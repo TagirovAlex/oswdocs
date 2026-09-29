@@ -1,5 +1,9 @@
 # TLS-валидация LDAPS корневым CA (доводка боевого стенда, волна C)
 
+> Статус (2026-09-29): задачи 1–3 выполнены и проверены на ВМ; коммиты `7286bc8` и
+> `d0094df` (фикс: проброс TLS-флага в auth-сервис + ro-mount файла CA в читаемый
+> путь для appuser). Осталось: вход реальным доменным паролем — ждёт человека.
+
 Цель: включить проверку цепочки сертификата LDAPS внутренним корневым CA
 `FIDELIO-DC2-CA` на боевой ВМ (`10.0.70.117`, `oswdocs.fidelio.local`).
 Сейчас `AD_TLS_VALIDATE` не задан (дефолт false — цепочка не проверяется),
@@ -19,6 +23,12 @@
 * `docker-compose.yml` — сервисы `api` и `worker`:
   - env `AD_TLS_VALIDATE: ${AD_TLS_VALIDATE:-false}`, `AD_CA_CERT: ${AD_CA_CERT:-}`;
   - read-only mount `${CERT_PATH:-/srv/sed/certs}:/etc/nginx/certs:ro`.
+* Фикс `d0094df` (после проверки на ВМ): каталог certs — `700 root:docker`,
+  appuser его не читает → вместо mount каталога — ro-mount ТОЛЬКО файла CA
+  в читаемый путь `/etc/ssl/certs/sed-ca.pem` (источник
+  `${CERT_PATH}/${CA_CERT_FILE:-fidelio-root-ca.pem}`); `auth.py` теперь
+  передаёт `tls_validate`/`ca_certs_file` в `AdReaderSettings` (иначе вход
+  шёл по `CERT_NONE`).
 * На ВМ уже сделано: корневой CA извлечён из цепочки `sed.crt`
   в `/srv/sed/certs/fidelio-root-ca.pem` (self-signed, `CN=FIDELIO-DC2-CA`,
   2023-06-07..2030-08-20); сертификат `DC1.FIDELIO.LOCAL` подписан этим же CA.
@@ -38,8 +48,9 @@
 
 ### 2. ВМ: .env, деплой, пересборка
 * `/srv/sed/.env` добавить:
-  `AD_TLS_VALIDATE=true`, `AD_CA_CERT=/etc/nginx/certs/fidelio-root-ca.pem`
-  (путь ВНУТРИ контейнера; на хосте файл лежит в `/srv/sed/certs/...`).
+  `AD_TLS_VALIDATE=true`, `AD_CA_CERT=/etc/ssl/certs/sed-ca.pem`
+  (путь ВНУТРИ контейнера — читаемый ro-mount файла CA; на хосте файл лежит
+  в `/srv/sed/certs/fidelio-root-ca.pem`, права каталога не менять).
 * Залить `api/app/ad_reader.py` и `docker-compose.yml` на ВМ (`sftp_put.py`).
 * Пересобрать и перезапустить только api:
   `docker compose --project-directory /srv/sed build api`, затем `up -d api`.
