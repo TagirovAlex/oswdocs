@@ -73,6 +73,7 @@ class AdReaderSettings:
     cache_ttl_seconds: int = 21600  # LDAP_CACHE_TTL, по умолчанию 6 ч (в окне 4–8 ч)
     timeout_seconds: float = 5.0  # таймаут LDAP-операций
     tls_validate: bool = False  # AD_TLS_VALIDATE; внутренний ЦС — по умолчанию false
+    ca_certs_file: str = ""  # AD_CA_CERT — файл корневого CA для проверки LDAPS
 
     @classmethod
     def from_env(cls) -> "AdReaderSettings":
@@ -88,6 +89,7 @@ class AdReaderSettings:
             cache_ttl_seconds=int(ttl_raw or 21600),
             timeout_seconds=float(timeout_raw or 5),
             tls_validate=validate_raw in ("1", "true", "yes", "on"),
+            ca_certs_file=os.getenv("AD_CA_CERT", ""),
         )
 
 
@@ -156,14 +158,21 @@ class Ldap3Gateway:
 
     # -- подключение -----------------------------------------------------------
     def _make_tls(self) -> object:
-        # Внутренний корпоративный ЦС: по умолчанию сертификат не проверяем
-        # (AD_TLS_VALIDATE=false). Усилить: указать корневой CA и включить флаг.
-        # ldap3.Tls принимает ssl-режим проверки (VerifyMode), не собственные
-        # константы: CERT_NONE без проверки цепочки, CERT_REQUIRED — с проверкой.
+        # Внутренний корпоративный ЦС (FIDELIO-DC2-CA): при tls_validate=true
+        # проверяем цепочку корневым CA из AD_CA_CERT (read-only mount в api).
+        # ldap3.Tls принимает ssl-режим проверки (VerifyMode): CERT_NONE без
+        # проверки цепочки, CERT_REQUIRED — с проверкой.
         import ssl  # локальный импорт: ssl нужен только живому шлюзу
 
-        validate = ssl.CERT_REQUIRED if self._settings.tls_validate else ssl.CERT_NONE
-        return self._ldap3.Tls(validate=validate)
+        if self._settings.tls_validate:
+            ca = self._settings.ca_certs_file
+            if not ca:
+                raise AdReaderError("AD_TLS_VALIDATE=true требует AD_CA_CERT (корневой CA).")
+            return self._ldap3.Tls(
+                validate=ssl.CERT_REQUIRED,
+                ca_certs_file=ca,
+            )
+        return self._ldap3.Tls(validate=ssl.CERT_NONE)
 
     def _connect(self, user_dn: str, password: str) -> Tuple[object, object]:
         """Создать Server/Connection и сразу сделать bind указанной учеткой."""

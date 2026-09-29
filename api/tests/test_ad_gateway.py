@@ -14,6 +14,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app.ad_reader import (  # noqa: E402
+    AdReaderError,
     AdReaderSettings,
     AdUnavailable,
     AdUser,
@@ -315,10 +316,24 @@ def test_tls_validate_true_uses_cert_validation():
     import ssl
 
     fake = _fake()
-    gw = _gateway(fake, tls_validate=True)
+    gw = _gateway(
+        fake,
+        tls_validate=True,
+        ca_certs_file="/etc/nginx/certs/fidelio-root-ca.pem",
+    )
     gw.bind()
     tls = fake.servers[-1].tls
     assert tls.validate == ssl.CERT_REQUIRED
+    # Корневой CA проброшен в ldap3.Tls для проверки цепочки.
+    assert tls.kwargs["ca_certs_file"] == "/etc/nginx/certs/fidelio-root-ca.pem"
+
+
+def test_tls_validate_true_without_ca_raises():
+    # AD_TLS_VALIDATE=true без AD_CA_CERT — ошибка конфигурации, не тихий CERT_NONE.
+    fake = _fake()
+    gw = _gateway(fake, tls_validate=True)
+    with pytest.raises(AdReaderError, match="AD_CA_CERT"):
+        gw.bind()
 
 
 def test_settings_from_env_reads_secret_and_tls_flag(monkeypatch):

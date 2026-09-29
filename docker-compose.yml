@@ -39,6 +39,8 @@ services:
       AD_BASE_DN: ${AD_BASE_DN}
       AD_READER_DN: ${AD_READER_DN}
       AD_READER_SECRET: ${AD_READER_SECRET}
+      AD_TLS_VALIDATE: ${AD_TLS_VALIDATE:-false}
+      AD_CA_CERT: ${AD_CA_CERT:-}
       LDAP_CACHE_TTL: ${LDAP_CACHE_TTL}
       ONEC_BASES_JSON: ${ONEC_BASES_JSON}
       AD_WRITE_ENABLED: ${AD_WRITE_ENABLED:-false}
@@ -54,6 +56,8 @@ services:
     volumes:
       - files:/app/files
       - backups:/app/backups:ro
+      # Корневой CA для проверки LDAPS (read-only; см. deploy/LAYOUT.md certs).
+      - ${CERT_PATH:-/srv/sed/certs}:/etc/nginx/certs:ro
     networks:
       - sednet
     restart: unless-stopped
@@ -72,6 +76,8 @@ services:
       AD_BASE_DN: ${AD_BASE_DN}
       AD_READER_DN: ${AD_READER_DN}
       AD_READER_SECRET: ${AD_READER_SECRET}
+      AD_TLS_VALIDATE: ${AD_TLS_VALIDATE:-false}
+      AD_CA_CERT: ${AD_CA_CERT:-}
       LDAP_CACHE_TTL: ${LDAP_CACHE_TTL}
       ONEC_BASES_JSON: ${ONEC_BASES_JSON}
       AD_WRITE_ENABLED: ${AD_WRITE_ENABLED:-false}
@@ -87,6 +93,8 @@ services:
     volumes:
       - files:/app/files
       - backups:/app/backups:ro
+      # Корневой CA для проверки LDAPS (read-only; см. deploy/LAYOUT.md certs).
+      - ${CERT_PATH:-/srv/sed/certs}:/etc/nginx/certs:ro
     networks:
       - sednet
     restart: unless-stopped
