@@ -10,6 +10,7 @@ from . import auth as auth_routes
 from . import employees as employees_routes
 from . import link as link_routes
 from . import requests as requests_routes
+from . import settings_routes as settings_routes
 from .audit import AuditEvent, audit_log
 from .config import Settings, get_settings
 from .deps import CurrentUser, get_current_user, is_privileged
@@ -19,6 +20,7 @@ app.include_router(auth_routes.router)
 app.include_router(employees_routes.router)
 app.include_router(link_routes.router)
 app.include_router(requests_routes.router)
+app.include_router(settings_routes.router)
 
 
 @app.get("/health")
