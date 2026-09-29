@@ -45,6 +45,12 @@ INSERT INTO settings (key, value) VALUES
   ('require_comment', 'false')
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
 
+-- Отправитель уведомлений (SMTP FROM). Редактируется через настройки (не env);
+-- реальное значение вносит ИТ/админ на стенде.
+INSERT INTO settings (key, value) VALUES
+  ('smtp_from', '"sed@example.com"')
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
+
 -- Срок хранения сканов в днях (глобальный).
 INSERT INTO settings (key, value) VALUES
   ('scan_retention_days', '365')

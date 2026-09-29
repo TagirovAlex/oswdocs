@@ -17,6 +17,7 @@ export function AdminSettings(props: AdminSettingsProps) {
   const [retentionDays, setRetentionDays] = useState<number>(30);
   const [maxMb, setMaxMb] = useState<number>(10);
   const [paperRequired, setPaperRequired] = useState<boolean>(true);
+  const [smtpFrom, setSmtpFrom] = useState<string>("sed@example.com"); // Из settings (smtp_from).
   const [error, setError] = useState<string>("");
   const [saved, setSaved] = useState<string>("");
 
@@ -28,6 +29,7 @@ export function AdminSettings(props: AdminSettingsProps) {
       .then((data) => {
         if (alive) {
           setTtl(data.approvalTtlDays);
+          setSmtpFrom(data.smtpFrom);
           setError("");
         }
       })
@@ -87,12 +89,21 @@ export function AdminSettings(props: AdminSettingsProps) {
         />
         Требовать бумажное заявление (require_paper_signature)
       </label>
+      <label style={{ display: "block", marginTop: 8 }}>
+        Отправитель уведомлений, e-mail (smtp_from)
+        <input
+          aria-label="Отправитель уведомлений"
+          type="email"
+          value={smtpFrom}
+          onChange={(e) => setSmtpFrom(e.target.value)}
+        />
+      </label>
       <div className="sed-toolbar" style={{ marginTop: 12 }}>
         <button
           type="button"
           className="sed-btn"
           onClick={() =>
-            setSaved(`Сохранено: TTL=${ttl} дн., сканы ${retentionDays} дн./${maxMb} МБ`)
+            setSaved(`Сохранено: TTL=${ttl} дн., сканы ${retentionDays} дн./${maxMb} МБ, от ${smtpFrom}`)
           }
         >
           Сохранить

@@ -145,6 +145,8 @@ export class MockForbidden extends Error {
 
 // Дефолт TTL мока совпадает с сидами (approval_ttl_days=3); на стенде — из таблицы settings.
 const DEFAULT_APPROVAL_TTL_DAYS = 3;
+// Дефолт отправителя мока совпадает с сидом smtp_from; на стенде — из таблицы settings.
+const DEFAULT_SMTP_FROM = "sed@example.com";
 
 // Мок API: тот же набор методов, что будет у реального клиента.
 export const mockApi = {
@@ -198,11 +200,14 @@ export const mockApi = {
   // Настройки — только админам (заглушка под будущий экран админки).
   async getSettings(
     role: Role,
-    overrides?: { approvalTtlDays?: number },
-  ): Promise<{ approvalTtlDays: number }> {
+    overrides?: { approvalTtlDays?: number; smtpFrom?: string },
+  ): Promise<{ approvalTtlDays: number; smtpFrom: string }> {
     await delay();
     if (role !== "admin") throw new MockForbidden("Настройки — только админам");
-    return { approvalTtlDays: overrides?.approvalTtlDays ?? DEFAULT_APPROVAL_TTL_DAYS };
+    return {
+      approvalTtlDays: overrides?.approvalTtlDays ?? DEFAULT_APPROVAL_TTL_DAYS,
+      smtpFrom: overrides?.smtpFrom ?? DEFAULT_SMTP_FROM,
+    };
   },
 };
 

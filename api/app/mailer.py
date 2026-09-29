@@ -41,6 +41,11 @@ class Mailer(Protocol):
         ...  # pragma: no cover
 
 
+def resolve_smtp_from(db_value: str | None, env_default: str) -> str:
+    """Отправитель письма: значение из settings БД (smtp_from), иначе env SMTP_FROM."""
+    return (db_value or "").strip() or env_default
+
+
 @dataclass
 class MailMessage:
     """Одно письмо в очереди (сериализуется в JSON целиком)."""
