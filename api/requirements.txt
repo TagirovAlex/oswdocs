@@ -7,6 +7,7 @@ fastapi>=0.115
 uvicorn[standard]>=0.30
 sqlalchemy>=2.0
 alembic>=1.13
+psycopg2-binary>=2.9 # Драйвер Postgres для SQLAlchemy/Alembic (нужен в образе api, см. S2a).
 redis>=5.0
 pydantic>=2.7
 pydantic-settings>=2.3

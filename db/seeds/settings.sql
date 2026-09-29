@@ -3,14 +3,14 @@
 -- Все имена/группы/предприятия вымышленные; реальные значения вносит ИТ на стенде.
 -- Группы, OU, предприятия и TTL живут только здесь, в SQL-логике миграций их нет.
 
--- Корневой OU учеток СЭД в AD.
+-- Корневой OU учеток СЭД в AD (подтвержден ИТ; DC-компоненты — заглушка, уточнит ИТ).
 INSERT INTO settings (key, value) VALUES
-  ('sed_ou', '"OU=SED,DC=example,DC=com"')
+  ('sed_ou', '"OU=OSWDOCS,DC=example,DC=com"')
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
 
--- Доменные группы доступа (проверка memberOf при логине).
+-- Доменные группы доступа (подтверждены ИТ, заведены в OSWDOCS; проверка memberOf при логине).
 INSERT INTO settings (key, value) VALUES
-  ('allowed_ad_groups', '["SED_HR", "SED_ADMINS", "SED_STEP_RUK", "SED_STEP_BUH"]')
+  ('allowed_ad_groups', '["SED_HR", "SED_ADMINS", "SED_STEP_EXEC"]')
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
 
 -- Предприятия (вымышленные): код используется в составном ключе сотрудника.

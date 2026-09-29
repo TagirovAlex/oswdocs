@@ -18,6 +18,9 @@ services:
     volumes:
       - ./proxy/nginx.conf:/etc/nginx/templates/default.conf.template:ro
       - ${CERT_PATH:-/srv/sed/certs}:/etc/nginx/certs:ro
+      # Статика SPA (S2b): именованный volume, наполняется из dist сборки
+      # helper-контейнером без полного up; proxy только читает (ro).
+      - frontend_dist:/usr/share/nginx/html:ro
     networks:
       - sednet
     restart: unless-stopped
@@ -129,3 +132,5 @@ volumes:
   pgdata:
   files:
   backups:
+  # Статика фронта для proxy (S2b, см. volumes сервиса proxy выше).
+  frontend_dist:
