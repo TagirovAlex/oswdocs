@@ -23,6 +23,18 @@ class Settings(BaseSettings):
     # --- Redis (брокер + кэш) ---
     REDIS_URL: str = Field(default="redis://localhost:6379/0")
 
+    # --- Сессии auth: TTL и режим мока (на ВМ — AUTH_MOCK_ENABLED=false) ---
+    SESSION_TTL_MINUTES: int = Field(
+        default=20,
+        description="TTL сессии в Redis (README п.5: сессии 15–20 минут)",
+    )
+    AUTH_MOCK_ENABLED: bool = Field(
+        default=True,
+        description=(
+            "Мок-заголовки X-Mock-* для офлайн-тестов; на ВМ — false, реальный Bearer-токен"
+        ),
+    )
+
     # --- Active Directory (только чтение через LDAPS bind, проверка memberOf) ---
     AD_URL: str = Field(default="ldaps://localhost:636")
     AD_BASE_DN: str = Field(default="DC=example,DC=com")
@@ -51,6 +63,11 @@ class Settings(BaseSettings):
 
     # --- TLS-сертификат (read-only mount в proxy) ---
     CERT_PATH: str = Field(default="/srv/sed/certs")
+
+    @property
+    def session_ttl_seconds(self) -> int:
+        """TTL сессии в секундах (минимум 60 — меньше не имеет смысла)."""
+        return max(60, self.SESSION_TTL_MINUTES * 60)
 
     @property
     def admin_groups(self) -> set[str]:

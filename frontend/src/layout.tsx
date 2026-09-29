@@ -15,15 +15,25 @@ import { OwnerView } from "./owner-view";
 const TABS = ["Заявки", "Создание", "Настройки"] as const;
 type Tab = (typeof TABS)[number];
 
+// Подписи ролей в шапке (матрица README п.1).
+const ROLE_LABELS: Record<Role, string> = {
+  hr: "ОК",
+  owner: "Владелец",
+  admin: "Админ",
+  guest: "Гость",
+};
+
 interface SedLayoutProps {
-  // Роль для демонстрации матрицы (по умолчанию ОК).
-  initialRole?: Role;
+  // Роль текущей сессии (из /auth/me); выбора роли на экране нет.
+  role: Role;
+  // Выход из системы: очистка сессии и возврат на экран логина.
+  onLogout: () => void;
 }
 
 // Основной каркас экрана.
 export function SedLayout(props: SedLayoutProps) {
+  const { role, onLogout } = props;
   const { theme, setTheme } = useTheme();
-  const [role, setRole] = useState<Role>(props.initialRole ?? "hr");
   const [tab, setTab] = useState<Tab>("Заявки");
   const [folder, setFolder] = useState<FolderId>("agreement");
   const [folders, setFolders] = useState<Folder[]>([]);
@@ -32,6 +42,14 @@ export function SedLayout(props: SedLayoutProps) {
   const [error, setError] = useState<string>("");
   // Выбранная заявка для карточки под таблицей (волна B4).
   const [selectedId, setSelectedId] = useState<string>("");
+
+  // Видимые вкладки по роли: «Настройки» — только админу, «Создание» — ОК и админу.
+  const visibleTabs = useMemo(() => {
+    const tabs: Tab[] = ["Заявки"];
+    if (role === "hr" || role === "admin") tabs.push("Создание");
+    if (role === "admin") tabs.push("Настройки");
+    return tabs;
+  }, [role]);
 
   // Загрузка папок при смене роли.
   useEffect(() => {
@@ -79,20 +97,9 @@ export function SedLayout(props: SedLayoutProps) {
 
   return (
     <div className="sed-shell">
-      {/* Шапка с переключателем роли и темы (демо матрицы ролей). */}
+      {/* Шапка: роль из сессии (без выбора), тема и выход. */}
       <header className="sed-header">
-        СЭД — Увольнение (скелет) · роль:
-        <select
-          aria-label="Роль пользователя"
-          value={role}
-          onChange={(e) => setRole(e.target.value as Role)}
-          style={{ marginLeft: 8 }}
-        >
-          <option value="hr">ОК</option>
-          <option value="owner">Владелец</option>
-          <option value="admin">Админ</option>
-          <option value="guest">Гость</option>
-        </select>
+        СЭД — Увольнение (скелет) · роль: {ROLE_LABELS[role]}
         <button
           type="button"
           className="sed-btn sed-btn--ghost"
@@ -102,11 +109,20 @@ export function SedLayout(props: SedLayoutProps) {
         >
           Тема: {theme === "light" ? "светлая" : "тёмная"}
         </button>
+        <button
+          type="button"
+          className="sed-btn sed-btn--ghost"
+          style={{ marginLeft: 8, borderColor: "#fff", color: "#fff" }}
+          onClick={onLogout}
+          title="Выход из системы"
+        >
+          Выйти
+        </button>
       </header>
 
-      {/* Вкладки скелета. */}
+      {/* Вкладки скелета (по роли сессии). */}
       <nav className="sed-tabs" aria-label="Вкладки">
-        {TABS.map((name) => (
+        {visibleTabs.map((name) => (
           <button
             key={name}
             type="button"

@@ -148,33 +148,6 @@ def _link_sam_for(card: EmployeeCard) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# Алиас профиля (контракт волны A2 /me сохраняется, добавляется /auth/me)
-# ---------------------------------------------------------------------------
-
-@router.get("/auth/me")
-def auth_me(
-    user: CurrentUser = Depends(get_current_user),
-    settings: Settings = Depends(get_settings),
-) -> dict:
-    """Текущий пользователь: ОК/админам — полностью, владельцам — без ПДн."""
-    settings.ensure_read_only()
-    audit_log.append(
-        AuditEvent(actor=user.sam, action="me.read", entity="user", entity_id=user.sam)
-    )
-    if is_privileged(user):
-        return {
-            "sam": user.sam,
-            "fio": user.fio,
-            "department": user.department,
-            "title": user.title,
-            "mail": user.mail,
-            "groups": user.groups,
-            "role": user.role,
-        }
-    return {"sam": user.sam, "groups": user.groups, "role": user.role}
-
-
-# ---------------------------------------------------------------------------
 # Поиск по предприятию
 # ---------------------------------------------------------------------------
 

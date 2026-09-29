@@ -1,7 +1,8 @@
-# Зависимости FastAPI: текущий пользователь и ролевая проверка (скелет).
-# Сейчас — заглушка на заголовках X-Mock-* для offline-тестов.
-# На стенде (волны A4/B1) будет заменена LDAPS bind + проверка memberOf
-# по группам из settings; контракт CurrentUser/401/403 сохранится.
+# Зависимости FastAPI: текущий пользователь и ролевая проверка.
+# Реальный путь — Bearer-токен через AuthService.me() (сессия в Redis);
+# мок-путь на заголовках X-Mock-* работает только при AUTH_MOCK_ENABLED=true
+# (офлайн-тесты; на ВМ флаг=false, README п.1 и TASKS_AUTH.md).
+# Контракт CurrentUser/401/403 сохраняется.
 
 from __future__ import annotations
 
@@ -57,6 +58,16 @@ def _detect_role(groups: list[str], settings: Settings) -> str:
     return "owner"
 
 
+def _bearer_token(authorization: str | None) -> str | None:
+    """Выделить токен из 'Authorization: Bearer <token>' (иначе None)."""
+    if not authorization:
+        return None
+    scheme, _, token = authorization.partition(" ")
+    if scheme.strip().lower() != "bearer" or not token:
+        return None
+    return token.strip()
+
+
 def is_privileged(user: CurrentUser) -> bool:
     """Полная карточка положена только ОК и админам (остальным — урезанная)."""
     return user.role in ("admin", "hr")
@@ -64,6 +75,7 @@ def is_privileged(user: CurrentUser) -> bool:
 
 async def get_current_user(
     settings: Settings = Depends(get_settings),
+    authorization: str | None = Header(default=None),
     x_mock_sam: str | None = Header(default=None),
     x_mock_fio: str | None = Header(default=None),
     x_mock_mail: str | None = Header(default=None),
@@ -71,7 +83,31 @@ async def get_current_user(
     x_mock_title: str | None = Header(default=None),
     x_mock_groups: str | None = Header(default=None),
 ) -> CurrentUser:
-    """Текущий пользователь из мок-заголовков; нет группы — 403, нет логина — 401."""
+    """Текущий пользователь: мок-путь (X-Mock-*) за флагом AUTH_MOCK_ENABLED,
+    иначе — Bearer-токен через AuthService.me(). Роль считает _detect_role."""
+    if not settings.AUTH_MOCK_ENABLED:
+        # Реальный путь: токен сессии из Redis (LDAPS bind — на входе /auth/login).
+        from .auth import SessionUnavailable, get_auth_service
+
+        token = _bearer_token(authorization)
+        if not token:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Нет учетных данных (Authorization: Bearer <token>)",
+            )
+        try:
+            user = get_auth_service(settings).me(token)
+        except SessionUnavailable as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+            ) from exc
+        if user is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Сессия не найдена или истекла",
+            )
+        return user
+    # Мок-путь (офлайн-тесты; на ВМ AUTH_MOCK_ENABLED=false).
     if not x_mock_sam:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

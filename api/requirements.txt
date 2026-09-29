@@ -1,6 +1,6 @@
 # Зависимости API СЭД (волна A2, Python 3.12 в образе, проверка на 3.11 — см. DECISIONS).
 # Минимум без лишнего: рантайм скелета + pytest/httpx для TestClient.
-# Заделы волн A3/A4/B3 (LDAP/HTTP/SMTP/DOCX) — закомментированы, раскомментирует свой агент.
+# Заделы волн A3/B3 (HTTP/SMTP/DOCX) — закомментированы, раскомментирует свой агент.
 
 # --- Рантайм скелета ---
 fastapi>=0.115
@@ -19,8 +19,8 @@ pytest>=8.0
 # --- Задел A3 (1С per-base HTTP): раскомментирует агент A3 ---
 # httpx уже выше; circuit-breaker — tenacity>=8.0
 
-# --- Задел A4 (AD LDAPS bind + кэш): раскомментирует агент A4 ---
-# ldap3>=2.9
+# --- A4 (AD LDAPS bind + кэш): живой шлюз Ldap3Gateway в app/ad_reader.py ---
+ldap3>=2.9
 
 # --- Задел B3 (письма/DOCX/QR): раскомментирует агент B3 ---
 # python-docx-template>=0.4

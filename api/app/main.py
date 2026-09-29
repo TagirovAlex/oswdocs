@@ -1,10 +1,12 @@
-# Точка входа API СЭД (волна B: подключены employees/link/requests через include_router).
-# Эндпоинты: GET /health (без auth), GET /me (заглушка с ролевой обрезкой); логика — в своих модулях.
+# Точка входа API СЭД (волна B: подключены employees/link/requests/auth через include_router).
+# Эндпоинты: GET /health (без auth), GET /me (заглушка с ролевой обрезкой),
+# POST /auth/login, GET /auth/me (LDAPS bind + сессии в Redis); логика — в своих модулях.
 
 from __future__ import annotations
 
 from fastapi import Depends, FastAPI
 
+from . import auth as auth_routes
 from . import employees as employees_routes
 from . import link as link_routes
 from . import requests as requests_routes
@@ -13,6 +15,7 @@ from .config import Settings, get_settings
 from .deps import CurrentUser, get_current_user, is_privileged
 
 app = FastAPI(title="SED API", version="0.1.0")
+app.include_router(auth_routes.router)
 app.include_router(employees_routes.router)
 app.include_router(link_routes.router)
 app.include_router(requests_routes.router)

@@ -69,20 +69,25 @@ class AdReaderSettings:
     ad_url: str  # ожидаем ldaps://...:636
     base_dn: str  # из настроек (BASE_DN)
     reader_dn: str  # DN сервисной RO-учетки из настроек
+    reader_secret: str = ""  # AD_READER_SECRET — секрет, только из env
     cache_ttl_seconds: int = 21600  # LDAP_CACHE_TTL, по умолчанию 6 ч (в окне 4–8 ч)
     timeout_seconds: float = 5.0  # таймаут LDAP-операций
+    tls_validate: bool = False  # AD_TLS_VALIDATE; внутренний ЦС — по умолчанию false
 
     @classmethod
     def from_env(cls) -> "AdReaderSettings":
         """Собрать настройки из окружения (секреты — только env)."""
         ttl_raw = os.getenv("LDAP_CACHE_TTL", "21600").strip()
         timeout_raw = os.getenv("AD_TIMEOUT_SECONDS", "5").strip()
+        validate_raw = os.getenv("AD_TLS_VALIDATE", "false").strip().lower()
         return cls(
             ad_url=os.getenv("AD_URL", ""),
             base_dn=os.getenv("AD_BASE_DN", ""),
             reader_dn=os.getenv("AD_READER_DN", ""),
+            reader_secret=os.getenv("AD_READER_SECRET", ""),
             cache_ttl_seconds=int(ttl_raw or 21600),
             timeout_seconds=float(timeout_raw or 5),
+            tls_validate=validate_raw in ("1", "true", "yes", "on"),
         )
 
 
@@ -109,6 +114,184 @@ class LdapGateway(Protocol):
     def search_user_by_dn(self, dn: str) -> Optional[Dict]:
         """Сырая запись по DN либо None. Живой поиск — на стенде."""
         ...  # pragma: no cover
+
+
+class Ldap3Gateway:
+    """Живой LDAP-шлюз на ldap3 (LDAPS, только чтение).
+
+    Реализует контракт LdapGateway: bind RO-учеткой, поиск по sAMAccountName
+    (SUBTREE по BASE_DN) и по DN (scope BASE). Дополнительно bind_user(dn,
+    password) — проверка пароля пользователя его собственной учеткой,
+    без записи.
+
+    ldap3 импортируется лениво и в тестах подменяется фейковым модулем через
+    инъекцию (ldap3_module) — никакой сети в CI/локальных тестах.
+    """
+
+    SEARCH_ATTRS = (
+        "sAMAccountName",
+        "displayName",
+        "manager",
+        "department",
+        "title",
+        "memberOf",
+        "mail",
+        "userAccountControl",
+    )
+
+    def __init__(
+        self,
+        settings: AdReaderSettings,
+        ldap3_module: object | None = None,
+    ) -> None:
+        ensure_read_only()
+        self._settings = settings
+        if ldap3_module is None:
+            import ldap3  # лениво: пакет нужен только для живого LDAPS
+
+            ldap3_module = ldap3
+        self._ldap3 = ldap3_module
+        self._server = None
+        self._conn = None
+
+    # -- подключение -----------------------------------------------------------
+    def _make_tls(self) -> object:
+        # Внутренний корпоративный ЦС: по умолчанию сертификат не проверяем
+        # (AD_TLS_VALIDATE=false). Усилить: указать корневой CA и включить флаг.
+        ldap3 = self._ldap3
+        validate = (
+            ldap3.TLS_VALIDATE_CERT
+            if self._settings.tls_validate
+            else ldap3.TLS_VALIDATE_NONE
+        )
+        return ldap3.Tls(validate=validate)
+
+    def _connect(self, user_dn: str, password: str) -> Tuple[object, object]:
+        """Создать Server/Connection и сразу сделать bind указанной учеткой."""
+        ldap3 = self._ldap3
+        server = ldap3.Server(
+            self._settings.ad_url,
+            use_ssl=True,
+            connect_timeout=self._settings.timeout_seconds,
+            tls=self._make_tls(),
+        )
+        conn = ldap3.Connection(
+            server,
+            user=user_dn,
+            password=password,
+            auto_bind=True,
+            raise_exceptions=True,
+            receive_timeout=self._settings.timeout_seconds,
+        )
+        return server, conn
+
+    def bind(self) -> None:
+        """Bind сервисной RO-учеткой (только чтение)."""
+        self._server, self._conn = self._connect(
+            self._settings.reader_dn, self._settings.reader_secret
+        )
+
+    # -- поиск -----------------------------------------------------------------
+    def search_user_by_sam(self, sam: str) -> Optional[Dict]:
+        """Сырая запись по sAMAccountName (SUBTREE по BASE_DN) либо None."""
+        return self._search(
+            self._settings.base_dn,
+            "(sAMAccountName={})".format(self._escape_filter(sam)),
+            self._ldap3.SUBTREE,
+        )
+
+    def search_user_by_dn(self, dn: str) -> Optional[Dict]:
+        """Сырая запись по DN (scope BASE) либо None."""
+        return self._search(dn, "(objectClass=user)", self._ldap3.BASE)
+
+    def _search(self, base_dn: str, filter_str: str, scope: object) -> Optional[Dict]:
+        if self._conn is None:
+            raise AdUnavailable("Шлюз не связан: сначала bind() RO-учеткой.")
+        self._conn.search(
+            search_base=base_dn,
+            search_filter=filter_str,
+            search_scope=scope,
+            attributes=self.SEARCH_ATTRS,
+        )
+        if not self._conn.entries:
+            return None
+        return self._to_raw(self._conn.entries[0])
+
+    @staticmethod
+    def _to_raw(entry: object) -> Dict:
+        """Перевод ldap3-Entry в словарь, ожидаемый parse_ldap_entry.
+
+        ldap3 отдает атрибуты списками — скалярные поля схлопываем до строки,
+        memberOf оставляем списком.
+        """
+        attrs = dict(getattr(entry, "entry_attributes", {}) or {})
+        raw: Dict = {"dn": str(getattr(entry, "entry_dn", ""))}
+        for name in (
+            "sAMAccountName",
+            "displayName",
+            "manager",
+            "department",
+            "title",
+            "mail",
+            "userAccountControl",
+        ):
+            value = attrs.get(name)
+            if isinstance(value, (list, tuple)):
+                value = value[0] if value else ""
+            raw[name] = str(value) if value else ""
+        members = attrs.get("memberOf", []) or []
+        if isinstance(members, str):
+            members = [members]
+        raw["memberOf"] = list(members)
+        return raw
+
+    @staticmethod
+    def _escape_filter(value: str) -> str:
+        """Экранирование спецсимволов LDAP-фильтра (защита от инъекций)."""
+        out = []
+        for ch in str(value):
+            if ch in "()*\\\x00":
+                out.append("\\" + "".join(f"{ord(c):02x}" for c in ch))
+            else:
+                out.append(ch)
+        return "".join(out)
+
+    # -- проверка пароля пользователя -------------------------------------------
+    def bind_user(self, dn: str, password: str) -> bool:
+        """Проверка пароля bind'ом его же учеткой (только чтение, без записи).
+
+        True — пара логин/пароль верна; False — неверная пара;
+        AdUnavailable — каталог недоступен (для ответа 503).
+        """
+        try:
+            _, conn = self._connect(dn, password)
+        except Exception as exc:
+            if self._is_bind_refused(exc):
+                return False
+            raise AdUnavailable(f"AD недоступен (bind пользователя): {exc}") from exc
+        try:
+            with conn:
+                return bool(conn.bound)
+        except Exception as exc:
+            if self._is_bind_refused(exc):
+                return False
+            raise AdUnavailable(f"AD недоступен (bind пользователя): {exc}") from exc
+
+    def _is_bind_refused(self, exc: Exception) -> bool:
+        """Неверная пара логин/пароль — отказ каталога, а не его недоступность.
+
+        Ловим классы ldap3, отвечающие за неверные учетные данные, плюс
+        запасной признак — код результата 49 (invalidCredentials).
+        """
+        for name in (
+            "LDAPInvalidCredentialsError",
+            "LDAPInvalidCredentialsResult",
+            "LDAPBindError",
+        ):
+            cls = getattr(self._ldap3, name, None)
+            if cls is not None and isinstance(exc, cls):
+                return True
+        return getattr(exc, "result", None) == 49
 
 
 # ---------------------------------------------------------------------------
