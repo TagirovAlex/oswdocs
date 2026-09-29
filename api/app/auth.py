@@ -256,6 +256,8 @@ def get_auth_service(settings: Settings = Depends(get_settings)) -> AuthService:
             reader_dn=settings.AD_READER_DN,
             reader_secret=reader_secret_from_env(),
             cache_ttl_seconds=settings.LDAP_CACHE_TTL,
+            tls_validate=settings.AD_TLS_VALIDATE,
+            ca_certs_file=settings.AD_CA_CERT,
         )
         gateway = Ldap3Gateway(ad_settings)
         reader = AdReader(ad_settings, gateway=gateway, cache=InMemoryCache())

@@ -41,6 +41,15 @@ class Settings(BaseSettings):
     AD_READER_DN: str = Field(default="")
     AD_READER_SECRET: str = Field(default="")
     LDAP_CACHE_TTL: int = Field(default=300)
+    # Проверка цепочки LDAPS корневым CA (внутренний ЦС; на ВМ — true + AD_CA_CERT).
+    AD_TLS_VALIDATE: bool = Field(
+        default=False,
+        description="Проверять цепочку LDAPS корневым CA (AD_CA_CERT); на ВМ — true",
+    )
+    AD_CA_CERT: str = Field(
+        default="",
+        description="Путь к корневому CA внутри контейнера (read-only mount)",
+    )
 
     # --- 1С ЗУП (только чтение, мультибаза; разбор JSON — в волне A3) ---
     ONEC_BASES_JSON: str = Field(default="{}")

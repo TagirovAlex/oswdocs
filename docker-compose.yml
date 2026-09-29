@@ -56,8 +56,10 @@ services:
     volumes:
       - files:/app/files
       - backups:/app/backups:ro
-      # Корневой CA для проверки LDAPS (read-only; см. deploy/LAYOUT.md certs).
-      - ${CERT_PATH:-/srv/sed/certs}:/etc/nginx/certs:ro
+      # Корневой CA для проверки LDAPS: ro-mount только файла CA в читаемый
+      # путь (каталог certs — 700 root:docker, appuser его не читает; права
+      # каталога не меняем, см. TASKS_TLS.md).
+      - ${CERT_PATH:-/srv/sed/certs}/${CA_CERT_FILE:-fidelio-root-ca.pem}:/etc/ssl/certs/sed-ca.pem:ro
     networks:
       - sednet
     restart: unless-stopped
@@ -93,8 +95,10 @@ services:
     volumes:
       - files:/app/files
       - backups:/app/backups:ro
-      # Корневой CA для проверки LDAPS (read-only; см. deploy/LAYOUT.md certs).
-      - ${CERT_PATH:-/srv/sed/certs}:/etc/nginx/certs:ro
+      # Корневой CA для проверки LDAPS: ro-mount только файла CA в читаемый
+      # путь (каталог certs — 700 root:docker, appuser его не читает; права
+      # каталога не меняем, см. TASKS_TLS.md).
+      - ${CERT_PATH:-/srv/sed/certs}/${CA_CERT_FILE:-fidelio-root-ca.pem}:/etc/ssl/certs/sed-ca.pem:ro
     networks:
       - sednet
     restart: unless-stopped

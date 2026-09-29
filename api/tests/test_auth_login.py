@@ -168,6 +168,37 @@ def test_login_service_me_logout(client, mock_auth_service):
     assert mock_auth_service.me(result.token) is None
 
 
+def test_get_auth_service_forwards_tls_settings(monkeypatch):
+    """Боевой сервис пробрасывает AD_TLS_VALIDATE/AD_CA_CERT в настройки шлюза
+    (фикс TLS: вход проверяет цепочку корневым CA, а не CERT_NONE)."""
+    captured = {}
+
+    class FakeGateway:
+        def __init__(self, ad_settings):
+            captured["tls_validate"] = ad_settings.tls_validate
+            captured["ca_certs_file"] = ad_settings.ca_certs_file
+
+        def bind_user(self, dn, password):
+            return True
+
+    class FakeSessions:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    monkeypatch.setattr("app.ad_reader.Ldap3Gateway", FakeGateway)
+    monkeypatch.setattr("app.auth.RedisSessionStore", FakeSessions)
+    settings = Settings(
+        AD_TLS_VALIDATE=True,
+        AD_CA_CERT="/etc/ssl/certs/sed-ca.pem",
+        AD_BASE_DN="DC=example,DC=com",
+        AD_READER_DN="CN=changeme,CN=Users,DC=example,DC=com",
+    )
+    service = get_auth_service(settings)
+    assert service is not None
+    assert captured["tls_validate"] is True
+    assert captured["ca_certs_file"] == "/etc/ssl/certs/sed-ca.pem"
+
+
 # --- GET /auth/me (обрезка как /me) ---
 
 def test_auth_me_hr_full(client, hr_headers, test_settings_override):
