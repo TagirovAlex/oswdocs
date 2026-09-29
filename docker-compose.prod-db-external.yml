@@ -1,0 +1,29 @@
+# SED — override dlya raz"ezda app/BD na 2 VM (zadel po README p.2:
+# "Raz"ezd na 2 VM — vynos db + smena DATABASE_URL"). Kod ne trogat' — tol'ko compose-uroven'.
+#
+# KAK ISPOL'ZOVAT' (na app-VM):
+#   1. V .env ukazhite DATABASE_URL na VNESHNYUYU BD (VM baz dannyh), naprimer:
+#      DATABASE_URL=postgresql://changeme:changeme@example.com:5432/sed
+#      (tol'ko plejsholder; real'nyj URL — ot IT k testu, v .env, ne v git).
+#   2. Zapusk bez lokal'nogo db:
+#      docker compose -f docker-compose.yml -f docker-compose.prod-db-external.yml up -d --scale db=0
+#   3. Bekapy vneshnej BD — pg_dump + snapshot na storone VM baz dannyh (RPO 24ch/RTO 4ch, README p.5).
+#
+# POCHEMU TAK: spec Compose ne umeet UDALYAT' servis override-fajlom (net standartnogo
+# '!reset'/'!override' dlya udaleniya; eto rasshireniya otdel'nyh instrumentov).
+# Poetomu validnyj dlya compose spec variant: pereopredelit' db (replicas: 0 dlya swarm)
+# i fakticheski ne startovat' ego (--scale db=0), a api/worker perevesti na vneshnij
+# DATABASE_URL cherez tot zhe .env. Lokal'nye tom pgdata/files/backups zdes' ne trogaty.
+
+services:
+  api:
+    environment:
+      # Na app-VM beretsya iz .env i ukazyvaet na vneshnyuyu BD. Bez znacheniya ne startovat'.
+      DATABASE_URL: ${DATABASE_URL}
+  worker:
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+  db:
+    # Ne startuet lokal'no: v swarm — replicas 0, v obychnom compose — --scale db=0 (sm. shapku).
+    deploy:
+      replicas: 0

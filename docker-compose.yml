@@ -1,0 +1,131 @@
+# SED — docker-compose.yml (Faza 0, Zadacha 1, agent: devops-compose).
+# Stek po README p.1–p.2: proxy (nginx) + api/worker (lokal'nyj build ./api) + redis + db (postgres).
+# Naruzhu — tol'ko 80 (redirekt na 443) i 443 cherez proxy. U db vneshnego porta NET (README p.2, AGENTS.md p.4).
+# Host-katalogi: /srv/sed/{pgdata,files,backups,certs} (layout — deploy/LAYOUT.md, Zadacha 4).
+# Zapusk: docker compose --env-file .env up -d (klyuchi — .env.example).
+# Raz"ezd na 2 VM: docker-compose.prod-db-external.yml (vynos db + smena DATABASE_URL), kod ne trogat'.
+
+services:
+  proxy:
+    image: nginx:stable-alpine
+    depends_on:
+      - api
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      SERVER_NAME: ${SERVER_NAME:-sed.company.local}
+    volumes:
+      - ./proxy/nginx.conf:/etc/nginx/templates/default.conf.template:ro
+      - ${CERT_PATH:-/srv/sed/certs}:/etc/nginx/certs:ro
+    networks:
+      - sednet
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ./api
+    # Real'naya tochka vhoda — Faza 2+ (FastAPI); zdes' tol'ko kontrakt porta dlya proxy.
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      AD_URL: ${AD_URL}
+      AD_BASE_DN: ${AD_BASE_DN}
+      AD_READER_DN: ${AD_READER_DN}
+      AD_READER_SECRET: ${AD_READER_SECRET}
+      LDAP_CACHE_TTL: ${LDAP_CACHE_TTL}
+      ONEC_BASES_JSON: ${ONEC_BASES_JSON}
+      AD_WRITE_ENABLED: ${AD_WRITE_ENABLED:-false}
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_FROM: ${SMTP_FROM}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASSWORD: ${SMTP_PASSWORD}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - files:/app/files
+      - backups:/app/backups:ro
+    networks:
+      - sednet
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ./api
+    # Tot zhe obraz chto api, drugaya komanda (detali — Faza 4: DOCX->PDF, SMTP, eskalaciya).
+    command: ["python", "-m", "app.worker"]
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      AD_URL: ${AD_URL}
+      AD_BASE_DN: ${AD_BASE_DN}
+      AD_READER_DN: ${AD_READER_DN}
+      AD_READER_SECRET: ${AD_READER_SECRET}
+      LDAP_CACHE_TTL: ${LDAP_CACHE_TTL}
+      ONEC_BASES_JSON: ${ONEC_BASES_JSON}
+      AD_WRITE_ENABLED: ${AD_WRITE_ENABLED:-false}
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_FROM: ${SMTP_FROM}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASSWORD: ${SMTP_PASSWORD}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - files:/app/files
+      - backups:/app/backups:ro
+    networks:
+      - sednet
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    # Vneshnego porta net: broker + kesh tol'ko vnutri seti sednet.
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - sednet
+    restart: unless-stopped
+
+  db:
+    image: postgres:17-trixie
+    env_file:
+      - .env
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-sed}
+      POSTGRES_USER: ${POSTGRES_USER:-sed}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    # ports: NAMERENNO NET — dostup tol'ko vnutri seti sednet (README p.2, AGENTS.md p.4).
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-sed} -d $${POSTGRES_DB:-sed}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - sednet
+    restart: unless-stopped
+
+networks:
+  sednet:
+    driver: bridge
+
+volumes:
+  pgdata:
+  files:
+  backups:
