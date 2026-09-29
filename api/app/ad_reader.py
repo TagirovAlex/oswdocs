@@ -158,21 +158,23 @@ class Ldap3Gateway:
     def _make_tls(self) -> object:
         # Внутренний корпоративный ЦС: по умолчанию сертификат не проверяем
         # (AD_TLS_VALIDATE=false). Усилить: указать корневой CA и включить флаг.
-        ldap3 = self._ldap3
-        validate = (
-            ldap3.TLS_VALIDATE_CERT
-            if self._settings.tls_validate
-            else ldap3.TLS_VALIDATE_NONE
-        )
-        return ldap3.Tls(validate=validate)
+        # ldap3.Tls принимает ssl-режим проверки (VerifyMode), не собственные
+        # константы: CERT_NONE без проверки цепочки, CERT_REQUIRED — с проверкой.
+        import ssl  # локальный импорт: ssl нужен только живому шлюзу
+
+        validate = ssl.CERT_REQUIRED if self._settings.tls_validate else ssl.CERT_NONE
+        return self._ldap3.Tls(validate=validate)
 
     def _connect(self, user_dn: str, password: str) -> Tuple[object, object]:
         """Создать Server/Connection и сразу сделать bind указанной учеткой."""
         ldap3 = self._ldap3
+        # ldap3 (2.9.1) требует целочисленные таймауты: float ломает socket
+        # ("required argument is not an integer") — переводим в int.
+        timeout = int(self._settings.timeout_seconds)
         server = ldap3.Server(
             self._settings.ad_url,
             use_ssl=True,
-            connect_timeout=self._settings.timeout_seconds,
+            connect_timeout=timeout,
             tls=self._make_tls(),
         )
         conn = ldap3.Connection(
@@ -181,7 +183,7 @@ class Ldap3Gateway:
             password=password,
             auto_bind=True,
             raise_exceptions=True,
-            receive_timeout=self._settings.timeout_seconds,
+            receive_timeout=timeout,
         )
         return server, conn
 
@@ -222,9 +224,15 @@ class Ldap3Gateway:
         """Перевод ldap3-Entry в словарь, ожидаемый parse_ldap_entry.
 
         ldap3 отдает атрибуты списками — скалярные поля схлопываем до строки,
-        memberOf оставляем списком.
+        memberOf оставляем списком. Реальный ldap3: `entry_attributes` — список
+        имен, значения — в `entry_attributes_as_dict`; фейк тестов кладет dict
+        прямо в `entry_attributes` — поддерживаем оба варианта.
         """
-        attrs = dict(getattr(entry, "entry_attributes", {}) or {})
+        attrs = getattr(entry, "entry_attributes_as_dict", None)
+        if not isinstance(attrs, dict):
+            attrs = getattr(entry, "entry_attributes", {}) or {}
+        if not isinstance(attrs, dict):
+            attrs = {}
         raw: Dict = {"dn": str(getattr(entry, "entry_dn", ""))}
         for name in (
             "sAMAccountName",

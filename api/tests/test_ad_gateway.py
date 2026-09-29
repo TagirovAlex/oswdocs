@@ -302,19 +302,23 @@ def test_bind_user_unavailable_on_network_error():
 
 
 def test_tls_validate_false_uses_none_cert_validation():
+    import ssl  # реальный ldap3.Tls принимает ssl-режим (VerifyMode)
+
     fake = _fake()
     gw = _gateway(fake, tls_validate=False)
     gw.bind()
     tls = fake.servers[-1].tls
-    assert tls.validate == _FakeLdap3Module.TLS_VALIDATE_NONE
+    assert tls.validate == ssl.CERT_NONE
 
 
 def test_tls_validate_true_uses_cert_validation():
+    import ssl
+
     fake = _fake()
     gw = _gateway(fake, tls_validate=True)
     gw.bind()
     tls = fake.servers[-1].tls
-    assert tls.validate == _FakeLdap3Module.TLS_VALIDATE_CERT
+    assert tls.validate == ssl.CERT_REQUIRED
 
 
 def test_settings_from_env_reads_secret_and_tls_flag(monkeypatch):
