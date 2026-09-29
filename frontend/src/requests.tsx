@@ -1,14 +1,21 @@
-// Экран списка заявок (волна B4).
-// Роль: ОК/админ — полные подписи, владелец — маски (уже обезличены в моке).
-// Все персональные данные ниже — ВЫМЫШЛЕННЫЕ.
+// Экран списка заявок (волна B4, реальный API).
+// Данные — GET /api/requests (requests-client), фильтры — клиентские.
+// Роль: ОК/админ — полные подписи, владелец — маски (fio=null → «Сотрудник № {id}»).
 import { useEffect, useState } from "react";
-import { EMPTY_FILTERS, mockApi } from "./api-mock";
-import type { RequestFilters, RequestRow, Role } from "./api-mock";
+import {
+  EMPTY_FILTERS,
+  filterRequests,
+  getEnterprises,
+  getRequests,
+  toRequestRow,
+} from "./requests-client";
+import type { Enterprise, RequestFilters, RequestRow } from "./requests-client";
+import type { Role } from "./api-mock";
 
 interface RequestsScreenProps {
   // Роль текущего пользователя (матрица README п.1).
   role: Role;
-  // Колбэк выбора заявки (открытие карточки под таблицей).
+  // Колбэк выбора заявки (открытие карточки под таблицей; карточка — Волна 2).
   onSelect?: (requestId: string) => void;
   // Выбранная заявка (подсветка строки).
   selectedId?: string;
@@ -18,19 +25,34 @@ interface RequestsScreenProps {
 export function RequestsScreen(props: RequestsScreenProps) {
   const { role, onSelect, selectedId } = props;
   const [filters, setFilters] = useState<RequestFilters>(EMPTY_FILTERS);
+  const [enterprises, setEnterprises] = useState<Enterprise[]>([]);
   const [rows, setRows] = useState<RequestRow[]>([]);
   const [error, setError] = useState<string>("");
   const [loading, setLoading] = useState<boolean>(true);
 
-  // Загрузка списка при смене фильтров/роли.
+  // Предприятия для фильтра таблицы (без хардкод-массивов).
+  useEffect(() => {
+    let alive = true;
+    getEnterprises()
+      .then((data) => {
+        if (alive) setEnterprises(data);
+      })
+      .catch((e: unknown) => {
+        if (alive) setError(e instanceof Error ? e.message : "Ошибка загрузки предприятий");
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // Загрузка списка при смене фильтров/роли; папка «mine» — все загруженные.
   useEffect(() => {
     let alive = true;
     setLoading(true);
-    mockApi
-      .getRequests("agreement", filters, role)
+    getRequests()
       .then((data) => {
         if (alive) {
-          setRows(data);
+          setRows(filterRequests(data.map(toRequestRow), "mine", filters));
           setError("");
           setLoading(false);
         }
@@ -70,8 +92,11 @@ export function RequestsScreen(props: RequestsScreenProps) {
           onChange={(e) => setFilters({ ...filters, enterprise: e.target.value })}
         >
           <option value="">Все предприятия</option>
-          <option value="Завод «Север»">Завод «Север»</option>
-          <option value="Филиал «Восток»">Филиал «Восток»</option>
+          {enterprises.map((ent) => (
+            <option key={ent.code} value={ent.code}>
+              {ent.name}
+            </option>
+          ))}
         </select>
         <select
           aria-label="Статус"
@@ -79,8 +104,14 @@ export function RequestsScreen(props: RequestsScreenProps) {
           onChange={(e) => setFilters({ ...filters, status: e.target.value })}
         >
           <option value="">Все статусы</option>
+          <option value="Черновик">Черновик</option>
           <option value="На согласовании">На согласовании</option>
           <option value="На доработке">На доработке</option>
+          <option value="Согласовано">Согласовано</option>
+          <option value="К исполнению">К исполнению</option>
+          <option value="Завершено">Завершено</option>
+          <option value="Отклонено">Отклонено</option>
+          <option value="Отозвано">Отозвано</option>
         </select>
         <button
           type="button"
@@ -122,7 +153,7 @@ export function RequestsScreen(props: RequestsScreenProps) {
                 }
               >
                 <td>{row.id}</td>
-                <td>{row.employeeLabel}</td>
+                <td>{row.fio}</td>
                 {showFull && (
                   <>
                     <td>{row.enterprise}</td>

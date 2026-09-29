@@ -121,6 +121,7 @@ def _create(client, headers, **kw) -> dict:
     """Создание заявки с вымышленными полями по умолчанию."""
     body = {
         "enterprise": FAKE_ENTERPRISE,
+        "fio": "Вымышленный Сотрудник Полный",
         "tab_num": "В-0001",
         "department": FAKE_SERVICE,
         "position": FAKE_POSITION_LINE,

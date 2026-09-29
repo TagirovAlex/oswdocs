@@ -203,7 +203,8 @@ def neg_mocks(neg_settings):
 def _create_request(client, hr_headers, steps=None) -> dict:
     """Создание заявки ручным конструктором (вымышленные поля)."""
     body = {
-        "enterprise": ENT, "tab_num": "В-0001",
+        "enterprise": ENT, "fio": "Вымышленный Сотрудник Полный",
+        "tab_num": "В-0001",
         "department": "Служба вымышленного учета", "position": FAKE_POSITION,
         "steps": steps or [{"owner_group": BUH_GROUP}],
     }
@@ -252,7 +253,8 @@ def test_owner_cannot_use_hr_constructor(client, hr_headers, owner_headers, neg_
     """Владелец не создает заявки, не правит маршрут, не вяжет 1С-AD, не перевыпускает."""
     manual = client.post(
         "/requests",
-        json={"enterprise": ENT, "tab_num": "В-9", "department": "С",
+        json={"enterprise": ENT, "fio": "Вымышленный Сотрудник Полный",
+              "tab_num": "В-9", "department": "С",
               "position": FAKE_POSITION, "steps": [{"owner_group": BUH_GROUP}]},
         headers=owner_headers,
     )

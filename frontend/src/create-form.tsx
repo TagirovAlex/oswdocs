@@ -1,50 +1,115 @@
-// Форма создания заявки для ОК (волна B4).
-// Шаги: предприятие → сотрудник → маршрут → печать.
-// Все персональные данные ниже — ВЫМЫШЛЕННЫЕ.
-import { useMemo, useState } from "react";
+// Форма создания заявки для ОК (волна B4, реальный API).
+// Шаги: предприятие → сотрудник → маршрут → POST /api/requests.
+// Предприятия и группы — только из API (settings БД), хардкода нет (AGENTS.md п.3).
+// Сотрудник: поиск в 1С (GET /api/employees); без баз (503) — ручной ввод полей.
+import { useEffect, useRef, useState } from "react";
+import { ApiHttpError } from "./auth-client";
+import { createRequest, getEnterprises, getStepGroups, searchEmployees } from "./requests-client";
+import type { EmployeeHit, Enterprise } from "./requests-client";
 import type { Role } from "./api-mock";
 
 interface CreateFormProps {
-  // Роль (создание — только ОК).
+  // Роль (создание — только ОК/админам, гард как в API _is_hr).
   role: Role;
 }
 
-// Вымышленные предприятия (значения — из настроек, здесь подписи мока).
-const ENTERPRISES = ["Завод «Север»", "Филиал «Восток»"] as const;
-
-// Вымышленные сотрудники по предприятиям.
-const EMPLOYEES: Record<string, Array<{ tabNum: string; fio: string; position: string }>> = {
-  "Завод «Север»": [
-    { tabNum: "Т-000201", fio: "Громов Игорь Олегович", position: "Слесарь" },
-    { tabNum: "Т-000202", fio: "Лебедева Мария Ивановна", position: "Кладовщик" },
-  ],
-  "Филиал «Восток»": [
-    { tabNum: "Т-000301", fio: "Захаров Николай Павлович", position: "Водитель" },
-  ],
-};
-
-// Шаблоны маршрута (имена групп — из настроек, здесь подписи мока).
-const ROUTE_TEMPLATES = ["Шаблон: линейный персонал", "Шаблон: руководитель", "Ручной конструктор"] as const;
-
-// Форма создания: мастер из четырёх шагов.
+// Форма создания: мастер из трёх шагов.
 export function CreateForm(props: CreateFormProps) {
   const { role } = props;
   const [step, setStep] = useState<number>(0);
+  const [enterprises, setEnterprises] = useState<Enterprise[]>([]);
   const [enterprise, setEnterprise] = useState<string>("");
-  const [tabNum, setTabNum] = useState<string>("");
-  const [route, setRoute] = useState<string>(ROUTE_TEMPLATES[0]);
+  const [groups, setGroups] = useState<string[]>([]);
   const [manualGroups, setManualGroups] = useState<string[]>([]);
-  const [printVersion, setPrintVersion] = useState<string>("v1");
+  const [loadError, setLoadError] = useState<string>("");
   const [created, setCreated] = useState<string>("");
+  const [createError, setCreateError] = useState<string>("");
+  const [busy, setBusy] = useState<boolean>(false);
 
-  // Сотрудники выбранного предприятия.
-  const employees = useMemo(() => (enterprise ? (EMPLOYEES[enterprise] ?? []) : []), [enterprise]);
-  // Выбранный сотрудник.
-  const selected = useMemo(() => employees.find((e) => e.tabNum === tabNum), [employees, tabNum]);
+  // Сотрудник: поиск в 1С (200 — список) либо ручной ввод (503 — базы не настроены).
+  const [empQuery, setEmpQuery] = useState<string>("");
+  const [empHits, setEmpHits] = useState<EmployeeHit[]>([]);
+  const [empSearching, setEmpSearching] = useState<boolean>(false);
+  const [manualMode, setManualMode] = useState<boolean>(false);
+  const [manualNote, setManualNote] = useState<string>("");
+  const [fio, setFio] = useState<string>("");
+  const [tabNum, setTabNum] = useState<string>("");
+  const [department, setDepartment] = useState<string>("");
+  const [position, setPosition] = useState<string>("");
+  // Порядковый номер поиска: устаревшие ответы отбрасываем.
+  const searchSeq = useRef(0);
+
+  // Предприятия и группы ручного конструктора — только из API.
+  useEffect(() => {
+    let alive = true;
+    Promise.all([getEnterprises(), getStepGroups()])
+      .then(([ents, grps]) => {
+        if (!alive) return;
+        setEnterprises(ents);
+        setGroups(grps);
+      })
+      .catch((e: unknown) => {
+        if (alive) setLoadError(e instanceof Error ? e.message : "Ошибка загрузки данных формы");
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   // Создание — ОК и админам (роль hr/admin, как в API _is_hr).
   if (role !== "hr" && role !== "admin") {
     return <div role="alert">Создание заявок доступно только ОК.</div>;
+  }
+
+  // Название выбранного предприятия (код — в составном ключе сотрудника).
+  const enterpriseName = enterprises.find((ent) => ent.code === enterprise)?.name ?? enterprise;
+
+  // Поиск сотрудника в 1С; без баз (503) или пустой результат — ручной ввод полей.
+  function handleSearch(query: string): void {
+    setEmpQuery(query);
+    const q = query.trim();
+    if (q === "") {
+      searchSeq.current++;
+      setEmpHits([]);
+      setManualMode(false);
+      setManualNote("");
+      return;
+    }
+    const seq = ++searchSeq.current;
+    setEmpSearching(true);
+    searchEmployees(enterprise, q)
+      .then((data) => {
+        if (seq !== searchSeq.current) return;
+        const hits = data.items ?? [];
+        setEmpHits(hits);
+        if (hits.length === 0) {
+          setManualMode(true);
+          setManualNote("ничего не найдено — введите данные вручную");
+        } else {
+          setManualMode(false);
+          setManualNote("");
+        }
+        setEmpSearching(false);
+      })
+      .catch((e: unknown) => {
+        if (seq !== searchSeq.current) return;
+        setEmpHits([]);
+        setEmpSearching(false);
+        if (e instanceof ApiHttpError && e.status === 503) {
+          setManualMode(true);
+          setManualNote("данные 1С не настроены, введите вручную");
+        } else {
+          setManualNote(e instanceof Error ? e.message : "Ошибка поиска сотрудника");
+        }
+      });
+  }
+
+  // Выбор сотрудника из списка 1С заполняет поля заявки.
+  function pickEmployee(hit: EmployeeHit): void {
+    setFio(hit.fio);
+    setTabNum(hit.tab_num);
+    setDepartment(hit.dept);
+    setPosition(hit.position);
   }
 
   // Переключение группы ручного конструктора.
@@ -55,98 +120,160 @@ export function CreateForm(props: CreateFormProps) {
   // Проверка шага перед переходом дальше.
   function canNext(): boolean {
     if (step === 0) return enterprise !== "";
-    if (step === 1) return tabNum !== "";
-    if (step === 2) return route !== "Ручной конструктор" || manualGroups.length > 0;
-    return true;
+    if (step === 1) {
+      return fio.trim() !== "" && tabNum.trim() !== "" && department.trim() !== "" && position.trim() !== "";
+    }
+    return false;
+  }
+
+  // Создание заявки: POST /api/requests; при 201 — статус и сброс формы на шаг 1.
+  async function handleCreate(): Promise<void> {
+    if (busy) return;
+    setCreateError("");
+    setCreated("");
+    setBusy(true);
+    try {
+      const result = await createRequest({
+        enterprise,
+        tab_num: tabNum,
+        department,
+        position,
+        fio,
+        steps: manualGroups.map((g) => ({ owner_group: g })),
+      });
+      setCreated(`Заявка ${result.id} создана`);
+      setStep(0);
+      setEnterprise("");
+      setTabNum("");
+      setFio("");
+      setDepartment("");
+      setPosition("");
+      setEmpQuery("");
+      setEmpHits([]);
+      setManualMode(false);
+      setManualNote("");
+      setManualGroups([]);
+    } catch (e: unknown) {
+      setCreateError(e instanceof Error ? e.message : "Ошибка создания заявки");
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
     <section aria-label="Создание заявки">
-      <h3>Создание заявки (шаг {step + 1} из 4)</h3>
+      <h3>Создание заявки (шаг {step + 1} из 3)</h3>
 
-      {/* Шаг 1: предприятие. */}
+      {loadError && <div role="alert">Ошибка: {loadError}</div>}
+      {/* Статус создания виден после сброса формы на шаг 1. */}
+      {created && <div role="status">{created}</div>}
+
+      {/* Шаг 1: предприятие из настроек (без хардкод-массивов). */}
       {step === 0 && (
         <label>
           Предприятие
           <select aria-label="Предприятие" value={enterprise} onChange={(e) => setEnterprise(e.target.value)}>
             <option value="">— выберите —</option>
-            {ENTERPRISES.map((name) => (
-              <option key={name} value={name}>
-                {name}
+            {enterprises.map((ent) => (
+              <option key={ent.code} value={ent.code}>
+                {ent.name}
               </option>
             ))}
           </select>
         </label>
       )}
 
-      {/* Шаг 2: сотрудник. */}
+      {/* Шаг 2: сотрудник (поиск 1С либо ручной ввод при 503). */}
       {step === 1 && (
-        <label>
-          Сотрудник ({enterprise})
-          <select aria-label="Сотрудник" value={tabNum} onChange={(e) => setTabNum(e.target.value)}>
-            <option value="">— выберите —</option>
-            {employees.map((e) => (
-              <option key={e.tabNum} value={e.tabNum}>
-                {e.fio} · {e.tabNum} · {e.position}
-              </option>
-            ))}
-          </select>
-        </label>
+        <div>
+          <label>
+            Поиск сотрудника
+            <input
+              aria-label="Поиск сотрудника"
+              placeholder="ФИО / табельный №"
+              value={empQuery}
+              onChange={(e) => handleSearch(e.target.value)}
+            />
+          </label>
+          {empSearching && <div className="sed-note">Поиск в 1С…</div>}
+          {empHits.length > 0 && (
+            <label>
+              Сотрудник ({enterpriseName})
+              <select
+                aria-label="Сотрудник"
+                value={tabNum}
+                onChange={(e) => {
+                  const hit = empHits.find((h) => h.tab_num === e.target.value);
+                  if (hit) pickEmployee(hit);
+                }}
+              >
+                <option value="">— выберите —</option>
+                {empHits.map((h) => (
+                  <option key={h.key} value={h.tab_num}>
+                    {h.fio} · {h.tab_num} · {h.position}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          {manualMode && (
+            <fieldset>
+              <legend>Данные сотрудника (вручную)</legend>
+              {manualNote && <div className="sed-note">{manualNote}</div>}
+              <label style={{ display: "block", marginTop: 8 }}>
+                ФИО
+                <input aria-label="ФИО" value={fio} onChange={(e) => setFio(e.target.value)} />
+              </label>
+              <label style={{ display: "block", marginTop: 8 }}>
+                Табельный №
+                <input aria-label="Табельный №" value={tabNum} onChange={(e) => setTabNum(e.target.value)} />
+              </label>
+              <label style={{ display: "block", marginTop: 8 }}>
+                Подразделение
+                <input aria-label="Подразделение" value={department} onChange={(e) => setDepartment(e.target.value)} />
+              </label>
+              <label style={{ display: "block", marginTop: 8 }}>
+                Должность
+                <input aria-label="Должность" value={position} onChange={(e) => setPosition(e.target.value)} />
+              </label>
+            </fieldset>
+          )}
+          {!manualMode && empHits.length === 0 && !empSearching && (
+            <div className="sed-note">Введите запрос для поиска в 1С либо укажите данные вручную.</div>
+          )}
+        </div>
       )}
 
-      {/* Шаг 3: маршрут. */}
+      {/* Шаг 3: ручной конструктор из групп API (шаблоны из settings пока пусты). */}
       {step === 2 && (
         <fieldset>
           <legend>Маршрут согласования</legend>
-          {ROUTE_TEMPLATES.map((name) => (
-            <label key={name} style={{ display: "block" }}>
-              <input type="radio" name="route" value={name} checked={route === name} onChange={() => setRoute(name)} />
-              {name}
+          <div className="sed-note">Шаблоны маршрутов из настроек не заданы — отметьте группы владельцев вручную.</div>
+          {groups.length === 0 && (
+            <div className="sed-note">Группы шагов не настроены (GET /api/step-groups пуст).</div>
+          )}
+          {groups.map((group) => (
+            <label key={group} style={{ display: "block" }}>
+              <input
+                type="checkbox"
+                checked={manualGroups.includes(group)}
+                onChange={() => toggleGroup(group)}
+              />
+              {group}
             </label>
           ))}
-          {route === "Ручной конструктор" && (
-            <div style={{ marginTop: 8 }}>
-              <div className="sed-note">Отметьте группы владельцев (замена руководителя — флажком):</div>
-              {["SED_STEP_BUH", "SED_STEP_SEC", "SED_STEP_IT"].map((group) => (
-                <label key={group} style={{ display: "block" }}>
-                  <input
-                    type="checkbox"
-                    checked={manualGroups.includes(group)}
-                    onChange={() => toggleGroup(group)}
-                  />
-                  {group}
-                </label>
-              ))}
-            </div>
-          )}
-        </fieldset>
-      )}
-
-      {/* Шаг 4: печать. */}
-      {step === 3 && (
-        <div>
-          <p>
-            Сотрудник: {selected?.fio} ({selected?.tabNum}), {enterprise}. Маршрут: {route}
-            {route === "Ручной конструктор" ? ` (${manualGroups.join(", ")})` : ""}.
-          </p>
-          <label>
-            Версия бегунка
-            <select aria-label="Версия бегунка" value={printVersion} onChange={(e) => setPrintVersion(e.target.value)}>
-              <option value="v1">v1 (первая печать)</option>
-              <option value="v2">v2 (повторная печать)</option>
-            </select>
-          </label>
-          <div style={{ marginTop: 8 }}>
+          <div className="sed-toolbar" style={{ marginTop: 12 }}>
             <button
               type="button"
               className="sed-btn"
-              onClick={() => setCreated(`REQ-100 (черновик, печать ${printVersion})`)}
+              disabled={manualGroups.length === 0 || busy}
+              onClick={handleCreate}
             >
-              Создать и отправить на печать
+              {busy ? "Создание…" : "Создать"}
             </button>
-            {created && <div role="status">Заявка создана: {created}</div>}
           </div>
-        </div>
+          {createError && <div role="alert">{createError}</div>}
+        </fieldset>
       )}
 
       {/* Навигация мастера. */}
@@ -154,7 +281,7 @@ export function CreateForm(props: CreateFormProps) {
         <button type="button" className="sed-btn sed-btn--ghost" disabled={step === 0} onClick={() => setStep(step - 1)}>
           Назад
         </button>
-        {step < 3 && (
+        {step < 2 && (
           <button type="button" className="sed-btn" disabled={!canNext()} onClick={() => setStep(step + 1)}>
             Далее
           </button>

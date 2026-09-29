@@ -1,15 +1,21 @@
-// Сетка скелета по ориентиру A5: вкладки, дерево папок со счётчиками,
-// тулбар, фильтры, таблица заявок.
-// Данные берутся из мок API-клиента (api-mock), тема — из theme.tsx.
+// Сетка скелета: вкладки, дерево папок со счётчиками, тулбар, фильтры, таблица.
+// Данные — из реального API (requests-client), тема — из theme.tsx.
+// Папки/фильтры — клиентские над загруженными строками (волна 1).
 import { useEffect, useMemo, useState } from "react";
-import { EMPTY_FILTERS, mockApi } from "./api-mock";
-import type { Folder, FolderId, RequestFilters, RequestRow, Role } from "./api-mock";
+import {
+  EMPTY_FILTERS,
+  filterRequests,
+  getEnterprises,
+  getFolders,
+  getRequests,
+  toRequestRow,
+} from "./requests-client";
+import type { Enterprise, Folder, FolderId, RequestFilters, RequestRow } from "./requests-client";
+import type { Role } from "./api-mock";
 import { useTheme } from "./theme";
-// Экраны волны B4 (минимальная стыковка к вкладкам и карточке под таблицей).
+// Экраны волны B4: создание и админка — реальный API.
 import { AdminSettings } from "./admin-settings";
 import { CreateForm } from "./create-form";
-import { EmployeeCard } from "./employee-card";
-import { OwnerView } from "./owner-view";
 
 // Вкладки скелета.
 const TABS = ["Заявки", "Создание", "Настройки"] as const;
@@ -37,11 +43,10 @@ export function SedLayout(props: SedLayoutProps) {
   const [tab, setTab] = useState<Tab>("Заявки");
   const [folder, setFolder] = useState<FolderId>("agreement");
   const [folders, setFolders] = useState<Folder[]>([]);
+  const [enterprises, setEnterprises] = useState<Enterprise[]>([]);
   const [rows, setRows] = useState<RequestRow[]>([]);
   const [filters, setFilters] = useState<RequestFilters>(EMPTY_FILTERS);
   const [error, setError] = useState<string>("");
-  // Выбранная заявка для карточки под таблицей (волна B4).
-  const [selectedId, setSelectedId] = useState<string>("");
 
   // Видимые вкладки по роли: «Настройки» — только админу, «Создание» — ОК и админу.
   const visibleTabs = useMemo(() => {
@@ -51,13 +56,15 @@ export function SedLayout(props: SedLayoutProps) {
     return tabs;
   }, [role]);
 
-  // Загрузка папок при смене роли.
+  // Загрузка папок при смене роли; активная папка — первая доступная.
   useEffect(() => {
     let alive = true;
-    mockApi
-      .getFolders(role)
+    getFolders()
       .then((data) => {
-        if (alive) setFolders(data);
+        if (alive) {
+          setFolders(data);
+          if (data.length > 0 && !data.some((f) => f.id === folder)) setFolder(data[0].id);
+        }
       })
       .catch((e: unknown) => {
         if (alive) setError(e instanceof Error ? e.message : "Ошибка загрузки папок");
@@ -67,14 +74,29 @@ export function SedLayout(props: SedLayoutProps) {
     };
   }, [role]);
 
-  // Загрузка таблицы при смене папки/фильтров/роли.
+  // Загрузка предприятий для фильтра таблицы (без хардкод-массивов).
   useEffect(() => {
     let alive = true;
-    mockApi
-      .getRequests(folder, filters, role)
+    getEnterprises()
+      .then((data) => {
+        if (alive) setEnterprises(data);
+      })
+      .catch((e: unknown) => {
+        if (alive) setError(e instanceof Error ? e.message : "Ошибка загрузки предприятий");
+      });
+    return () => {
+      alive = false;
+    };
+  }, [role]);
+
+  // Загрузка таблицы: GET /api/requests, папка и фильтры — на клиенте.
+  // Переход на вкладку «Заявки» обновляет список (новая заявка видна сразу).
+  useEffect(() => {
+    let alive = true;
+    getRequests()
       .then((data) => {
         if (alive) {
-          setRows(data);
+          setRows(filterRequests(data.map(toRequestRow), folder, filters));
           setError("");
         }
       })
@@ -87,7 +109,7 @@ export function SedLayout(props: SedLayoutProps) {
     return () => {
       alive = false;
     };
-  }, [folder, filters, role]);
+  }, [folder, filters, role, tab]);
 
   // Заголовок таблицы зависит от роли (владельцу — без колонки ПДн).
   const columns = useMemo(() => {
@@ -173,7 +195,7 @@ export function SedLayout(props: SedLayoutProps) {
             </button>
           </div>
 
-          {/* Фильтры таблицы. */}
+          {/* Фильтры таблицы (предприятия — из API). */}
           <div className="sed-filters" aria-label="Фильтры">
             <input
               aria-label="Поиск"
@@ -187,8 +209,11 @@ export function SedLayout(props: SedLayoutProps) {
               onChange={(e) => setFilters({ ...filters, enterprise: e.target.value })}
             >
               <option value="">Все предприятия</option>
-              <option value="Завод «Север»">Завод «Север»</option>
-              <option value="Филиал «Восток»">Филиал «Восток»</option>
+              {enterprises.map((ent) => (
+                <option key={ent.code} value={ent.code}>
+                  {ent.name}
+                </option>
+              ))}
             </select>
             <select
               aria-label="Статус"
@@ -196,8 +221,14 @@ export function SedLayout(props: SedLayoutProps) {
               onChange={(e) => setFilters({ ...filters, status: e.target.value })}
             >
               <option value="">Все статусы</option>
+              <option value="Черновик">Черновик</option>
               <option value="На согласовании">На согласовании</option>
               <option value="На доработке">На доработке</option>
+              <option value="Согласовано">Согласовано</option>
+              <option value="К исполнению">К исполнению</option>
+              <option value="Завершено">Завершено</option>
+              <option value="Отклонено">Отклонено</option>
+              <option value="Отозвано">Отозвано</option>
             </select>
           </div>
 
@@ -214,13 +245,9 @@ export function SedLayout(props: SedLayoutProps) {
             </thead>
             <tbody>
               {rows.map((row) => (
-                <tr
-                  key={row.id}
-                  onClick={() => setSelectedId(row.id)}
-                  style={selectedId === row.id ? { background: "var(--sed-primary-soft)" } : undefined}
-                >
+                <tr key={row.id}>
                   <td>{row.id}</td>
-                  <td>{row.employeeLabel}</td>
+                  <td>{row.fio}</td>
                   {role !== "owner" && (
                     <>
                       <td>{row.enterprise}</td>
@@ -240,18 +267,8 @@ export function SedLayout(props: SedLayoutProps) {
           </table>
 
           <div className="sed-note">
-            Скелет волны A5: вкладка «{tab}», данные — мок (вымышленные). Полные экраны — волна B4.
+            Волна 1: данные — из реального API; карточка заявки под таблицей — Волна 2.
           </div>
-          {/* Карточка под таблицей: владельцу — урезанная без ПДн, остальным — полная. */}
-          {selectedId && (
-            <div style={{ marginTop: 12 }}>
-              {role === "owner" ? (
-                <OwnerView requestId={selectedId} />
-              ) : (
-                <EmployeeCard requestId={selectedId} role={role} />
-              )}
-            </div>
-          )}
           </>
           )}
         </main>

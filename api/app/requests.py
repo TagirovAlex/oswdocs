@@ -103,6 +103,7 @@ class CreateRequestIn(BaseModel):
     """Создание заявки от ОК (истина по полям 1С, категория — решает ОК)."""
 
     enterprise: str
+    fio: str = Field(description="ФИО сотрудника (из 1С при наличии баз, иначе вводит ОК)")
     tab_num: str = Field(description="Табельный номер (ПДн, только ОК)")
     department: str = Field(description="Служба увольняемого (поле 1С)")
     position: str = Field(description="Должность увольняемого (поле 1С)")
@@ -157,6 +158,7 @@ class RequestOut(BaseModel):
     route_origin: str
     enterprise: str | None = None
     tab_num: str | None = None
+    fio: str | None = None
     department: str
     position: str
     category: str | None = None
@@ -187,6 +189,7 @@ class _Request(BaseModel):
     status: str = DRAFT
     route_origin: str = "custom"
     enterprise: str
+    fio: str
     tab_num: str
     department: str
     position: str
@@ -340,6 +343,7 @@ def _public_view(request: _Request, user: CurrentUser) -> RequestOut:
         route_origin=request.route_origin,
         enterprise=request.enterprise if privileged else None,
         tab_num=request.tab_num if privileged else None,
+        fio=request.fio if privileged else None,
         department=request.department,
         position=request.position,
         category=request.category,
@@ -388,6 +392,7 @@ def create_request(
         status=DRAFT,
         route_origin=origin,
         enterprise=body.enterprise,
+        fio=body.fio,
         tab_num=body.tab_num,
         department=body.department,
         position=body.position,
@@ -412,6 +417,56 @@ def list_requests(
         return [_public_view(r, user) for r in _REQUESTS.values()]
     mine = [r for r in _REQUESTS.values() if any(s.owner_group in user.groups for s in r.steps)]
     return [_public_view(r, user) for r in mine]
+
+
+class FolderOut(BaseModel):
+    """Папка списка заявок: id + русский заголовок + счетчик заявок."""
+
+    id: str
+    title: str
+    count: int
+
+
+@router.get("/folders", response_model=list[FolderOut])
+def list_folders(
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+) -> list[FolderOut]:
+    """Счетчики папок (Волна 1): всем авторизованным; владельцу — только mine."""
+    settings.ensure_read_only()
+    folders: list[FolderOut] = []
+    if _is_hr(user):
+        folders = [
+            FolderOut(
+                id="agreement",
+                title="На согласовании",
+                count=sum(1 for r in _REQUESTS.values() if r.status == IN_APPROVAL),
+            ),
+            FolderOut(
+                id="revision",
+                title="На доработке",
+                count=sum(1 for r in _REQUESTS.values() if r.status == REWORK),
+            ),
+            FolderOut(
+                id="done",
+                title="Завершённые",
+                count=sum(
+                    1 for r in _REQUESTS.values() if r.status in (DONE, REJECTED, REVOKED)
+                ),
+            ),
+        ]
+    folders.append(
+        FolderOut(
+            id="mine",
+            title="Мои задачи",
+            count=sum(
+                1
+                for r in _REQUESTS.values()
+                if any(s.owner_group in user.groups for s in r.steps)
+            ),
+        )
+    )
+    return folders
 
 
 @router.get("/requests/{request_id}", response_model=RequestOut)

@@ -154,6 +154,15 @@ def _require_admin(user: CurrentUser) -> None:
         )
 
 
+def _require_hr(user: CurrentUser) -> None:
+    """Справочники Волны 1 (предприятия/группы шагов) — только ОК и админы."""
+    if user.role not in ("hr", "admin"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Справочники доступны только разрешенной группе",
+        )
+
+
 def _settings_dict(store: DbSettingsStore) -> dict:
     """Типизированный словарь настроек из хранилища (None — ключа нет в БД)."""
     raw = store.get_many(SETTINGS_KEYS)
@@ -208,3 +217,50 @@ def update_settings(
         )
     )
     return payload.model_dump()
+
+
+@router.get("/enterprises")
+def list_enterprises(
+    user: CurrentUser = Depends(get_current_user),
+    store: DbSettingsStore = Depends(get_settings_store),
+) -> list[dict]:
+    """Предприятия (Волна 1): ОК/админы, иначе 403; БД недоступна — 503.
+    Значения — только из таблицы settings (ключ enterprises), хардкода нет."""
+    _require_hr(user)
+    try:
+        raw = store.get("enterprises")
+    except SettingsUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    values = _from_stored(raw)
+    items = [item for item in values if isinstance(item, dict)] if isinstance(values, list) else []
+    audit_log.append(
+        AuditEvent(
+            actor=user.sam,
+            action="enterprises.read",
+            entity="enterprise",
+            entity_id="enterprises",
+        )
+    )
+    return items
+
+
+@router.get("/step-groups")
+def list_step_groups(
+    user: CurrentUser = Depends(get_current_user),
+    store: DbSettingsStore = Depends(get_settings_store),
+) -> list[str]:
+    """Группы ручного конструктора шагов (Волна 1): ОК/админы, иначе 403;
+    значения — из таблицы settings (ключ allowed_ad_groups), хардкода нет."""
+    _require_hr(user)
+    try:
+        raw = store.get("allowed_ad_groups")
+    except SettingsUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    values = _from_stored(raw)
+    if not isinstance(values, list):
+        return []
+    return [item for item in values if isinstance(item, str)]
