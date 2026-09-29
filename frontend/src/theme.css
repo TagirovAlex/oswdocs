@@ -1,0 +1,198 @@
+/* Палитра скелета: светлая тема в синей гамме через переменные. */
+/* Тёмная тема — задел (переопределение тех же переменных). */
+:root,
+[data-theme="light"] {
+  --sed-bg: #f2f6fc;
+  --sed-surface: #ffffff;
+  --sed-surface-2: #eaf1fa;
+  --sed-border: #c9d8ee;
+  --sed-text: #16283f;
+  --sed-text-muted: #5b7191;
+  --sed-primary: #1a56ac;
+  --sed-primary-hover: #144583;
+  --sed-primary-soft: #dbe8fb;
+  --sed-accent: #2f80ed;
+  --sed-danger: #b3261e;
+  --sed-radius: 8px;
+}
+
+/* Задел под тёмную тему: те же имена переменных, другие значения. */
+[data-theme="dark"] {
+  --sed-bg: #0f1b2d;
+  --sed-surface: #16263d;
+  --sed-surface-2: #1e3350;
+  --sed-border: #2e4a6e;
+  --sed-text: #e3ecf8;
+  --sed-text-muted: #9db1cc;
+  --sed-primary: #7aa9ee;
+  --sed-primary-hover: #9cc0f3;
+  --sed-primary-soft: #24466f;
+  --sed-accent: #7aa9ee;
+  --sed-danger: #f2a5a0;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--sed-bg);
+  color: var(--sed-text);
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-size: 14px;
+}
+
+/* Сетка скелета: шапка, вкладки, боковое дерево, контент (тулбар+фильтры+таблица). */
+.sed-shell {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.sed-header {
+  background: var(--sed-primary);
+  color: #fff;
+  padding: 10px 16px;
+  font-weight: 600;
+}
+
+.sed-tabs {
+  display: flex;
+  gap: 4px;
+  background: var(--sed-surface);
+  border-bottom: 1px solid var(--sed-border);
+  padding: 0 16px;
+}
+
+.sed-tab {
+  border: none;
+  background: transparent;
+  color: var(--sed-text-muted);
+  padding: 10px 14px;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+}
+
+.sed-tab--active {
+  color: var(--sed-primary);
+  border-bottom-color: var(--sed-primary);
+  font-weight: 600;
+}
+
+.sed-body {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  gap: 12px;
+  padding: 12px 16px;
+  flex: 1;
+}
+
+.sed-folders {
+  background: var(--sed-surface);
+  border: 1px solid var(--sed-border);
+  border-radius: var(--sed-radius);
+  padding: 8px;
+  align-self: start;
+}
+
+.sed-folder {
+  display: flex;
+  justify-content: space-between;
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: var(--sed-text);
+  padding: 8px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.sed-folder--active {
+  background: var(--sed-primary-soft);
+}
+
+.sed-folder__count {
+  background: var(--sed-surface-2);
+  border: 1px solid var(--sed-border);
+  border-radius: 999px;
+  padding: 0 8px;
+  color: var(--sed-text-muted);
+}
+
+.sed-content {
+  background: var(--sed-surface);
+  border: 1px solid var(--sed-border);
+  border-radius: var(--sed-radius);
+  padding: 12px;
+  min-width: 0;
+}
+
+.sed-toolbar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.sed-btn {
+  border: 1px solid var(--sed-primary);
+  background: var(--sed-primary);
+  color: #fff;
+  border-radius: 6px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+.sed-btn--ghost {
+  background: transparent;
+  color: var(--sed-primary);
+}
+
+.sed-btn:hover {
+  background: var(--sed-primary-hover);
+}
+
+.sed-btn--ghost:hover {
+  background: var(--sed-primary-soft);
+}
+
+.sed-filters {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.sed-filters input,
+.sed-filters select {
+  border: 1px solid var(--sed-border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  background: var(--sed-surface);
+  color: var(--sed-text);
+}
+
+.sed-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.sed-table th,
+.sed-table td {
+  border-bottom: 1px solid var(--sed-border);
+  padding: 8px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.sed-table th {
+  color: var(--sed-text-muted);
+  font-weight: 600;
+  background: var(--sed-surface-2);
+}
+
+.sed-note {
+  color: var(--sed-text-muted);
+  margin-top: 12px;
+}

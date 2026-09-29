@@ -1,9 +1,9 @@
-# SED — docker-compose.yml (Faza 0, Zadacha 1, agent: devops-compose).
-# Stek po README p.1–p.2: proxy (nginx) + api/worker (lokal'nyj build ./api) + redis + db (postgres).
-# Naruzhu — tol'ko 80 (redirekt na 443) i 443 cherez proxy. U db vneshnego porta NET (README p.2, AGENTS.md p.4).
-# Host-katalogi: /srv/sed/{pgdata,files,backups,certs} (layout — deploy/LAYOUT.md, Zadacha 4).
-# Zapusk: docker compose --env-file .env up -d (klyuchi — .env.example).
-# Raz"ezd na 2 VM: docker-compose.prod-db-external.yml (vynos db + smena DATABASE_URL), kod ne trogat'.
+# СЭД — docker-compose.yml (Фаза 0, Задача 1, агент: devops-compose).
+# Стек по README п.1–п.2: proxy (nginx) + api/worker (локальный build ./api) + redis + db (postgres).
+# Наружу — только 80 (редирект на 443) и 443 через proxy. У db внешнего порта НЕТ (README п.2, AGENTS.md п.4).
+# Хост-каталоги: /srv/sed/{pgdata,files,backups,certs} (раскладка — deploy/LAYOUT.md, Задача 4).
+# Запуск: docker compose --env-file .env up -d (ключи — .env.example).
+# Разъезд на 2 ВМ: docker-compose.prod-db-external.yml (вынос db + смена DATABASE_URL), код не трогать.
 
 services:
   proxy:
@@ -25,7 +25,7 @@ services:
   api:
     build:
       context: ./api
-    # Real'naya tochka vhoda — Faza 2+ (FastAPI); zdes' tol'ko kontrakt porta dlya proxy.
+    # Реальная точка входа — Фаза 2+ (FastAPI); здесь только контракт порта для proxy.
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
     env_file:
       - .env
@@ -58,7 +58,7 @@ services:
   worker:
     build:
       context: ./api
-    # Tot zhe obraz chto api, drugaya komanda (detali — Faza 4: DOCX->PDF, SMTP, eskalaciya).
+    # Тот же образ что api, другая команда (детали — Фаза 4: DOCX->PDF, SMTP, эскалация).
     command: ["python", "-m", "app.worker"]
     env_file:
       - .env
@@ -91,7 +91,7 @@ services:
   redis:
     image: redis:7-alpine
     command: ["redis-server", "--appendonly", "yes"]
-    # Vneshnego porta net: broker + kesh tol'ko vnutri seti sednet.
+    # Внешнего порта нет: брокер + кэш только внутри сети sednet.
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -109,7 +109,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-sed}
       POSTGRES_USER: ${POSTGRES_USER:-sed}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
-    # ports: NAMERENNO NET — dostup tol'ko vnutri seti sednet (README p.2, AGENTS.md p.4).
+    # ports: НАМЕРЕННО НЕТ — доступ только внутри сети sednet (README п.2, AGENTS.md п.4).
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-sed} -d $${POSTGRES_DB:-sed}"]
       interval: 10s

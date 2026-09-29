@@ -1,3 +1,26 @@
-# СЭД Фаза 0 Задача 3 — заглушка зависимостей api.
-# Реальные зависимости (FastAPI/uvicorn/SQLAlchemy/redis/LDAP/1C-клиент и др.) —
-# в Фазах 2-4. Здесь намеренно без пакетов, чтобы не тянуть лишнее в scaffold.
+# Зависимости API СЭД (волна A2, Python 3.12 в образе, проверка на 3.11 — см. DECISIONS).
+# Минимум без лишнего: рантайм скелета + pytest/httpx для TestClient.
+# Заделы волн A3/A4/B3 (LDAP/HTTP/SMTP/DOCX) — закомментированы, раскомментирует свой агент.
+
+# --- Рантайм скелета ---
+fastapi>=0.115
+uvicorn[standard]>=0.30
+sqlalchemy>=2.0
+alembic>=1.13
+redis>=5.0
+pydantic>=2.7
+pydantic-settings>=2.3
+
+# --- Тесты скелета (TestClient поверх httpx) ---
+httpx>=0.27
+pytest>=8.0
+
+# --- Задел A3 (1С per-base HTTP): раскомментирует агент A3 ---
+# httpx уже выше; circuit-breaker — tenacity>=8.0
+
+# --- Задел A4 (AD LDAPS bind + кэш): раскомментирует агент A4 ---
+# ldap3>=2.9
+
+# --- Задел B3 (письма/DOCX/QR): раскомментирует агент B3 ---
+# python-docx-template>=0.4
+# qrcode>=7.4

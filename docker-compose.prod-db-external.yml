@@ -1,29 +1,29 @@
-# SED — override dlya raz"ezda app/BD na 2 VM (zadel po README p.2:
-# "Raz"ezd na 2 VM — vynos db + smena DATABASE_URL"). Kod ne trogat' — tol'ko compose-uroven'.
+# СЭД — override для разъезда app/БД на 2 ВМ (задел по README п.2:
+# "Разъезд на 2 ВМ — вынос db + смена DATABASE_URL"). Код не трогать — только compose-уровень.
 #
-# KAK ISPOL'ZOVAT' (na app-VM):
-#   1. V .env ukazhite DATABASE_URL na VNESHNYUYU BD (VM baz dannyh), naprimer:
+# КАК ИСПОЛЬЗОВАТЬ (на app-ВМ):
+#   1. В .env укажите DATABASE_URL на ВНЕШНЮЮ БД (ВМ баз данных), например:
 #      DATABASE_URL=postgresql://changeme:changeme@example.com:5432/sed
-#      (tol'ko plejsholder; real'nyj URL — ot IT k testu, v .env, ne v git).
-#   2. Zapusk bez lokal'nogo db:
+#      (только плейсхолдер; реальный URL — от ИТ к тесту, в .env, не в git).
+#   2. Запуск без локального db:
 #      docker compose -f docker-compose.yml -f docker-compose.prod-db-external.yml up -d --scale db=0
-#   3. Bekapy vneshnej BD — pg_dump + snapshot na storone VM baz dannyh (RPO 24ch/RTO 4ch, README p.5).
+#   3. Бэкапы внешней БД — pg_dump + снапшот на стороне ВМ баз данных (RPO 24ч/RTO 4ч, README п.5).
 #
-# POCHEMU TAK: spec Compose ne umeet UDALYAT' servis override-fajlom (net standartnogo
-# '!reset'/'!override' dlya udaleniya; eto rasshireniya otdel'nyh instrumentov).
-# Poetomu validnyj dlya compose spec variant: pereopredelit' db (replicas: 0 dlya swarm)
-# i fakticheski ne startovat' ego (--scale db=0), a api/worker perevesti na vneshnij
-# DATABASE_URL cherez tot zhe .env. Lokal'nye tom pgdata/files/backups zdes' ne trogaty.
+# ПОЧЕМУ ТАК: спец Compose не умеет УДАЛЯТЬ сервис override-файлом (нет стандартного
+# '!reset'/'!override' для удаления; это расширения отдельных инструментов).
+# Поэтому валидный для compose spec вариант: переопределить db (replicas: 0 для swarm)
+# и фактически не стартовать его (--scale db=0), а api/worker перевести на внешний
+# DATABASE_URL через тот же .env. Локальные тома pgdata/files/backups здесь не трогать.
 
 services:
   api:
     environment:
-      # Na app-VM beretsya iz .env i ukazyvaet na vneshnyuyu BD. Bez znacheniya ne startovat'.
+      # На app-ВМ берется из .env и указывает на внешнюю БД. Без значения не стартовать.
       DATABASE_URL: ${DATABASE_URL}
   worker:
     environment:
       DATABASE_URL: ${DATABASE_URL}
   db:
-    # Ne startuet lokal'no: v swarm — replicas 0, v obychnom compose — --scale db=0 (sm. shapku).
+    # Не стартует локально: в swarm — replicas 0, в обычном compose — --scale db=0 (см. шапку).
     deploy:
       replicas: 0
