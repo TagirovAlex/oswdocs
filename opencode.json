@@ -1,0 +1,1 @@
+{"$schema": "https://opencode.ai/config.json", "instructions": ["AGENTS.md"], "mcp": {"playwright": {"command": ["npx", "-y", "@playwright/mcp"], "enabled": true, "type": "local"}, "postgres": {"command": ["npx", "-y", "@modelcontextprotocol/server-postgres", "{env:PG_URL}"], "enabled": true, "type": "local"}}, "skills": {"paths": [".opencode/skills"]}}

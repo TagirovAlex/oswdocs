@@ -1,0 +1,20 @@
+---
+name: react-sed
+description: Use when editing the React SPA, role-based UI, login and OK/owner flows in SED. Triggers on frontend, React, login, request creation, owner steps, admin settings, role matrices.
+---
+
+# React SPA SED
+
+Фронтенд Фазы 5 (README п.6): статика собирается в `frontend/Dockerfile`, отдаётся через `proxy` (отдельного рантайм-сервиса нет).
+
+## Железные правила
+
+- UI — только по матрицам ролей README п.1: ОК — всё + полная карточка, владелец — свои задачи + урезанная карточка без ПДн, админы — всё + настройки, остальные — ничего.
+- Логин — через `/auth` (LDAPS bind на стороне API); пароли и токены в localStorage не хранить.
+- Создание ОК: предприятие → сотрудник → маршрут → печать; отметки владельца — только свои шаги.
+- Админка настроек — только для `SED_ADMINS` (settings в БД, не в коде).
+- Прогон UI — через MCP `playwright` в intranet; матрицы ролей проверять после каждой правки.
+
+## Приемка правки
+
+Матрицы ролей из п.1 зелёные (playwright), затронутые экраны работают, ПДн не светит владельцам.
