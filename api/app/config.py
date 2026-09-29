@@ -53,6 +53,10 @@ class Settings(BaseSettings):
 
     # --- 1С ЗУП (только чтение, мультибаза; разбор JSON — в волне A3) ---
     ONEC_BASES_JSON: str = Field(default="{}")
+    ONEC_CACHE_TTL: int = Field(
+        default=300,
+        description="TTL кэша карточек 1С в Redis (сек)",
+    )
 
     # --- AD write-заглушка: всегда False в MVP (запись запрещена) ---
     AD_WRITE_ENABLED: bool = Field(default=False)

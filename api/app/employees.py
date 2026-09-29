@@ -37,16 +37,24 @@ router = APIRouter(tags=["сотрудники"])
 # Зависимости-интерфейсы (границы для моков волны A)
 # ---------------------------------------------------------------------------
 
-def get_onec_client() -> OneCClient:
-    """Клиент 1С волны A3. В offline-тестах подменяется мок-транспортом.
+def get_onec_client(settings: Settings = Depends(get_settings)) -> OneCClient:
+    """Боевой клиент 1С: OneCClient по базам из env + кэш Redis карточек.
 
-    Без подмены — 503: живого HTTP к 1С здесь нет, боевую реализацию
-    собирает стенд без правки логики эндпоинтов.
+    Без баз в ONEC_BASES_JSON — 503 (прежнее поведение офлайн-тестов);
+    кэшируется только успешный get_employee, падение Redis не валит чтение.
     """
-    raise HTTPException(
-        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        detail="Клиент 1С не настроен (в offline — подмена мок-транспортом)",
-    )
+    from .onec_cache import CachingOneCClient, RedisCardCache
+    from .onec_client import load_bases_from_env
+
+    bases = load_bases_from_env()
+    if not bases:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Клиент 1С не настроен (нет баз в ONEC_BASES_JSON)",
+        )
+    client = OneCClient(bases)
+    cache = RedisCardCache(settings.REDIS_URL, settings.ONEC_CACHE_TTL)
+    return CachingOneCClient(client, cache, ttl_seconds=settings.ONEC_CACHE_TTL)
 
 
 def get_ad_reader() -> AdReader | None:
