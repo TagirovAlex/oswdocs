@@ -28,6 +28,13 @@ describe("CreateForm", () => {
     expect(screen.getByText("Далее")).toBeDisabled();
   });
 
+  // Админ тоже может создавать (роль admin, как в API _is_hr).
+  it("админу создание доступно", () => {
+    render(<CreateForm role="admin" />);
+    expect(screen.getByText("Создание заявки (шаг 1 из 4)")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   // Не-ОК создание закрыто.
   it("владельцу и гостю создание закрыто", () => {
     render(<CreateForm role="owner" />);

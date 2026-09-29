@@ -42,8 +42,8 @@ export function CreateForm(props: CreateFormProps) {
   // Выбранный сотрудник.
   const selected = useMemo(() => employees.find((e) => e.tabNum === tabNum), [employees, tabNum]);
 
-  // Создание — только ОК.
-  if (role !== "hr") {
+  // Создание — ОК и админам (роль hr/admin, как в API _is_hr).
+  if (role !== "hr" && role !== "admin") {
     return <div role="alert">Создание заявок доступно только ОК.</div>;
   }
 
