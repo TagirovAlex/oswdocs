@@ -1,5 +1,14 @@
 # Деплой полного кода проекта на стенд (10.0.70.117) — задание агенту
 
+> ## Статус (2026-09-30): ВЫПОЛНЕНО
+>
+> Результат: код Волн 1–5 залит, миграция `0002` накатана, `settings` — 15 ключей
+> (включая `scan_allowed_types`, `smtp_host`, `smtp_port`), фронт собран и в volume
+> `sed_frontend_dist`, api/worker Up без рестартов, `/api/health` 200, 401 на
+> settings/me/enterprises/login(wrongpass), IMPORT_OK, `soffice=True` (вариант a).
+> SMTP-параметры (smtp_host/smtp_port/smtp_from) вынесены в settings — см. шаг 3 и коммит `9be6e6f`.
+> Отклонения и открытое — в разделе «ОТЧЁТ» и в шапке `TASKS_REAL.md`.
+
 Запускается ОТДЕЛЬНОЙ сессией. Прочитай перед стартом: `AGENTS.md`, `README.md`
 п.2/п.6, `TASKS_REAL.md` (что деплоим), хелперы `temp/ssh_probe.py`,
 `temp/sftp_put.py`, `temp/su_exec.py` (пароли сами читают из `./.env`, НЕ выводить).

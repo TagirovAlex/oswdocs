@@ -43,8 +43,8 @@ Browser --HTTPS--> proxy (nginx :80→443 + :443, корп. cert)
 
 ## 3. Каталог настроек (все вне кода)
 
-Инфра (`env`, секреты): `DATABASE_URL` (= `PG_URL` для MCP postgres, см. AI_SKILLS_MCP.md), `REDIS_URL, AD_URL/BASE_DN/READER_DN+secret, LDAP_CACHE_TTL, ONEC_BASES_JSON (enterprise→base→url+user+secret), AD_WRITE_ENABLED=false, CERT_PATH, SMTP_HOST/FROM(+secret)`.
-Прикладные (`settings` в БД, правит `SED_ADMINS`): `sed_ou, allowed_ad_groups, enterprises, position_to_category, position_escalation, approval_ttl_days, require_paper_signature, require_comment (на шаг, по умолчанию false; отказ/возврат — всегда обязателен), templates/filters/steps, doc_templates, mail_templates, scan_retention_days/scan_max_mb`.
+Инфра (`env`, секреты): `DATABASE_URL` (= `PG_URL` для MCP postgres, см. AI_SKILLS_MCP.md), `REDIS_URL, AD_URL/BASE_DN/READER_DN+secret, LDAP_CACHE_TTL, ONEC_BASES_JSON (enterprise→base→url+user+secret), AD_WRITE_ENABLED=false, CERT_PATH, SMTP_USER/SMTP_PASSWORD` (учётка релея — секреты).
+Прикладные (`settings` в БД, правит `SED_ADMINS`): `sed_ou, allowed_ad_groups, enterprises, position_to_category, position_escalation, approval_ttl_days, require_paper_signature, require_comment (на шаг, по умолчанию false; отказ/возврат — всегда обязателен), smtp_host/smtp_port/smtp_from (параметры SMTP-релея, с 2026-09-30 в settings), templates/filters/steps, doc_templates, mail_templates, scan_retention_days/scan_max_mb`.
 
 ## 4. Схема Postgres (ядро)
 
@@ -67,8 +67,14 @@ TLS 1.2+, HSTS, сессии 15–20 мин, rate-limit логина, RPO 24ч/R
 * **Фаза 6 — qa/security:** негативные тесты (403, дубли ФИО, просрочка TTL, лимиты скана, rate-limit), проверка «нет записи в 1С/AD, нет delete». Приемка: чек-лист + `audit_log` полный.
 * **Фаза 7 — pilot:** деплой на 1 ВМ, Exchange/DNS/cert от ИТ, образцы бланков, списки должностей. Правки событий писем — только после пилота.
 
+Текущий статус (2026-09-30): фазы 0–5 выполнены и задеплоены на стенд `10.0.70.117`
+(коммиты `1f9bf99`, `9be6e6f`; детали — `TASKS_REAL.md`/`TASKS_DEPLOY.md`). Фаза 6 —
+скрипты `deploy/qa/*` написаны, прогон на стенде не выполнен (нужны реальные доменные
+учётки). Фаза 7 (пилот) — стенд развёрнут, ждёт от ИТ: `ONEC_BASES_JSON`, SMTP-учётку
+релея (если нужна), образцы бланков/писем, подтверждение входа реальным паролем.
+
 Правила агентам: минимальный дифф, тесты на затронутое, настройки — в `settings/env` а не в код, смена архитектуры/схемы/контракта — только вопросом человеку. Скилы: `fastapi-sed, pg-sed, ad-reader, onec-multibase, approval-templates, debian-ops, mail-docs, qa-sed, react-sed`. MCP: `postgres, fetch/http (1С), playwright (UI)`.
 
 ## 7. Backlog
 
-Автосинхронизация AD+1С (worker + очередь сверки, метрики расхождений), auto-disable AD (отдельное согласование с ИБ). Флаг МОЛ из 1С — прояснить отдельно.
+Автосинхронизация AD+1С (worker + очередь сверки, метрики расхождений) — **не реализовано** (есть только ручной `link_1c_ad`). auto-disable AD (отдельное согласование с ИБ) — **не реализовано** (только заглушка-флаг `AD_WRITE_ENABLED=false`). Флаг МОЛ из 1С — **TODO** (`mol_flag` nullable, не используется). Событие письма «закрыта» — не подключено (см. `TASKS_REAL.md`).

@@ -1,5 +1,30 @@
 # План реальной реализации СЭД (без заглушек)
 
+> ## Статус (2026-09-30): Волны 1–5 РЕАЛИЗОВАНЫ и ЗАДЕПЛОЕНЫ на стенд `10.0.70.117`
+>
+> Залито: `api/app` целиком (включая requests_store/link_store/documents/attachments/worker),
+> миграция `0002` (alembic `head`), сиды `settings` обновлены (на стенде 15 ключей:
+> `scan_allowed_types` + `smtp_host`/`smtp_port` от деплоя, `templates` — добавлен через админку),
+> фронт (свежая сборка), `docker-compose.yml` (совпадает с ВМ). api/worker Up и стабильны,
+> `/api/health` 200, вход LDAPS+TLS (wrongpass → 401), IMPORT_OK, `soffice` в образе (вариант a).
+> Коммиты: `1f9bf99` (fix deploy: LibreOffice/docxtpl/python-multipart/worker-loop), `9be6e6f`
+> (SMTP-параметры в settings).
+>
+> ### Открытые пункты (не код, данные/операции)
+> - Вход реальным доменным паролем — ждёт человека (официально не проверялся).
+> - `ONEC_BASES_JSON` не задан — карточки/поиск сотрудников из 1С недоступны (1С вне объёма).
+> - SMTP: релей `intsrvmail.fidelio.local:587`, отправитель `tagirovam@yaltaintourist.ru`
+>   (в settings); `SMTP_USER`/`SMTP_PASSWORD` пусты — если релею нужна авторизация, дать учётку.
+> - Реальные `doc_templates`/`mail_templates` (образцы корп. бланков/писем) не заведены.
+> - QA-прогон на стенде (`deploy/qa/roles-matrix.spec.ts`, `audit-fullness.sql`) не выполнялся
+>   (нужны реальные доменные учётки).
+>
+> ### Известные пробелы кода (не входят в Волны 1–5)
+> - Событие письма «закрыта» (EVENT_CLOSED) не ставится в очередь (нет при finish).
+> - Кнопки «Отозвать»/«Повторить шаг» в UI нет (API есть); эскалация не редактируется в админке.
+> - Блок AD в `employees.py`/`link.py` отключён: `get_ad_reader()` возвращает `None` (AD читается
+>   только в auth и worker). Каталога сотрудников из AD нет — источник истины 1С (README п.1).
+
 База: README.md (весь), AGENTS.md (правила), скилы `fastapi-sed`, `react-sed`,
 `pg-sed`, `approval-templates`, `mail-docs`, `qa-sed`. Правило: настройки/данные —
 только `settings` (БД) и `env`; хардкод запрещён; 1С/AD — только чтение.

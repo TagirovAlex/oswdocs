@@ -1,5 +1,9 @@
 # Фаза 3 — backend-1c: кэш Redis карточек 1С + боевая сборка клиента
 
+> Статус (2026-09-30): ВЫПОЛНЕНА — `api/app/onec_cache.py` (CardCache/RedisCardCache/
+> CachingOneCClient), `config.ONEC_CACHE_TTL=300`, `get_onec_client` с кэшем Redis.
+> На стенде: данные 1С (`ONEC_BASES_JSON`) НЕ заданы — карточки/поиск из 1С ждут ИТ.
+
 Цель (README п.6 Фаза 3): закрыть недостающий пункт приёмки — «кэш Redis».
 Готово офлайн-волной A3: `OneCClient` (per-base GET, таймаут 5с, circuit-breaker),
 `resolver` (предприятие→база→сотрудник, изоляция падения баз), составной ключ

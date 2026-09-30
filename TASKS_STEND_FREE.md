@@ -1,5 +1,10 @@
 # Свободный забег стенда: всё, что не требует данных от ИТ
 
+> Статус (2026-09-30): волны S1–S2 ВЫПОЛНЕНЫ (подтверждено в `temp/DECISIONS.md`):
+> образы api/worker собраны, db/redis healthy + миграция 0001/сиды/pg_dump/триггер
+> audit_log проверены, frontend в volume, nftables применён, посторонних контейнеров нет.
+> Дальше — только по данным ИТ (сертификат, `.env`, AD/1С/SMTP, бланки, должности).
+
 База: `README.md`, `AGENTS.md`, `deploy/LAYOUT.md`, `deploy/ЧЕК-ЛИСТ_ИТ.md`,
 `temp/OFFLINE_GAPS.md`. Доступы ВМ — в `./.env` (`SED_VM_*`, в git не коммитить).
 Хелперы SSH — `./temp/ssh_probe.py` (команды), `./temp/su_exec.py` (root через su),

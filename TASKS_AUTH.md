@@ -1,5 +1,10 @@
 # Реальная доменная аутентификация (LDAP bind + /auth + экран логина)
 
+> Статус (2026-09-30): волны A (A1–A3) и C ВЫПОЛНЕНЫ. На стенде: `AUTH_MOCK_ENABLED=false`,
+> `ALLOWED_AD_GROUPS`/`ADMIN_GROUPS`/`HR_GROUPS` заданы, вход LDAPS+TLS работает
+> (`POST /api/auth/login` wrongpass → 401, `/auth/me` без токена → 401, rate-limit в Redis).
+> Открыто: вход реальным доменным паролем — ждёт человека.
+
 Цель: заменить мок-роль (`initialRole="hr"` в main.tsx и X-Mock-* заголовки в deps.py)
 на реальный вход доменной учеткой через LDAPS. Данные AD уже в `.env` на ВМ:
 `AD_URL=ldaps://DC1.FIDELIO.LOCAL:636`, `AD_BASE_DN=DC=FIDELIO,DC=LOCAL`,
