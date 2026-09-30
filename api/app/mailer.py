@@ -56,6 +56,19 @@ def resolve_smtp_from(db_value: str | None, env_default: str) -> str:
     return (db_value or "").strip() or env_default
 
 
+def resolve_smtp_host(db_value: object, env_default: str) -> str:
+    """Хост SMTP-релея: значение из settings (smtp_host), иначе env SMTP_HOST."""
+    return str(db_value or "").strip() or env_default
+
+
+def resolve_smtp_port(db_value: object, env_default: int) -> int:
+    """Порт SMTP: из settings (smtp_port), иначе env SMTP_PORT; невалидное — дефолт."""
+    try:
+        return int(db_value)
+    except (TypeError, ValueError):
+        return env_default
+
+
 @dataclass
 class MailMessage:
     """Одно письмо в очереди (сериализуется в JSON целиком)."""
@@ -579,15 +592,26 @@ def get_mail_queue() -> MailQueue:
     return _db_mail_queue
 
 
-def get_mailer() -> Mailer:
-    """Боевой отправитель (SmtpMailer) по env; offline — подмена на MockMailer."""
+def get_mailer(store: "DbSettingsStore | None" = None) -> Mailer:
+    """Боевой отправитель (SmtpMailer): хост/порт/отправитель — из settings
+    (smtp_host/smtp_port/smtp_from, при отсутствии ключа — env SMTP_*);
+    секреты SMTP_USER/SMTP_PASSWORD — только env (AGENTS.md п.3)."""
     from .config import get_settings
+    from .settings_routes import DbSettingsStore, read_setting_value
 
     current = get_settings()
+    if store is None:
+        store = DbSettingsStore(current.DATABASE_URL)
     return SmtpMailer(
-        host=current.SMTP_HOST,
-        port=current.SMTP_PORT,
+        host=resolve_smtp_host(
+            read_setting_value(store, "smtp_host"), current.SMTP_HOST
+        ),
+        port=resolve_smtp_port(
+            read_setting_value(store, "smtp_port"), current.SMTP_PORT
+        ),
         username=current.SMTP_USER,
         password=current.SMTP_PASSWORD,
-        from_addr=current.SMTP_FROM,
+        from_addr=resolve_smtp_from(
+            read_setting_value(store, "smtp_from"), current.SMTP_FROM
+        ),
     )

@@ -30,7 +30,8 @@ class SettingsUnavailable(Exception):
 
 # Прикладные ключи админки (состав — контракт B2 GET/PUT /settings, дополнен
 # W3a: doc_templates/mail_templates — бегунки и письма; W5a: scan_allowed_types —
-# MIME-allowlist сканов).
+# MIME-allowlist сканов; SMTP: smtp_host/smtp_port/smtp_from — параметры релея
+# из settings, секреты SMTP_USER/SMTP_PASSWORD — только env).
 # Порядок — как в контракте: базовые, справочники, шаблоны.
 SETTINGS_KEYS: tuple[str, ...] = (
     "approval_ttl_days",
@@ -38,6 +39,8 @@ SETTINGS_KEYS: tuple[str, ...] = (
     "scan_max_mb",
     "scan_allowed_types",
     "require_paper_signature",
+    "smtp_host",
+    "smtp_port",
     "smtp_from",
     "require_comment",
     "enterprises",
@@ -213,6 +216,12 @@ class SettingsPayload(BaseModel):
     )
     require_paper_signature: bool | None = Field(
         default=None, description="Нужна ли бумажная подпись"
+    )
+    smtp_host: str | None = Field(
+        default=None, description="Хост SMTP-релея (из settings, иначе env SMTP_HOST)"
+    )
+    smtp_port: int | None = Field(
+        default=None, description="Порт SMTP-релея (из settings, иначе env SMTP_PORT)"
     )
     smtp_from: str | None = Field(
         default=None, description="Отправитель уведомлений (SMTP FROM)"

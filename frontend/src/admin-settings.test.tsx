@@ -21,6 +21,8 @@ const settings: SettingsData = {
   scan_retention_days: 30,
   scan_max_mb: 10,
   require_paper_signature: true,
+  smtp_host: "intsrvmail.fidelio.local",
+  smtp_port: 587,
   smtp_from: "sed@example.com",
   require_comment: true,
   enterprises: [{ code: "OOO_ALFA", name: "ООО Альфа" }],

@@ -265,6 +265,8 @@ export function AdminSettings(props: AdminSettingsProps) {
   const [retentionDays, setRetentionDays] = useState<number | null>(null);
   const [maxMb, setMaxMb] = useState<number | null>(null);
   const [paperRequired, setPaperRequired] = useState<boolean | null>(null);
+  const [smtpHost, setSmtpHost] = useState<string | null>(null);
+  const [smtpPort, setSmtpPort] = useState<number | null>(null);
   const [smtpFrom, setSmtpFrom] = useState<string | null>(null);
   const [requireComment, setRequireComment] = useState<boolean | null>(null);
   const [enterprises, setEnterprises] = useState<SettingsEnterprise[]>([]);
@@ -284,6 +286,8 @@ export function AdminSettings(props: AdminSettingsProps) {
           setRetentionDays(data.scan_retention_days);
           setMaxMb(data.scan_max_mb);
           setPaperRequired(data.require_paper_signature);
+          setSmtpHost(data.smtp_host);
+          setSmtpPort(data.smtp_port);
           setSmtpFrom(data.smtp_from);
           setRequireComment(data.require_comment);
           setEnterprises(data.enterprises ?? []);
@@ -317,6 +321,8 @@ export function AdminSettings(props: AdminSettingsProps) {
       retentionDays === null ||
       maxMb === null ||
       paperRequired === null ||
+      smtpHost === null ||
+      smtpPort === null ||
       smtpFrom === null
     ) {
       setSaveError("Заполните все поля настроек (значения хранятся в settings БД)");
@@ -329,6 +335,8 @@ export function AdminSettings(props: AdminSettingsProps) {
         scan_retention_days: retentionDays,
         scan_max_mb: maxMb,
         require_paper_signature: paperRequired,
+        smtp_host: smtpHost,
+        smtp_port: smtpPort,
         smtp_from: smtpFrom,
         require_comment: requireComment ?? false,
         enterprises,
@@ -401,6 +409,24 @@ export function AdminSettings(props: AdminSettingsProps) {
             onChange={(e) => setRequireComment(e.target.checked)}
           />
           Комментарий обязателен при согласовании (require_comment)
+        </label>
+        <label style={{ display: "block", marginTop: 8 }}>
+          Хост SMTP-релея (smtp_host)
+          <input
+            aria-label="Хост SMTP-релея"
+            type="text"
+            value={smtpHost ?? ""}
+            onChange={(e) => setSmtpHost(e.target.value)}
+          />
+        </label>
+        <label style={{ display: "block", marginTop: 8 }}>
+          Порт SMTP-релея (smtp_port)
+          <input
+            aria-label="Порт SMTP-релея"
+            type="number"
+            value={smtpPort ?? ""}
+            onChange={(e) => setSmtpPort(Number(e.target.value))}
+          />
         </label>
         <label style={{ display: "block", marginTop: 8 }}>
           Отправитель уведомлений, e-mail (smtp_from)

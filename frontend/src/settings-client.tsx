@@ -33,6 +33,10 @@ export interface SettingsData {
   scan_max_mb: number | null;
   // Требовать бумажное заявление (require_paper_signature).
   require_paper_signature: boolean | null;
+  // Хост SMTP-релея (smtp_host).
+  smtp_host: string | null;
+  // Порт SMTP-релея (smtp_port).
+  smtp_port: number | null;
   // Отправитель уведомлений, e-mail (smtp_from).
   smtp_from: string | null;
   // Комментарий обязателен при согласовании (require_comment).

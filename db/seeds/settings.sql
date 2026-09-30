@@ -45,6 +45,16 @@ INSERT INTO settings (key, value) VALUES
   ('require_comment', 'false')
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
 
+-- Хост SMTP-релея (пусто — берётся из env SMTP_HOST; реальное значение вносит ИТ/админ).
+INSERT INTO settings (key, value) VALUES
+  ('smtp_host', '""')
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
+
+-- Порт SMTP-релея (дефолт STARTTLS-релея).
+INSERT INTO settings (key, value) VALUES
+  ('smtp_port', '587')
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
+
 -- Отправитель уведомлений (SMTP FROM). Редактируется через настройки (не env);
 -- реальное значение вносит ИТ/админ на стенде.
 INSERT INTO settings (key, value) VALUES

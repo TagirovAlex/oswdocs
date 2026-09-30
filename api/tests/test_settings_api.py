@@ -37,6 +37,8 @@ SEED_VALUES = {
     "scan_max_mb": "10",
     "scan_allowed_types": '["application/pdf", "image/jpeg", "image/png"]',
     "require_paper_signature": "true",
+    "smtp_host": '""',
+    "smtp_port": "587",
     "smtp_from": '"sed@example.com"',
     "require_comment": "false",
     "enterprises": (
@@ -68,6 +70,8 @@ CONTRACT_VALUES = {
     "scan_max_mb": 10,
     "scan_allowed_types": ["application/pdf", "image/jpeg", "image/png"],
     "require_paper_signature": True,
+    "smtp_host": "",
+    "smtp_port": 587,
     "smtp_from": "sed@example.com",
     "require_comment": False,
     "enterprises": [
@@ -110,6 +114,8 @@ UPDATED_VALUES = {
     "scan_max_mb": 25,
     "scan_allowed_types": ["application/pdf", "image/png"],
     "require_paper_signature": False,
+    "smtp_host": "mail-relay.example.com",
+    "smtp_port": 465,
     "smtp_from": "noreply@example.com",
     "require_comment": True,
     "enterprises": [
