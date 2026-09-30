@@ -18,7 +18,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from app.ad_reader import AdReader, AdReaderSettings, InMemoryCache  # noqa: E402
 from app.config import Settings, get_settings  # noqa: E402
 from app.employees import get_ad_reader, get_onec_client  # noqa: E402
-from app.link import clear_for_tests  # noqa: E402
+from app.link import clear_for_tests, get_memory_links_store  # noqa: E402
+from app.link_store import get_links_store  # noqa: E402
 from app.main import app  # noqa: E402
 from app.onec_client import HttpResult, OneCBaseConfig, OneCClient  # noqa: E402
 
@@ -188,10 +189,12 @@ def b1_mocks(b1_settings):
     )
     app.dependency_overrides[get_onec_client] = lambda: client
     app.dependency_overrides[get_ad_reader] = lambda: reader
+    app.dependency_overrides[get_links_store] = lambda: get_memory_links_store()
     clear_for_tests()
     yield {"client": client, "reader": reader}
     app.dependency_overrides.pop(get_onec_client, None)
     app.dependency_overrides.pop(get_ad_reader, None)
+    app.dependency_overrides.pop(get_links_store, None)
     clear_for_tests()
 
 
@@ -320,6 +323,7 @@ def test_employees_base_down_isolated(client, hr_headers, b1_settings):
     )
     app.dependency_overrides[get_onec_client] = lambda: client_mock
     app.dependency_overrides[get_ad_reader] = lambda: None
+    app.dependency_overrides[get_links_store] = lambda: get_memory_links_store()
     clear_for_tests()
     try:
         response = client.get(
@@ -333,6 +337,7 @@ def test_employees_base_down_isolated(client, hr_headers, b1_settings):
     finally:
         app.dependency_overrides.pop(get_onec_client, None)
         app.dependency_overrides.pop(get_ad_reader, None)
+        app.dependency_overrides.pop(get_links_store, None)
         clear_for_tests()
 
 

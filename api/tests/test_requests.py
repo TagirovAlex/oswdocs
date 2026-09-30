@@ -16,12 +16,12 @@ from app.audit import audit_log  # noqa: E402
 from app.config import Settings, get_settings  # noqa: E402
 from app.main import app  # noqa: E402
 from app.requests import (  # noqa: E402
-    _REQUESTS,
     _utcnow,
+    get_memory_requests_store,
     get_route_settings,
-    reset_state_for_tests,
 )
 from app.requests import RouteSettings, RouteStepTemplate, RouteTemplate  # noqa: E402
+from app.requests_store import get_requests_store  # noqa: E402
 
 TEST_ALLOWED = "SED_HR,SED_ADMINS"
 TEST_ADMINS = "SED_ADMINS"
@@ -89,13 +89,22 @@ def test_settings_override():
     app.dependency_overrides.pop(get_settings, None)
 
 
+@pytest.fixture
+def requests_store():
+    """Хранилище заявок через зависимость (общий InMemory-экземпляр)."""
+    store = get_memory_requests_store()
+    app.dependency_overrides[get_requests_store] = lambda: store
+    yield store
+    app.dependency_overrides.pop(get_requests_store, None)
+
+
 @pytest.fixture(autouse=True)
-def clean_state():
+def clean_state(requests_store):
     """Чистое хранилище и аудит на каждый тест."""
-    reset_state_for_tests()
+    requests_store.reset()
     audit_log.clear_for_tests()
     yield
-    reset_state_for_tests()
+    requests_store.reset()
     audit_log.clear_for_tests()
 
 
@@ -192,19 +201,21 @@ def test_foreign_step_403(client, hr, other_owner, test_settings_override, route
     assert response.status_code == 403
 
 
-def test_expired_reissue(client, hr, buh_owner, test_settings_override, route_override):
+def test_expired_reissue(
+    client, hr, buh_owner, requests_store, test_settings_override, route_override
+):
     """Просрочка TTL → 410 и На доработке, повтор (reissue) возвращает в работу."""
     rid = _create(client, hr).json()["id"]
     assert client.post(f"/requests/{rid}/submit", headers=hr).status_code == 200
     # Искусственно состариваем шаг мимо TTL (хранилище in-memory — стенд хранит в БД).
-    _REQUESTS[rid].steps[0].expires_at = _utcnow() - timedelta(days=1)
+    requests_store.get(rid).steps[0].expires_at = _utcnow() - timedelta(days=1)
     late = client.post(
         f"/requests/{rid}/steps/1/decision",
         json={"decision": "approve"},
         headers=buh_owner,
     )
     assert late.status_code == 410
-    assert _REQUESTS[rid].status == "На доработке"
+    assert requests_store.get(rid).status == "На доработке"
     again = client.post(f"/requests/{rid}/steps/1/reissue", headers=hr)
     assert again.status_code == 200
     assert again.json()["status"] == "На согласовании"

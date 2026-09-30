@@ -1,8 +1,8 @@
 # Прикладные настройки (админка): GET/PUT /settings, только роль admin.
 # Хранилище — таблица settings в Postgres (JSONB value), общение строкой
 # в «сид-формате» (db/seeds/settings.sql): int '3', bool 'true', строка '"..."'.
-# Редактируются только 5 прикладных ключей контракта; остальные настройки
-# (OU, группы, предприятия, шаблоны) админка не трогает.
+# Контракт B2: GET/PUT охватывают все прикладные ключи (см. SETTINGS_KEYS);
+# технический ключ sed_ou из сида админка не трогает.
 # Падение БД -> 503, а не 500 (как RedisSessionStore -> SessionUnavailable в auth).
 # Зависимость get_settings_store() НЕ конфликтует с get_settings из config.py.
 
@@ -28,13 +28,20 @@ class SettingsUnavailable(Exception):
     """Хранилище настроек (БД) недоступно — роутер отвечает 503, а не 500."""
 
 
-# Прикладные ключи админки (состав — контракт GET/PUT /settings).
+# Прикладные ключи админки (состав — контракт B2 GET/PUT /settings).
+# Порядок — как в контракте: базовые, справочники, шаблоны.
 SETTINGS_KEYS: tuple[str, ...] = (
     "approval_ttl_days",
     "scan_retention_days",
     "scan_max_mb",
     "require_paper_signature",
     "smtp_from",
+    "require_comment",
+    "enterprises",
+    "allowed_ad_groups",
+    "position_to_category",
+    "position_escalation",
+    "templates",
 )
 
 
@@ -135,14 +142,68 @@ def get_settings_store(settings: Settings = Depends(get_settings)) -> DbSettings
     return _db_store
 
 
-class SettingsPayload(BaseModel):
-    """Тело GET/PUT /settings: 5 прикладных ключей (в PUT все обязательны)."""
+class EnterpriseItem(BaseModel):
+    """Предприятие справочника: пара code+name (формат сида settings.enterprises)."""
 
-    approval_ttl_days: int = Field(..., description="Срок отметки шага в днях")
-    scan_retention_days: int = Field(..., description="Срок хранения сканов в днях")
-    scan_max_mb: int = Field(..., description="Максимальный размер скана в МБ")
-    require_paper_signature: bool = Field(..., description="Нужна ли бумажная подпись")
-    smtp_from: str = Field(..., description="Отправитель уведомлений (SMTP FROM)")
+    code: str = Field(description="Код предприятия (составной ключ сотрудника)")
+    name: str = Field(description="Название предприятия")
+
+
+class TemplateStepItem(BaseModel):
+    """Шаг шаблона маршрута (контракт B2: группа + опциональные резолвер/флаг)."""
+
+    owner_group: str = Field(description="Группа-владелец шага из settings")
+    resolver: str | None = Field(default=None, description="Резолвер исполнителя")
+    require_comment: bool | None = Field(
+        default=None, description="Комментарий обязателен даже при согласии"
+    )
+
+
+class TemplateItem(BaseModel):
+    """Шаблон маршрута: служба + категория → шаги (формат settings.templates)."""
+
+    service: str = Field(description="Служба увольняемого (поле 1С)")
+    category: str = Field(description="Категория (МОЛ/линейный/руководитель)")
+    steps: list[TemplateStepItem] = Field(description="Шаги шаблона по порядку")
+
+
+class SettingsPayload(BaseModel):
+    """Тело GET/PUT /settings: все прикладные ключи; в PUT все опциональны
+    (частичное обновление — пишутся только присутствующие в теле ключи)."""
+
+    approval_ttl_days: int | None = Field(
+        default=None, description="Срок отметки шага в днях"
+    )
+    scan_retention_days: int | None = Field(
+        default=None, description="Срок хранения сканов в днях"
+    )
+    scan_max_mb: int | None = Field(
+        default=None, description="Максимальный размер скана в МБ"
+    )
+    require_paper_signature: bool | None = Field(
+        default=None, description="Нужна ли бумажная подпись"
+    )
+    smtp_from: str | None = Field(
+        default=None, description="Отправитель уведомлений (SMTP FROM)"
+    )
+    require_comment: bool | None = Field(
+        default=None, description="Комментарий обязателен на шаге всегда"
+    )
+    enterprises: list[EnterpriseItem] | None = Field(
+        default=None, description="Предприятия (код+название)"
+    )
+    allowed_ad_groups: list[str] | None = Field(
+        default=None, description="Группы ручного конструктора шагов"
+    )
+    position_to_category: dict[str, str] | None = Field(
+        default=None, description="Должность 1С → категория"
+    )
+    position_escalation: dict[str, int] | None = Field(
+        default=None, description="Должность → часы эскалации"
+    )
+    templates: list[TemplateItem] | None = Field(
+        default=None, description="Шаблоны маршрутов (служба+категория→шаги)"
+    )
 
 
 def _require_admin(user: CurrentUser) -> None:
@@ -199,11 +260,16 @@ def update_settings(
     user: CurrentUser = Depends(get_current_user),
     store: DbSettingsStore = Depends(get_settings_store),
 ) -> dict:
-    """Обновить настройки: только admin, все 5 полей обязательны (иначе 422)."""
+    """Обновить настройки: только admin; все ключи опциональны (частичное
+    обновление — пишутся только присутствующие), ответ — полное состояние."""
     _require_admin(user)
-    stored = {key: _to_stored(getattr(payload, key)) for key in SETTINGS_KEYS}
+    # exclude_unset: только явно переданные ключи (в т.ч. внутри шаблонов);
+    # дефолтов нет — отсутствующий ключ в БД остается как был.
+    updates = payload.model_dump(mode="json", exclude_unset=True)
+    stored = {key: _to_stored(value) for key, value in updates.items()}
     try:
         store.set_many(stored)
+        values = _settings_dict(store)
     except SettingsUnavailable as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
@@ -214,9 +280,10 @@ def update_settings(
             action="settings.update",
             entity="settings",
             entity_id=",".join(SETTINGS_KEYS),
+            detail=",".join(updates),
         )
     )
-    return payload.model_dump()
+    return values
 
 
 @router.get("/enterprises")

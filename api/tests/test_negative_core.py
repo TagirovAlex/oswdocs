@@ -27,15 +27,18 @@ from app.audit import AuditLogger, audit_log  # noqa: E402
 from app.config import Settings, get_settings  # noqa: E402
 from app.employees import get_ad_reader, get_onec_client  # noqa: E402
 from app.link import clear_for_tests as clear_links  # noqa: E402
+from app.link import get_memory_links_store  # noqa: E402
+from app.link_store import get_links_store  # noqa: E402
 from app.main import app  # noqa: E402
 from app.onec_client import HttpResult, OneCBaseConfig, OneCClient  # noqa: E402
 from app.requests import (  # noqa: E402
-    _REQUESTS,
     _utcnow,
+    get_memory_requests_store,
     get_route_settings,
     reset_state_for_tests,
 )
 from app.requests import RouteSettings  # noqa: E402
+from app.requests_store import get_requests_store  # noqa: E402
 
 # --- Тестовые группы (имена тестовые; продовые — только через env/БД) ---
 TEST_ALLOWED = "SED_HR,SED_ADMINS"
@@ -191,11 +194,15 @@ def neg_mocks(neg_settings):
     reader = _reader([_ad_entry("t.ivan", FIO_IVAN), _ad_entry("t.dubl", FIO_DUBL)])
     app.dependency_overrides[get_onec_client] = lambda: client
     app.dependency_overrides[get_ad_reader] = lambda: reader
+    app.dependency_overrides[get_requests_store] = lambda: get_memory_requests_store()
+    app.dependency_overrides[get_links_store] = lambda: get_memory_links_store()
     reset_state_for_tests()
     clear_links()
     yield {"client": client, "reader": reader}
     app.dependency_overrides.pop(get_onec_client, None)
     app.dependency_overrides.pop(get_ad_reader, None)
+    app.dependency_overrides.pop(get_requests_store, None)
+    app.dependency_overrides.pop(get_links_store, None)
     reset_state_for_tests()
     clear_links()
 
@@ -344,12 +351,12 @@ def test_ttl_expired_410_and_reissue(client, hr_headers, owner_headers, neg_mock
     """Решение после TTL — 410 и «На доработке»; повтор возвращает в работу."""
     rid = _create_request(client, hr_headers)["id"]
     assert client.post(f"/requests/{rid}/submit", headers=hr_headers).status_code == 200
-    _REQUESTS[rid].steps[0].expires_at = _utcnow() - timedelta(days=1)
+    get_memory_requests_store().get(rid).steps[0].expires_at = _utcnow() - timedelta(days=1)
     late = client.post(
         f"/requests/{rid}/steps/1/decision", json={"decision": "approve"}, headers=owner_headers,
     )
     assert late.status_code == 410
-    assert _REQUESTS[rid].status == "На доработке"
+    assert get_memory_requests_store().get(rid).status == "На доработке"
     assert any(e.action == "step.expired" for e in audit_log.all())
     # Повтор чужой группе запрещен, владельцу запрещен — только ОК.
     stranger = _headers_for("step.chuzhoi", [OTHER_GROUP])
@@ -437,7 +444,7 @@ def test_audit_branch_actions(client, hr_headers, owner_headers, neg_mocks, rout
         headers=hr_headers,
     )
     client.post(f"/requests/{rid}/submit", headers=hr_headers)
-    _REQUESTS[rid].steps[0].expires_at = _utcnow() - timedelta(days=1)
+    get_memory_requests_store().get(rid).steps[0].expires_at = _utcnow() - timedelta(days=1)
     assert client.post(
         f"/requests/{rid}/steps/1/decision", json={"decision": "approve"}, headers=owner_headers,
     ).status_code == 410

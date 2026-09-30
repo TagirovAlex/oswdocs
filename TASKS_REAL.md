@@ -63,6 +63,42 @@ in-memory (теряется при рестарте), нет документо�
   `templates` (CRUD через таблицу settings), `doc_templates`/`mail_templates`.
 - `GET/PUT /settings` расширить: enterprises, allowed_ad_groups, position_to_category.
 
+### Контракты Волны 2 (согласованы, не менять)
+
+**B1 — персистентность заявок (requests.py):**
+- Новый модуль `api/app/requests_store.py`: `RequestsStore` (Protocol) +
+  `DbRequestsStore` (SQLAlchemy, таблицы `dismissal_requests`/`request_steps` из
+  `db/alembic/versions/0001_initial_schema.py`) + `InMemoryRequestsStore` (для
+  офлайн-тестов и дефолта без БД). Методы: `create(request)`, `get(request_id)`,
+  `list_all()`, `update(request)`, `next_id() -> "REQ-XXXX"`.
+- `requests.py`: все обращения к `_REQUESTS`/`_SEQ` перевести на зависимость
+  `store: RequestsStore = Depends(get_requests_store)`; `get_requests_store()` —
+  лениво создаёт `DbRequestsStore` (как `get_settings_store`); офлайн-тесты
+  переопределяют InMemoryRequestsStore. Поведение/контракты эндпоинтов не меняются.
+- `reset_state_for_tests` оставить для InMemoryRequestsStore.
+
+**B2 — расширенный /settings (settings_routes.py):**
+- `GET /settings` → все ключи: approval_ttl_days, scan_retention_days, scan_max_mb,
+  require_paper_signature, smtp_from, require_comment, enterprises
+  ([{code,name}]), allowed_ad_groups ([str]), position_to_category ({str:str}),
+  position_escalation ({str:int}), templates ([{service,category,steps:[{owner_group,
+  resolver?, require_comment?}]}]). Отсутствующий ключ → null.
+- `PUT /settings`: тело — те же поля, ВСЕ опциональны (частичное обновление:
+  обновляются только присутствующие), ответ — полное текущее состояние.
+  Типы валидируются pydantic (422 при неверных).
+- Админ-только (403), аудит settings.update с detail по изменённым ключам.
+- `GET /enterprises`/`GET /step-groups` (Волна 1) — переиспользовать те же ключи.
+
+**B3 — админка контента (frontend):**
+- `settings-client.tsx`: тип `SettingsData` расширить (все ключи B2, nullable);
+  `getSettings()`/`saveSettings(data)` — PUT частичное.
+- `admin-settings.tsx`: секции: базовые (TTL/сканы/флаг/smtp_from/require_comment),
+  предприятия (список code+name: добавить/удалить/переименовать),
+  группы доступа (список строк), должность→категория (пары ключ→значение),
+  шаблоны маршрутов (список: служба+категория+шаги owner_group). Сохранение —
+  PUT одним объектом. Без хардкода значений.
+- Тесты на новые секции (мок requests-client/settings-client).
+
 ## Волна 3 — документы, почта, worker (Фаза 4)
 - Шаблоны бегунков (doc_templates по службе+категории), генерация DOCX→PDF+QR (worker,
   LibreOffice), версии v1/v2, `mail_queue`+`mail_templates`, SMTP Exchange, эскалация.

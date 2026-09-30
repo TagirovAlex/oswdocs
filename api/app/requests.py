@@ -1,6 +1,7 @@
-# Заявки на увольнение и маршруты согласования (волна B2, offline).
-# Хранилище — in-memory (словарь процесса); Postgres — только на стенде,
-# логика подменяется без правки эндпоинтов (интерфейс хранилища ниже).
+# Заявки на увольнение и маршруты согласования (волна B1, offline).
+# Хранилище — зависимость get_requests_store: in-memory на офлайне/в тестах,
+# Postgres (DbRequestsStore) на стенде; логика эндпоинтов не зависит от
+# реализации (интерфейс RequestsStore в requests_store.py).
 # Прикладные настройки (position_to_category/escalation, approval_ttl_days,
 # require_comment, templates) — из таблицы settings на стенде (волна A1);
 # здесь — injectable-заглушка get_route_settings (дефолты нейтральные,
@@ -19,6 +20,12 @@ from pydantic import BaseModel, Field
 from .audit import AuditEvent, audit_log
 from .config import Settings, get_settings
 from .deps import CurrentUser, get_current_user
+from .requests_store import (
+    InMemoryRequestsStore,
+    RequestsStore,
+    RequestsUnavailable,
+    get_requests_store,
+)
 
 router = APIRouter(tags=["requests"])
 
@@ -199,16 +206,19 @@ class _Request(BaseModel):
     steps: list[_Step] = Field(default_factory=list)
 
 
-# --- In-memory хранилище (интерфейс под Postgres на стенде) ---
-_REQUESTS: dict[str, _Request] = {}
-_SEQ = 0
+# --- Офлайн-хранилище (тесты/локаль без БД); на стенде эндпоинты получают
+# DbRequestsStore через зависимость get_requests_store (см. requests_store.py).
+_requests_store = InMemoryRequestsStore()
+
+
+def get_memory_requests_store() -> InMemoryRequestsStore:
+    """Офлайн-хранилище заявок (общий экземпляр для тестов и локали без БД)."""
+    return _requests_store
 
 
 def reset_state_for_tests() -> None:
-    """Сброс хранилища. Только для изоляции pytest."""
-    global _SEQ
-    _REQUESTS.clear()
-    _SEQ = 0
+    """Сброс офлайн-хранилища. Только для изоляции pytest."""
+    _requests_store.reset()
 
 
 def _utcnow() -> datetime:
@@ -274,9 +284,9 @@ def _build_steps(
     return steps
 
 
-def _get_request_or_404(request_id: str) -> _Request:
+def _get_request_or_404(store: RequestsStore, request_id: str) -> _Request:
     """Заявка по id, иначе 404 (без ПДн в ошибке)."""
-    request = _REQUESTS.get(request_id)
+    request = store.get(request_id)
     if request is None:
         raise HTTPException(status_code=404, detail="Заявка не найдена")
     return request
@@ -366,11 +376,11 @@ def create_request(
     user: CurrentUser = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
     route: RouteSettings = Depends(get_route_settings),
+    store: RequestsStore = Depends(get_requests_store),
 ) -> RequestOut:
     """Создание заявки от ОК: шаблон по службе/категории, иначе ручной конструктор."""
     settings.ensure_read_only()
     _require_hr(user)
-    global _SEQ
     now = _utcnow()
     category = _resolve_category(route, body.position, body.category)
     template = _find_template(route, body.department, category)
@@ -386,22 +396,26 @@ def create_request(
             )
         steps = _build_steps(body.steps, route.approval_ttl_days, body.manager, now)
         origin = "custom"
-    _SEQ += 1
-    request = _Request(
-        id=f"REQ-{_SEQ:04d}",
-        status=DRAFT,
-        route_origin=origin,
-        enterprise=body.enterprise,
-        fio=body.fio,
-        tab_num=body.tab_num,
-        department=body.department,
-        position=body.position,
-        category=category,
-        escalation_hours=route.position_escalation.get(body.position),
-        created_by=user.sam,
-        steps=steps,
-    )
-    _REQUESTS[request.id] = request
+    try:
+        request = _Request(
+            id=store.next_id(),
+            status=DRAFT,
+            route_origin=origin,
+            enterprise=body.enterprise,
+            fio=body.fio,
+            tab_num=body.tab_num,
+            department=body.department,
+            position=body.position,
+            category=category,
+            escalation_hours=route.position_escalation.get(body.position),
+            created_by=user.sam,
+            steps=steps,
+        )
+        store.create(request)
+    except RequestsUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
     _audit(user.sam, "request.create", request.id, f"origin={origin}")
     return _public_view(request, user)
 
@@ -410,12 +424,19 @@ def create_request(
 def list_requests(
     user: CurrentUser = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
+    store: RequestsStore = Depends(get_requests_store),
 ) -> list[RequestOut]:
     """Список: ОК/админы — все, владелец — только свои шаги (урезанные без ПДн)."""
     settings.ensure_read_only()
+    try:
+        requests = store.list_all()
+    except RequestsUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
     if _is_hr(user):
-        return [_public_view(r, user) for r in _REQUESTS.values()]
-    mine = [r for r in _REQUESTS.values() if any(s.owner_group in user.groups for s in r.steps)]
+        return [_public_view(r, user) for r in requests]
+    mine = [r for r in requests if any(s.owner_group in user.groups for s in r.steps)]
     return [_public_view(r, user) for r in mine]
 
 
@@ -431,27 +452,34 @@ class FolderOut(BaseModel):
 def list_folders(
     user: CurrentUser = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
+    store: RequestsStore = Depends(get_requests_store),
 ) -> list[FolderOut]:
     """Счетчики папок (Волна 1): всем авторизованным; владельцу — только mine."""
     settings.ensure_read_only()
+    try:
+        requests = store.list_all()
+    except RequestsUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
     folders: list[FolderOut] = []
     if _is_hr(user):
         folders = [
             FolderOut(
                 id="agreement",
                 title="На согласовании",
-                count=sum(1 for r in _REQUESTS.values() if r.status == IN_APPROVAL),
+                count=sum(1 for r in requests if r.status == IN_APPROVAL),
             ),
             FolderOut(
                 id="revision",
                 title="На доработке",
-                count=sum(1 for r in _REQUESTS.values() if r.status == REWORK),
+                count=sum(1 for r in requests if r.status == REWORK),
             ),
             FolderOut(
                 id="done",
                 title="Завершённые",
                 count=sum(
-                    1 for r in _REQUESTS.values() if r.status in (DONE, REJECTED, REVOKED)
+                    1 for r in requests if r.status in (DONE, REJECTED, REVOKED)
                 ),
             ),
         ]
@@ -461,7 +489,7 @@ def list_folders(
             title="Мои задачи",
             count=sum(
                 1
-                for r in _REQUESTS.values()
+                for r in requests
                 if any(s.owner_group in user.groups for s in r.steps)
             ),
         )
@@ -474,10 +502,16 @@ def get_request(
     request_id: str,
     user: CurrentUser = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
+    store: RequestsStore = Depends(get_requests_store),
 ) -> RequestOut:
     """Карточка заявки с ролевой обрезкой ПДн."""
     settings.ensure_read_only()
-    request = _get_request_or_404(request_id)
+    try:
+        request = _get_request_or_404(store, request_id)
+    except RequestsUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
     if not _is_hr(user) and not any(s.owner_group in user.groups for s in request.steps):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Нет доступа к заявке")
     return _public_view(request, user)
@@ -488,16 +522,23 @@ def submit_request(
     request_id: str,
     user: CurrentUser = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
+    store: RequestsStore = Depends(get_requests_store),
 ) -> RequestOut:
     """Черновик/На доработке → На согласовании (только ОК-автор, нужны шаги)."""
     settings.ensure_read_only()
     _require_hr(user)
-    request = _get_request_or_404(request_id)
-    if request.status not in (DRAFT, REWORK):
-        raise HTTPException(status_code=409, detail="Подать можно только из Черновика/На доработке")
-    if not request.steps:
-        raise HTTPException(status_code=422, detail="Маршрут пуст: добавьте шаги")
-    request.status = IN_APPROVAL
+    try:
+        request = _get_request_or_404(store, request_id)
+        if request.status not in (DRAFT, REWORK):
+            raise HTTPException(status_code=409, detail="Подать можно только из Черновика/На доработке")
+        if not request.steps:
+            raise HTTPException(status_code=422, detail="Маршрут пуст: добавьте шаги")
+        request.status = IN_APPROVAL
+        store.update(request)
+    except RequestsUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
     _audit(user.sam, "request.submit", request.id, "")
     return _public_view(request, user)
 
@@ -507,14 +548,21 @@ def withdraw_request(
     request_id: str,
     user: CurrentUser = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
+    store: RequestsStore = Depends(get_requests_store),
 ) -> RequestOut:
     """Отзыв заявки → Отозвано (только разрешенная группа)."""
     settings.ensure_read_only()
     _require_hr(user)
-    request = _get_request_or_404(request_id)
-    if request.status in (DONE, REJECTED, REVOKED):
-        raise HTTPException(status_code=409, detail="Заявка уже закрыта")
-    request.status = REVOKED
+    try:
+        request = _get_request_or_404(store, request_id)
+        if request.status in (DONE, REJECTED, REVOKED):
+            raise HTTPException(status_code=409, detail="Заявка уже закрыта")
+        request.status = REVOKED
+        store.update(request)
+    except RequestsUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
     _audit(user.sam, "request.withdraw", request.id, "")
     return _public_view(request, user)
 
@@ -524,14 +572,21 @@ def to_execution(
     request_id: str,
     user: CurrentUser = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
+    store: RequestsStore = Depends(get_requests_store),
 ) -> RequestOut:
     """Согласовано → К исполнению (только разрешенная группа)."""
     settings.ensure_read_only()
     _require_hr(user)
-    request = _get_request_or_404(request_id)
-    if request.status != AGREED:
-        raise HTTPException(status_code=409, detail="К исполнению — только из Согласовано")
-    request.status = TO_EXECUTION
+    try:
+        request = _get_request_or_404(store, request_id)
+        if request.status != AGREED:
+            raise HTTPException(status_code=409, detail="К исполнению — только из Согласовано")
+        request.status = TO_EXECUTION
+        store.update(request)
+    except RequestsUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
     _audit(user.sam, "request.to_execution", request.id, "")
     return _public_view(request, user)
 
@@ -541,14 +596,21 @@ def finish_request(
     request_id: str,
     user: CurrentUser = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
+    store: RequestsStore = Depends(get_requests_store),
 ) -> RequestOut:
     """К исполнению → Завершено (только разрешенная группа)."""
     settings.ensure_read_only()
     _require_hr(user)
-    request = _get_request_or_404(request_id)
-    if request.status != TO_EXECUTION:
-        raise HTTPException(status_code=409, detail="Завершить — только из К исполнению")
-    request.status = DONE
+    try:
+        request = _get_request_or_404(store, request_id)
+        if request.status != TO_EXECUTION:
+            raise HTTPException(status_code=409, detail="Завершить — только из К исполнению")
+        request.status = DONE
+        store.update(request)
+    except RequestsUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
     _audit(user.sam, "request.finish", request.id, "")
     return _public_view(request, user)
 
@@ -560,47 +622,55 @@ def decide_step(
     body: DecisionIn,
     user: CurrentUser = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
+    store: RequestsStore = Depends(get_requests_store),
 ) -> RequestOut:
     """Отметка владельца: согласие/отказ/возврат (комментарий по require_comment)."""
     settings.ensure_read_only()
-    request = _get_request_or_404(request_id)
-    if request.status != IN_APPROVAL:
-        raise HTTPException(status_code=409, detail="Отметки — только в статусе На согласовании")
-    step = next((s for s in request.steps if s.order == order), None)
-    if step is None:
-        raise HTTPException(status_code=404, detail="Шаг не найден")
-    if step.status != STEP_PENDING:
-        raise HTTPException(status_code=409, detail="Шаг уже закрыт")
-    _check_step_owner(step, user)
-    now = _utcnow()
-    # Просрочка TTL — шаг в просроченные, заявка на доработку, решение отклоняется.
-    if now > step.expires_at:
-        step.status = STEP_EXPIRED
-        request.status = REWORK
-        _audit(user.sam, "step.expired", request.id, f"order={order}")
+    try:
+        request = _get_request_or_404(store, request_id)
+        if request.status != IN_APPROVAL:
+            raise HTTPException(status_code=409, detail="Отметки — только в статусе На согласовании")
+        step = next((s for s in request.steps if s.order == order), None)
+        if step is None:
+            raise HTTPException(status_code=404, detail="Шаг не найден")
+        if step.status != STEP_PENDING:
+            raise HTTPException(status_code=409, detail="Шаг уже закрыт")
+        _check_step_owner(step, user)
+        now = _utcnow()
+        # Просрочка TTL — шаг в просроченные, заявка на доработку, решение отклоняется.
+        if now > step.expires_at:
+            step.status = STEP_EXPIRED
+            request.status = REWORK
+            store.update(request)
+            _audit(user.sam, "step.expired", request.id, f"order={order}")
+            raise HTTPException(
+                status_code=410, detail="Срок шага истек: нужен повтор (reissue)"
+            )
+        current = _current_pending(request)
+        if current is None or current.order != order:
+            raise HTTPException(status_code=409, detail="Шаги закрываются строго по порядку")
+        _check_comment(step, body.decision, body.comment)
+        step.done_by = user.sam
+        step.done_at = now
+        step.comment = (body.comment or "").strip() or None
+        if body.decision == "approve":
+            step.status = STEP_APPROVED
+            _audit(user.sam, "step.approve", request.id, f"order={order}")
+            if all(s.status == STEP_APPROVED for s in request.steps):
+                request.status = AGREED
+        elif body.decision == "reject":
+            step.status = STEP_REJECTED
+            request.status = REJECTED
+            _audit(user.sam, "step.reject", request.id, f"order={order}")
+        else:
+            step.status = STEP_RETURNED
+            request.status = REWORK
+            _audit(user.sam, "step.return", request.id, f"order={order}")
+        store.update(request)
+    except RequestsUnavailable as exc:
         raise HTTPException(
-            status_code=410, detail="Срок шага истек: нужен повтор (reissue)"
-        )
-    current = _current_pending(request)
-    if current is None or current.order != order:
-        raise HTTPException(status_code=409, detail="Шаги закрываются строго по порядку")
-    _check_comment(step, body.decision, body.comment)
-    step.done_by = user.sam
-    step.done_at = now
-    step.comment = (body.comment or "").strip() or None
-    if body.decision == "approve":
-        step.status = STEP_APPROVED
-        _audit(user.sam, "step.approve", request.id, f"order={order}")
-        if all(s.status == STEP_APPROVED for s in request.steps):
-            request.status = AGREED
-    elif body.decision == "reject":
-        step.status = STEP_REJECTED
-        request.status = REJECTED
-        _audit(user.sam, "step.reject", request.id, f"order={order}")
-    else:
-        step.status = STEP_RETURNED
-        request.status = REWORK
-        _audit(user.sam, "step.return", request.id, f"order={order}")
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
     return _public_view(request, user)
 
 
@@ -611,22 +681,29 @@ def reissue_step(
     user: CurrentUser = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
     route: RouteSettings = Depends(get_route_settings),
+    store: RequestsStore = Depends(get_requests_store),
 ) -> RequestOut:
     """Повтор просроченного шага: новый TTL, снова в работу (только ОК)."""
     settings.ensure_read_only()
     _require_hr(user)
-    request = _get_request_or_404(request_id)
-    step = next((s for s in request.steps if s.order == order), None)
-    if step is None:
-        raise HTTPException(status_code=404, detail="Шаг не найден")
-    if step.status != STEP_EXPIRED:
-        raise HTTPException(status_code=409, detail="Повтор — только для просроченного шага")
-    step.status = STEP_PENDING
-    step.done_by = None
-    step.done_at = None
-    step.comment = None
-    step.expires_at = _utcnow() + timedelta(days=route.approval_ttl_days)
-    request.status = IN_APPROVAL
+    try:
+        request = _get_request_or_404(store, request_id)
+        step = next((s for s in request.steps if s.order == order), None)
+        if step is None:
+            raise HTTPException(status_code=404, detail="Шаг не найден")
+        if step.status != STEP_EXPIRED:
+            raise HTTPException(status_code=409, detail="Повтор — только для просроченного шага")
+        step.status = STEP_PENDING
+        step.done_by = None
+        step.done_at = None
+        step.comment = None
+        step.expires_at = _utcnow() + timedelta(days=route.approval_ttl_days)
+        request.status = IN_APPROVAL
+        store.update(request)
+    except RequestsUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
     _audit(user.sam, "step.reissue", request.id, f"order={order}")
     return _public_view(request, user)
 
@@ -638,25 +715,32 @@ def replace_steps(
     user: CurrentUser = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
     route: RouteSettings = Depends(get_route_settings),
+    store: RequestsStore = Depends(get_requests_store),
 ) -> RequestOut:
     """Правка шагов (включая замену руководителя) — только разрешенная группа + audit."""
     settings.ensure_read_only()
     _require_hr(user)
-    request = _get_request_or_404(request_id)
-    if request.status in (DONE, REJECTED, REVOKED):
-        raise HTTPException(status_code=409, detail="Закрытая заявка не правится")
-    if not body.steps:
-        raise HTTPException(status_code=422, detail="Список шагов не может быть пустым")
-    now = _utcnow()
-    # Закрытые шаги сохраняем, ожидающие — заменяем новым набором.
-    kept = [s for s in request.steps if s.status != STEP_PENDING]
-    fresh = _build_steps(body.steps, route.approval_ttl_days, body.manager, now)
-    base = len(kept)
-    for index, step in enumerate(fresh):
-        step.order = base + index + 1
-    request.steps = sorted(kept + fresh, key=lambda s: s.order)
-    request.route_origin = "custom"
-    if request.status == REWORK:
-        request.status = DRAFT
+    try:
+        request = _get_request_or_404(store, request_id)
+        if request.status in (DONE, REJECTED, REVOKED):
+            raise HTTPException(status_code=409, detail="Закрытая заявка не правится")
+        if not body.steps:
+            raise HTTPException(status_code=422, detail="Список шагов не может быть пустым")
+        now = _utcnow()
+        # Закрытые шаги сохраняем, ожидающие — заменяем новым набором.
+        kept = [s for s in request.steps if s.status != STEP_PENDING]
+        fresh = _build_steps(body.steps, route.approval_ttl_days, body.manager, now)
+        base = len(kept)
+        for index, step in enumerate(fresh):
+            step.order = base + index + 1
+        request.steps = sorted(kept + fresh, key=lambda s: s.order)
+        request.route_origin = "custom"
+        if request.status == REWORK:
+            request.status = DRAFT
+        store.update(request)
+    except RequestsUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
     _audit(user.sam, "steps.patch", request.id, (body.reason or "")[:200])
     return _public_view(request, user)

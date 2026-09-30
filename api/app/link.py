@@ -1,9 +1,10 @@
-# Ручная связка записей 1С и AD (волна B1): link_1c_ad и снапшоты.
+# Ручная связка записей 1С и AD (волна B1/4): link_1c_ad и снапшоты.
 # Стыковка — только по полному ФИО + ручное подтверждение ОК (факт вызова).
 # При любом расхождении истина — 1С; оба значения видны в снапшоте.
 # Дубли одного ФИО не склеиваются автоматически — помечаются на ручную сверку.
-# Хранилище — в памяти процесса (offline); персистентность в таблице link_1c_ad
-# подменится без смены вызовов find_link/find_links_by_sam/clear_for_tests.
+# Хранилище — зависимость get_links_store: in-memory на офлайне/в тестах,
+# Postgres (DbLinksStore) на стенде; логика эндпоинтов не зависит от реализации
+# (интерфейс LinksStore в link_store.py).
 # Записи в 1С/AD здесь нет: только чтение карточек и запись факта связки у нас.
 
 from __future__ import annotations
@@ -18,6 +19,12 @@ from .audit import AuditEvent, audit_log
 from .config import Settings, get_settings
 from .deps import CurrentUser, get_current_user, is_privileged
 from .employees import get_ad_reader, get_onec_client
+from .link_store import (
+    InMemoryLinksStore,
+    LinksStore,
+    LinksUnavailable,
+    get_links_store,
+)
 from .onec_client import (
     OneCBaseDown,
     OneCCircuitOpen,
@@ -56,8 +63,14 @@ class LinkRecord(BaseModel):
     truth_source: str = "1c"
 
 
-# Хранилище связок в памяти (ключ — составной enterprise|base|tab).
-_LINKS: dict[str, LinkRecord] = {}
+# Офлайн-хранилище связок (тесты/локаль без БД); на стенде эндпоинты получают
+# DbLinksStore через зависимость get_links_store (см. link_store.py).
+_memory_links_store = InMemoryLinksStore()
+
+
+def get_memory_links_store() -> InMemoryLinksStore:
+    """Офлайн-хранилище связок (общий экземпляр для тестов и локали без БД)."""
+    return _memory_links_store
 
 
 def link_key(enterprise: str, base_code: str, tab_num: str) -> str:
@@ -65,20 +78,30 @@ def link_key(enterprise: str, base_code: str, tab_num: str) -> str:
     return "%s|%s|%s" % (enterprise, base_code, tab_num)
 
 
+def _current_store() -> LinksStore:
+    """Текущее хранилище связок: уважает dependency_overrides тестов
+    (InMemoryLinksStore), иначе — боевой синглтон Postgres."""
+    from .main import app  # локально против циклического импорта
+
+    override = app.dependency_overrides.get(get_links_store)
+    if override is not None:
+        return override()
+    return get_links_store(get_settings())
+
+
 def find_link(enterprise: str, base_code: str, tab_num: str) -> LinkRecord | None:
     """Найти связку по составному ключу (только чтение хранилища)."""
-    return _LINKS.get(link_key(enterprise, base_code, tab_num))
+    return _current_store().find(link_key(enterprise, base_code, tab_num))
 
 
 def find_links_by_sam(sam: str) -> list[LinkRecord]:
     """Все связки логина (для добора поиска по логину)."""
-    wanted = sam.strip().lower()
-    return [rec for rec in _LINKS.values() if rec.sam.strip().lower() == wanted]
+    return _current_store().find_by_sam(sam)
 
 
 def clear_for_tests() -> None:
-    """Сброс хранилища. Только для изоляции pytest; в прод-коде не вызывать."""
-    _LINKS.clear()
+    """Сброс офлайн-хранилища. Только для изоляции pytest; в прод-коде не вызывать."""
+    _memory_links_store.reset()
 
 
 def _norm(text: str) -> str:
@@ -93,6 +116,7 @@ def create_link(
     settings: Settings = Depends(get_settings),
     client: OneCClient = Depends(get_onec_client),
     reader: AdReader | None = Depends(get_ad_reader),
+    store: LinksStore = Depends(get_links_store),
 ) -> dict:
     """Создать/подтвердить связку вручную. Только ОК/админы; владельцам — 403."""
     settings.ensure_read_only()
@@ -168,7 +192,12 @@ def create_link(
         diverged=bool(diverged),
         needs_manual_review=bool(duplicate or diverged),
     )
-    _LINKS[record.key] = record
+    try:
+        store.save(record)
+    except LinksUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
     audit_log.append(
         AuditEvent(
             actor=user.sam,
@@ -200,10 +229,16 @@ def read_link(
     tab_num: str = Query(..., min_length=1),
     user: CurrentUser = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
+    store: LinksStore = Depends(get_links_store),
 ) -> dict:
     """Прочитать факт связки (без ПДн: только ключи, логин и флаги сверки)."""
     settings.ensure_read_only()
-    stored = find_link(enterprise, base_code, tab_num)
+    try:
+        stored = store.find(link_key(enterprise, base_code, tab_num))
+    except LinksUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
     if stored is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Связка не найдена"

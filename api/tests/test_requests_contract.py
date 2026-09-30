@@ -15,10 +15,11 @@ from app.audit import audit_log  # noqa: E402
 from app.config import Settings, get_settings  # noqa: E402
 from app.main import app  # noqa: E402
 from app.requests import (  # noqa: E402
+    get_memory_requests_store,
     get_route_settings,
-    reset_state_for_tests,
 )
 from app.requests import RouteSettings, RouteTemplate, RouteStepTemplate  # noqa: E402
+from app.requests_store import get_requests_store  # noqa: E402
 from app.settings_routes import SettingsUnavailable, get_settings_store  # noqa: E402
 
 TEST_ALLOWED = "SED_HR,SED_ADMINS"
@@ -108,13 +109,22 @@ def settings_store(settings_override):
     app.dependency_overrides.pop(get_settings_store, None)
 
 
+@pytest.fixture
+def requests_store():
+    """Хранилище заявок через зависимость (общий InMemory-экземпляр)."""
+    store = get_memory_requests_store()
+    app.dependency_overrides[get_requests_store] = lambda: store
+    yield store
+    app.dependency_overrides.pop(get_requests_store, None)
+
+
 @pytest.fixture(autouse=True)
-def clean_state():
+def clean_state(requests_store):
     """Чистое хранилище заявок и аудит на каждый тест."""
-    reset_state_for_tests()
+    requests_store.reset()
     audit_log.clear_for_tests()
     yield
-    reset_state_for_tests()
+    requests_store.reset()
     audit_log.clear_for_tests()
 
 

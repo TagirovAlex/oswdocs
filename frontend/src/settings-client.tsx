@@ -1,10 +1,29 @@
-// Клиент настроек СЭД (волна B4): GET/PUT /api/settings (только SED_ADMINS).
+// Клиент настроек СЭД (волна B4 / B3 Волны 2): GET/PUT /api/settings (только SED_ADMINS).
 // Значения — из settings БД (в коде не хардкодятся); токен — Bearer из localStorage.
 import { ApiHttpError, getToken } from "./auth-client";
 
-// Настройки СЭД из таблицы settings (типы — по контракту API).
-// Поля nullable: ключа нет в БД — null (значения живут только в settings БД,
-// дефолтов в коде нет, AGENTS.md п.3); админ заполняет их перед сохранением.
+// Предприятие из настроек (settings.enterprises).
+export interface SettingsEnterprise {
+  code: string;
+  name: string;
+}
+
+// Шаг шаблона маршрута (settings.templates[].steps[]).
+export interface SettingsTemplateStep {
+  owner_group: string;
+  resolver?: string | null;
+  require_comment?: boolean | null;
+}
+
+// Шаблон маршрута (settings.templates[]): служба + категория + шаги владельцев.
+export interface SettingsTemplate {
+  service: string;
+  category: string;
+  steps: SettingsTemplateStep[];
+}
+
+// Настройки СЭД из таблицы settings (типы — по контракту API, поля nullable:
+// ключа нет в БД — null, значений в коде нет, AGENTS.md п.3).
 export interface SettingsData {
   // TTL отметок, дней (approval_ttl_days).
   approval_ttl_days: number | null;
@@ -16,6 +35,18 @@ export interface SettingsData {
   require_paper_signature: boolean | null;
   // Отправитель уведомлений, e-mail (smtp_from).
   smtp_from: string | null;
+  // Комментарий обязателен при согласовании (require_comment).
+  require_comment: boolean | null;
+  // Предприятия (enterprises).
+  enterprises: SettingsEnterprise[] | null;
+  // Группы доступа — владельцы шагов (allowed_ad_groups).
+  allowed_ad_groups: string[] | null;
+  // Должность → категория (position_to_category).
+  position_to_category: Record<string, string> | null;
+  // Эскалация по должностям, часов (position_escalation).
+  position_escalation: Record<string, number> | null;
+  // Шаблоны маршрутов (templates).
+  templates: SettingsTemplate[] | null;
 }
 
 // Запрос к /api/settings с Bearer-токеном; ответ — настройки.
@@ -52,7 +83,8 @@ export async function getSettings(): Promise<SettingsData> {
   return requestSettings("GET");
 }
 
-// PUT /api/settings: сохранение, ответ — сохранённые значения.
+// PUT /api/settings: частичное сохранение (передаём только редактируемые ключи),
+// ответ — полное текущее состояние.
 export async function saveSettings(data: SettingsData): Promise<SettingsData> {
   return requestSettings("PUT", data);
 }
