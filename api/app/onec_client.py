@@ -92,6 +92,8 @@ class OneCBaseConfig:
     department_field: str = "Подразделение"
     position_field: str = "Должность"
     hire_date_field: str = "ДатаПриема"
+    organization_code_field: str = "Ref_Key"
+    organization_name_field: str = "Description"
 
 
 @dataclass(frozen=True)

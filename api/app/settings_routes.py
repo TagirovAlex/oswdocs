@@ -280,6 +280,12 @@ class OnecBaseItem(BaseModel):
     department_field: str = Field(default="Подразделение", description="Поле подразделения")
     position_field: str = Field(default="Должность", description="Поле должности")
     hire_date_field: str = Field(default="ДатаПриема", description="Поле даты приёма")
+    organization_code_field: str = Field(
+        default="Ref_Key", description="Поле кода организации (у ЗУП-«Организаций» кода нет — Ref_Key/ИНН)"
+    )
+    organization_name_field: str = Field(
+        default="Description", description="Поле названия организации"
+    )
 
 
 class SettingsPayload(BaseModel):

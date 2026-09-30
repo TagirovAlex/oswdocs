@@ -50,8 +50,10 @@ def _store(bases=None, synced_at=None):
 
 
 def _orgs_json(*pairs):
-    """OData-ответ сущности организаций: список (code, name)."""
-    items = [{"Code": code, "Description": name} for code, name in pairs]
+    """OData-ответ сущности организаций: список (code, name).
+
+    У ЗУП «Организаций» нет Code — по умолчанию код = Ref_Key, имя = Description."""
+    items = [{"Ref_Key": code, "Description": name} for code, name in pairs]
     return json.dumps({"value": items}, ensure_ascii=False)
 
 
@@ -128,8 +130,8 @@ def test_sync_all_bases_down_raises(monkeypatch):
 
 
 def test_sync_skips_entries_without_code(monkeypatch):
-    """Записи без Code пропускаются; пустое имя — как есть."""
-    body = '{"value": [{"Code": "A", "Description": "Альфа"}, {"Description": "Без кода"}]}'
+    """Записи без Ref_Key пропускаются; пустое имя — как есть."""
+    body = '{"value": [{"Ref_Key": "A", "Description": "Альфа"}, {"Description": "Без кода"}]}'
     monkeypatch.setattr(onec_sync, "http_get", lambda *a, **kw: body)
     items = sync_enterprises(_store(bases=[_base()]))
     assert items == [{"code": "A", "name": "Альфа"}]

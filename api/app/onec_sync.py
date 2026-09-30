@@ -33,10 +33,16 @@ def http_get(url: str, user: str, password: str, timeout: float = 15.0) -> str:
     return response.text
 
 
-def _organization(item: dict) -> tuple[str, str]:
-    """Код/название организации из записи OData (Code/Description)."""
-    code = str(item.get("Code") or item.get("code") or "").strip()
-    name = str(item.get("Description") or item.get("name") or "").strip()
+def _organization(base: dict, item: dict) -> tuple[str, str]:
+    """Код/название организации из записи OData по схеме базы.
+
+    У ЗУП-справочника «Организации» кода (Code) нет — по умолчанию код =
+    Ref_Key (GUID), имя = Description; поля настраиваются в карточке базы
+    (organization_code_field / organization_name_field, напр. ИНН)."""
+    code_field = str(base.get("organization_code_field") or "Ref_Key")
+    name_field = str(base.get("organization_name_field") or "Description")
+    code = str(item.get(code_field) or "").strip()
+    name = str(item.get(name_field) or "").strip()
     return code, name
 
 
@@ -69,7 +75,7 @@ def sync_enterprises(store) -> list[dict]:
             continue
         ok = True
         for item in items:
-            code, name = _organization(item)
+            code, name = _organization(base, item)
             if not code:
                 continue
             if code not in enterprises:

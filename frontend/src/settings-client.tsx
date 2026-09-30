@@ -62,6 +62,10 @@ export interface SettingsOnecBase {
   position_field: string;
   // Поле даты приёма.
   hire_date_field: string;
+  // Поле кода организации (у ЗУП-«Организаций» кода нет — Ref_Key/ИНН).
+  organization_code_field: string;
+  // Поле названия организации.
+  organization_name_field: string;
 }
 
 // Настройки СЭД из таблицы settings (типы — по контракту API, поля nullable:

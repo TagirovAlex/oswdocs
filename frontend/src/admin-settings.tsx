@@ -854,6 +854,28 @@ export function AdminSettings(props: AdminSettingsProps) {
                     }
                   />
                 </label>
+                <label style={{ display: "block", marginTop: 8 }}>
+                  Поле кода организации (у ЗУП кода нет — Ref_Key/ИНН)
+                  <input
+                    aria-label={`Поле кода организации базы 1С ${i + 1}`}
+                    type="text"
+                    value={base.organization_code_field}
+                    onChange={(e) =>
+                      setOnecBases(onecBases.map((b, j) => (j === i ? { ...b, organization_code_field: e.target.value } : b)))
+                    }
+                  />
+                </label>
+                <label style={{ display: "block", marginTop: 8 }}>
+                  Поле названия организации
+                  <input
+                    aria-label={`Поле названия организации базы 1С ${i + 1}`}
+                    type="text"
+                    value={base.organization_name_field}
+                    onChange={(e) =>
+                      setOnecBases(onecBases.map((b, j) => (j === i ? { ...b, organization_name_field: e.target.value } : b)))
+                    }
+                  />
+                </label>
               </details>
               <div className="sed-toolbar" style={{ marginTop: 8 }}>
                 <button
@@ -889,6 +911,8 @@ export function AdminSettings(props: AdminSettingsProps) {
                     department_field: "Подразделение",
                     position_field: "Должность",
                     hire_date_field: "ДатаПриема",
+                    organization_code_field: "Ref_Key",
+                    organization_name_field: "Description",
                   },
                 ]);
                 setOnecBasesSet([...onecBasesSet, false]);

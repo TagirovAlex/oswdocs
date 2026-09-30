@@ -69,6 +69,8 @@ def _bases_from_settings(store: DbSettingsStore | None) -> dict[str, OneCBaseCon
             department_field=str(item.get("department_field") or "Подразделение"),
             position_field=str(item.get("position_field") or "Должность"),
             hire_date_field=str(item.get("hire_date_field") or "ДатаПриема"),
+            organization_code_field=str(item.get("organization_code_field") or "Ref_Key"),
+            organization_name_field=str(item.get("organization_name_field") or "Description"),
         )
     return bases
 

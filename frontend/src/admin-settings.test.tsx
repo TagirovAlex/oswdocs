@@ -279,6 +279,8 @@ describe("AdminSettings", () => {
               department_field: "Подразделение",
               position_field: "Должность",
               hire_date_field: "ДатаПриема",
+              organization_code_field: "Ref_Key",
+              organization_name_field: "Description",
             },
           ],
         }),
