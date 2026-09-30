@@ -22,6 +22,20 @@ export interface SettingsTemplate {
   steps: SettingsTemplateStep[];
 }
 
+// Шаблон бегунка (settings.doc_templates[]): служба + категория + тело DOCX.
+export interface SettingsDocTemplate {
+  service: string;
+  category: string;
+  body: string;
+}
+
+// Шаблон письма (settings.mail_templates[]): код события + тема + HTML-тело.
+export interface SettingsMailTemplate {
+  code: string;
+  subject: string;
+  body_html: string;
+}
+
 // Настройки СЭД из таблицы settings (типы — по контракту API, поля nullable:
 // ключа нет в БД — null, значений в коде нет, AGENTS.md п.3).
 export interface SettingsData {
@@ -58,11 +72,40 @@ export interface SettingsData {
   position_escalation: Record<string, number> | null;
   // Шаблоны маршрутов (templates).
   templates: SettingsTemplate[] | null;
+  // Шаблоны бегунков (doc_templates).
+  doc_templates: SettingsDocTemplate[] | null;
+  // Шаблоны писем (mail_templates).
+  mail_templates: SettingsMailTemplate[] | null;
 }
 
-// Запрос к /api/settings с Bearer-токеном; ответ — настройки.
-// Ошибки: 401 — нет сессии, 403 — не админ, 422 — неверные типы, 503 — сервис недоступен.
-async function requestSettings(method: "GET" | "PUT", data?: SettingsData): Promise<SettingsData> {
+// Контент-настройки (GET/PUT /api/settings/content): контент-ключи для
+// руководителя ОК и админа (инфра-ключи — только админ через /api/settings).
+export interface ContentSettingsData {
+  // TTL отметок, дней (approval_ttl_days).
+  approval_ttl_days: number | null;
+  // Комментарий обязателен при согласовании (require_comment).
+  require_comment: boolean | null;
+  // Требовать бумажное заявление (require_paper_signature).
+  require_paper_signature: boolean | null;
+  // Предприятия (enterprises).
+  enterprises: SettingsEnterprise[] | null;
+  // Группы доступа — владельцы шагов (allowed_ad_groups).
+  allowed_ad_groups: string[] | null;
+  // Должность → категория (position_to_category).
+  position_to_category: Record<string, string> | null;
+  // Эскалация по должностям, часов (position_escalation).
+  position_escalation: Record<string, number> | null;
+  // Шаблоны маршрутов (templates).
+  templates: SettingsTemplate[] | null;
+  // Шаблоны бегунков (doc_templates).
+  doc_templates: SettingsDocTemplate[] | null;
+  // Шаблоны писем (mail_templates).
+  mail_templates: SettingsMailTemplate[] | null;
+}
+
+// Запрос к /api/settings* с Bearer-токеном; ответ — настройки.
+// Ошибки: 401 — нет сессии, 403 — доступ закрыт, 422 — неверные типы, 503 — сервис недоступен.
+async function requestSettings<T>(path: string, method: "GET" | "PUT", data?: T): Promise<T> {
   const token = getToken();
   if (!token) {
     throw new ApiHttpError(401, "Нет токена");
@@ -74,7 +117,7 @@ async function requestSettings(method: "GET" | "PUT", data?: SettingsData): Prom
   }
   let res: Response;
   try {
-    res = await fetch("/api/settings", init);
+    res = await fetch(path, init);
   } catch {
     throw new Error("Сервис недоступен");
   }
@@ -86,16 +129,26 @@ async function requestSettings(method: "GET" | "PUT", data?: SettingsData): Prom
     const verb = method === "PUT" ? "сохранения" : "загрузки";
     throw new ApiHttpError(res.status, `Ошибка ${verb} настроек`);
   }
-  return (await res.json()) as SettingsData;
+  return (await res.json()) as T;
 }
 
-// GET /api/settings: текущие настройки.
+// GET /api/settings: текущие настройки (все ключи, только админ).
 export async function getSettings(): Promise<SettingsData> {
-  return requestSettings("GET");
+  return requestSettings<SettingsData>("/api/settings", "GET");
 }
 
 // PUT /api/settings: частичное сохранение (передаём только редактируемые ключи),
 // ответ — полное текущее состояние.
 export async function saveSettings(data: SettingsData): Promise<SettingsData> {
-  return requestSettings("PUT", data);
+  return requestSettings<SettingsData>("/api/settings", "PUT", data);
+}
+
+// GET /api/settings/content: контент-настройки (руководитель ОК + админ).
+export async function getSettingsContent(): Promise<ContentSettingsData> {
+  return requestSettings<ContentSettingsData>("/api/settings/content", "GET");
+}
+
+// PUT /api/settings/content: частичное сохранение контента (только контент-ключи).
+export async function saveSettingsContent(data: ContentSettingsData): Promise<ContentSettingsData> {
+  return requestSettings<ContentSettingsData>("/api/settings/content", "PUT", data);
 }

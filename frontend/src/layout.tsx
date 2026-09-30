@@ -87,12 +87,12 @@ export function SedLayout(props: SedLayoutProps) {
   // Принудительная перезагрузка списка после отметки/действия ОК (refetch).
   const [listVersion, setListVersion] = useState<number>(0);
 
-  // Видимые вкладки по роли: «Настройки» — только админу, «Создание» — ОК,
-  // руководителю ОК и админу.
+  // Видимые вкладки по роли: «Настройки» — админу и руководителю ОК (контент),
+  // «Создание» — ОК, руководителю ОК и админу.
   const visibleTabs = useMemo(() => {
     const tabs: Tab[] = ["Заявки"];
     if (role === "hr" || role === "hr_admin" || role === "admin") tabs.push("Создание");
-    if (role === "admin") tabs.push("Настройки");
+    if (role === "admin" || role === "hr_admin") tabs.push("Настройки");
     return tabs;
   }, [role]);
 

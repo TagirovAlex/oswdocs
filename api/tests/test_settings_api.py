@@ -1,9 +1,10 @@
-# Тесты админки настроек: GET/PUT /settings (только admin), хранилище — in-memory мок.
+# Тесты админки настроек: GET/PUT /settings (только admin) и GET/PUT
+# /settings/content (admin + руководитель ОК), хранилище — in-memory мок.
 # Живого Postgres нет: get_settings_store подменяется через dependency_overrides
 # (как get_auth_service/get_onec_client в других тестах). ПДн вымышленные.
 # Контракт B2: GET 200 для admin со всеми ключами, PUT — частичное обновление
 # (пишутся только присутствующие ключи, ответ — полное состояние), 403 для hr/owner,
-# 422 на неверные типы, 503 при падении хранилища.
+# 422 на неверные типы, 503 при падении хранилища. Контент-ключи — для hr_admin.
 
 from __future__ import annotations
 
@@ -19,6 +20,8 @@ from app.audit import audit_log  # noqa: E402
 from app.config import Settings, get_settings  # noqa: E402
 from app.main import app  # noqa: E402
 from app.settings_routes import (  # noqa: E402
+    CONTENT_KEYS,
+    INFRA_KEYS,
     SETTINGS_KEYS,
     SMTP_PASSWORD_MASK,
     SettingsUnavailable,
@@ -114,6 +117,9 @@ CONTRACT_VALUES = {
         }
     ],
 }
+
+# Контент-часть контракта: только ключи CONTENT_KEYS (для GET/PUT /settings/content).
+CONTENT_CONTRACT = {key: CONTRACT_VALUES[key] for key in CONTENT_KEYS}
 
 # Полный обновленный набор для PUT (все ключи переданы явно).
 UPDATED_VALUES = {
@@ -407,6 +413,113 @@ def test_settings_put_store_down_503(client, admin_headers, mock_store):
     mock_store.broken = True
     response = client.put("/settings", json=dict(CONTRACT_VALUES), headers=admin_headers)
     assert response.status_code == 503
+
+
+# --- GET/PUT /settings/content (контент: руководитель ОК + админ) ---
+
+def test_settings_content_get_admin_200(client, admin_headers, mock_store):
+    """Админ читает контент-настройки: 200, только CONTENT_KEYS без инфра-ключей."""
+    response = client.get("/settings/content", headers=admin_headers)
+    assert response.status_code == 200
+    assert response.json() == CONTENT_CONTRACT
+    assert set(response.json()) == set(CONTENT_KEYS)
+
+
+def test_settings_content_get_hr_admin_200(client, hr_admin_headers, mock_store):
+    """Руководитель ОК читает контент-настройки: 200 (те же контент-ключи)."""
+    response = client.get("/settings/content", headers=hr_admin_headers)
+    assert response.status_code == 200
+    assert response.json() == CONTENT_CONTRACT
+
+
+def test_settings_content_get_hr_403(client, hr_headers, mock_store):
+    """ОК не читает контент-настройки — 403 (контент — руководителю ОК и админу)."""
+    response = client.get("/settings/content", headers=hr_headers)
+    assert response.status_code == 403
+
+
+def test_settings_content_get_owner_403(client, owner_headers, mock_store):
+    """Владелец шага не читает контент-настройки — 403."""
+    response = client.get("/settings/content", headers=owner_headers)
+    assert response.status_code == 403
+
+
+def test_settings_content_put_hr_admin_200_keeps_infra(client, hr_admin_headers, mock_store):
+    """Руководитель ОК правит контент: 200, инфра-ключи в БД не тронуты."""
+    response = client.put(
+        "/settings/content",
+        json={"approval_ttl_days": 7, "require_comment": True},
+        headers=hr_admin_headers,
+    )
+    assert response.status_code == 200
+    assert response.json()["approval_ttl_days"] == 7
+    assert response.json()["require_comment"] is True
+    # Контент-ключ записан в сид-формате.
+    assert mock_store._data["approval_ttl_days"] == "7"
+    assert mock_store._data["require_comment"] == "true"
+    # Инфра-ключи остались сидовыми (PUT /settings/content их не трогает).
+    assert mock_store._data["session_ttl_minutes"] == "600"
+    assert mock_store._data["smtp_from"] == '"sed@example.com"'
+    assert mock_store._data["scan_max_mb"] == "10"
+
+
+def test_settings_content_put_admin_200(client, admin_headers, mock_store):
+    """Админ правит контент: 200, инфра-ключи не затронуты."""
+    response = client.put(
+        "/settings/content",
+        json={"enterprises": [{"code": "ENT_PRIMER_9", "name": "Предприятие Пример-9"}]},
+        headers=admin_headers,
+    )
+    assert response.status_code == 200
+    assert response.json()["enterprises"] == [
+        {"code": "ENT_PRIMER_9", "name": "Предприятие Пример-9"}
+    ]
+    assert mock_store._data["session_ttl_minutes"] == "600"
+
+
+def test_settings_content_put_ignores_infra_keys(client, hr_admin_headers, mock_store):
+    """Чужие (инфра) ключи в теле контента игнорируются: не 422, в БД не пишутся."""
+    response = client.put(
+        "/settings/content",
+        json={"approval_ttl_days": 9, "session_ttl_minutes": 123, "smtp_host": "x"},
+        headers=hr_admin_headers,
+    )
+    assert response.status_code == 200
+    assert response.json()["approval_ttl_days"] == 9
+    assert mock_store._data["approval_ttl_days"] == "9"
+    assert mock_store._data["session_ttl_minutes"] == "600"
+
+
+def test_settings_content_put_hr_403(client, hr_headers, mock_store):
+    """ОК не правит контент-настройки — 403."""
+    response = client.put(
+        "/settings/content",
+        json={"approval_ttl_days": 7},
+        headers=hr_headers,
+    )
+    assert response.status_code == 403
+
+
+def test_settings_content_get_store_down_503(client, admin_headers, mock_store):
+    """Хранилище недоступно при чтении контента — 503."""
+    mock_store.broken = True
+    response = client.get("/settings/content", headers=admin_headers)
+    assert response.status_code == 503
+
+
+def test_settings_content_audit_read_and_update(client, hr_admin_headers, mock_store):
+    """Чтение/правка контента пишут settings.read/settings.update по CONTENT_KEYS."""
+    assert audit_log.all() == []
+    client.get("/settings/content", headers=hr_admin_headers)
+    read_events = [e for e in audit_log.all() if e.action == "settings.read"]
+    assert len(read_events) == 1
+    assert read_events[0].actor == hr_admin_headers["X-Mock-Sam"]
+    assert read_events[0].entity_id == ",".join(CONTENT_KEYS)
+    client.put("/settings/content", json={"approval_ttl_days": 7}, headers=hr_admin_headers)
+    update_events = [e for e in audit_log.all() if e.action == "settings.update"]
+    assert len(update_events) == 1
+    assert update_events[0].entity_id == ",".join(CONTENT_KEYS)
+    assert update_events[0].detail == "approval_ttl_days"
 
 
 # --- Аудит ---

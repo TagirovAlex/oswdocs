@@ -166,8 +166,8 @@ describe("SedLayout", () => {
     expect(screen.queryByLabelText("Роль пользователя")).not.toBeInTheDocument();
   });
 
-  // Вкладка «Настройки» — только админу.
-  it("вкладка «Настройки» видна только админу", () => {
+  // Вкладка «Настройки» — админу.
+  it("вкладка «Настройки» видна админу", () => {
     vi.mocked(getFolders).mockResolvedValue(folders);
     vi.mocked(getRequests).mockResolvedValue([]);
     renderWithTheme("admin");
@@ -184,13 +184,13 @@ describe("SedLayout", () => {
     expect(screen.queryByText("Настройки")).not.toBeInTheDocument();
   });
 
-  // Руководитель ОК видит «Создание», как ОК, но «Настройки» — только админу (Фаза 2).
-  it("руководитель ОК видит «Создание», но не «Настройки»", () => {
+  // Руководитель ОК видит «Создание» и «Настройки» (контент-настройки, Фаза 2).
+  it("руководитель ОК видит «Создание» и «Настройки»", () => {
     vi.mocked(getFolders).mockResolvedValue(folders);
     vi.mocked(getRequests).mockResolvedValue([]);
     renderWithTheme("hr_admin");
     expect(screen.getByText("Создание")).toBeInTheDocument();
-    expect(screen.queryByText("Настройки")).not.toBeInTheDocument();
+    expect(screen.getByText("Настройки")).toBeInTheDocument();
   });
 
   // Кнопка «Выйти» вызывает сброс сессии.

@@ -1,16 +1,30 @@
-// Админка настроек для SED_ADMINS (волна B4 / B3 Волны 2).
-// Значения — из settings БД (GET/PUT /api/settings), в коде не хардкодятся.
-// Все персональные данные отсутствуют (только технические настройки).
-// Секции: базовые поля, предприятия, группы доступа, должность→категория, шаблоны.
+// Админка настроек: контент (руководитель ОК + админ) и инфра (только админ).
+// Значения — из settings БД (GET/PUT /api/settings для админа, /settings/content
+// для руководителя ОК), в коде не хардкодятся. Вкладки: Процесс / Справочники /
+// Шаблоны (контент) и Инфра (только админ).
 import { useEffect, useState } from "react";
-import { getSettings, saveSettings } from "./settings-client";
-import type { SettingsData, SettingsEnterprise, SettingsTemplate, SettingsTemplateStep } from "./settings-client";
+import { getSettings, getSettingsContent, saveSettings, saveSettingsContent } from "./settings-client";
+import type {
+  ContentSettingsData,
+  SettingsData,
+  SettingsDocTemplate,
+  SettingsEnterprise,
+  SettingsMailTemplate,
+  SettingsTemplate,
+  SettingsTemplateStep,
+} from "./settings-client";
 import type { Role } from "./api-mock";
 
 interface AdminSettingsProps {
-  // Роль (форма — только SED_ADMINS; проверку доступа делает сервер, 403 для не-админа).
+  // Роль (админ — все вкладки; руководитель ОК — только контент; проверку
+  // доступа делает сервер, 403 для остальных).
   role: Role;
 }
+
+// Вкладки админки: контент (Процесс/Справочники/Шаблоны) + Инфра (только админ).
+const CONTENT_TABS = ["Процесс", "Справочники", "Шаблоны"] as const;
+const ALL_TABS = ["Процесс", "Справочники", "Шаблоны", "Инфра"] as const;
+type SettingsTab = (typeof ALL_TABS)[number];
 
 // Пара «должность → категория» для формы (порядок строк сохраняется).
 interface PositionCategoryPair {
@@ -251,10 +265,13 @@ function TemplatesEditor(props: { value: SettingsTemplate[]; onChange: (v: Setti
   );
 }
 
-// Админка: TTL отметок + лимиты скана + флаги процесса + контент (предприятия,
-// группы, должность→категория, шаблоны). Всё — из settings БД.
+// Админка: контент (TTL/флаги, справочники, шаблоны) + инфра (сессия/сканы/SMTP).
+// Админ видит все вкладки (GET/PUT /api/settings), руководитель ОК — только
+// контент (GET/PUT /api/settings/content). Всё — из settings БД.
 export function AdminSettings(props: AdminSettingsProps) {
-  void props; // Доступ проверяет сервер (403), на клиенте роль не нужна.
+  const { role } = props;
+  const isAdmin = role === "admin";
+  const [activeTab, setActiveTab] = useState<SettingsTab>("Процесс");
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string>("");
   const [saveError, setSaveError] = useState<string>("");
@@ -278,35 +295,43 @@ export function AdminSettings(props: AdminSettingsProps) {
   const [adGroups, setAdGroups] = useState<string[]>([]);
   const [positionCategory, setPositionCategory] = useState<PositionCategoryPair[]>([]);
   const [templates, setTemplates] = useState<SettingsTemplate[]>([]);
+  const [docTemplates, setDocTemplates] = useState<SettingsDocTemplate[]>([]);
+  const [mailTemplates, setMailTemplates] = useState<SettingsMailTemplate[]>([]);
   // Эскалация в форме не редактируется (отдельная волна), передаём как загружено.
   const [positionEscalation, setPositionEscalation] = useState<Record<string, number> | null>(null);
 
-  // Загрузка настроек с сервера (доступ — только админам, иначе 403).
+  // Загрузка: админ — полный объект /api/settings, руководитель ОК — контент
+  // /api/settings/content (инфра-поля у него не приходят и не показываются).
   useEffect(() => {
     let alive = true;
-    getSettings()
+    const load = isAdmin ? getSettings() : getSettingsContent();
+    load
       .then((data) => {
-        if (alive) {
-          setSessionTtl(data.session_ttl_minutes);
-          setTtl(data.approval_ttl_days);
-          setRetentionDays(data.scan_retention_days);
-          setMaxMb(data.scan_max_mb);
-          setPaperRequired(data.require_paper_signature);
-          setSmtpHost(data.smtp_host);
-          setSmtpPort(data.smtp_port);
-          setSmtpFrom(data.smtp_from);
-          setSmtpUser(data.smtp_user ?? "");
+        if (!alive) return;
+        if (isAdmin) {
+          const full = data as SettingsData;
+          setSessionTtl(full.session_ttl_minutes);
+          setRetentionDays(full.scan_retention_days);
+          setMaxMb(full.scan_max_mb);
+          setSmtpHost(full.smtp_host);
+          setSmtpPort(full.smtp_port);
+          setSmtpFrom(full.smtp_from);
+          setSmtpUser(full.smtp_user ?? "");
           // Пароль из API не приходит (маска/null): поле пустое, только признак.
           setSmtpPassword("");
-          setSmtpPasswordSet(data.smtp_password !== null);
-          setRequireComment(data.require_comment);
-          setEnterprises(data.enterprises ?? []);
-          setAdGroups(data.allowed_ad_groups ?? []);
-          setPositionCategory(pairsFromRecord(data.position_to_category));
-          setPositionEscalation(data.position_escalation);
-          setTemplates(data.templates ?? []);
-          setError("");
+          setSmtpPasswordSet(full.smtp_password !== null);
         }
+        setTtl(data.approval_ttl_days);
+        setPaperRequired(data.require_paper_signature);
+        setRequireComment(data.require_comment);
+        setEnterprises(data.enterprises ?? []);
+        setAdGroups(data.allowed_ad_groups ?? []);
+        setPositionCategory(pairsFromRecord(data.position_to_category));
+        setPositionEscalation(data.position_escalation);
+        setTemplates(data.templates ?? []);
+        setDocTemplates(data.doc_templates ?? []);
+        setMailTemplates(data.mail_templates ?? []);
+        setError("");
       })
       .catch((e: unknown) => {
         if (alive) setError(e instanceof Error ? e.message : "Ошибка загрузки настроек");
@@ -317,53 +342,60 @@ export function AdminSettings(props: AdminSettingsProps) {
     return () => {
       alive = false;
     };
-  }, []);
+  }, [isAdmin]);
 
-  // Сохранение: PUT /api/settings (объект со всеми редактируемыми ключами);
-  // ошибки 403/422/503 приходят понятным текстом из клиента.
+  // Сохранение: тем же объектом, каким грузили (полным для админа, контентным
+  // для руководителя ОК); ошибки 403/422/503 приходят понятным текстом из клиента.
   async function handleSave(): Promise<void> {
     if (busy) return;
     setSaveError("");
     setSaved("");
     // Пустые поля (ключа нет в БД) — честно просим заполнить, а не подставляем дефолты.
-    if (
-      sessionTtl === null ||
-      ttl === null ||
-      retentionDays === null ||
-      maxMb === null ||
-      paperRequired === null ||
-      smtpHost === null ||
-      smtpPort === null ||
-      smtpFrom === null
-    ) {
+    const contentMissing = ttl === null || paperRequired === null;
+    const infraMissing =
+      isAdmin &&
+      (sessionTtl === null || retentionDays === null || maxMb === null || smtpHost === null || smtpPort === null || smtpFrom === null);
+    if (contentMissing || infraMissing) {
       setSaveError("Заполните все поля настроек (значения хранятся в settings БД)");
       return;
     }
+    const content: ContentSettingsData = {
+      approval_ttl_days: ttl,
+      require_comment: requireComment ?? false,
+      require_paper_signature: paperRequired,
+      enterprises,
+      allowed_ad_groups: adGroups,
+      position_to_category: recordFromPairs(positionCategory),
+      position_escalation: positionEscalation,
+      templates,
+      doc_templates: docTemplates,
+      mail_templates: mailTemplates,
+    };
     setBusy(true);
     try {
-      const data: SettingsData = {
-        session_ttl_minutes: sessionTtl,
-        approval_ttl_days: ttl,
-        scan_retention_days: retentionDays,
-        scan_max_mb: maxMb,
-        require_paper_signature: paperRequired,
-        smtp_host: smtpHost,
-        smtp_port: smtpPort,
-        smtp_from: smtpFrom,
-        smtp_user: smtpUser ?? "",
-        // Пустое значение — сервер сохранит текущий пароль (не перезапишет).
-        smtp_password: smtpPassword,
-        require_comment: requireComment ?? false,
-        enterprises,
-        allowed_ad_groups: adGroups,
-        position_to_category: recordFromPairs(positionCategory),
-        position_escalation: positionEscalation,
-        templates,
-      };
-      const result = await saveSettings(data);
-      setSaved(
-        `Сохранено: TTL=${result.approval_ttl_days} дн., сканы ${result.scan_retention_days} дн./${result.scan_max_mb} МБ, от ${result.smtp_from}, предприятий ${result.enterprises?.length ?? 0}, групп ${result.allowed_ad_groups?.length ?? 0}, шаблонов ${result.templates?.length ?? 0}`,
-      );
+      if (isAdmin) {
+        const full: SettingsData = {
+          ...content,
+          session_ttl_minutes: sessionTtl,
+          scan_retention_days: retentionDays,
+          scan_max_mb: maxMb,
+          smtp_host: smtpHost,
+          smtp_port: smtpPort,
+          smtp_from: smtpFrom,
+          smtp_user: smtpUser ?? "",
+          // Пустое значение — сервер сохранит текущий пароль (не перезапишет).
+          smtp_password: smtpPassword,
+        };
+        const result = await saveSettings(full);
+        setSaved(
+          `Сохранено: TTL=${result.approval_ttl_days} дн., сканы ${result.scan_retention_days} дн./${result.scan_max_mb} МБ, от ${result.smtp_from}, предприятий ${result.enterprises?.length ?? 0}, групп ${result.allowed_ad_groups?.length ?? 0}, шаблонов ${result.templates?.length ?? 0}`,
+        );
+      } else {
+        const result = await saveSettingsContent(content);
+        setSaved(
+          `Сохранено: TTL=${result.approval_ttl_days} дн., предприятий ${result.enterprises?.length ?? 0}, групп ${result.allowed_ad_groups?.length ?? 0}, шаблонов ${result.templates?.length ?? 0}`,
+        );
+      }
     } catch (e: unknown) {
       setSaveError(e instanceof Error ? e.message : "Ошибка сохранения настроек");
     } finally {
@@ -375,116 +407,152 @@ export function AdminSettings(props: AdminSettingsProps) {
   if (error) return <div role="alert">Ошибка: {error}</div>;
   if (loading) return <div className="sed-note">Загрузка настроек…</div>;
 
+  const tabs: readonly SettingsTab[] = isAdmin ? ALL_TABS : CONTENT_TABS;
+
   return (
     <section aria-label="Настройки СЭД">
-      <h3>Настройки (только SED_ADMINS)</h3>
+      <h3>Настройки{isAdmin ? "" : " (Режим: руководитель ОК)"}</h3>
       <div className="sed-note">Значения хранятся в settings БД и применяются без пересборки.</div>
-      <fieldset>
-        <legend>Базовые настройки</legend>
-        <label style={{ display: "block", marginTop: 8 }}>
-          Длительность сессии, минут (session_ttl_minutes; 600 = 10 часов)
-          <input
-            aria-label="Длительность сессии"
-            type="number"
-            value={sessionTtl ?? ""}
-            onChange={(e) => setSessionTtl(Number(e.target.value))}
-          />
-        </label>
-        <label style={{ display: "block", marginTop: 8 }}>
-          TTL отметок, дней (approval_ttl_days)
-          <input
-            aria-label="TTL отметок"
-            type="number"
-            value={ttl ?? ""}
-            onChange={(e) => setTtl(Number(e.target.value))}
-          />
-        </label>
-        <label style={{ display: "block", marginTop: 8 }}>
-          Хранение сканов, дней (scan_retention_days)
-          <input
-            aria-label="Хранение сканов"
-            type="number"
-            value={retentionDays ?? ""}
-            onChange={(e) => setRetentionDays(Number(e.target.value))}
-          />
-        </label>
-        <label style={{ display: "block", marginTop: 8 }}>
-          Лимит скана, МБ (scan_max_mb)
-          <input
-            aria-label="Лимит скана"
-            type="number"
-            value={maxMb ?? ""}
-            onChange={(e) => setMaxMb(Number(e.target.value))}
-          />
-        </label>
-        <label style={{ display: "block", marginTop: 8 }}>
-          <input
-            type="checkbox"
-            checked={paperRequired ?? false}
-            onChange={(e) => setPaperRequired(e.target.checked)}
-          />
-          Требовать бумажное заявление (require_paper_signature)
-        </label>
-        <label style={{ display: "block", marginTop: 8 }}>
-          <input
-            type="checkbox"
-            aria-label="Комментарий обязателен при согласовании"
-            checked={requireComment ?? false}
-            onChange={(e) => setRequireComment(e.target.checked)}
-          />
-          Комментарий обязателен при согласовании (require_comment)
-        </label>
-        <label style={{ display: "block", marginTop: 8 }}>
-          Хост SMTP-релея (smtp_host)
-          <input
-            aria-label="Хост SMTP-релея"
-            type="text"
-            value={smtpHost ?? ""}
-            onChange={(e) => setSmtpHost(e.target.value)}
-          />
-        </label>
-        <label style={{ display: "block", marginTop: 8 }}>
-          Порт SMTP-релея (smtp_port)
-          <input
-            aria-label="Порт SMTP-релея"
-            type="number"
-            value={smtpPort ?? ""}
-            onChange={(e) => setSmtpPort(Number(e.target.value))}
-          />
-        </label>
-        <label style={{ display: "block", marginTop: 8 }}>
-          Отправитель уведомлений, e-mail (smtp_from)
-          <input
-            aria-label="Отправитель уведомлений"
-            type="email"
-            value={smtpFrom ?? ""}
-            onChange={(e) => setSmtpFrom(e.target.value)}
-          />
-        </label>
-        <label style={{ display: "block", marginTop: 8 }}>
-          Логин SMTP-релея (smtp_user; пусто — отправка без авторизации)
-          <input
-            aria-label="Логин SMTP-релея"
-            type="text"
-            value={smtpUser ?? ""}
-            onChange={(e) => setSmtpUser(e.target.value)}
-          />
-        </label>
-        <label style={{ display: "block", marginTop: 8 }}>
-          Пароль SMTP-релея (smtp_password; оставьте пустым, чтобы сохранить текущий)
-          <input
-            aria-label="Пароль SMTP-релея"
-            type="password"
-            placeholder={smtpPasswordSet ? "задан (не менять)" : "не задан"}
-            value={smtpPassword}
-            onChange={(e) => setSmtpPassword(e.target.value)}
-          />
-        </label>
-      </fieldset>
-      <EnterprisesEditor value={enterprises} onChange={setEnterprises} />
-      <GroupsEditor value={adGroups} onChange={setAdGroups} />
-      <PositionCategoryEditor value={positionCategory} onChange={setPositionCategory} />
-      <TemplatesEditor value={templates} onChange={setTemplates} />
+      <nav className="sed-tabs" aria-label="Вкладки настроек">
+        {tabs.map((name) => (
+          <button
+            key={name}
+            type="button"
+            className={activeTab === name ? "sed-tab sed-tab--active" : "sed-tab"}
+            onClick={() => setActiveTab(name)}
+          >
+            {name}
+          </button>
+        ))}
+      </nav>
+
+      {activeTab === "Процесс" && (
+        <fieldset>
+          <legend>Процесс</legend>
+          <label style={{ display: "block", marginTop: 8 }}>
+            TTL отметок, дней (approval_ttl_days)
+            <input
+              aria-label="TTL отметок"
+              type="number"
+              value={ttl ?? ""}
+              onChange={(e) => setTtl(Number(e.target.value))}
+            />
+          </label>
+          <label style={{ display: "block", marginTop: 8 }}>
+            <input
+              type="checkbox"
+              aria-label="Требовать бумажное заявление"
+              checked={paperRequired ?? false}
+              onChange={(e) => setPaperRequired(e.target.checked)}
+            />
+            Требовать бумажное заявление (require_paper_signature)
+          </label>
+          <label style={{ display: "block", marginTop: 8 }}>
+            <input
+              type="checkbox"
+              aria-label="Комментарий обязателен при согласовании"
+              checked={requireComment ?? false}
+              onChange={(e) => setRequireComment(e.target.checked)}
+            />
+            Комментарий обязателен при согласовании (require_comment)
+          </label>
+        </fieldset>
+      )}
+
+      {activeTab === "Справочники" && (
+        <>
+          <EnterprisesEditor value={enterprises} onChange={setEnterprises} />
+          <GroupsEditor value={adGroups} onChange={setAdGroups} />
+          <PositionCategoryEditor value={positionCategory} onChange={setPositionCategory} />
+        </>
+      )}
+
+      {activeTab === "Шаблоны" && (
+        <>
+          <TemplatesEditor value={templates} onChange={setTemplates} />
+          <div className="sed-note">Редакторы бегунков (doc_templates) и писем (mail_templates) — Фаза 4.</div>
+        </>
+      )}
+
+      {activeTab === "Инфра" && isAdmin && (
+        <fieldset>
+          <legend>Инфра (сессия, сканы, SMTP)</legend>
+          <label style={{ display: "block", marginTop: 8 }}>
+            Длительность сессии, минут (session_ttl_minutes; 600 = 10 часов)
+            <input
+              aria-label="Длительность сессии"
+              type="number"
+              value={sessionTtl ?? ""}
+              onChange={(e) => setSessionTtl(Number(e.target.value))}
+            />
+          </label>
+          <label style={{ display: "block", marginTop: 8 }}>
+            Хранение сканов, дней (scan_retention_days)
+            <input
+              aria-label="Хранение сканов"
+              type="number"
+              value={retentionDays ?? ""}
+              onChange={(e) => setRetentionDays(Number(e.target.value))}
+            />
+          </label>
+          <label style={{ display: "block", marginTop: 8 }}>
+            Лимит скана, МБ (scan_max_mb)
+            <input
+              aria-label="Лимит скана"
+              type="number"
+              value={maxMb ?? ""}
+              onChange={(e) => setMaxMb(Number(e.target.value))}
+            />
+          </label>
+          <label style={{ display: "block", marginTop: 8 }}>
+            Хост SMTP-релея (smtp_host)
+            <input
+              aria-label="Хост SMTP-релея"
+              type="text"
+              value={smtpHost ?? ""}
+              onChange={(e) => setSmtpHost(e.target.value)}
+            />
+          </label>
+          <label style={{ display: "block", marginTop: 8 }}>
+            Порт SMTP-релея (smtp_port)
+            <input
+              aria-label="Порт SMTP-релея"
+              type="number"
+              value={smtpPort ?? ""}
+              onChange={(e) => setSmtpPort(Number(e.target.value))}
+            />
+          </label>
+          <label style={{ display: "block", marginTop: 8 }}>
+            Отправитель уведомлений, e-mail (smtp_from)
+            <input
+              aria-label="Отправитель уведомлений"
+              type="email"
+              value={smtpFrom ?? ""}
+              onChange={(e) => setSmtpFrom(e.target.value)}
+            />
+          </label>
+          <label style={{ display: "block", marginTop: 8 }}>
+            Логин SMTP-релея (smtp_user; пусто — отправка без авторизации)
+            <input
+              aria-label="Логин SMTP-релея"
+              type="text"
+              value={smtpUser ?? ""}
+              onChange={(e) => setSmtpUser(e.target.value)}
+            />
+          </label>
+          <label style={{ display: "block", marginTop: 8 }}>
+            Пароль SMTP-релея (smtp_password; оставьте пустым, чтобы сохранить текущий)
+            <input
+              aria-label="Пароль SMTP-релея"
+              type="password"
+              placeholder={smtpPasswordSet ? "задан (не менять)" : "не задан"}
+              value={smtpPassword}
+              onChange={(e) => setSmtpPassword(e.target.value)}
+            />
+          </label>
+        </fieldset>
+      )}
+
       <div className="sed-toolbar" style={{ marginTop: 12 }}>
         <button type="button" className="sed-btn" onClick={handleSave} disabled={busy}>
           {busy ? "Сохранение…" : "Сохранить"}

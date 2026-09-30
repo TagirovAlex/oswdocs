@@ -1,4 +1,4 @@
-// Тесты админки настроек (волна B4 / B3 Волны 2): данные — из /api/settings
+﻿// Тесты админки настроек (волна B4 / B3 Волны 2): данные — из /api/settings
 // (settings-client). Сеть не нужна: модуль settings-client мокается,
 // сценарии — загрузка полного объекта, сохранение, добавление/удаление
 // предприятий и групп, рендер шаблонов, успех/ошибка/403.
@@ -6,13 +6,15 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AdminSettings } from "./admin-settings";
 import { ApiHttpError } from "./auth-client";
-import { getSettings, saveSettings } from "./settings-client";
+import { getSettings, getSettingsContent, saveSettings, saveSettingsContent } from "./settings-client";
 import type { SettingsData } from "./settings-client";
 
 // Мок клиента настроек (fetch не вызывается).
 vi.mock("./settings-client", () => ({
   getSettings: vi.fn(),
   saveSettings: vi.fn(),
+  getSettingsContent: vi.fn(),
+  saveSettingsContent: vi.fn(),
 }));
 
 // Настройки, как их отдаёт GET /api/settings (полный объект по контракту B2).
@@ -39,11 +41,39 @@ const settings: SettingsData = {
       steps: [{ owner_group: "SED_HR" }, { owner_group: "SED_Vlastelcy", require_comment: true }],
     },
   ],
+  doc_templates: [
+    { service: "Бухгалтерия", category: "Увольнение", body: "Бегунок: {{ fio }}" },
+  ],
+  mail_templates: [{ code: "assigned", subject: "Заявка {{ request_id }}", body_html: "<html>{{ fio }}</html>" }],
+};
+
+// Контентная часть (как отдаёт GET /api/settings/content для руководителя ОК).
+const contentOnly: SettingsData = {
+  session_ttl_minutes: null,
+  approval_ttl_days: 3,
+  scan_retention_days: null,
+  scan_max_mb: null,
+  require_paper_signature: true,
+  smtp_host: null,
+  smtp_port: null,
+  smtp_from: null,
+  smtp_user: null,
+  smtp_password: null,
+  require_comment: true,
+  enterprises: [{ code: "OOO_ALFA", name: "ООО Альфа" }],
+  allowed_ad_groups: ["SED_HR"],
+  position_to_category: { "Руководитель": "Руководители" },
+  position_escalation: {},
+  templates: [],
+  doc_templates: [],
+  mail_templates: [],
 };
 
 beforeEach(() => {
   vi.mocked(getSettings).mockReset();
   vi.mocked(saveSettings).mockReset();
+  vi.mocked(getSettingsContent).mockReset();
+  vi.mocked(saveSettingsContent).mockReset();
 });
 
 describe("AdminSettings", () => {
@@ -61,7 +91,7 @@ describe("AdminSettings", () => {
     expect(saveSettings).toHaveBeenCalledWith(expect.objectContaining({ approval_ttl_days: 7 }));
   });
 
-  // Загрузка полного объекта: видны все секции контента.
+  // Загрузка полного объекта: видны все секции контента (после перехода на вкладку).
   it("загружает полный объект настроек (контент)", async () => {
     vi.mocked(getSettings).mockResolvedValue(settings);
 
@@ -69,6 +99,8 @@ describe("AdminSettings", () => {
 
     await waitFor(() => expect(screen.getByLabelText("TTL отметок")).toBeInTheDocument());
     expect(screen.getByLabelText("Комментарий обязателен при согласовании")).toBeChecked();
+    fireEvent.click(screen.getByRole("button", { name: "Справочники" }));
+    await waitFor(() => expect(screen.getByLabelText("Код предприятия 1")).toBeInTheDocument());
     expect(screen.getByLabelText("Код предприятия 1")).toHaveValue("OOO_ALFA");
     expect(screen.getByLabelText("Название предприятия 1")).toHaveValue("ООО Альфа");
     expect(screen.getByLabelText("Группа доступа 1")).toHaveValue("SED_Vlastelcy");
@@ -77,12 +109,14 @@ describe("AdminSettings", () => {
     expect(screen.getByLabelText("Категория 1")).toHaveValue("Руководители");
   });
 
-  // Рендер шаблонов: служба, категория и шаги owner_group.
+  // Рендер шаблонов: служба, категория и шаги owner_group (вкладка «Шаблоны»).
   it("рендерит шаблоны маршрутов и добавляет шаг", async () => {
     vi.mocked(getSettings).mockResolvedValue(settings);
 
     render(<AdminSettings role="admin" />);
 
+    await waitFor(() => expect(screen.getByRole("button", { name: "Шаблоны" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Шаблоны" }));
     await waitFor(() => expect(screen.getByLabelText("Служба шаблона 1")).toBeInTheDocument());
     expect(screen.getByLabelText("Служба шаблона 1")).toHaveValue("Бухгалтерия");
     expect(screen.getByLabelText("Категория шаблона 1")).toHaveValue("Увольнение");
@@ -99,6 +133,8 @@ describe("AdminSettings", () => {
     vi.mocked(saveSettings).mockImplementation(async (data: SettingsData) => data);
 
     render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Справочники" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Справочники" }));
     await waitFor(() => expect(screen.getByLabelText("Код предприятия 1")).toBeInTheDocument());
 
     fireEvent.click(screen.getByText("Добавить предприятие"));
@@ -123,6 +159,8 @@ describe("AdminSettings", () => {
     vi.mocked(getSettings).mockResolvedValue(settings);
 
     render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Справочники" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Справочники" }));
     await waitFor(() => expect(screen.getByLabelText("Код предприятия 1")).toBeInTheDocument());
 
     fireEvent.click(screen.getByText("Удалить предприятие"));
@@ -136,6 +174,8 @@ describe("AdminSettings", () => {
     vi.mocked(getSettings).mockResolvedValue(settings);
 
     render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Справочники" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Справочники" }));
     await waitFor(() => expect(screen.getByLabelText("Группа доступа 1")).toBeInTheDocument());
 
     fireEvent.click(screen.getByText("Добавить группу"));
@@ -155,12 +195,46 @@ describe("AdminSettings", () => {
     await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(/Сервис недоступен/));
   });
 
-  // Не-админ получает 403 — alert вместо формы.
+  // Не-админ получает 403 — alert вместо формы (для hr компонент грузит content).
   it("не-админам доступ закрыт (403)", async () => {
-    vi.mocked(getSettings).mockRejectedValue(new ApiHttpError(403, "Настройки — только админам"));
+    vi.mocked(getSettingsContent).mockRejectedValue(new ApiHttpError(403, "Настройки — только админам"));
 
     render(<AdminSettings role="hr" />);
 
     await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
+  });
+
+  // Руководитель ОК: только контент-вкладки, загрузка/сохранение через /settings/content.
+  it("руководитель ОК видит только контент и сохраняет через content", async () => {
+    vi.mocked(getSettingsContent).mockResolvedValue(contentOnly);
+    vi.mocked(saveSettingsContent).mockImplementation(async (data) => data);
+
+    render(<AdminSettings role="hr_admin" />);
+    await waitFor(() => expect(screen.getByLabelText("TTL отметок")).toBeInTheDocument());
+
+    // Инфра-вкладки и инфра-поля недоступны руководителю ОК.
+    expect(screen.queryByRole("button", { name: "Инфра" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Длительность сессии")).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("TTL отметок"), { target: { value: "7" } });
+    fireEvent.click(screen.getByText("Сохранить"));
+
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent(/TTL=7/));
+    expect(saveSettingsContent).toHaveBeenCalledWith(expect.objectContaining({ approval_ttl_days: 7 }));
+    expect(saveSettings).not.toHaveBeenCalled();
+  });
+
+  // Админ: видит вкладку «Инфра» и грузит полный объект через /api/settings.
+  it("админ видит вкладку Инфра и сохраняет полный объект", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+    vi.mocked(saveSettings).mockImplementation(async (data) => data);
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Инфра" })).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "Инфра" }));
+    await waitFor(() => expect(screen.getByLabelText("Длительность сессии")).toBeInTheDocument());
+    expect(screen.getByLabelText("Длительность сессии")).toHaveValue(600);
+    expect(screen.getByLabelText("Хост SMTP-релея")).toHaveValue("intsrvmail.fidelio.local");
   });
 });

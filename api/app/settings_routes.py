@@ -1,4 +1,5 @@
-# Прикладные настройки (админка): GET/PUT /settings, только роль admin.
+# Прикладные настройки (админка): GET/PUT /settings (только admin, все ключи)
+# и GET/PUT /settings/content (admin + руководитель ОК, только контент-ключи).
 # Хранилище — таблица settings в Postgres (JSONB value), общение строкой
 # в «сид-формате» (db/seeds/settings.sql): int '3', bool 'true', строка '"..."'.
 # Контракт B2: GET/PUT охватывают все прикладные ключи (см. SETTINGS_KEYS);
@@ -32,20 +33,12 @@ class SettingsUnavailable(Exception):
 # W3a: doc_templates/mail_templates — бегунки и письма; W5a: scan_allowed_types —
 # MIME-allowlist сканов; SMTP: smtp_host/smtp_port/smtp_from/smtp_user/smtp_password —
 # параметры релея из settings; пароль маскируется в GET и пишется только при вводе).
-# Порядок — как в контракте: базовые, справочники, шаблоны.
-SETTINGS_KEYS: tuple[str, ...] = (
-    "session_ttl_minutes",
+# Фаза 2: ключи разделены на КОНТЕНТ (руководитель ОК + админ) и ИНФРА (только админ);
+# SETTINGS_KEYS — полный набор (контент + инфра).
+CONTENT_KEYS: tuple[str, ...] = (
     "approval_ttl_days",
-    "scan_retention_days",
-    "scan_max_mb",
-    "scan_allowed_types",
-    "require_paper_signature",
-    "smtp_host",
-    "smtp_port",
-    "smtp_from",
-    "smtp_user",
-    "smtp_password",
     "require_comment",
+    "require_paper_signature",
     "enterprises",
     "allowed_ad_groups",
     "position_to_category",
@@ -54,6 +47,20 @@ SETTINGS_KEYS: tuple[str, ...] = (
     "doc_templates",
     "mail_templates",
 )
+
+INFRA_KEYS: tuple[str, ...] = (
+    "session_ttl_minutes",
+    "scan_retention_days",
+    "scan_max_mb",
+    "scan_allowed_types",
+    "smtp_host",
+    "smtp_port",
+    "smtp_from",
+    "smtp_user",
+    "smtp_password",
+)
+
+SETTINGS_KEYS: tuple[str, ...] = CONTENT_KEYS + INFRA_KEYS
 
 # Маска пароля SMTP в GET /settings: наружу отдаём только признак «задан/не задан»,
 # само значение — только запись (PUT) при явном вводе нового пароля.
@@ -277,6 +284,43 @@ class SettingsPayload(BaseModel):
     )
 
 
+class ContentSettingsPayload(BaseModel):
+    """Тело GET/PUT /settings/content: только контент-ключи (руководитель ОК
+    + админ); в PUT все опциональны (частичное обновление). Чужие ключи
+    (инфра) в теле игнорируются pydantic — не 422 (клиент шлёт один объект)."""
+
+    approval_ttl_days: int | None = Field(
+        default=None, description="Срок отметки шага в днях"
+    )
+    require_comment: bool | None = Field(
+        default=None, description="Комментарий обязателен на шаге всегда"
+    )
+    require_paper_signature: bool | None = Field(
+        default=None, description="Нужна ли бумажная подпись"
+    )
+    enterprises: list[EnterpriseItem] | None = Field(
+        default=None, description="Предприятия (код+название)"
+    )
+    allowed_ad_groups: list[str] | None = Field(
+        default=None, description="Группы ручного конструктора шагов"
+    )
+    position_to_category: dict[str, str] | None = Field(
+        default=None, description="Должность 1С → категория"
+    )
+    position_escalation: dict[str, int] | None = Field(
+        default=None, description="Должность → часы эскалации"
+    )
+    templates: list[TemplateItem] | None = Field(
+        default=None, description="Шаблоны маршрутов (служба+категория→шаги)"
+    )
+    doc_templates: list[DocTemplateItem] | None = Field(
+        default=None, description="Шаблоны бегунков (служба+категория→тело DOCX)"
+    )
+    mail_templates: list[MailTemplateItem] | None = Field(
+        default=None, description="Шаблоны писем (код события→тема+HTML-тело)"
+    )
+
+
 def _require_admin(user: CurrentUser) -> None:
     """Настройки — строго роль admin (ОК/владельцам 403; is_privileged не подходит)."""
     if user.role != "admin":
@@ -296,6 +340,15 @@ def _require_hr(user: CurrentUser) -> None:
         )
 
 
+def _require_content_admin(user: CurrentUser) -> None:
+    """Контент-настройки — роли admin и руководитель ОК (hr_admin), иначе 403."""
+    if user.role not in ("admin", "hr_admin"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Контент-настройки — руководителям ОК и админам",
+        )
+
+
 def _settings_dict(store: DbSettingsStore) -> dict:
     """Типизированный словарь настроек из хранилища (None — ключа нет в БД)."""
     raw = store.get_many(SETTINGS_KEYS)
@@ -303,6 +356,13 @@ def _settings_dict(store: DbSettingsStore) -> dict:
     # Пароль SMTP наружу не отдаём: только признак «задан/не задан».
     values["smtp_password"] = _mask_smtp_password(values.get("smtp_password"))
     return values
+
+
+def _content_dict(store: DbSettingsStore) -> dict:
+    """Типизированный словарь контент-настроек из хранилища (None — ключа нет в БД).
+    Пароль SMTP не входит в CONTENT_KEYS — маскирование не нужно."""
+    raw = store.get_many(CONTENT_KEYS)
+    return {key: _from_stored(raw.get(key)) for key in CONTENT_KEYS}
 
 
 @router.get("/settings")
@@ -359,6 +419,64 @@ def update_settings(
             action="settings.update",
             entity="settings",
             entity_id=",".join(SETTINGS_KEYS),
+            detail=",".join(updates),
+        )
+    )
+    return values
+
+
+@router.get("/settings/content")
+def read_content_settings(
+    user: CurrentUser = Depends(get_current_user),
+    store: DbSettingsStore = Depends(get_settings_store),
+) -> dict:
+    """Контент-настройки (руководитель ОК + админ): только CONTENT_KEYS,
+    иначе 403; БД недоступна — 503."""
+    _require_content_admin(user)
+    try:
+        values = _content_dict(store)
+    except SettingsUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    audit_log.append(
+        AuditEvent(
+            actor=user.sam,
+            action="settings.read",
+            entity="settings",
+            entity_id=",".join(CONTENT_KEYS),
+        )
+    )
+    return values
+
+
+@router.put("/settings/content")
+def update_content_settings(
+    payload: ContentSettingsPayload,
+    user: CurrentUser = Depends(get_current_user),
+    store: DbSettingsStore = Depends(get_settings_store),
+) -> dict:
+    """Обновить контент-настройки (руководитель ОК + админ): частичное
+    обновление только CONTENT_KEYS (чужие ключи в теле игнорируются),
+    ответ — полное состояние контента."""
+    _require_content_admin(user)
+    # exclude_unset: только явно переданные ключи; инфра-ключи в теле pydantic
+    # игнорирует (extra) — в хранилище не пишутся.
+    updates = payload.model_dump(mode="json", exclude_unset=True)
+    stored = {key: _to_stored(value) for key, value in updates.items()}
+    try:
+        store.set_many(stored)
+        values = _content_dict(store)
+    except SettingsUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    audit_log.append(
+        AuditEvent(
+            actor=user.sam,
+            action="settings.update",
+            entity="settings",
+            entity_id=",".join(CONTENT_KEYS),
             detail=",".join(updates),
         )
     )
