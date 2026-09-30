@@ -1,4 +1,4 @@
-# Тесты B1 auth+карточка: матрица ролей, дубли ФИО, обрезка ПДн, связка.
+﻿# Тесты B1 auth+карточка: матрица ролей, дубли ФИО, обрезка ПДн, связка.
 # Все персоналии вымышлены. Живых LDAP/HTTP нет: транспорт 1С — мок,
 # шлюз AD — фейк волны A4. Общий conftest.py не правим (только читаем):
 # пользовательские фикстуры заголовков и client берутся оттуда, подмены
@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import urllib.parse
 
@@ -58,64 +59,61 @@ def _bases():
 
 
 def _card_row(tab, fio, dept="Цех Тестовый", position="Тестировщик"):
+    # OData-запись по схеме ЗУП (дефолты): русские имена полей, ФИО — вложенное.
     return {
-        "tab_num": tab,
-        "fio": fio,
-        "dept": dept,
-        "position": position,
-        "employment_type": "Основная",
-        "hire_date": "2023-01-15",
-        "vacation_balance": "14",
+        "ТабельныйНомер": tab,
+        "Сотрудник": {"Description": fio},
+        "Подразделение": dept,
+        "Должность": position,
+        "ДатаПриема": "2023-01-15",
     }
 
 
 class FakeTransport:
-    """Мок-HTTP 1С: раскладывает строки по базам; late_ok чинит базу t1."""
+    """Мок-HTTP 1С: отвечает OData-обёрткой {"value": [...]} по базе.
+
+    URL от клиента: $filter=ТабельныйНомер eq 'NNN' (карточка) либо
+    substringof('...', Сотрудник/Description) eq true (поиск). down_t1
+    имитирует падение базы t1 (5xx)."""
 
     def __init__(self, down_t1=False):
         self.down_t1 = down_t1
         self.calls: list[str] = []
 
+    @staticmethod
+    def _respond(rows: dict[str, dict], filter_str: str) -> HttpResult:
+        if "substringof" in filter_str:
+            m = re.search(r"substringof\('([^']*)'", filter_str)
+            needle = (m.group(1) if m else "").lower()
+            hit = [
+                row
+                for row in rows.values()
+                if needle in row["Сотрудник"]["Description"].lower()
+            ]
+            return HttpResult(200, json.dumps({"value": hit}, ensure_ascii=False))
+        m = re.search(r"eq '([^']*)'", filter_str)
+        tab = m.group(1) if m else ""
+        if tab in rows:
+            return HttpResult(200, json.dumps({"value": [rows[tab]]}, ensure_ascii=False))
+        return HttpResult(200, json.dumps({"value": []}, ensure_ascii=False))
+
     def get(self, url, headers, timeout):
         self.calls.append(url)
         parsed = urllib.parse.urlparse(url)
-        query = urllib.parse.parse_qs(parsed.query)
-        path = parsed.path
-        # Падение базы t1: серверная ошибка, цепь не трогаем (порог высокий).
-        if "/t1/Employees" in url and self.down_t1:
-            return HttpResult(status=500, body="down")
-        # Карточки базы t1: таб. 001 (Иван), 003/004 (дубли).
-        if "/t1/Employees" in url:
-            if "tab_num" in query:
-                tab = query["tab_num"][0]
-                rows = {
-                    "001": _card_row("001", FIO_IVAN),
-                    "003": _card_row("003", FIO_DUBL),
-                    "004": _card_row("004", FIO_DUBL),
-                }
-                if tab in rows:
-                    return HttpResult(status=200, body=json.dumps(rows[tab]))
-                return HttpResult(status=404, body="{}")
-            needle = query.get("q", [""])[0].lower()
-            rows = [
-                _card_row("001", FIO_IVAN),
-                _card_row("003", FIO_DUBL),
-                _card_row("004", FIO_DUBL),
-            ]
-            hit = [r for r in rows if needle in r["fio"].lower()]
-            return HttpResult(status=200, body=json.dumps(hit))
-        # База t2: таб. 002 (Петр).
-        if "/t2/Employees" in url:
-            if "tab_num" in query:
-                if query["tab_num"][0] == "002":
-                    return HttpResult(
-                        status=200, body=json.dumps(_card_row("002", FIO_PETR))
-                    )
-                return HttpResult(status=404, body="{}")
-            needle = query.get("q", [""])[0].lower()
-            row = _card_row("002", FIO_PETR)
-            hit = [row] if needle in row["fio"].lower() else []
-            return HttpResult(status=200, body=json.dumps(hit))
+        filter_str = urllib.parse.unquote(
+            urllib.parse.parse_qs(parsed.query).get("$filter", [""])[0]
+        )
+        rows_t1 = {
+            "001": _card_row("001", FIO_IVAN),
+            "003": _card_row("003", FIO_DUBL),
+            "004": _card_row("004", FIO_DUBL),
+        }
+        if "/t1/" in url:
+            if self.down_t1:
+                return HttpResult(status=500, body="down")
+            return self._respond(rows_t1, filter_str)
+        if "/t2/" in url:
+            return self._respond({"002": _card_row("002", FIO_PETR)}, filter_str)
         return HttpResult(status=404, body="{}")
 
 
@@ -264,7 +262,8 @@ def test_employees_hr_full(client, hr_headers, b1_mocks):
     assert len(body["items"]) == 1
     item = body["items"][0]
     assert item["fio"] == FIO_IVAN
-    assert item["vacation_balance"] == "14"
+    # Остаток отпуска — TODO (поле схемы OData не настроено), пока None.
+    assert item["vacation_balance"] is None
     assert item["tab_num"] == "001"
     assert body["needs_manual_review"] is False
 
@@ -286,7 +285,8 @@ def test_employees_hr_admin_full(client, hr_admin_headers, b1_mocks):
     assert response.status_code == 200
     item = response.json()["items"][0]
     assert item["fio"] == FIO_IVAN
-    assert item["vacation_balance"] == "14"
+    # Остаток отпуска — TODO (поле схемы OData не настроено), пока None.
+    assert item["vacation_balance"] is None
     assert item["tab_num"] == "001"
 
 

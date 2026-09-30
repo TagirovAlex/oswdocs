@@ -72,13 +72,26 @@ class OneCNotFound(OneCError):
 
 @dataclass(frozen=True)
 class OneCBaseConfig:
-    """Настройки одной базы 1С. Заполняется только из env, не из кода."""
+    """Настройки одной базы 1С (OData). Заполняется только из настроек/env.
+
+    Маппинг «предприятие → базы» НЕ из этого конфига (в базе может быть несколько
+    предприятий) — его строит синхронизация (onec_sync) и хранит в settings
+    (onec_enterprise_bases); enterprise здесь оставлен для обратной совместимости.
+    Имена сущностей/полей OData — дефолты под ЗУП 3.х, правит ИТ по факту из базы.
+    """
 
     code: str  # код базы, напр. "zup_msk"
-    enterprise: str  # предприятие-владелец, напр. "Предприятие-МСК"
-    url: str  # базовый URL публикации 1С web-сервера
-    user: str  # сервисная УЗ чтения (имя)
-    secret: str  # сервисная УЗ чтения (пароль, только из env, не логировать)
+    enterprise: str = ""  # устарело: маппинг предприятий — из синхронизации
+    url: str = ""  # OData-URL публикации базы (до /odata/standard.odata/)
+    user: str = ""  # сервисная УЗ чтения (имя)
+    secret: str = ""  # сервисная УЗ чтения (пароль, только из env/настроек)
+    employee_entity: str = "Catalog_СотрудникиОрганизаций"
+    organization_entity: str = "Catalog_Организации"
+    tab_num_field: str = "ТабельныйНомер"
+    fio_field: str = "Сотрудник/Description"
+    department_field: str = "Подразделение"
+    position_field: str = "Должность"
+    hire_date_field: str = "ДатаПриема"
 
 
 @dataclass(frozen=True)
@@ -195,6 +208,24 @@ def build_enterprise_map(bases: Dict[str, OneCBaseConfig]) -> Dict[str, List[str
     return index
 
 
+def build_entity_url(base_url: str, entity: str) -> str:
+    """OData-URL коллекции сущности: {url}/{entity}?$format=json."""
+    return base_url.rstrip("/") + "/" + entity + "?$format=json"
+
+
+def parse_collection(body: str) -> List[Dict[str, object]]:
+    """Список записей из OData-ответа: обёртка {"value": [...]} либо голый список."""
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise OneCError("некорректный JSON в ответе OData") from exc
+    if isinstance(data, dict) and isinstance(data.get("value"), list):
+        return [item for item in data["value"] if isinstance(item, dict)]
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    raise OneCError("неожиданный формат OData-ответа (ожидался список)")
+
+
 class OneCClient:
     """Per-base клиент чтения 1С: только GET, таймаут 5с, circuit-breaker на базу."""
 
@@ -206,6 +237,7 @@ class OneCClient:
         failure_threshold: int = DEFAULT_FAILURE_THRESHOLD,
         recovery_timeout: float = DEFAULT_RECOVERY_TIMEOUT,
         time_func: Callable[[], float] = time.monotonic,
+        enterprise_index: Optional[Dict[str, List[str]]] = None,
     ) -> None:
         self._bases = dict(bases)
         self._transport: HttpTransport = transport if transport is not None else UrllibTransport()
@@ -214,6 +246,9 @@ class OneCClient:
         self._recovery_timeout = recovery_timeout
         self._time = time_func
         self._circuits: Dict[str, _CircuitState] = {code: _CircuitState() for code in self._bases}
+        # Маппинг предприятие→базы: из синхронизации (settings.onec_enterprise_bases)
+        # либо производный от конфигов (совместимость).
+        self._enterprise_index = enterprise_index if enterprise_index is not None else build_enterprise_map(bases)
 
     # -- публичный интерфейс (только чтение) --
 
@@ -223,8 +258,8 @@ class OneCClient:
         return sorted(self._bases)
 
     def bases_for_enterprise(self, enterprise: str) -> List[str]:
-        """Коды баз, привязанных к предприятию (публичный accessor для resolver)."""
-        return sorted(code for code, cfg in self._bases.items() if cfg.enterprise == enterprise)
+        """Коды баз, привязанных к предприятию (маппинг из синхронизации)."""
+        return sorted(self._enterprise_index.get(enterprise, []))
 
     def circuit_is_open(self, base_code: str) -> bool:
         """Открыта ли цепь базы (для диагностики и тестов)."""
@@ -235,7 +270,7 @@ class OneCClient:
         """Прочитать карточку сотрудника по таб. номеру (GET одной базы)."""
         cfg = self._require_base(base_code)
         self._ensure_allowed(base_code)
-        url = self._build_employee_url(cfg.url, tab_num)
+        url = self._build_employee_url(cfg, tab_num)
         try:
             result = self._transport.get(url, self._auth_headers(cfg), self._timeout)
         except OneCTimeoutError:
@@ -264,7 +299,7 @@ class OneCClient:
         """Поиск сотрудников базы по подстроке ФИО (GET одной базы)."""
         cfg = self._require_base(base_code)
         self._ensure_allowed(base_code)
-        url = self._build_search_url(cfg.url, query)
+        url = self._build_search_url(cfg, query)
         try:
             result = self._transport.get(url, self._auth_headers(cfg), self._timeout)
         except OneCTimeoutError:
@@ -323,20 +358,74 @@ class OneCClient:
         return {"Authorization": "Basic " + token, "Accept": "application/json"}
 
     @staticmethod
-    def _build_employee_url(base_url: str, tab_num: str) -> str:
-        # Точный путь OData-сущности — пометка «на стенде»; единый контракт для всех баз.
-        return base_url.rstrip("/") + "/Employees?tab_num=" + urllib.parse.quote(tab_num, safe="")
+    def _expand_part(fio_field: str) -> str:
+        """Часть до '/' в поле ФИО для $expand (напр. 'Сотрудник/Description' → 'Сотрудник')."""
+        part = fio_field.split("/", 1)[0].strip()
+        return part if part and "/" in fio_field else ""
 
     @staticmethod
-    def _build_search_url(base_url: str, query: str) -> str:
-        # Точный путь OData-сущности — пометка «на стенде»; единый контракт для всех баз.
-        return base_url.rstrip("/") + "/Employees?q=" + urllib.parse.quote(query, safe="")
+    def _select_fields(cfg: OneCBaseConfig) -> str:
+        """Список полей $select по схеме базы (уникальные, без пустых)."""
+        fields = [
+            cfg.tab_num_field,
+            cfg.fio_field,
+            cfg.department_field,
+            cfg.position_field,
+            cfg.hire_date_field,
+        ]
+        seen: List[str] = []
+        for f in fields:
+            if f and f not in seen:
+                seen.append(f)
+        return ",".join(seen)
+
+    @classmethod
+    def _build_employee_url(cls, cfg: OneCBaseConfig, tab_num: str) -> str:
+        """OData-URL карточки: сущность + $filter по таб.№ + $select схемы."""
+        select = urllib.parse.quote(cls._select_fields(cfg), safe=",;/")
+        flt = urllib.parse.quote("%s eq '%s'" % (cfg.tab_num_field, tab_num), safe="")
+        url = "%s/%s?$format=json&$top=1&$select=%s&$filter=%s" % (
+            cfg.url.rstrip("/"),
+            cfg.employee_entity,
+            select,
+            flt,
+        )
+        expand = cls._expand_part(cfg.fio_field)
+        if expand:
+            url += "&$expand=" + urllib.parse.quote(expand)
+        return url
+
+    @classmethod
+    def _build_search_url(cls, cfg: OneCBaseConfig, query: str) -> str:
+        """OData-URL поиска: подстрока ФИО через substringof по полю схемы."""
+        select = urllib.parse.quote(cls._select_fields(cfg), safe=",;/")
+        flt = urllib.parse.quote(
+            "substringof('%s', %s) eq true" % (query, cfg.fio_field), safe=""
+        )
+        url = "%s/%s?$format=json&$top=50&$select=%s&$filter=%s" % (
+            cfg.url.rstrip("/"),
+            cfg.employee_entity,
+            select,
+            flt,
+        )
+        expand = cls._expand_part(cfg.fio_field)
+        if expand:
+            url += "&$expand=" + urllib.parse.quote(expand)
+        return url
+
+    @staticmethod
+    def _field(item: Dict[str, object], name: str) -> str:
+        """Значение поля OData: поддерживает вложенные 'Сотрудник/Description'."""
+        value: object = item
+        for part in name.split("/"):
+            if not isinstance(value, dict):
+                return ""
+            value = value.get(part)
+        return str(value) if value is not None else ""
 
     @staticmethod
     def _parse_card(cfg: OneCBaseConfig, body: str, tab_num: str) -> EmployeeCard:
-        # Ожидаемый JSON: {"fio": ..., "dept": ..., "position": ...,
-        #   "employment_type": ..., "hire_date": ..., "vacation_balance": ..., "mol_flag": ...}
-        # Точные имена полей OData — пометка «на стенде».
+        # OData-ответ — обёртка {"value": [...]}; поля — по схеме базы.
         try:
             data = json.loads(body)
         except json.JSONDecodeError as exc:
@@ -346,17 +435,20 @@ class OneCClient:
             if not items:
                 raise OneCNotFound("таб. %r не найден в базе %r" % (tab_num, cfg.code))
             data = items[0]
-        if not isinstance(data, dict) or not data.get("fio"):
+        if not isinstance(data, dict):
+            raise OneCError("база %r вернула неожиданный формат карточки" % cfg.code)
+        fio = OneCClient._field(data, cfg.fio_field)
+        if not fio:
             raise OneCError("база %r вернула карточку без ФИО" % cfg.code)
         return EmployeeCard(
             enterprise=cfg.enterprise,
             base_code=cfg.code,
-            tab_num=str(data.get("tab_num", tab_num)),
-            fio=str(data["fio"]),
-            dept=str(data.get("dept", "")),
-            position=str(data.get("position", "")),
-            employment_type=str(data.get("employment_type", "")),
-            hire_date=str(data.get("hire_date", "")),
+            tab_num=OneCClient._field(data, cfg.tab_num_field) or tab_num,
+            fio=fio,
+            dept=OneCClient._field(data, cfg.department_field),
+            position=OneCClient._field(data, cfg.position_field),
+            employment_type="",
+            hire_date=OneCClient._field(data, cfg.hire_date_field),
             vacation_balance=data.get("vacation_balance"),
             mol_flag=data.get("mol_flag"),
         )
@@ -375,18 +467,21 @@ class OneCClient:
             raise OneCError("база %r вернула неожиданный формат поиска" % cfg.code)
         cards: List[EmployeeCard] = []
         for item in items:
-            if not isinstance(item, dict) or not item.get("fio"):
+            if not isinstance(item, dict):
+                continue
+            fio = OneCClient._field(item, cfg.fio_field)
+            if not fio:
                 continue
             cards.append(
                 EmployeeCard(
                     enterprise=cfg.enterprise,
                     base_code=cfg.code,
-                    tab_num=str(item.get("tab_num", "")),
-                    fio=str(item["fio"]),
-                    dept=str(item.get("dept", "")),
-                    position=str(item.get("position", "")),
-                    employment_type=str(item.get("employment_type", "")),
-                    hire_date=str(item.get("hire_date", "")),
+                    tab_num=OneCClient._field(item, cfg.tab_num_field),
+                    fio=fio,
+                    dept=OneCClient._field(item, cfg.department_field),
+                    position=OneCClient._field(item, cfg.position_field),
+                    employment_type="",
+                    hire_date=OneCClient._field(item, cfg.hire_date_field),
                     vacation_balance=item.get("vacation_balance"),
                     mol_flag=item.get("mol_flag"),
                 )

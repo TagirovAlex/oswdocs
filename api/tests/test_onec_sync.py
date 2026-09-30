@@ -1,6 +1,7 @@
-# Тесты синхронизации справочника предприятий из 1С (Фаза 4): onec_sync.
-# Источник — settings.onec_enterprises_source; транспорт http_get патчится
-# (никакой сети в тестах). ПДн/предприятия вымышленные.
+# Тесты синхронизации справочника предприятий из 1С (Фаза C1): onec_sync.
+# Список предприятий берётся ИЗ КАЖДОЙ БАЗЫ (сущность организаций); в базе может
+# быть несколько предприятий. Транспорт http_get патчится (никакой сети в тестах).
+# ПДн/предприятия вымышленные.
 
 from __future__ import annotations
 
@@ -34,116 +35,127 @@ class InMemorySettingsStore:
         self._data[key] = value
 
 
-def _source(url="https://1c-mock.local/enterprises", user="", password=""):
-    """Источник предприятий в сид-формате."""
-    return json.dumps({"url": url, "user": user, "password": password})
+def _base(code="zup_a", url="https://1c-mock.local/a", org="Catalog_Организации"):
+    """Одна база в сид-формате (значение списка onec_bases)."""
+    return {"code": code, "name": "База " + code, "url": url, "organization_entity": org}
 
 
-def _store(source=None, synced_at=None):
+def _store(bases=None, synced_at=None):
     data = {}
-    if source is not None:
-        data["onec_enterprises_source"] = source
+    if bases is not None:
+        data["onec_bases"] = json.dumps(bases, ensure_ascii=False)
     if synced_at is not None:
         data["onec_enterprises_synced_at"] = json.dumps(synced_at)
     return InMemorySettingsStore(data)
 
 
+def _orgs_json(*pairs):
+    """OData-ответ сущности организаций: список (code, name)."""
+    items = [{"Code": code, "Description": name} for code, name in pairs]
+    return json.dumps({"value": items}, ensure_ascii=False)
+
+
 # --- sync_enterprises ---
 
 def test_sync_unconfigured_raises():
-    """Источник не настроен — OnecSyncUnavailable с понятным текстом."""
+    """Базы не настроены — OnecSyncUnavailable с понятным текстом."""
     with pytest.raises(OnecSyncUnavailable) as exc_info:
-        sync_enterprises(_store(source=_source(url="")))
-    assert "не настроен" in str(exc_info.value)
+        sync_enterprises(_store(bases=[]))
+    assert "не настроены" in str(exc_info.value)
 
 
-def test_sync_list_format(monkeypatch):
-    """Ответ списком: нормализация, запись в settings.enterprises и synced_at."""
-    monkeypatch.setattr(
-        onec_sync, "http_get", lambda *a, **kw: '[{"code": "A", "name": "Альфа"}]'
-    )
-    store = _store(source=_source())
+def test_sync_one_base_single_enterprise(monkeypatch):
+    """Одна база, одно предприятие: справочник + маппинг {code:[base]}."""
+    monkeypatch.setattr(onec_sync, "http_get", lambda *a, **kw: _orgs_json(("A", "Альфа")))
+    store = _store(bases=[_base()])
     items = sync_enterprises(store)
     assert items == [{"code": "A", "name": "Альфа"}]
     assert json.loads(store._data["enterprises"]) == [{"code": "A", "name": "Альфа"}]
+    assert json.loads(store._data["onec_enterprise_bases"]) == {"A": ["zup_a"]}
     assert isinstance(json.loads(store._data["onec_enterprises_synced_at"]), str)
 
 
-def test_sync_wrapped_format(monkeypatch):
-    """Ответ в конверте {"enterprises": [...]}: тот же результат."""
+def test_sync_base_with_multiple_enterprises(monkeypatch):
+    """В ОДНОЙ базе НЕСКОЛЬКО предприятий — маппинг по одному base_code."""
     monkeypatch.setattr(
-        onec_sync,
-        "http_get",
-        lambda *a, **kw: '{"enterprises": [{"code": "B", "name": "Бета"}]}',
+        onec_sync, "http_get", lambda *a, **kw: _orgs_json(("A", "Альфа"), ("B", "Бета"))
     )
-    store = _store(source=_source())
+    store = _store(bases=[_base()])
+    sync_enterprises(store)
+    assert json.loads(store._data["onec_enterprise_bases"]) == {
+        "A": ["zup_a"],
+        "B": ["zup_a"],
+    }
+
+
+def test_sync_two_bases_union_and_mapping(monkeypatch):
+    """Две базы: union предприятий + маппинг по каждому base_code."""
+    def route(url, user, password):
+        if "/a/" in url:
+            return _orgs_json(("A", "Альфа"))
+        if "/b/" in url:
+            return _orgs_json(("A", "Альфа"), ("B", "Бета"))
+        raise AssertionError("неожиданный url: " + url)
+
+    monkeypatch.setattr(onec_sync, "http_get", route)
+    store = _store(bases=[_base("zup_a", "https://1c-mock.local/a"), _base("zup_b", "https://1c-mock.local/b")])
+    items = sync_enterprises(store)
+    assert {i["code"] for i in items} == {"A", "B"}
+    mapping = json.loads(store._data["onec_enterprise_bases"])
+    assert mapping == {"A": ["zup_a", "zup_b"], "B": ["zup_b"]}
+
+
+def test_sync_one_base_down_others_alive(monkeypatch):
+    """Падение одной базы не валит остальные."""
+    def route(url, user, password):
+        if "/a/" in url:
+            raise RuntimeError("база A недоступна")
+        return _orgs_json(("B", "Бета"))
+
+    monkeypatch.setattr(onec_sync, "http_get", route)
+    store = _store(bases=[_base("zup_a", "https://1c-mock.local/a"), _base("zup_b", "https://1c-mock.local/b")])
     items = sync_enterprises(store)
     assert items == [{"code": "B", "name": "Бета"}]
+    assert json.loads(store._data["onec_enterprise_bases"]) == {"B": ["zup_b"]}
 
 
-def test_sync_odata_value_wrapper(monkeypatch):
-    """Стандартная OData-обёртка 1С {"value": [...]} — принимается."""
-    monkeypatch.setattr(
-        onec_sync,
-        "http_get",
-        lambda *a, **kw: '{"value": [{"code": "C", "name": "Гамма"}]}',
-    )
-    items = sync_enterprises(_store(source=_source()))
-    assert items == [{"code": "C", "name": "Гамма"}]
+def test_sync_all_bases_down_raises(monkeypatch):
+    """Все базы упали — OnecSyncUnavailable с текстом ошибок."""
+    monkeypatch.setattr(onec_sync, "http_get", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("нет сети")))
+    with pytest.raises(OnecSyncUnavailable) as exc_info:
+        sync_enterprises(_store(bases=[_base(), _base("zup_b", "https://1c-mock.local/b")]))
+    assert "Ни одна база" in str(exc_info.value)
 
 
 def test_sync_skips_entries_without_code(monkeypatch):
-    """Записи без code пропускаются; пустая строка name — как есть."""
-    monkeypatch.setattr(
-        onec_sync,
-        "http_get",
-        lambda *a, **kw: '[{"code": "A", "name": "Альфа"}, {"name": "Без кода"}, "x"]',
-    )
-    items = sync_enterprises(_store(source=_source()))
+    """Записи без Code пропускаются; пустое имя — как есть."""
+    body = '{"value": [{"Code": "A", "Description": "Альфа"}, {"Description": "Без кода"}]}'
+    monkeypatch.setattr(onec_sync, "http_get", lambda *a, **kw: body)
+    items = sync_enterprises(_store(bases=[_base()]))
     assert items == [{"code": "A", "name": "Альфа"}]
 
 
 def test_sync_bad_json_raises(monkeypatch):
-    """Битый JSON — OnecSyncUnavailable, а не 500."""
+    """Битый JSON от базы — база считается упавшей, без баз — OnecSyncUnavailable."""
     monkeypatch.setattr(onec_sync, "http_get", lambda *a, **kw: "{broken json")
     with pytest.raises(OnecSyncUnavailable):
-        sync_enterprises(_store(source=_source()))
-
-
-def test_sync_http_error_raises(monkeypatch):
-    """Сбой HTTP — OnecSyncUnavailable с текстом ошибки."""
-    def boom(*a, **kw):
-        raise RuntimeError("1С недоступен")
-
-    monkeypatch.setattr(onec_sync, "http_get", boom)
-    with pytest.raises(OnecSyncUnavailable) as exc_info:
-        sync_enterprises(_store(source=_source()))
-    assert "1С недоступен" in str(exc_info.value)
-
-
-def test_sync_unexpected_format_raises(monkeypatch):
-    """Ни список, ни конверт — OnecSyncUnavailable."""
-    monkeypatch.setattr(onec_sync, "http_get", lambda *a, **kw: '"строка"')
-    with pytest.raises(OnecSyncUnavailable):
-        sync_enterprises(_store(source=_source()))
+        sync_enterprises(_store(bases=[_base()]))
 
 
 # --- maybe_sync_weekly ---
 
 def test_weekly_unconfigured_false(monkeypatch):
-    """Источник не настроен — False (тихо), http_get не вызывается."""
+    """Базы не настроены — False (тихо), http_get не вызывается."""
     called = []
     monkeypatch.setattr(onec_sync, "http_get", lambda *a, **kw: called.append(1) or "[]")
-    assert maybe_sync_weekly(_store(source=_source(url=""))) is False
+    assert maybe_sync_weekly(_store(bases=[])) is False
     assert called == []
 
 
 def test_weekly_no_last_syncs(monkeypatch):
     """Нет отметки синхронизации — выполняется, True."""
-    monkeypatch.setattr(
-        onec_sync, "http_get", lambda *a, **kw: '[{"code": "A", "name": "Альфа"}]'
-    )
-    store = _store(source=_source())
+    monkeypatch.setattr(onec_sync, "http_get", lambda *a, **kw: _orgs_json(("A", "Альфа")))
+    store = _store(bases=[_base()])
     assert maybe_sync_weekly(store) is True
     assert json.loads(store._data["enterprises"]) == [{"code": "A", "name": "Альфа"}]
 
@@ -153,21 +165,18 @@ def test_weekly_fresh_skips(monkeypatch):
     called = []
     monkeypatch.setattr(onec_sync, "http_get", lambda *a, **kw: called.append(1) or "[]")
     fresh = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
-    assert maybe_sync_weekly(_store(source=_source(), synced_at=fresh)) is False
+    assert maybe_sync_weekly(_store(bases=[_base()], synced_at=fresh)) is False
     assert called == []
 
 
 def test_weekly_old_syncs(monkeypatch):
     """Синхронизация старше 7 дней — выполняется, True."""
-    monkeypatch.setattr(onec_sync, "http_get", lambda *a, **kw: "[]")
+    monkeypatch.setattr(onec_sync, "http_get", lambda *a, **kw: _orgs_json())
     old = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()
-    assert maybe_sync_weekly(_store(source=_source(), synced_at=old)) is True
+    assert maybe_sync_weekly(_store(bases=[_base()], synced_at=old)) is True
 
 
 def test_weekly_sync_error_false(monkeypatch):
     """Сбой синхронизации — False (worker не падает)."""
-    def boom(*a, **kw):
-        raise RuntimeError("сеть недоступна")
-
-    monkeypatch.setattr(onec_sync, "http_get", boom)
-    assert maybe_sync_weekly(_store(source=_source())) is False
+    monkeypatch.setattr(onec_sync, "http_get", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("сеть недоступна")))
+    assert maybe_sync_weekly(_store(bases=[_base()])) is False

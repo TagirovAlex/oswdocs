@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import urllib.parse
 
@@ -146,28 +147,32 @@ def _bases():
 
 
 class FakeTransport:
-    """Мок-HTTP 1С: карточка Ивана по таб. номеру 001."""
+    """Мок-HTTP 1С: карточка Ивана по таб. номеру 001 (OData-схема ЗУП)."""
 
     def get(self, url, headers, timeout):
         parsed = urllib.parse.urlparse(url)
-        query = urllib.parse.parse_qs(parsed.query)
-        if "/t1/Employees" in url:
-            if "tab_num" in query:
-                if query["tab_num"][0] == "001":
-                    return HttpResult(status=200, body=json.dumps({
-                        "tab_num": "001", "fio": FIO_IVAN, "dept": "Цех Тестовый",
-                        "position": "Тестировщик", "employment_type": "Основная",
-                        "hire_date": "2023-01-15", "vacation_balance": "14",
-                    }))
-                return HttpResult(status=404, body="{}")
-            needle = query.get("q", [""])[0].lower()
-            hit = [{"tab_num": "001", "fio": FIO_IVAN, "dept": "Цех Тестовый",
-                    "position": "Тестировщик", "employment_type": "Основная",
-                    "hire_date": "2023-01-15", "vacation_balance": "14"}]
-            return HttpResult(status=200, body=json.dumps(
-                hit if needle in FIO_IVAN.lower() else []
-            ))
-        return HttpResult(status=404, body="{}")
+        filter_str = urllib.parse.unquote(
+            urllib.parse.parse_qs(parsed.query).get("$filter", [""])[0]
+        )
+        if "/t1/" not in url:
+            return HttpResult(status=404, body="{}")
+        row = {
+            "ТабельныйНомер": "001",
+            "Сотрудник": {"Description": FIO_IVAN},
+            "Подразделение": "Цех Тестовый",
+            "Должность": "Тестировщик",
+            "ДатаПриема": "2023-01-15",
+        }
+        if "substringof" in filter_str:
+            m = re.search(r"substringof\('([^']*)'", filter_str)
+            needle = (m.group(1) if m else "").lower()
+            hit = [row] if needle in FIO_IVAN.lower() else []
+            return HttpResult(status=200, body=json.dumps({"value": hit}, ensure_ascii=False))
+        m = re.search(r"eq '([^']*)'", filter_str)
+        tab = m.group(1) if m else ""
+        if tab == "001":
+            return HttpResult(status=200, body=json.dumps({"value": [row]}, ensure_ascii=False))
+        return HttpResult(status=200, body=json.dumps({"value": []}, ensure_ascii=False))
 
 
 class FakeGateway:

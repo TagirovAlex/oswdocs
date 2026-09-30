@@ -17,7 +17,6 @@ import type {
   SettingsEnterprise,
   SettingsMailTemplate,
   SettingsOnecBase,
-  SettingsOnecSource,
   SettingsTemplate,
   SettingsTemplateStep,
 } from "./settings-client";
@@ -430,9 +429,7 @@ export function AdminSettings(props: AdminSettingsProps) {
   // Базы 1С: поля формы + параллельный признак «пароль задан» для placeholder.
   const [onecBases, setOnecBases] = useState<SettingsOnecBase[]>([]);
   const [onecBasesSet, setOnecBasesSet] = useState<boolean[]>([]);
-  // Источник предприятий 1С: поля формы + признак «пароль задан» + статус синхронизации.
-  const [onecSource, setOnecSource] = useState<SettingsOnecSource>({ url: "", user: "", password: "" });
-  const [onecSourcePasswordSet, setOnecSourcePasswordSet] = useState<boolean>(false);
+  // Статус принудительной синхронизации предприятий из баз 1С.
   const [syncStatus, setSyncStatus] = useState<string>("");
   const [syncError, setSyncError] = useState<string>("");
   // Эскалация в форме не редактируется (отдельная волна), передаём как загружено.
@@ -461,10 +458,6 @@ export function AdminSettings(props: AdminSettingsProps) {
           // Базы 1С: пароль очищаем, признак «задан» — из маски/None.
           setOnecBases((full.onec_bases ?? []).map((b) => ({ ...b, password: "" })));
           setOnecBasesSet((full.onec_bases ?? []).map((b) => b.password !== null));
-          // Источник предприятий 1С: пароль очищаем, признак «задан» — из маски/None.
-          const src = full.onec_enterprises_source;
-          setOnecSource({ url: src?.url ?? "", user: src?.user ?? "", password: "" });
-          setOnecSourcePasswordSet(src?.password !== null);
         }
         setTtl(data.approval_ttl_days);
         setPaperRequired(data.require_paper_signature);
@@ -532,8 +525,6 @@ export function AdminSettings(props: AdminSettingsProps) {
           smtp_password: smtpPassword,
           // Пароль базы — как введено (пустое → сервер сохранит текущий).
           onec_bases: onecBases,
-          // Источник предприятий 1С (пустой пароль → сервер сохранит текущий).
-          onec_enterprises_source: onecSource,
         };
         const result = await saveSettings(full);
         setSaved(
@@ -718,21 +709,16 @@ export function AdminSettings(props: AdminSettingsProps) {
       {activeTab === "Инфра" && isAdmin && (
         <fieldset>
           <legend>1С-базы (подключения)</legend>
+          <div className="sed-note">
+            В каждой базе может быть несколько предприятий: справочник предприятий и
+            маппинг «предприятие → базы» собирает синхронизация «Обновить из 1С»
+            (сущность организаций базы; еженедельно + по кнопке). Имена сущностей/полей
+            OData — дефолты ЗУП 3.х, при необходимости правятся по факту из базы.
+          </div>
           {onecBases.length === 0 && <div className="sed-note">не задано</div>}
           {onecBases.map((base, i) => (
             <div key={i} style={{ border: "1px solid #ccc", marginTop: 8, padding: 8 }}>
               <label style={{ display: "block" }}>
-                Предприятие (enterprise)
-                <input
-                  aria-label={`Предприятие базы 1С ${i + 1}`}
-                  type="text"
-                  value={base.enterprise}
-                  onChange={(e) =>
-                    setOnecBases(onecBases.map((b, j) => (j === i ? { ...b, enterprise: e.target.value } : b)))
-                  }
-                />
-              </label>
-              <label style={{ display: "block", marginTop: 8 }}>
                 Код базы 1С (base_code)
                 <input
                   aria-label={`Код базы 1С ${i + 1}`}
@@ -755,10 +741,11 @@ export function AdminSettings(props: AdminSettingsProps) {
                 />
               </label>
               <label style={{ display: "block", marginTop: 8 }}>
-                OData-URL базы
+                OData-URL публикации базы (до /odata/standard.odata/)
                 <input
                   aria-label={`OData URL базы 1С ${i + 1}`}
                   type="text"
+                  placeholder="http://intsrvterm0/zup/odata/standard.odata/"
                   value={base.url}
                   onChange={(e) =>
                     setOnecBases(onecBases.map((b, j) => (j === i ? { ...b, url: e.target.value } : b)))
@@ -766,7 +753,7 @@ export function AdminSettings(props: AdminSettingsProps) {
                 />
               </label>
               <label style={{ display: "block", marginTop: 8 }}>
-                Сервисная УЗ чтения (user)
+                Сервисная УЗ чтения (user, роль OData)
                 <input
                   aria-label={`УЗ базы 1С ${i + 1}`}
                   type="text"
@@ -788,6 +775,86 @@ export function AdminSettings(props: AdminSettingsProps) {
                   }
                 />
               </label>
+              <details>
+                <summary>Схема OData (ЗУП 3.х; имена уточняет ИТ по факту)</summary>
+                <label style={{ display: "block", marginTop: 8 }}>
+                  Сущность сотрудников
+                  <input
+                    aria-label={`Сущность сотрудников базы 1С ${i + 1}`}
+                    type="text"
+                    value={base.employee_entity}
+                    onChange={(e) =>
+                      setOnecBases(onecBases.map((b, j) => (j === i ? { ...b, employee_entity: e.target.value } : b)))
+                    }
+                  />
+                </label>
+                <label style={{ display: "block", marginTop: 8 }}>
+                  Сущность организаций (предприятий)
+                  <input
+                    aria-label={`Сущность организаций базы 1С ${i + 1}`}
+                    type="text"
+                    value={base.organization_entity}
+                    onChange={(e) =>
+                      setOnecBases(onecBases.map((b, j) => (j === i ? { ...b, organization_entity: e.target.value } : b)))
+                    }
+                  />
+                </label>
+                <label style={{ display: "block", marginTop: 8 }}>
+                  Поле таб.№
+                  <input
+                    aria-label={`Поле таб.№ базы 1С ${i + 1}`}
+                    type="text"
+                    value={base.tab_num_field}
+                    onChange={(e) =>
+                      setOnecBases(onecBases.map((b, j) => (j === i ? { ...b, tab_num_field: e.target.value } : b)))
+                    }
+                  />
+                </label>
+                <label style={{ display: "block", marginTop: 8 }}>
+                  Поле ФИО (может требовать $expand, напр. «Сотрудник/Description»)
+                  <input
+                    aria-label={`Поле ФИО базы 1С ${i + 1}`}
+                    type="text"
+                    value={base.fio_field}
+                    onChange={(e) =>
+                      setOnecBases(onecBases.map((b, j) => (j === i ? { ...b, fio_field: e.target.value } : b)))
+                    }
+                  />
+                </label>
+                <label style={{ display: "block", marginTop: 8 }}>
+                  Поле подразделения
+                  <input
+                    aria-label={`Поле подразделения базы 1С ${i + 1}`}
+                    type="text"
+                    value={base.department_field}
+                    onChange={(e) =>
+                      setOnecBases(onecBases.map((b, j) => (j === i ? { ...b, department_field: e.target.value } : b)))
+                    }
+                  />
+                </label>
+                <label style={{ display: "block", marginTop: 8 }}>
+                  Поле должности
+                  <input
+                    aria-label={`Поле должности базы 1С ${i + 1}`}
+                    type="text"
+                    value={base.position_field}
+                    onChange={(e) =>
+                      setOnecBases(onecBases.map((b, j) => (j === i ? { ...b, position_field: e.target.value } : b)))
+                    }
+                  />
+                </label>
+                <label style={{ display: "block", marginTop: 8 }}>
+                  Поле даты приёма
+                  <input
+                    aria-label={`Поле даты приёма базы 1С ${i + 1}`}
+                    type="text"
+                    value={base.hire_date_field}
+                    onChange={(e) =>
+                      setOnecBases(onecBases.map((b, j) => (j === i ? { ...b, hire_date_field: e.target.value } : b)))
+                    }
+                  />
+                </label>
+              </details>
               <div className="sed-toolbar" style={{ marginTop: 8 }}>
                 <button
                   type="button"
@@ -807,51 +874,29 @@ export function AdminSettings(props: AdminSettingsProps) {
               type="button"
               className="sed-btn"
               onClick={() => {
-                setOnecBases([...onecBases, { enterprise: "", code: "", name: "", url: "", user: "", password: "" }]);
+                setOnecBases([
+                  ...onecBases,
+                  {
+                    code: "",
+                    name: "",
+                    url: "",
+                    user: "",
+                    password: "",
+                    employee_entity: "Catalog_СотрудникиОрганизаций",
+                    organization_entity: "Catalog_Организации",
+                    tab_num_field: "ТабельныйНомер",
+                    fio_field: "Сотрудник/Description",
+                    department_field: "Подразделение",
+                    position_field: "Должность",
+                    hire_date_field: "ДатаПриема",
+                  },
+                ]);
                 setOnecBasesSet([...onecBasesSet, false]);
               }}
             >
               Добавить базу 1С
             </button>
           </div>
-        </fieldset>
-      )}
-
-      {activeTab === "Инфра" && isAdmin && (
-        <fieldset>
-          <legend>Источник предприятий 1С</legend>
-          <div className="sed-note">
-            Справочник предприятий синхронизируется из отдельного OData-эндпоинта 1С
-            (еженедельно и по кнопке).
-          </div>
-          <label style={{ display: "block", marginTop: 8 }}>
-            OData-URL источника
-            <input
-              aria-label="URL источника предприятий 1С"
-              type="text"
-              value={onecSource.url}
-              onChange={(e) => setOnecSource({ ...onecSource, url: e.target.value })}
-            />
-          </label>
-          <label style={{ display: "block", marginTop: 8 }}>
-            Сервисная УЗ чтения (user)
-            <input
-              aria-label="УЗ источника предприятий 1С"
-              type="text"
-              value={onecSource.user}
-              onChange={(e) => setOnecSource({ ...onecSource, user: e.target.value })}
-            />
-          </label>
-          <label style={{ display: "block", marginTop: 8 }}>
-            Пароль УЗ (оставьте пустым, чтобы сохранить текущий)
-            <input
-              aria-label="Пароль источника предприятий 1С"
-              type="password"
-              placeholder={onecSourcePasswordSet ? "задан (не менять)" : "не задан"}
-              value={onecSource.password ?? ""}
-              onChange={(e) => setOnecSource({ ...onecSource, password: e.target.value })}
-            />
-          </label>
           <div className="sed-toolbar" style={{ marginTop: 12 }}>
             <button type="button" className="sed-btn" onClick={handleSyncEnterprises}>
               Обновить из 1С

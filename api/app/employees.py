@@ -46,24 +46,41 @@ router = APIRouter(tags=["сотрудники"])
 def _bases_from_settings(store: DbSettingsStore | None) -> dict[str, OneCBaseConfig]:
     """Базы 1С из settings (onec_bases) в формате OneCClient: код -> конфиг.
 
-    Непустые enterprise/code обязательны; url/user/secret подставляются как
-    есть (пустые допустимы — проверка доступности на транспорте)."""
+    Код базы обязателен; поля схемы (сущности/поля OData) — с дефолтами ЗУП 3.х
+    (правит ИТ по факту из базы). Маппинг предприятий — из синхронизации,
+    не из конфига базы."""
     if store is None or not hasattr(store, "get"):
         return {}
     raw = read_setting_value(store, "onec_bases")
     bases: dict[str, OneCBaseConfig] = {}
     for item in raw or []:
-        if not isinstance(item, dict) or not item.get("enterprise") or not item.get("code"):
+        if not isinstance(item, dict) or not item.get("code"):
             continue
         code = str(item["code"])
         bases[code] = OneCBaseConfig(
             code=code,
-            enterprise=str(item["enterprise"]),
             url=str(item.get("url") or ""),
             user=str(item.get("user") or ""),
             secret=str(item.get("password") or ""),
+            employee_entity=str(item.get("employee_entity") or "Catalog_СотрудникиОрганизаций"),
+            organization_entity=str(item.get("organization_entity") or "Catalog_Организации"),
+            tab_num_field=str(item.get("tab_num_field") or "ТабельныйНомер"),
+            fio_field=str(item.get("fio_field") or "Сотрудник/Description"),
+            department_field=str(item.get("department_field") or "Подразделение"),
+            position_field=str(item.get("position_field") or "Должность"),
+            hire_date_field=str(item.get("hire_date_field") or "ДатаПриема"),
         )
     return bases
+
+
+def _enterprise_index_from_settings(store: DbSettingsStore | None) -> dict[str, list[str]] | None:
+    """Маппинг предприятие→базы из синхронизации (settings.onec_enterprise_bases)."""
+    if store is None or not hasattr(store, "get"):
+        return None
+    raw = read_setting_value(store, "onec_enterprise_bases")
+    if isinstance(raw, dict):
+        return {str(code): [str(b) for b in bases] for code, bases in raw.items()}
+    return None
 
 
 def get_onec_client(
@@ -72,8 +89,9 @@ def get_onec_client(
 ) -> OneCClient:
     """Боевой клиент 1С: базы из settings (onec_bases), иначе из env; + кэш Redis.
 
-    Без баз в настройках и в ONEC_BASES_JSON — 503 (прежнее поведение);
-    кэшируется только успешный get_employee, падение Redis не валит чтение.
+    Маппинг предприятие→базы — из синхронизации (settings.onec_enterprise_bases),
+    иначе производный от конфигов (совместимость). Без баз — 503; кэшируется
+    только успешный get_employee, падение Redis не валит чтение.
     """
     from .onec_cache import CachingOneCClient, RedisCardCache
     from .onec_client import load_bases_from_env
@@ -84,9 +102,9 @@ def get_onec_client(
     if not bases:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Клиент 1С не настроен (нет баз в ONEC_BASES_JSON)",
+            detail="Клиент 1С не настроен (нет баз в настройках 1С)",
         )
-    client = OneCClient(bases)
+    client = OneCClient(bases, enterprise_index=_enterprise_index_from_settings(store))
     cache = RedisCardCache(settings.REDIS_URL, settings.ONEC_CACHE_TTL)
     return CachingOneCClient(client, cache, ttl_seconds=settings.ONEC_CACHE_TTL)
 

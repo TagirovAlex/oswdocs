@@ -47,7 +47,6 @@ const settings: SettingsData = {
   ],
   mail_templates: [{ code: "assigned", subject: "Заявка {{ request_id }}", body_html: "<html>{{ fio }}</html>" }],
   onec_bases: [],
-  onec_enterprises_source: { url: "", user: "", password: null },
 };
 
 // Контентная часть (как отдаёт GET /api/settings/content для руководителя ОК).
@@ -71,7 +70,6 @@ const contentOnly: SettingsData = {
   doc_templates: [],
   mail_templates: [],
   onec_bases: [],
-  onec_enterprises_source: null,
 };
 
 beforeEach(() => {
@@ -255,10 +253,11 @@ describe("AdminSettings", () => {
     await waitFor(() => expect(screen.getByText("1С-базы (подключения)")).toBeInTheDocument());
 
     fireEvent.click(screen.getByText("Добавить базу 1С"));
-    fireEvent.change(screen.getByLabelText("Предприятие базы 1С 1"), { target: { value: "ENT_PRIMER_1" } });
     fireEvent.change(screen.getByLabelText("Код базы 1С 1"), { target: { value: "zup_t1" } });
     fireEvent.change(screen.getByLabelText("Название базы 1С 1"), { target: { value: "База ЗУП" } });
-    fireEvent.change(screen.getByLabelText("OData URL базы 1С 1"), { target: { value: "https://1c-mock.local/t1" } });
+    fireEvent.change(screen.getByLabelText("OData URL базы 1С 1"), {
+      target: { value: "http://1c-mock.local/zup/odata/standard.odata/" },
+    });
     fireEvent.change(screen.getByLabelText("УЗ базы 1С 1"), { target: { value: "reader" } });
     fireEvent.change(screen.getByLabelText("Пароль базы 1С 1"), { target: { value: "secret-1" } });
     fireEvent.click(screen.getByText("Сохранить"));
@@ -268,12 +267,18 @@ describe("AdminSettings", () => {
         expect.objectContaining({
           onec_bases: [
             {
-              enterprise: "ENT_PRIMER_1",
               code: "zup_t1",
               name: "База ЗУП",
-              url: "https://1c-mock.local/t1",
+              url: "http://1c-mock.local/zup/odata/standard.odata/",
               user: "reader",
               password: "secret-1",
+              employee_entity: "Catalog_СотрудникиОрганизаций",
+              organization_entity: "Catalog_Организации",
+              tab_num_field: "ТабельныйНомер",
+              fio_field: "Сотрудник/Description",
+              department_field: "Подразделение",
+              position_field: "Должность",
+              hire_date_field: "ДатаПриема",
             },
           ],
         }),
@@ -281,7 +286,7 @@ describe("AdminSettings", () => {
     );
   });
 
-  // Админ: на вкладке «Инфра» кнопка «Обновить из 1С» синхронизирует предприятия.
+  // Админ: на вкладке «Инфра» кнопка «Обновить из 1С» синхронизирует предприятия из баз.
   it("обновляет предприятия из 1С по кнопке", async () => {
     vi.mocked(getSettings).mockResolvedValue(settings);
     vi.mocked(syncEnterprises).mockResolvedValue({ synced: true, count: 3, enterprises: [] });
@@ -289,7 +294,7 @@ describe("AdminSettings", () => {
     render(<AdminSettings role="admin" />);
     await waitFor(() => expect(screen.getByRole("button", { name: "Инфра" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Инфра" }));
-    await waitFor(() => expect(screen.getByText("Источник предприятий 1С")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("1С-базы (подключения)")).toBeInTheDocument());
 
     fireEvent.click(screen.getByText("Обновить из 1С"));
 

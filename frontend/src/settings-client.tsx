@@ -36,30 +36,32 @@ export interface SettingsMailTemplate {
   body_html: string;
 }
 
-// Подключение к базе 1С (settings.onec_bases): OData-параметры.
+// Подключение к базе 1С (settings.onec_bases): OData-параметры + схема ЗУП.
 export interface SettingsOnecBase {
-  // Код предприятия (составной ключ).
-  enterprise: string;
-  // Код базы 1С (base_code).
+  // Код базы 1С (base_code, уникален).
   code: string;
   // Название базы.
   name: string;
-  // OData-URL базы.
+  // OData-URL публикации базы (до /odata/standard.odata/).
   url: string;
-  // Сервисная УЗ чтения.
+  // Сервисная УЗ чтения (роль OData).
   user: string;
   // Пароль УЗ (в GET — маска либо null; записывается только при вводе).
   password: string | null;
-}
-
-// Источник справочника предприятий 1С (settings.onec_enterprises_source).
-export interface SettingsOnecSource {
-  // OData-URL источника предприятий.
-  url: string;
-  // Сервисная УЗ чтения (при заданном user — basic auth).
-  user: string;
-  // Пароль УЗ (в GET — маска либо null; записывается только при вводе).
-  password: string | null;
+  // Сущность сотрудников OData (дефолт ЗУП).
+  employee_entity: string;
+  // Сущность организаций (предприятий) OData (дефолт ЗУП).
+  organization_entity: string;
+  // Поле таб.№.
+  tab_num_field: string;
+  // Поле ФИО (может требовать $expand).
+  fio_field: string;
+  // Поле подразделения.
+  department_field: string;
+  // Поле должности.
+  position_field: string;
+  // Поле даты приёма.
+  hire_date_field: string;
 }
 
 // Настройки СЭД из таблицы settings (типы — по контракту API, поля nullable:
@@ -104,8 +106,6 @@ export interface SettingsData {
   mail_templates: SettingsMailTemplate[] | null;
   // Подключения к базам 1С (onec_bases; пароль маскируется в GET).
   onec_bases: SettingsOnecBase[] | null;
-  // Источник справочника предприятий 1С (onec_enterprises_source; пароль в GET — маска).
-  onec_enterprises_source: SettingsOnecSource | null;
 }
 
 // Контент-настройки (GET/PUT /api/settings/content): контент-ключи для

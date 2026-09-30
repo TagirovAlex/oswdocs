@@ -51,17 +51,18 @@ def _bases():
 
 
 def _card_json(tab, fio, **kw):
-    payload = {
-        "tab_num": tab,
-        "fio": fio,
-        "dept": kw.get("dept", "Цех тестовый"),
-        "position": kw.get("position", "Тестировщик"),
-        "employment_type": kw.get("employment_type", "Основная"),
-        "hire_date": kw.get("hire_date", "2020-01-15"),
-        "vacation_balance": kw.get("vacation_balance", "14"),
-        "mol_flag": None,
+    # OData-ответ по схеме ЗУП (дефолты): поля — русские имена, ФИО — через
+    # вложенный Сотрудник/Description (требует $expand в URL).
+    item = {
+        "ТабельныйНомер": tab,
+        "Сотрудник": {"Description": fio},
+        "Подразделение": kw.get("dept", "Цех тестовый"),
+        "Должность": kw.get("position", "Тестировщик"),
+        "ДатаПриема": kw.get("hire_date", "2020-01-15"),
     }
-    return json.dumps(payload, ensure_ascii=False)
+    if kw.get("vacation_balance") is not None:
+        item["ОстатокОтпуска"] = kw["vacation_balance"]
+    return json.dumps({"value": [item]}, ensure_ascii=False)
 
 
 class FakeTransport:
@@ -78,10 +79,9 @@ class FakeTransport:
 
 
 def _ok_a(url, headers, timeout):
-    if "/a/Employees" in url and "tab_num=" in url:
+    # URL карточки/поиска по схеме: сущность + $filter по ТабельныйНомер.
+    if "/a/" in url:
         return HttpResult(200, _card_json("100", FIOS["a100"]))
-    if "/a/Employees" in url:
-        return HttpResult(200, json.dumps([{"tab_num": "100", "fio": FIOS["a100"]}]))
     return HttpResult(404, "{}")
 
 
@@ -184,7 +184,7 @@ def test_timeout_counts_as_failure_and_opens_circuit():
 def test_one_base_failure_does_not_affect_other_base():
     # Изоляция на уровне клиента: цепь базы A разомкнута, база B отвечает.
     def router(url, headers, timeout):
-        if "/a/Employees" in url:
+        if "/a/" in url:
             return HttpResult(500, "down")
         return HttpResult(200, _card_json("100", FIOS["b100"]))
 
@@ -204,7 +204,13 @@ def test_composite_key_unique_across_bases():
 
 def test_search_returns_cards():
     def h(url, headers, timeout):
-        return HttpResult(200, json.dumps([{"tab_num": "200", "fio": FIOS["b200"]}]))
+        return HttpResult(
+            200,
+            json.dumps(
+                {"value": [{"ТабельныйНомер": "200", "Сотрудник": {"Description": FIOS["b200"]}}]},
+                ensure_ascii=False,
+            ),
+        )
 
     c = OneCClient({"zup_b": _bases()["zup_b"]}, transport=FakeTransport(h))
     cards = c.search("zup_b", "Несуществов")

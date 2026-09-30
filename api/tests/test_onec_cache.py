@@ -54,7 +54,12 @@ def _bases():
 
 
 def _card_json(tab, fio):
-    return json.dumps({"tab_num": tab, "fio": fio}, ensure_ascii=False)
+    # OData-ответ по схеме ЗУП: обёртка {"value": [...]}, поля — русские имена,
+    # ФИО — вложенный Сотрудник/Description.
+    return json.dumps(
+        {"value": [{"ТабельныйНомер": tab, "Сотрудник": {"Description": fio}}]},
+        ensure_ascii=False,
+    )
 
 
 class FakeTransport:
@@ -163,7 +168,10 @@ def test_caching_get_employee_network_error_not_cached_and_raised():
 
 
 def test_caching_search_not_cached():
-    body = json.dumps([{"tab_num": "100", "fio": FIO_B}], ensure_ascii=False)
+    body = json.dumps(
+        {"value": [{"ТабельныйНомер": "100", "Сотрудник": {"Description": FIO_B}}]},
+        ensure_ascii=False,
+    )
     transport = FakeTransport(lambda u, h, t: HttpResult(200, body))
     client = OneCClient(_bases(), transport=transport)
     cache = FakeCache()
@@ -328,14 +336,13 @@ class InMemorySettingsStore:
 
 
 def test_get_onec_client_builds_from_settings(monkeypatch):
-    """Базы из settings (onec_bases) собирают CachingOneCClient без fallback env."""
+    """Базы из settings (onec_bases) + маппинг предприятий (из синхронизации)."""
     monkeypatch.delenv("ONEC_BASES_JSON", raising=False)
     store = InMemorySettingsStore(
         {
             "onec_bases": json.dumps(
                 [
                     {
-                        "enterprise": "Предприятие-Юг-Тест",
                         "code": "zup_c",
                         "name": "База Юг",
                         "url": "https://1c-mock.local/c",
@@ -344,13 +351,16 @@ def test_get_onec_client_builds_from_settings(monkeypatch):
                     }
                 ],
                 ensure_ascii=False,
-            )
+            ),
+            "onec_enterprise_bases": json.dumps({"Предприятие-Юг-Тест": ["zup_c"]}),
         }
     )
     client = employees.get_onec_client(Settings(), store=store)
     assert isinstance(client, CachingOneCClient)
     assert client.base_codes == ["zup_c"]
+    # Маппинг предприятие→базы — из синхронизации (в базе может быть несколько).
     assert client.bases_for_enterprise("Предприятие-Юг-Тест") == ["zup_c"]
+    assert client.bases_for_enterprise("Нет-такого") == []
 
 
 def test_get_onec_client_empty_settings_and_env_503(monkeypatch):

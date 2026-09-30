@@ -59,7 +59,6 @@ INFRA_KEYS: tuple[str, ...] = (
     "smtp_user",
     "smtp_password",
     "onec_bases",
-    "onec_enterprises_source",
 )
 
 SETTINGS_KEYS: tuple[str, ...] = CONTENT_KEYS + INFRA_KEYS
@@ -91,33 +90,21 @@ def _mask_onec_bases(value: object) -> object:
     return masked
 
 
-def _mask_onec_source(value: object) -> object:
-    """Пароль источника предприятий 1С в ответе: маска если задан, иначе None
-    (значение не отдаём), как у smtp_password."""
-    if not isinstance(value, dict):
-        return value
-    row = dict(value)
-    password = row.get("password")
-    row["password"] = SMTP_PASSWORD_MASK if isinstance(password, str) and password else None
-    return row
-
-
 def _merge_onec_bases(incoming: list[dict], stored: object) -> list[dict]:
     """Слить пароли баз 1С при PUT: пустое значение/маска входящего password —
-    сохранить текущий из БД; реальное значение — записать; без совпадения —
-    оставить как есть (пустой пароль)."""
-    saved_by_key: dict[tuple[str, str], object] = {}
+    сохранить текущий из БД (по коду базы); реальное значение — записать;
+    без совпадения — оставить как есть (пустой пароль)."""
+    saved_by_code: dict[str, object] = {}
     if isinstance(stored, list):
         for item in stored:
-            if isinstance(item, dict) and item.get("enterprise") and item.get("code"):
-                saved_by_key[(str(item["enterprise"]), str(item["code"]))] = item.get("password")
+            if isinstance(item, dict) and item.get("code"):
+                saved_by_code[str(item["code"])] = item.get("password")
     merged = []
     for item in incoming:
         row = dict(item)
         password = row.get("password")
         if password in (None, "", SMTP_PASSWORD_MASK):
-            key = (str(row.get("enterprise") or ""), str(row.get("code") or ""))
-            row["password"] = saved_by_key.get(key)
+            row["password"] = saved_by_code.get(str(row.get("code") or ""))
         merged.append(row)
     return merged
 
@@ -268,26 +255,31 @@ class MailTemplateItem(BaseModel):
 
 
 class OnecBaseItem(BaseModel):
-    """Подключение к базе 1С: предприятие + код + название + OData-параметры."""
+    """Подключение к базе 1С (OData) + схема сущностей/полей (дефолты под ЗУП 3.х).
 
-    enterprise: str = Field(description="Код предприятия (составной ключ)")
-    code: str = Field(description="Код базы 1С (base_code)")
+    В базе может быть несколько предприятий — список предприятий и маппинг
+    «предприятие→базы» собирает синхронизация (POST /settings/enterprises/sync)."""
+
+    code: str = Field(description="Код базы 1С (base_code, уникален)")
     name: str = Field(description="Название базы")
-    url: str = Field(description="OData-URL базы")
-    user: str = Field(default="", description="Сервисная УЗ чтения")
+    url: str = Field(description="OData-URL публикации базы (до /odata/standard.odata/)")
+    user: str = Field(default="", description="Сервисная УЗ чтения (роль OData)")
     password: str | None = Field(
         default=None, description="Пароль УЗ (маскируется в GET, пишется при вводе)"
     )
-
-
-class OnecEnterprisesSource(BaseModel):
-    """Источник справочника предприятий 1С (отдельный OData-эндпоинт)."""
-
-    url: str = Field(description="OData-URL источника предприятий")
-    user: str = Field(default="", description="Сервисная УЗ чтения")
-    password: str | None = Field(
-        default=None, description="Пароль УЗ (маскируется в GET, пишется при вводе)"
+    employee_entity: str = Field(
+        default="Catalog_СотрудникиОрганизаций", description="Сущность сотрудников OData"
     )
+    organization_entity: str = Field(
+        default="Catalog_Организации", description="Сущность организаций (предприятий) OData"
+    )
+    tab_num_field: str = Field(default="ТабельныйНомер", description="Поле таб.№")
+    fio_field: str = Field(
+        default="Сотрудник/Description", description="Поле ФИО (может требовать $expand)"
+    )
+    department_field: str = Field(default="Подразделение", description="Поле подразделения")
+    position_field: str = Field(default="Должность", description="Поле должности")
+    hire_date_field: str = Field(default="ДатаПриема", description="Поле даты приёма")
 
 
 class SettingsPayload(BaseModel):
@@ -357,9 +349,6 @@ class SettingsPayload(BaseModel):
     )
     onec_bases: list[OnecBaseItem] | None = Field(
         default=None, description="Подключения к базам 1С (OData, пароль маскируется)"
-    )
-    onec_enterprises_source: OnecEnterprisesSource | None = Field(
-        default=None, description="Источник справочника предприятий 1С"
     )
 
 
@@ -436,8 +425,6 @@ def _settings_dict(store: DbSettingsStore) -> dict:
     values["smtp_password"] = _mask_smtp_password(values.get("smtp_password"))
     # Пароли баз 1С наружу не отдаём: маска/None (аналог smtp_password).
     values["onec_bases"] = _mask_onec_bases(values.get("onec_bases"))
-    # Пароль источника предприятий 1С наружу не отдаём: маска/None.
-    values["onec_enterprises_source"] = _mask_onec_source(values.get("onec_enterprises_source"))
     return values
 
 
@@ -494,13 +481,6 @@ def update_settings(
             updates["onec_bases"] = _merge_onec_bases(
                 updates["onec_bases"], _from_stored(store.get("onec_bases"))
             )
-        # Пароль источника предприятий 1С: пустое/маска = сохранить текущий.
-        if "onec_enterprises_source" in updates:
-            source = updates["onec_enterprises_source"]
-            if isinstance(source, dict) and source.get("password") in (None, "", SMTP_PASSWORD_MASK):
-                saved = _from_stored(store.get("onec_enterprises_source"))
-                saved_password = saved.get("password") if isinstance(saved, dict) else None
-                source["password"] = saved_password
         stored = {key: _to_stored(value) for key, value in updates.items()}
         store.set_many(stored)
         values = _settings_dict(store)

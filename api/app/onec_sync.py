@@ -1,9 +1,10 @@
-# Синхронизация справочника предприятий из 1С (Фаза 4).
-# Источник — отдельный OData-эндпоинт, контракт уточнит ИТ; механизм готов,
-# до контракта — понятная ошибка «не настроено». Синхронизация: еженедельно
-# (worker, maybe_sync_weekly) и принудительно (эндпоинт POST /settings/
-# enterprises/sync, кнопка в админке). Только чтение из 1С (HTTP GET),
-# запись — только в settings (enterprises + onec_enterprises_synced_at).
+# Синхронизация справочника предприятий из 1С (Фаза C1).
+# Список предприятий берётся ИЗ КАЖДОЙ БАЗЫ 1С (сущность организаций базы,
+# в базе может быть несколько предприятий — ЗУП 3.х, справочник «Организации»).
+# Синхронизация: еженедельно (worker, maybe_sync_weekly) и принудительно
+# (POST /settings/enterprises/sync, кнопка в админке). Только чтение из 1С
+# (HTTP GET), запись — только в settings (enterprises + onec_enterprise_bases +
+# onec_enterprises_synced_at).
 
 from __future__ import annotations
 
@@ -13,11 +14,12 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 
+from .onec_client import build_entity_url, parse_collection
 from .settings_routes import read_setting_value
 
 
 class OnecSyncUnavailable(Exception):
-    """Источник предприятий 1С не настроен или недоступен (503/409, не 500)."""
+    """Базы 1С не настроены или недоступны (503, не 500)."""
 
 
 def http_get(url: str, user: str, password: str, timeout: float = 15.0) -> str:
@@ -31,73 +33,69 @@ def http_get(url: str, user: str, password: str, timeout: float = 15.0) -> str:
     return response.text
 
 
-def _parse_enterprises(payload: object) -> list[dict]:
-    """Нормализация ответа источника: список [{"code","name"},...].
-
-    Принимаются: голый список, конверт {"enterprises": [...]} и стандартная
-    OData-обёртка 1С {"value": [...]}. Записи без code пропускаются;
-    битый формат — OnecSyncUnavailable (не 500)."""
-    data = payload
-    if isinstance(data, dict):
-        # OData 1С возвращает массив в обёртке {"value": [...]} — принимаем
-        # и её, и собственный конверт {"enterprises": [...]}.
-        for key in ("enterprises", "value"):
-            candidate = data.get(key)
-            if isinstance(candidate, list):
-                data = candidate
-                break
-        else:
-            raise OnecSyncUnavailable("Неожиданный формат ответа источника предприятий 1С")
-    if not isinstance(data, list):
-        raise OnecSyncUnavailable("Неожиданный формат ответа источника предприятий 1С")
-    items = []
-    for item in data:
-        if not isinstance(item, dict) or not item.get("code"):
-            continue
-        items.append({"code": str(item["code"]), "name": str(item.get("name") or "")})
-    return items
+def _organization(item: dict) -> tuple[str, str]:
+    """Код/название организации из записи OData (Code/Description)."""
+    code = str(item.get("Code") or item.get("code") or "").strip()
+    name = str(item.get("Description") or item.get("name") or "").strip()
+    return code, name
 
 
 def sync_enterprises(store) -> list[dict]:
-    """Прочитать предприятия из источника 1С и записать в settings.
+    """Опрос всех баз 1С: собрать предприятия (union) и маппинг предприятие→базы.
 
-    Источник — settings.onec_enterprises_source (JSON: {url, user, password});
-    без url — OnecSyncUnavailable. Результат пишется в settings.enterprises
-    и settings.onec_enterprises_synced_at (now ISO). Возвращает список.
+    Базы — settings.onec_bases (в каждой — OData-URL и сущность организаций).
+    Результат пишется в settings.enterprises, settings.onec_enterprise_bases
+    и settings.onec_enterprises_synced_at. Падение одной базы не валит остальные;
+    если не ответила НИ ОДНА — OnecSyncUnavailable.
     """
-    source = read_setting_value(store, "onec_enterprises_source")
-    url = ""
-    user = ""
-    password = ""
-    if isinstance(source, dict):
-        url = str(source.get("url") or "").strip()
-        user = str(source.get("user") or "")
-        password = str(source.get("password") or "")
-    if not url:
-        raise OnecSyncUnavailable("Источник предприятий 1С не настроен")
-    try:
-        text = http_get(url, user, password)
-        parsed = json.loads(text)
-    except OnecSyncUnavailable:
-        raise
-    except Exception as exc:
-        raise OnecSyncUnavailable(str(exc)) from exc
-    items = _parse_enterprises(parsed)
-    store.set("enterprises", json.dumps(items, ensure_ascii=False))
+    bases = read_setting_value(store, "onec_bases")
+    if not isinstance(bases, list) or not bases:
+        raise OnecSyncUnavailable("Базы 1С не настроены")
+    enterprises: dict[str, dict] = {}
+    mapping: dict[str, list[str]] = {}
+    errors: list[str] = []
+    ok = False
+    for base in bases:
+        if not isinstance(base, dict) or not base.get("url") or not base.get("code"):
+            continue
+        base_code = str(base["code"])
+        entity = str(base.get("organization_entity") or "Catalog_Организации")
+        url = build_entity_url(str(base["url"]), entity)
+        try:
+            text = http_get(url, str(base.get("user") or ""), str(base.get("password") or ""))
+            items = parse_collection(text)
+        except Exception as exc:  # падение одной базы — не валит остальные
+            errors.append("%s: %s" % (base_code, exc))
+            continue
+        ok = True
+        for item in items:
+            code, name = _organization(item)
+            if not code:
+                continue
+            if code not in enterprises:
+                enterprises[code] = {"code": code, "name": name}
+            if base_code not in mapping.setdefault(code, []):
+                mapping[code].append(base_code)
+    if not ok:
+        raise OnecSyncUnavailable(
+            "Ни одна база 1С не ответила: " + "; ".join(errors or ["баз нет"])
+        )
+    store.set("enterprises", json.dumps(list(enterprises.values()), ensure_ascii=False))
+    store.set("onec_enterprise_bases", json.dumps(mapping, ensure_ascii=False))
     store.set(
         "onec_enterprises_synced_at",
         json.dumps(datetime.now(timezone.utc).isoformat()),
     )
-    return items
+    return list(enterprises.values())
 
 
 def maybe_sync_weekly(store) -> bool:
     """Еженедельная синхронизация предприятий (worker): тихо, без сбоев.
 
-    Источник не настроен — False; последняя синхронизация свежая (< 7 дней) —
+    Базы не настроены — False; последняя синхронизация свежая (< 7 дней) —
     False; иначе sync_enterprises (сбой не валит worker — False), успех — True."""
-    source = read_setting_value(store, "onec_enterprises_source")
-    if not (isinstance(source, dict) and str(source.get("url") or "").strip()):
+    bases = read_setting_value(store, "onec_bases")
+    if not isinstance(bases, list) or not bases:
         return False
     last_raw = read_setting_value(store, "onec_enterprises_synced_at")
     if isinstance(last_raw, str) and last_raw:
