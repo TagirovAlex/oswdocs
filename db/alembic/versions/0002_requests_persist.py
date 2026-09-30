@@ -78,6 +78,13 @@ def upgrade() -> None:
         "ADD COLUMN truth_source TEXT NOT NULL DEFAULT '1c'"
     )
 
+    # mail_queue.template_code ссылается на mail_templates(code), но прикладные
+    # шаблоны писем читаются из settings (JSONB-ключ mail_templates), таблица
+    # не сидируется — FK ронял бы постановку писем в очередь (ревью Волны 3).
+    op.execute(
+        "ALTER TABLE mail_queue DROP CONSTRAINT IF EXISTS mail_queue_template_code_fkey"
+    )
+
 
 def downgrade() -> None:
     # Сначала индекс на code, затем колонки.
@@ -104,6 +111,11 @@ def downgrade() -> None:
         "ALTER TABLE dismissal_requests "
         "ADD CONSTRAINT dismissal_requests_initiated_by_hr_fkey "
         "FOREIGN KEY (initiated_by_hr) REFERENCES users (sam)"
+    )
+    op.execute(
+        "ALTER TABLE mail_queue "
+        "ADD CONSTRAINT mail_queue_template_code_fkey "
+        "FOREIGN KEY (template_code) REFERENCES mail_templates (code)"
     )
 
     # Возврат к схеме 0001 «по возможности»: если остался NULL base_code,

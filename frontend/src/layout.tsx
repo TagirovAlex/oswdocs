@@ -401,7 +401,7 @@ export function SedLayout(props: SedLayoutProps) {
           {tab === "Заявки" && (
           <>
           <div className="sed-toolbar" aria-label="Панель действий">
-            <button type="button" className="sed-btn">
+            <button type="button" className="sed-btn" onClick={() => setTab("Создание")}>
               Создать заявку
             </button>
             <button
