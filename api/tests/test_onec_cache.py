@@ -315,3 +315,48 @@ def test_get_onec_client_builds_caching_client(monkeypatch):
     client = employees.get_onec_client(Settings())
     assert isinstance(client, CachingOneCClient)
     assert client.base_codes == ["zup_c"]
+
+
+class InMemorySettingsStore:
+    """Мок хранилища settings (сид-формат значений), как в test_settings_api."""
+
+    def __init__(self, initial=None):
+        self._data = dict(initial or {})
+
+    def get(self, key):
+        return self._data.get(key)
+
+
+def test_get_onec_client_builds_from_settings(monkeypatch):
+    """Базы из settings (onec_bases) собирают CachingOneCClient без fallback env."""
+    monkeypatch.delenv("ONEC_BASES_JSON", raising=False)
+    store = InMemorySettingsStore(
+        {
+            "onec_bases": json.dumps(
+                [
+                    {
+                        "enterprise": "Предприятие-Юг-Тест",
+                        "code": "zup_c",
+                        "name": "База Юг",
+                        "url": "https://1c-mock.local/c",
+                        "user": "r",
+                        "password": "s3",
+                    }
+                ],
+                ensure_ascii=False,
+            )
+        }
+    )
+    client = employees.get_onec_client(Settings(), store=store)
+    assert isinstance(client, CachingOneCClient)
+    assert client.base_codes == ["zup_c"]
+    assert client.bases_for_enterprise("Предприятие-Юг-Тест") == ["zup_c"]
+
+
+def test_get_onec_client_empty_settings_and_env_503(monkeypatch):
+    """Пустые базы и в settings, и в env — 503 (прежнее поведение)."""
+    monkeypatch.delenv("ONEC_BASES_JSON", raising=False)
+    store = InMemorySettingsStore({"onec_bases": "[]"})
+    with pytest.raises(HTTPException) as exc_info:
+        employees.get_onec_client(Settings(), store=store)
+    assert exc_info.value.status_code == 503

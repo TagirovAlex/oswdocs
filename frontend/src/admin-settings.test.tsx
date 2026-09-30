@@ -45,6 +45,7 @@ const settings: SettingsData = {
     { service: "Бухгалтерия", category: "Увольнение", body: "Бегунок: {{ fio }}" },
   ],
   mail_templates: [{ code: "assigned", subject: "Заявка {{ request_id }}", body_html: "<html>{{ fio }}</html>" }],
+  onec_bases: [],
 };
 
 // Контентная часть (как отдаёт GET /api/settings/content для руководителя ОК).
@@ -67,6 +68,7 @@ const contentOnly: SettingsData = {
   templates: [],
   doc_templates: [],
   mail_templates: [],
+  onec_bases: [],
 };
 
 beforeEach(() => {
@@ -236,5 +238,42 @@ describe("AdminSettings", () => {
     await waitFor(() => expect(screen.getByLabelText("Длительность сессии")).toBeInTheDocument());
     expect(screen.getByLabelText("Длительность сессии")).toHaveValue(600);
     expect(screen.getByLabelText("Хост SMTP-релея")).toHaveValue("intsrvmail.fidelio.local");
+  });
+
+  // Админ: на вкладке «Инфра» видит 1С-базы, добавляет базу и сохраняет (PUT с onec_bases).
+  it("добавляет базу 1С и сохраняет через PUT", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+    vi.mocked(saveSettings).mockImplementation(async (data) => data);
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Инфра" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Инфра" }));
+    await waitFor(() => expect(screen.getByText("1С-базы (подключения)")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByText("Добавить базу 1С"));
+    fireEvent.change(screen.getByLabelText("Предприятие базы 1С 1"), { target: { value: "ENT_PRIMER_1" } });
+    fireEvent.change(screen.getByLabelText("Код базы 1С 1"), { target: { value: "zup_t1" } });
+    fireEvent.change(screen.getByLabelText("Название базы 1С 1"), { target: { value: "База ЗУП" } });
+    fireEvent.change(screen.getByLabelText("OData URL базы 1С 1"), { target: { value: "https://1c-mock.local/t1" } });
+    fireEvent.change(screen.getByLabelText("УЗ базы 1С 1"), { target: { value: "reader" } });
+    fireEvent.change(screen.getByLabelText("Пароль базы 1С 1"), { target: { value: "secret-1" } });
+    fireEvent.click(screen.getByText("Сохранить"));
+
+    await waitFor(() =>
+      expect(saveSettings).toHaveBeenCalledWith(
+        expect.objectContaining({
+          onec_bases: [
+            {
+              enterprise: "ENT_PRIMER_1",
+              code: "zup_t1",
+              name: "База ЗУП",
+              url: "https://1c-mock.local/t1",
+              user: "reader",
+              password: "secret-1",
+            },
+          ],
+        }),
+      ),
+    );
   });
 });

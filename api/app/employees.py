@@ -17,6 +17,7 @@ from .config import Settings, get_settings
 from .deps import CurrentUser, get_current_user, is_privileged
 from .onec_client import (
     EmployeeCard,
+    OneCBaseConfig,
     OneCBaseDown,
     OneCCircuitOpen,
     OneCClient,
@@ -29,6 +30,11 @@ from .resolver import (
     make_snapshot_1c,
     search_enterprise,
 )
+from .settings_routes import (
+    DbSettingsStore,
+    get_settings_store,
+    read_setting_value,
+)
 
 router = APIRouter(tags=["сотрудники"])
 
@@ -37,16 +43,44 @@ router = APIRouter(tags=["сотрудники"])
 # Зависимости-интерфейсы (границы для моков волны A)
 # ---------------------------------------------------------------------------
 
-def get_onec_client(settings: Settings = Depends(get_settings)) -> OneCClient:
-    """Боевой клиент 1С: OneCClient по базам из env + кэш Redis карточек.
+def _bases_from_settings(store: DbSettingsStore | None) -> dict[str, OneCBaseConfig]:
+    """Базы 1С из settings (onec_bases) в формате OneCClient: код -> конфиг.
 
-    Без баз в ONEC_BASES_JSON — 503 (прежнее поведение офлайн-тестов);
+    Непустые enterprise/code обязательны; url/user/secret подставляются как
+    есть (пустые допустимы — проверка доступности на транспорте)."""
+    if store is None or not hasattr(store, "get"):
+        return {}
+    raw = read_setting_value(store, "onec_bases")
+    bases: dict[str, OneCBaseConfig] = {}
+    for item in raw or []:
+        if not isinstance(item, dict) or not item.get("enterprise") or not item.get("code"):
+            continue
+        code = str(item["code"])
+        bases[code] = OneCBaseConfig(
+            code=code,
+            enterprise=str(item["enterprise"]),
+            url=str(item.get("url") or ""),
+            user=str(item.get("user") or ""),
+            secret=str(item.get("password") or ""),
+        )
+    return bases
+
+
+def get_onec_client(
+    settings: Settings = Depends(get_settings),
+    store: DbSettingsStore | None = Depends(get_settings_store),
+) -> OneCClient:
+    """Боевой клиент 1С: базы из settings (onec_bases), иначе из env; + кэш Redis.
+
+    Без баз в настройках и в ONEC_BASES_JSON — 503 (прежнее поведение);
     кэшируется только успешный get_employee, падение Redis не валит чтение.
     """
     from .onec_cache import CachingOneCClient, RedisCardCache
     from .onec_client import load_bases_from_env
 
-    bases = load_bases_from_env()
+    bases = _bases_from_settings(store)
+    if not bases:
+        bases = load_bases_from_env()
     if not bases:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

@@ -69,6 +69,7 @@ SEED_VALUES = {
         '[{"code": "assigned", "subject": "Заявка {{ request_id }}",'
         ' "body_html": "<html>Заявка {{ request_id }} назначена {{ fio }}</html>"}]'
     ),
+    "onec_bases": "[]",
 }
 
 # Контрактный ответ GET /settings (все ключи на месте, типы по B2).
@@ -116,6 +117,7 @@ CONTRACT_VALUES = {
             "body_html": "<html>Заявка {{ request_id }} назначена {{ fio }}</html>",
         }
     ],
+    "onec_bases": [],
 }
 
 # Контент-часть контракта: только ключи CONTENT_KEYS (для GET/PUT /settings/content).
@@ -161,6 +163,16 @@ UPDATED_VALUES = {
             "code": "reminder",
             "subject": "Напоминание {{ request_id }}",
             "body_html": "<html>Напомним про {{ request_id }}</html>",
+        }
+    ],
+    "onec_bases": [
+        {
+            "enterprise": "ENT_PRIMER_1",
+            "code": "zup_t1",
+            "name": "База ЗУП тестовая",
+            "url": "https://1c-mock.local/t1",
+            "user": "reader",
+            "password": None,
         }
     ],
 }
@@ -413,6 +425,100 @@ def test_settings_put_store_down_503(client, admin_headers, mock_store):
     mock_store.broken = True
     response = client.put("/settings", json=dict(CONTRACT_VALUES), headers=admin_headers)
     assert response.status_code == 503
+
+
+# --- onec_bases (базы 1С: пароль маскируется в GET, сливается при PUT) ---
+
+def test_settings_put_onec_bases_passwords_stored_and_masked(client, admin_headers, mock_store):
+    """PUT баз с паролями: в БД пароли сохранены, в ответе замаскированы."""
+    bases = [
+        {
+            "enterprise": "ENT_PRIMER_1",
+            "code": "zup_t1",
+            "name": "База ЗУП",
+            "url": "https://1c-mock.local/t1",
+            "user": "reader",
+            "password": "secret-1",
+        }
+    ]
+    response = client.put("/settings", json={"onec_bases": bases}, headers=admin_headers)
+    assert response.status_code == 200
+    # В ответе пароль маскируется (как smtp_password).
+    assert response.json()["onec_bases"][0]["password"] == SMTP_PASSWORD_MASK
+    # В БД — настоящее значение.
+    stored = json.loads(mock_store._data["onec_bases"])
+    assert stored[0]["password"] == "secret-1"
+    # Повторный GET тоже отдаёт маску.
+    got = client.get("/settings", headers=admin_headers)
+    assert got.json()["onec_bases"][0]["password"] == SMTP_PASSWORD_MASK
+
+
+def test_settings_put_onec_bases_empty_password_keeps_existing(client, admin_headers, mock_store):
+    """Пустое значение/маска пароля существующей базы — пароль из БД сохраняется."""
+    bases = [
+        {
+            "enterprise": "ENT_PRIMER_1",
+            "code": "zup_t1",
+            "name": "База ЗУП",
+            "url": "https://1c-mock.local/t1",
+            "user": "reader",
+            "password": "secret-1",
+        }
+    ]
+    assert client.put("/settings", json={"onec_bases": bases}, headers=admin_headers).status_code == 200
+    # Тот же список, но пароль пустой — текущий должен сохраниться.
+    kept = [
+        {
+            "enterprise": "ENT_PRIMER_1",
+            "code": "zup_t1",
+            "name": "База ЗУП",
+            "url": "https://1c-mock.local/t1",
+            "user": "reader",
+            "password": "",
+        }
+    ]
+    response = client.put("/settings", json={"onec_bases": kept}, headers=admin_headers)
+    assert response.status_code == 200
+    assert response.json()["onec_bases"][0]["password"] == SMTP_PASSWORD_MASK
+    assert json.loads(mock_store._data["onec_bases"])[0]["password"] == "secret-1"
+    # Маска в PUT тоже не затирает текущий пароль.
+    masked = [
+        {
+            "enterprise": "ENT_PRIMER_1",
+            "code": "zup_t1",
+            "name": "База ЗУП",
+            "url": "https://1c-mock.local/t1",
+            "user": "reader",
+            "password": SMTP_PASSWORD_MASK,
+        }
+    ]
+    assert client.put("/settings", json={"onec_bases": masked}, headers=admin_headers).status_code == 200
+    assert json.loads(mock_store._data["onec_bases"])[0]["password"] == "secret-1"
+
+
+def test_settings_put_onec_bases_new_base_no_password(client, admin_headers, mock_store):
+    """Новая база без пароля — пароль пустой (None в ответе, '' в БД-JSON)."""
+    bases = [
+        {
+            "enterprise": "ENT_PRIMER_9",
+            "code": "zup_t9",
+            "name": "Новая база",
+            "url": "https://1c-mock.local/t9",
+            "user": "reader",
+            "password": None,
+        }
+    ]
+    response = client.put("/settings", json={"onec_bases": bases}, headers=admin_headers)
+    assert response.status_code == 200
+    assert response.json()["onec_bases"][0]["password"] is None
+    assert json.loads(mock_store._data["onec_bases"])[0]["password"] is None
+
+
+def test_settings_content_ignores_onec_bases(client, hr_admin_headers, mock_store):
+    """Контент-эндпоинт не отдаёт и не пишет onec_bases (инфра-ключ)."""
+    response = client.get("/settings/content", headers=hr_admin_headers)
+    assert response.status_code == 200
+    assert "onec_bases" not in response.json()
 
 
 # --- GET/PUT /settings/content (контент: руководитель ОК + админ) ---

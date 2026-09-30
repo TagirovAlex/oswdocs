@@ -36,6 +36,22 @@ export interface SettingsMailTemplate {
   body_html: string;
 }
 
+// Подключение к базе 1С (settings.onec_bases): OData-параметры.
+export interface SettingsOnecBase {
+  // Код предприятия (составной ключ).
+  enterprise: string;
+  // Код базы 1С (base_code).
+  code: string;
+  // Название базы.
+  name: string;
+  // OData-URL базы.
+  url: string;
+  // Сервисная УЗ чтения.
+  user: string;
+  // Пароль УЗ (в GET — маска либо null; записывается только при вводе).
+  password: string | null;
+}
+
 // Настройки СЭД из таблицы settings (типы — по контракту API, поля nullable:
 // ключа нет в БД — null, значений в коде нет, AGENTS.md п.3).
 export interface SettingsData {
@@ -76,6 +92,8 @@ export interface SettingsData {
   doc_templates: SettingsDocTemplate[] | null;
   // Шаблоны писем (mail_templates).
   mail_templates: SettingsMailTemplate[] | null;
+  // Подключения к базам 1С (onec_bases; пароль маскируется в GET).
+  onec_bases: SettingsOnecBase[] | null;
 }
 
 // Контент-настройки (GET/PUT /api/settings/content): контент-ключи для

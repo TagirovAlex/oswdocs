@@ -58,6 +58,7 @@ INFRA_KEYS: tuple[str, ...] = (
     "smtp_from",
     "smtp_user",
     "smtp_password",
+    "onec_bases",
 )
 
 SETTINGS_KEYS: tuple[str, ...] = CONTENT_KEYS + INFRA_KEYS
@@ -70,6 +71,43 @@ SMTP_PASSWORD_MASK = "********"
 def _mask_smtp_password(value: object) -> object:
     """Пароль SMTP в ответе: маска если задан, иначе None (значение не отдаём)."""
     return SMTP_PASSWORD_MASK if isinstance(value, str) and value else None
+
+
+def _mask_onec_bases(value: object) -> object:
+    """Пароли баз 1С в ответе: для каждого элемента списка password заменяется
+    на маску если задан, иначе None (значение не отдаём)."""
+    if not isinstance(value, list):
+        return value
+    masked = []
+    for item in value:
+        if not isinstance(item, dict):
+            masked.append(item)
+            continue
+        row = dict(item)
+        password = row.get("password")
+        row["password"] = SMTP_PASSWORD_MASK if isinstance(password, str) and password else None
+        masked.append(row)
+    return masked
+
+
+def _merge_onec_bases(incoming: list[dict], stored: object) -> list[dict]:
+    """Слить пароли баз 1С при PUT: пустое значение/маска входящего password —
+    сохранить текущий из БД; реальное значение — записать; без совпадения —
+    оставить как есть (пустой пароль)."""
+    saved_by_key: dict[tuple[str, str], object] = {}
+    if isinstance(stored, list):
+        for item in stored:
+            if isinstance(item, dict) and item.get("enterprise") and item.get("code"):
+                saved_by_key[(str(item["enterprise"]), str(item["code"]))] = item.get("password")
+    merged = []
+    for item in incoming:
+        row = dict(item)
+        password = row.get("password")
+        if password in (None, "", SMTP_PASSWORD_MASK):
+            key = (str(row.get("enterprise") or ""), str(row.get("code") or ""))
+            row["password"] = saved_by_key.get(key)
+        merged.append(row)
+    return merged
 
 
 def _to_stored(value: object) -> str:
@@ -217,6 +255,19 @@ class MailTemplateItem(BaseModel):
     body_html: str = Field(description="HTML-тело письма (Jinja-подобное)")
 
 
+class OnecBaseItem(BaseModel):
+    """Подключение к базе 1С: предприятие + код + название + OData-параметры."""
+
+    enterprise: str = Field(description="Код предприятия (составной ключ)")
+    code: str = Field(description="Код базы 1С (base_code)")
+    name: str = Field(description="Название базы")
+    url: str = Field(description="OData-URL базы")
+    user: str = Field(default="", description="Сервисная УЗ чтения")
+    password: str | None = Field(
+        default=None, description="Пароль УЗ (маскируется в GET, пишется при вводе)"
+    )
+
+
 class SettingsPayload(BaseModel):
     """Тело GET/PUT /settings: все прикладные ключи; в PUT все опциональны
     (частичное обновление — пишутся только присутствующие в теле ключи)."""
@@ -281,6 +332,9 @@ class SettingsPayload(BaseModel):
     )
     mail_templates: list[MailTemplateItem] | None = Field(
         default=None, description="Шаблоны писем (код события→тема+HTML-тело)"
+    )
+    onec_bases: list[OnecBaseItem] | None = Field(
+        default=None, description="Подключения к базам 1С (OData, пароль маскируется)"
     )
 
 
@@ -355,6 +409,8 @@ def _settings_dict(store: DbSettingsStore) -> dict:
     values = {key: _from_stored(raw.get(key)) for key in SETTINGS_KEYS}
     # Пароль SMTP наружу не отдаём: только признак «задан/не задан».
     values["smtp_password"] = _mask_smtp_password(values.get("smtp_password"))
+    # Пароли баз 1С наружу не отдаём: маска/None (аналог smtp_password).
+    values["onec_bases"] = _mask_onec_bases(values.get("onec_bases"))
     return values
 
 
@@ -405,8 +461,13 @@ def update_settings(
     # реальное значение — только явный ввод нового пароля.
     if updates.get("smtp_password") in (None, "", SMTP_PASSWORD_MASK):
         updates.pop("smtp_password", None)
-    stored = {key: _to_stored(value) for key, value in updates.items()}
     try:
+        # Пароли баз 1С: пустое значение/маска = сохранить текущий из БД.
+        if "onec_bases" in updates:
+            updates["onec_bases"] = _merge_onec_bases(
+                updates["onec_bases"], _from_stored(store.get("onec_bases"))
+            )
+        stored = {key: _to_stored(value) for key, value in updates.items()}
         store.set_many(stored)
         values = _settings_dict(store)
     except SettingsUnavailable as exc:

@@ -10,6 +10,7 @@ import type {
   SettingsDocTemplate,
   SettingsEnterprise,
   SettingsMailTemplate,
+  SettingsOnecBase,
   SettingsTemplate,
   SettingsTemplateStep,
 } from "./settings-client";
@@ -297,6 +298,9 @@ export function AdminSettings(props: AdminSettingsProps) {
   const [templates, setTemplates] = useState<SettingsTemplate[]>([]);
   const [docTemplates, setDocTemplates] = useState<SettingsDocTemplate[]>([]);
   const [mailTemplates, setMailTemplates] = useState<SettingsMailTemplate[]>([]);
+  // Базы 1С: поля формы + параллельный признак «пароль задан» для placeholder.
+  const [onecBases, setOnecBases] = useState<SettingsOnecBase[]>([]);
+  const [onecBasesSet, setOnecBasesSet] = useState<boolean[]>([]);
   // Эскалация в форме не редактируется (отдельная волна), передаём как загружено.
   const [positionEscalation, setPositionEscalation] = useState<Record<string, number> | null>(null);
 
@@ -320,6 +324,9 @@ export function AdminSettings(props: AdminSettingsProps) {
           // Пароль из API не приходит (маска/null): поле пустое, только признак.
           setSmtpPassword("");
           setSmtpPasswordSet(full.smtp_password !== null);
+          // Базы 1С: пароль очищаем, признак «задан» — из маски/None.
+          setOnecBases((full.onec_bases ?? []).map((b) => ({ ...b, password: "" })));
+          setOnecBasesSet((full.onec_bases ?? []).map((b) => b.password !== null));
         }
         setTtl(data.approval_ttl_days);
         setPaperRequired(data.require_paper_signature);
@@ -385,6 +392,8 @@ export function AdminSettings(props: AdminSettingsProps) {
           smtp_user: smtpUser ?? "",
           // Пустое значение — сервер сохранит текущий пароль (не перезапишет).
           smtp_password: smtpPassword,
+          // Пароль базы — как введено (пустое → сервер сохранит текущий).
+          onec_bases: onecBases,
         };
         const result = await saveSettings(full);
         setSaved(
@@ -550,6 +559,108 @@ export function AdminSettings(props: AdminSettingsProps) {
               onChange={(e) => setSmtpPassword(e.target.value)}
             />
           </label>
+        </fieldset>
+      )}
+
+      {activeTab === "Инфра" && isAdmin && (
+        <fieldset>
+          <legend>1С-базы (подключения)</legend>
+          {onecBases.length === 0 && <div className="sed-note">не задано</div>}
+          {onecBases.map((base, i) => (
+            <div key={i} style={{ border: "1px solid #ccc", marginTop: 8, padding: 8 }}>
+              <label style={{ display: "block" }}>
+                Предприятие (enterprise)
+                <input
+                  aria-label={`Предприятие базы 1С ${i + 1}`}
+                  type="text"
+                  value={base.enterprise}
+                  onChange={(e) =>
+                    setOnecBases(onecBases.map((b, j) => (j === i ? { ...b, enterprise: e.target.value } : b)))
+                  }
+                />
+              </label>
+              <label style={{ display: "block", marginTop: 8 }}>
+                Код базы 1С (base_code)
+                <input
+                  aria-label={`Код базы 1С ${i + 1}`}
+                  type="text"
+                  value={base.code}
+                  onChange={(e) =>
+                    setOnecBases(onecBases.map((b, j) => (j === i ? { ...b, code: e.target.value } : b)))
+                  }
+                />
+              </label>
+              <label style={{ display: "block", marginTop: 8 }}>
+                Название базы
+                <input
+                  aria-label={`Название базы 1С ${i + 1}`}
+                  type="text"
+                  value={base.name}
+                  onChange={(e) =>
+                    setOnecBases(onecBases.map((b, j) => (j === i ? { ...b, name: e.target.value } : b)))
+                  }
+                />
+              </label>
+              <label style={{ display: "block", marginTop: 8 }}>
+                OData-URL базы
+                <input
+                  aria-label={`OData URL базы 1С ${i + 1}`}
+                  type="text"
+                  value={base.url}
+                  onChange={(e) =>
+                    setOnecBases(onecBases.map((b, j) => (j === i ? { ...b, url: e.target.value } : b)))
+                  }
+                />
+              </label>
+              <label style={{ display: "block", marginTop: 8 }}>
+                Сервисная УЗ чтения (user)
+                <input
+                  aria-label={`УЗ базы 1С ${i + 1}`}
+                  type="text"
+                  value={base.user}
+                  onChange={(e) =>
+                    setOnecBases(onecBases.map((b, j) => (j === i ? { ...b, user: e.target.value } : b)))
+                  }
+                />
+              </label>
+              <label style={{ display: "block", marginTop: 8 }}>
+                Пароль УЗ (оставьте пустым, чтобы сохранить текущий)
+                <input
+                  aria-label={`Пароль базы 1С ${i + 1}`}
+                  type="password"
+                  placeholder={onecBasesSet[i] ? "задан (не менять)" : "не задан"}
+                  value={base.password ?? ""}
+                  onChange={(e) =>
+                    setOnecBases(onecBases.map((b, j) => (j === i ? { ...b, password: e.target.value } : b)))
+                  }
+                />
+              </label>
+              <div className="sed-toolbar" style={{ marginTop: 8 }}>
+                <button
+                  type="button"
+                  className="sed-btn sed-btn--ghost"
+                  onClick={() => {
+                    setOnecBases(onecBases.filter((_, j) => j !== i));
+                    setOnecBasesSet(onecBasesSet.filter((_, j) => j !== i));
+                  }}
+                >
+                  Удалить базу
+                </button>
+              </div>
+            </div>
+          ))}
+          <div className="sed-toolbar" style={{ marginTop: 12 }}>
+            <button
+              type="button"
+              className="sed-btn"
+              onClick={() => {
+                setOnecBases([...onecBases, { enterprise: "", code: "", name: "", url: "", user: "", password: "" }]);
+                setOnecBasesSet([...onecBasesSet, false]);
+              }}
+            >
+              Добавить базу 1С
+            </button>
+          </div>
         </fieldset>
       )}
 
