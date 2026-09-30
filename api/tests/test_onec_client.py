@@ -255,5 +255,20 @@ def test_normalize_odata_base_url():
         == "http://h/zup/odata/standard.odata"
     )
     assert build_entity_url("http://h/zup/ru/", "Catalog_Организации") == (
-        "http://h/zup/ru/odata/standard.odata/Catalog_Организации?$format=json"
+        "http://h/zup/ru/odata/standard.odata/Catalog_%D0%9E%D1%80%D0%B3%D0%B0%D0%BD%D0%B8%D0%B7%D0%B0%D1%86%D0%B8%D0%B8?$format=json"
     )
+
+
+def test_built_urls_are_ascii():
+    """Кириллица в сущности/полях кодируется — URL пригоден для urllib (ascii)."""
+    from urllib.parse import quote
+
+    from app.onec_client import OneCClient
+
+    cfg = _bases()["zup_a"]
+    emp = OneCClient._build_employee_url(cfg, "100")
+    search = OneCClient._build_search_url(cfg, "Сказочников")
+    for url in (emp, search):
+        url.encode("ascii")  # не бросает UnicodeEncodeError
+    assert quote("Catalog_СотрудникиОрганизаций") in emp
+    assert "СотрудникиОрганизаций" not in emp  # сырой кириллицы в пути нет

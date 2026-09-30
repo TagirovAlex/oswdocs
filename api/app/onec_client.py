@@ -223,8 +223,11 @@ def normalize_odata_base_url(url: str) -> str:
 
 
 def build_entity_url(base_url: str, entity: str) -> str:
-    """OData-URL коллекции сущности: {base_url}/{entity}?$format=json."""
-    return normalize_odata_base_url(base_url) + "/" + entity + "?$format=json"
+    """OData-URL коллекции сущности: {base_url}/{entity}?$format=json.
+
+    Сущность кодируется (кириллица в имени, напр. Catalog_СотрудникиОрганизаций)
+    — urllib требует ascii-URL, httpx сам не кодирует."""
+    return normalize_odata_base_url(base_url) + "/" + urllib.parse.quote(entity) + "?$format=json"
 
 
 def parse_collection(body: str) -> List[Dict[str, object]]:
@@ -400,7 +403,7 @@ class OneCClient:
         flt = urllib.parse.quote("%s eq '%s'" % (cfg.tab_num_field, tab_num), safe="")
         url = "%s/%s?$format=json&$top=1&$select=%s&$filter=%s" % (
             normalize_odata_base_url(cfg.url),
-            cfg.employee_entity,
+            urllib.parse.quote(cfg.employee_entity),  # кириллица в имени сущности
             select,
             flt,
         )
@@ -418,7 +421,7 @@ class OneCClient:
         )
         url = "%s/%s?$format=json&$top=50&$select=%s&$filter=%s" % (
             normalize_odata_base_url(cfg.url),
-            cfg.employee_entity,
+            urllib.parse.quote(cfg.employee_entity),  # кириллица в имени сущности
             select,
             flt,
         )
