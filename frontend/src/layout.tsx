@@ -44,6 +44,7 @@ type Tab = (typeof TABS)[number];
 // Подписи ролей в шапке (матрица README п.1).
 const ROLE_LABELS: Record<Role, string> = {
   hr: "ОК",
+  hr_admin: "Руководитель ОК",
   owner: "Владелец",
   admin: "Админ",
   guest: "Гость",
@@ -86,10 +87,11 @@ export function SedLayout(props: SedLayoutProps) {
   // Принудительная перезагрузка списка после отметки/действия ОК (refetch).
   const [listVersion, setListVersion] = useState<number>(0);
 
-  // Видимые вкладки по роли: «Настройки» — только админу, «Создание» — ОК и админу.
+  // Видимые вкладки по роли: «Настройки» — только админу, «Создание» — ОК,
+  // руководителю ОК и админу.
   const visibleTabs = useMemo(() => {
     const tabs: Tab[] = ["Заявки"];
-    if (role === "hr" || role === "admin") tabs.push("Создание");
+    if (role === "hr" || role === "hr_admin" || role === "admin") tabs.push("Создание");
     if (role === "admin") tabs.push("Настройки");
     return tabs;
   }, [role]);

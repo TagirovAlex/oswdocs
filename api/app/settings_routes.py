@@ -287,8 +287,9 @@ def _require_admin(user: CurrentUser) -> None:
 
 
 def _require_hr(user: CurrentUser) -> None:
-    """Справочники Волны 1 (предприятия/группы шагов) — только ОК и админы."""
-    if user.role not in ("hr", "admin"):
+    """Справочники Волны 1 (предприятия/группы шагов) — только ОК,
+    руководителям ОК и админам."""
+    if user.role not in ("hr", "hr_admin", "admin"):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Справочники доступны только разрешенной группе",

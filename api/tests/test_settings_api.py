@@ -28,6 +28,7 @@ from app.settings_routes import (  # noqa: E402
 TEST_ALLOWED = "SED_HR,SED_ADMINS"
 TEST_ADMINS = "SED_ADMINS"
 TEST_HR = "SED_HR"
+TEST_HR_ADMIN = "SED_HR_ADMIN"
 TEST_STEP_PREFIX = "SED_STEP_"
 
 # Сид-формат значений (как в db/seeds/settings.sql): int '3', bool 'true',
@@ -194,6 +195,7 @@ def settings_override():
         ALLOWED_AD_GROUPS=TEST_ALLOWED,
         ADMIN_GROUPS=TEST_ADMINS,
         HR_GROUPS=TEST_HR,
+        HR_ADMIN_GROUPS=TEST_HR_ADMIN,
         STEP_GROUP_PREFIX=TEST_STEP_PREFIX,
     )
     app.dependency_overrides[get_settings] = lambda: settings
@@ -240,6 +242,12 @@ def test_settings_get_no_auth_401(client, noauth_headers, settings_override):
 def test_settings_get_hr_403(client, hr_headers, mock_store):
     """ОК (hr) не читает настройки — 403 (admin-only, is_privileged не подходит)."""
     response = client.get("/settings", headers=hr_headers)
+    assert response.status_code == 403
+
+
+def test_settings_get_hr_admin_403(client, hr_admin_headers, mock_store):
+    """Руководитель ОК тоже не читает настройки — 403 (до Фазы 2)."""
+    response = client.get("/settings", headers=hr_admin_headers)
     assert response.status_code == 403
 
 
@@ -355,6 +363,12 @@ def test_settings_put_explicit_null_stored(client, admin_headers, mock_store):
 def test_settings_put_hr_403(client, hr_headers, mock_store):
     """ОК не редактирует настройки — 403."""
     response = client.put("/settings", json=dict(CONTRACT_VALUES), headers=hr_headers)
+    assert response.status_code == 403
+
+
+def test_settings_put_hr_admin_403(client, hr_admin_headers, mock_store):
+    """Руководитель ОК не редактирует настройки — 403 (до Фазы 2)."""
+    response = client.put("/settings", json=dict(CONTRACT_VALUES), headers=hr_admin_headers)
     assert response.status_code == 403
 
 

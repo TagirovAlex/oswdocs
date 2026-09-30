@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app.ad_reader import AdReader, AdReaderSettings, InMemoryCache  # noqa: E402
 from app.config import Settings, get_settings  # noqa: E402
+from app.deps import _detect_role  # noqa: E402
 from app.employees import get_ad_reader, get_onec_client  # noqa: E402
 from app.link import clear_for_tests, get_memory_links_store  # noqa: E402
 from app.link_store import get_links_store  # noqa: E402
@@ -27,6 +28,7 @@ from app.onec_client import HttpResult, OneCBaseConfig, OneCClient  # noqa: E402
 TEST_ALLOWED = "SED_HR,SED_ADMINS"
 TEST_ADMINS = "SED_ADMINS"
 TEST_HR = "SED_HR"
+TEST_HR_ADMIN = "SED_HR_ADMIN"
 TEST_STEP_PREFIX = "SED_STEP_"
 
 # Вымышленное предприятие и персоналии (не реальные данные).
@@ -168,6 +170,7 @@ def b1_settings():
         ALLOWED_AD_GROUPS=TEST_ALLOWED,
         ADMIN_GROUPS=TEST_ADMINS,
         HR_GROUPS=TEST_HR,
+        HR_ADMIN_GROUPS=TEST_HR_ADMIN,
         STEP_GROUP_PREFIX=TEST_STEP_PREFIX,
     )
     app.dependency_overrides[get_settings] = lambda: settings
@@ -200,6 +203,18 @@ def b1_mocks(b1_settings):
 
 # --- Матрица доступа: 401/403 ---
 
+def test_detect_role_hierarchy(b1_settings):
+    """Иерархия ролей: админ > руководитель ОК > ОК > владелец (пересечение групп)."""
+    settings = b1_settings
+    assert _detect_role(["SED_STEP_BUH"], settings) == "owner"
+    assert _detect_role(["SED_HR"], settings) == "hr"
+    assert _detect_role(["SED_HR_ADMIN"], settings) == "hr_admin"
+    assert _detect_role(["SED_ADMINS"], settings) == "admin"
+    # Руководитель ОК с группой ОК — всё равно hr_admin; админ в любой группе — admin.
+    assert _detect_role(["SED_HR_ADMIN", "SED_HR"], settings) == "hr_admin"
+    assert _detect_role(["SED_ADMINS", "SED_HR"], settings) == "admin"
+
+
 def test_employees_no_auth_401(client, noauth_headers, b1_mocks):
     """Без логина — 401 (проверка deps, не дублируем логику)."""
     response = client.get(
@@ -229,6 +244,14 @@ def test_auth_me_alias_matrix(client, hr_headers, owner_headers, nogroup_headers
     assert denied.status_code == 403
 
 
+def test_auth_me_hr_admin_full(client, hr_admin_headers, b1_mocks):
+    """Руководитель ОК — полная заглушка (как ОК) и роль hr_admin."""
+    full = client.get("/auth/me", headers=hr_admin_headers)
+    assert full.status_code == 200
+    assert full.json()["role"] == "hr_admin"
+    assert "fio" in full.json()
+
+
 # --- Поиск и обрезка ПДн ---
 
 def test_employees_hr_full(client, hr_headers, b1_mocks):
@@ -253,6 +276,18 @@ def test_employees_admin_full(client, admin_headers, b1_mocks):
     )
     assert response.status_code == 200
     assert response.json()["items"][0]["fio"] == FIO_PETR
+
+
+def test_employees_hr_admin_full(client, hr_admin_headers, b1_mocks):
+    """Руководитель ОК видит полную карточку, как ОК (is_privileged)."""
+    response = client.get(
+        "/employees", params={"enterprise": ENT, "q": "Сказочников"}, headers=hr_admin_headers
+    )
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["fio"] == FIO_IVAN
+    assert item["vacation_balance"] == "14"
+    assert item["tab_num"] == "001"
 
 
 def test_employees_owner_trimmed_no_pdn(client, owner_headers, b1_mocks):

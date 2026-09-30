@@ -8,7 +8,7 @@ import type { EmployeeBrief, EmployeeFull, Role } from "./api-mock";
 interface EmployeeCardProps {
   // Идентификатор заявки.
   requestId: string;
-  // Роль (полная карточка — только hr/admin; владельцу — подсказка без ПДн).
+  // Роль (полная карточка — только hr/hr_admin/admin; владельцу — подсказка без ПДн).
   role: Role;
 }
 

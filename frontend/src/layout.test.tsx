@@ -184,6 +184,15 @@ describe("SedLayout", () => {
     expect(screen.queryByText("Настройки")).not.toBeInTheDocument();
   });
 
+  // Руководитель ОК видит «Создание», как ОК, но «Настройки» — только админу (Фаза 2).
+  it("руководитель ОК видит «Создание», но не «Настройки»", () => {
+    vi.mocked(getFolders).mockResolvedValue(folders);
+    vi.mocked(getRequests).mockResolvedValue([]);
+    renderWithTheme("hr_admin");
+    expect(screen.getByText("Создание")).toBeInTheDocument();
+    expect(screen.queryByText("Настройки")).not.toBeInTheDocument();
+  });
+
   // Кнопка «Выйти» вызывает сброс сессии.
   it("кнопка «Выйти» вызывает onLogout", () => {
     vi.mocked(getFolders).mockResolvedValue(folders);

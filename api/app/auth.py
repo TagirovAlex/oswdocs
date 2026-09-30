@@ -2,12 +2,12 @@
 #
 # Контракт (TASKS_AUTH.md):
 #   POST /auth/login  {login, password} -> 200 {token, user} | 401 | 503 (AD недоступен)
-#   GET  /auth/me     Bearer -> CurrentUser (полный для admin/hr, урезанный для owner)
+#   GET  /auth/me     Bearer -> CurrentUser (полный для admin/hr_admin/hr, урезанный для owner)
 #   Токен — secrets.token_urlsafe; ключ Redis `sed:session:{token}`,
 #   TTL — SESSION_TTL_MINUTES из настроек (дефолт 20, README п.5: 15–20 мин).
 #   Пароль проверяется bind'ом пользователя по DN (шлюз Ldap3Gateway с bind_user
 #   добавляет агент A1 в ad_reader.py), сам пароль нигде не хранится.
-#   Роль — существующий _detect_role из deps (admin > hr > owner); разрешенные
+#   Роль — существующий _detect_role из deps (admin > hr_admin > hr > owner); разрешенные
 #   группы — из настроек (is_group_allowed). AD недоступен -> 503, неверные
 #   данные/нет разрешенных групп -> 401.
 
@@ -235,8 +235,9 @@ class LdapAuthService:
     """Реальная доменная аутентификация: AdReader (LDAPS) + SessionStore (Redis).
 
     Пароль проверяется bind'ом пользователя по DN (шлюз с bind_user добавит A1),
-    пароль нигде не хранится. Роль — существующий _detect_role, разрешенные
-    группы — из настроек. AD недоступен -> 503, неверные данные/нет групп -> 401.
+    пароль нигде не хранится. Роль — существующий _detect_role (admin > hr_admin > hr
+    > owner), разрешенные группы — из настроек. AD недоступен -> 503, неверные
+    данные/нет групп -> 401.
     """
 
     def __init__(

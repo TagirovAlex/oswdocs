@@ -56,8 +56,8 @@ export function CreateForm(props: CreateFormProps) {
     };
   }, []);
 
-  // Создание — ОК и админам (роль hr/admin, как в API _is_hr).
-  if (role !== "hr" && role !== "admin") {
+  // Создание — ОК, руководителям ОК и админам (роль hr/hr_admin/admin, как в API _is_hr).
+  if (role !== "hr" && role !== "hr_admin" && role !== "admin") {
     return <div role="alert">Создание заявок доступно только ОК.</div>;
   }
 

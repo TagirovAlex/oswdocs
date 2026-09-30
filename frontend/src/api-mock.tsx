@@ -6,7 +6,7 @@
 // чтобы на волне B1–B3 подменить реализацию/MSW без правки экранов.
 
 // Роль текущего пользователя (матрица README п.1).
-export type Role = "hr" | "owner" | "admin" | "guest";
+export type Role = "hr" | "hr_admin" | "owner" | "admin" | "guest";
 
 // Идентификатор папки в дереве слева.
 export type FolderId = "agreement" | "revision" | "done" | "mine";
@@ -43,7 +43,7 @@ export interface RequestRow {
   dueDate: string;
 }
 
-// Полная карточка сотрудника (только для ОК и админов).
+// Полная карточка сотрудника (только для ОК, руководителей ОК и админов).
 export interface EmployeeFull {
   kind: "full";
   requestId: string;

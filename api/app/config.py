@@ -77,6 +77,10 @@ class Settings(BaseSettings):
     ALLOWED_AD_GROUPS: str = Field(default="")
     ADMIN_GROUPS: str = Field(default="")
     HR_GROUPS: str = Field(default="")
+    HR_ADMIN_GROUPS: str = Field(
+        default="",
+        description="Группы руководителей ОК (контент-настройки)",
+    )
     # Префикс групп владельцев шагов: любая группа с таким префиксом тоже
     # считается разрешающей (конкретные имена — в settings, волна A1).
     STEP_GROUP_PREFIX: str = Field(default="EXAMPLE_STEP_")
@@ -116,10 +120,15 @@ class Settings(BaseSettings):
         return {g.strip() for g in self.HR_GROUPS.split(",") if g.strip()}
 
     @property
+    def hr_admin_groups(self) -> set[str]:
+        """Множество групп руководителей ОК из env (без пустых, без пробелов)."""
+        return {g.strip() for g in self.HR_ADMIN_GROUPS.split(",") if g.strip()}
+
+    @property
     def allowed_groups(self) -> set[str]:
-        """Множество разрешенных групп из env: явный список + админы + ОК."""
+        """Множество разрешенных групп из env: явный список + админы + ОК + руководители ОК."""
         explicit = {g.strip() for g in self.ALLOWED_AD_GROUPS.split(",") if g.strip()}
-        return explicit | self.admin_groups | self.hr_groups
+        return explicit | self.admin_groups | self.hr_groups | self.hr_admin_groups
 
     def is_group_allowed(self, group: str) -> bool:
         """Группа разрешает вход: явный список или префикс владельцев шагов."""

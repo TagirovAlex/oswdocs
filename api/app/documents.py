@@ -255,16 +255,16 @@ def get_documents_store(
 
 
 def _require_hr(user: CurrentUser) -> None:
-    """Печать бегунка — только разрешенной группе (ОК/админы), иначе 403."""
-    if user.role not in ("hr", "admin"):
+    """Печать бегунка — только разрешенной группе (ОК/руководители ОК/админы), иначе 403."""
+    if user.role not in ("hr", "hr_admin", "admin"):
         raise HTTPException(
             status_code=403, detail="Печать бегунка — только разрешенной группе"
         )
 
 
 def _can_view(request: object, user: CurrentUser) -> bool:
-    """Доступ к документам: ОК/админы или владелец одного из шагов заявки."""
-    if user.role in ("hr", "admin"):
+    """Доступ к документам: ОК/руководители ОК/админы или владелец одного из шагов заявки."""
+    if user.role in ("hr", "hr_admin", "admin"):
         return True
     return any(
         s.owner_group in user.groups or (s.assignee and s.assignee == user.sam)

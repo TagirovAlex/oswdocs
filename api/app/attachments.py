@@ -340,8 +340,8 @@ def get_attachments_store(
 # ---------------------------------------------------------------------------
 
 def _can_access(request: object, user: CurrentUser) -> bool:
-    """Доступ к вложениям заявки: ОК/админы или владелец одного из шагов."""
-    if user.role in ("hr", "admin"):
+    """Доступ к вложениям заявки: ОК/руководители ОК/админы или владелец одного из шагов."""
+    if user.role in ("hr", "hr_admin", "admin"):
         return True
     return any(
         s.owner_group in user.groups or (s.assignee and s.assignee == user.sam)

@@ -40,6 +40,15 @@ FAKE_ADMIN = {
     "groups": ["SED_ADMINS"],
 }
 
+FAKE_HR_ADMIN = {
+    "sam": "ok.head",
+    "fio": "Королева Мария Викторовна",
+    "mail": "ok.head@example.com",
+    "department": "Отдел кадров",
+    "title": "Руководитель отдела кадров",
+    "groups": ["SED_HR_ADMIN"],
+}
+
 FAKE_OWNER = {
     "sam": "step.sidorov",
     "fio": "Сидоров Алексей Викторович",
@@ -95,6 +104,12 @@ def hr_headers() -> dict:
 def admin_headers() -> dict:
     """Заголовки администратора (положена полная заглушка)."""
     return mock_headers(FAKE_ADMIN)
+
+
+@pytest.fixture
+def hr_admin_headers() -> dict:
+    """Заголовки руководителя ОК (положена полная заглушка, как ОК)."""
+    return mock_headers(FAKE_HR_ADMIN)
 
 
 @pytest.fixture

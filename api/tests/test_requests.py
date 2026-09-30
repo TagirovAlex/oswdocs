@@ -26,6 +26,7 @@ from app.requests_store import get_requests_store  # noqa: E402
 TEST_ALLOWED = "SED_HR,SED_ADMINS"
 TEST_ADMINS = "SED_ADMINS"
 TEST_HR = "SED_HR"
+TEST_HR_ADMIN = "SED_HR_ADMIN"
 TEST_STEP_PREFIX = "SED_STEP_"
 
 # Вымышленные служба/должности (не продовые значения).
@@ -82,6 +83,7 @@ def test_settings_override():
         ALLOWED_AD_GROUPS=TEST_ALLOWED,
         ADMIN_GROUPS=TEST_ADMINS,
         HR_GROUPS=TEST_HR,
+        HR_ADMIN_GROUPS=TEST_HR_ADMIN,
         STEP_GROUP_PREFIX=TEST_STEP_PREFIX,
     )
     app.dependency_overrides[get_settings] = lambda: settings
@@ -112,6 +114,12 @@ def clean_state(requests_store):
 def hr() -> dict:
     """Заголовки ОК (разрешенная группа для конструктора)."""
     return _headers_for("ok.vymyshlennaya", ["SED_HR"])
+
+
+@pytest.fixture
+def hr_admin() -> dict:
+    """Заголовки руководителя ОК (права конструктора, как ОК)."""
+    return _headers_for("ok.head.vymyshlenny", ["SED_HR_ADMIN"])
 
 
 @pytest.fixture
@@ -167,6 +175,26 @@ def test_template_picked_by_service_category(client, hr, test_settings_override,
     # Явная категория от ОК важнее подсказки: чужой категории нет в шаблонах → нужен ручной.
     miss = _create(client, hr, category="руководитель")
     assert miss.status_code == 422
+
+
+def test_hr_admin_can_create(client, hr_admin, test_settings_override, route_override):
+    """Руководитель ОК создает заявку, как ОК (201, ручной конструктор разрешен)."""
+    response = _create(client, hr_admin)
+    assert response.status_code == 201
+    body = response.json()
+    assert body["route_origin"] == "template"
+    assert body["status"] == "Черновик"
+
+
+def test_hr_admin_can_patch_steps(client, hr_admin, test_settings_override, route_override):
+    """Руководитель ОК правит шаги (только разрешенной группе, 200)."""
+    rid = _create(client, hr_admin).json()["id"]
+    response = client.patch(
+        f"/requests/{rid}/steps",
+        json={"steps": [{"owner_group": "SED_STEP_BUH"}], "reason": "Вымышленная правка"},
+        headers=hr_admin,
+    )
+    assert response.status_code == 200
 
 
 def test_reject_without_comment_422(client, hr, buh_owner, test_settings_override, route_override):

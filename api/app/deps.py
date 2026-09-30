@@ -23,7 +23,7 @@ class CurrentUser(BaseModel):
     department: str | None = Field(default=None, description="Подразделение из AD")
     title: str | None = Field(default=None, description="Должность из AD")
     groups: list[str] = Field(default_factory=list, description="Группы memberOf")
-    role: str = Field(default="owner", description="admin | hr | owner")
+    role: str = Field(default="owner", description="admin | hr_admin | hr | owner")
 
 
 def _split_groups(raw: str | None) -> list[str]:
@@ -49,10 +49,13 @@ def _decode_mock(raw: str | None) -> str | None:
 
 
 def _detect_role(groups: list[str], settings: Settings) -> str:
-    """Роль по группам из настроек: админ важнее ОК, ОК важнее владельца шага."""
+    """Роль по группам из настроек: админ важнее руководителя ОК, тот важнее
+    ОК, а ОК — важнее владельца шага."""
     group_set = set(groups)
     if group_set & settings.admin_groups:
         return "admin"
+    if group_set & settings.hr_admin_groups:
+        return "hr_admin"
     if group_set & settings.hr_groups:
         return "hr"
     return "owner"
@@ -69,8 +72,9 @@ def _bearer_token(authorization: str | None) -> str | None:
 
 
 def is_privileged(user: CurrentUser) -> bool:
-    """Полная карточка положена только ОК и админам (остальным — урезанная)."""
-    return user.role in ("admin", "hr")
+    """Полная карточка положена только ОК, руководителям ОК и админам
+    (остальным — урезанная)."""
+    return user.role in ("admin", "hr_admin", "hr")
 
 
 async def get_current_user(

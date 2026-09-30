@@ -141,6 +141,13 @@ describe("CreateForm", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
+  // Руководитель ОК тоже может создавать (роль hr_admin, как в API _is_hr).
+  it("руководителю ОК создание доступно", async () => {
+    render(<CreateForm role="hr_admin" />);
+    await waitFor(() => expect(screen.getByText("Создание заявки (шаг 1 из 3)")).toBeInTheDocument());
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   // Не-ОК создание закрыто.
   it("владельцу и гостю создание закрыто", () => {
     render(<CreateForm role="owner" />);

@@ -14,6 +14,13 @@ describe("mockApi", () => {
     }
   });
 
+  // Руководитель ОК видит полную карточку, как ОК, но не настройки.
+  it("отдаёт полную карточку руководителю ОК, настройки — нет", async () => {
+    const card = await mockApi.getEmployee("REQ-001", "hr_admin");
+    expect(card.kind).toBe("full");
+    await expect(mockApi.getSettings("hr_admin")).rejects.toBeInstanceOf(MockForbidden);
+  });
+
   // Владелец получает урезанную карточку без ПДн.
   it("урезанная карточка владельцу не содержит ПДн", async () => {
     const card = await mockApi.getEmployee("REQ-001", "owner");

@@ -243,8 +243,8 @@ def _utcnow() -> datetime:
 
 
 def _is_hr(user: CurrentUser) -> bool:
-    """Разрешенная группа для конструктора/правок: только ОК и админы."""
-    return user.role in ("hr", "admin")
+    """Разрешенная группа для конструктора/правок: ОК, руководители ОК и админы."""
+    return user.role in ("hr", "hr_admin", "admin")
 
 
 def _require_hr(user: CurrentUser) -> None:
@@ -347,7 +347,7 @@ def _check_comment(step: _Step, decision: str, comment: str | None) -> None:
 
 def _public_view(request: _Request, user: CurrentUser) -> RequestOut:
     """Ролевая обрезка: ОК/админы — всё, владелец — без tab_num (ПДн)."""
-    privileged = user.role in ("hr", "admin")
+    privileged = user.role in ("hr", "hr_admin", "admin")
     steps = [
         StepOut(
             order=s.order,
