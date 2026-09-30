@@ -20,6 +20,7 @@ from app.config import Settings, get_settings  # noqa: E402
 from app.main import app  # noqa: E402
 from app.settings_routes import (  # noqa: E402
     SETTINGS_KEYS,
+    SMTP_PASSWORD_MASK,
     SettingsUnavailable,
     get_settings_store,
 )
@@ -32,6 +33,7 @@ TEST_STEP_PREFIX = "SED_STEP_"
 # Сид-формат значений (как в db/seeds/settings.sql): int '3', bool 'true',
 # строка '"..."', массив/объект — JSON-строкой.
 SEED_VALUES = {
+    "session_ttl_minutes": "600",
     "approval_ttl_days": "3",
     "scan_retention_days": "365",
     "scan_max_mb": "10",
@@ -40,6 +42,8 @@ SEED_VALUES = {
     "smtp_host": '""',
     "smtp_port": "587",
     "smtp_from": '"sed@example.com"',
+    "smtp_user": '""',
+    "smtp_password": '""',
     "require_comment": "false",
     "enterprises": (
         '[{"code": "ENT_PRIMER_1", "name": "Предприятие Пример-1"},'
@@ -65,6 +69,7 @@ SEED_VALUES = {
 
 # Контрактный ответ GET /settings (все ключи на месте, типы по B2).
 CONTRACT_VALUES = {
+    "session_ttl_minutes": 600,
     "approval_ttl_days": 3,
     "scan_retention_days": 365,
     "scan_max_mb": 10,
@@ -73,6 +78,8 @@ CONTRACT_VALUES = {
     "smtp_host": "",
     "smtp_port": 587,
     "smtp_from": "sed@example.com",
+    "smtp_user": "",
+    "smtp_password": None,
     "require_comment": False,
     "enterprises": [
         {"code": "ENT_PRIMER_1", "name": "Предприятие Пример-1"},
@@ -109,6 +116,7 @@ CONTRACT_VALUES = {
 
 # Полный обновленный набор для PUT (все ключи переданы явно).
 UPDATED_VALUES = {
+    "session_ttl_minutes": 480,
     "approval_ttl_days": 7,
     "scan_retention_days": 730,
     "scan_max_mb": 25,
@@ -117,6 +125,8 @@ UPDATED_VALUES = {
     "smtp_host": "mail-relay.example.com",
     "smtp_port": 465,
     "smtp_from": "noreply@example.com",
+    "smtp_user": "relay-user",
+    "smtp_password": "relay-pass",
     "require_comment": True,
     "enterprises": [
         {"code": "ENT_PRIMER_1", "name": "Предприятие Пример-1"},
@@ -252,7 +262,9 @@ def test_settings_put_admin_200_persists(client, admin_headers, mock_store):
     """Админ сохраняет настройки: 200, полное состояние, в хранилище — сид-формат."""
     response = client.put("/settings", json=UPDATED_VALUES, headers=admin_headers)
     assert response.status_code == 200
-    assert response.json() == UPDATED_VALUES
+    expected = dict(UPDATED_VALUES)
+    expected["smtp_password"] = SMTP_PASSWORD_MASK  # в ответе пароль маскируется
+    assert response.json() == expected
     # Формат записи в БД — как в сидах: int строкой, bool 'true'/'false',
     # строка JSON-строкой, массив/объект — JSON-строкой (json.dumps).
     assert mock_store._data["approval_ttl_days"] == "7"
@@ -261,6 +273,8 @@ def test_settings_put_admin_200_persists(client, admin_headers, mock_store):
     assert mock_store._data["require_paper_signature"] == "false"
     assert mock_store._data["require_comment"] == "true"
     assert mock_store._data["smtp_from"] == '"noreply@example.com"'
+    assert mock_store._data["smtp_user"] == '"relay-user"'
+    assert mock_store._data["smtp_password"] == '"relay-pass"'  # в БД — настоящее значение
     assert json.loads(mock_store._data["enterprises"]) == UPDATED_VALUES["enterprises"]
     assert json.loads(mock_store._data["allowed_ad_groups"]) == ["SED_HR", "SED_ADMINS"]
     assert json.loads(mock_store._data["position_to_category"]) == {
@@ -270,10 +284,39 @@ def test_settings_put_admin_200_persists(client, admin_headers, mock_store):
         "Должность вымышленная": 24
     }
     assert json.loads(mock_store._data["templates"]) == UPDATED_VALUES["templates"]
-    # Последующее чтение возвращает сохраненное.
+    # Последующее чтение возвращает сохраненное (пароль — маской).
     got = client.get("/settings", headers=admin_headers)
     assert got.status_code == 200
-    assert got.json() == UPDATED_VALUES
+    assert got.json() == expected
+
+
+def test_settings_put_smtp_password_empty_keeps_existing(client, admin_headers, mock_store):
+    """Пустой/маска пароль в PUT не перезаписывает заданный (сохранить текущий)."""
+    client.put("/settings", json=UPDATED_VALUES, headers=admin_headers)
+    assert mock_store._data["smtp_password"] == '"relay-pass"'
+    # Пустое значение — не меняем.
+    response = client.put("/settings", json={"smtp_password": ""}, headers=admin_headers)
+    assert response.status_code == 200
+    assert response.json()["smtp_password"] == SMTP_PASSWORD_MASK
+    assert mock_store._data["smtp_password"] == '"relay-pass"'
+    # Маска — тоже не меняем.
+    client.put("/settings", json={"smtp_password": SMTP_PASSWORD_MASK}, headers=admin_headers)
+    assert mock_store._data["smtp_password"] == '"relay-pass"'
+    # Новое значение — перезаписывает.
+    response = client.put("/settings", json={"smtp_password": "new-pass"}, headers=admin_headers)
+    assert response.status_code == 200
+    assert mock_store._data["smtp_password"] == '"new-pass"'
+    assert response.json()["smtp_password"] == SMTP_PASSWORD_MASK
+
+
+def test_settings_put_smtp_user_cleared(client, admin_headers, mock_store):
+    """Логин релея можно очистить (без авторизации); пароль при этом сохраняется."""
+    client.put("/settings", json={"smtp_user": "relay-user", "smtp_password": "relay-pass"}, headers=admin_headers)
+    response = client.put("/settings", json={"smtp_user": ""}, headers=admin_headers)
+    assert response.status_code == 200
+    assert response.json()["smtp_user"] == ""
+    assert mock_store._data["smtp_user"] == '""'
+    assert mock_store._data["smtp_password"] == '"relay-pass"'
 
 
 def test_settings_put_partial_200(client, admin_headers, mock_store):

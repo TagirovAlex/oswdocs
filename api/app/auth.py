@@ -290,7 +290,7 @@ class LdapAuthService:
             role=_detect_role(groups, self._settings),
         )
         token = secrets.token_urlsafe(32)
-        self._sessions.set(token, user, self._settings.session_ttl_seconds)
+        self._sessions.set(token, user, self._session_ttl_seconds())
         return AuthResult(token=token, user=user)
 
     def me(self, token: str) -> CurrentUser | None:
@@ -304,6 +304,21 @@ class LdapAuthService:
         return any(
             self._settings.is_group_allowed(group_cn(dn)) for dn in ad_user.member_of
         )
+
+    def _session_ttl_seconds(self) -> int:
+        """TTL новой сессии: из settings БД (session_ttl_minutes, правит админ),
+        иначе env SESSION_TTL_MINUTES. БД недоступна — env-дефолт (вход не валим)."""
+        ttl_minutes = self._settings.SESSION_TTL_MINUTES
+        try:
+            from .settings_routes import DbSettingsStore, read_setting_value
+
+            store = DbSettingsStore(self._settings.DATABASE_URL)
+            raw = read_setting_value(store, "session_ttl_minutes")
+            if raw:
+                ttl_minutes = int(raw)
+        except Exception:
+            pass  # БД/настройки недоступны — берем значение из env
+        return max(60, ttl_minutes * 60)
 
 
 # ---------------------------------------------------------------------------

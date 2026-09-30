@@ -17,6 +17,7 @@ vi.mock("./settings-client", () => ({
 
 // Настройки, как их отдаёт GET /api/settings (полный объект по контракту B2).
 const settings: SettingsData = {
+  session_ttl_minutes: 600,
   approval_ttl_days: 3,
   scan_retention_days: 30,
   scan_max_mb: 10,
@@ -24,6 +25,8 @@ const settings: SettingsData = {
   smtp_host: "intsrvmail.fidelio.local",
   smtp_port: 587,
   smtp_from: "sed@example.com",
+  smtp_user: "",
+  smtp_password: null,
   require_comment: true,
   enterprises: [{ code: "OOO_ALFA", name: "ООО Альфа" }],
   allowed_ad_groups: ["SED_Vlastelcy", "SED_HR"],

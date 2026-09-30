@@ -8,6 +8,11 @@ INSERT INTO settings (key, value) VALUES
   ('sed_ou', '"OU=OSWDOCS,DC=example,DC=com"')
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
 
+-- Длительность сессии после входа, минут (решение бизнеса 2026-09-30: 10 ч = 600).
+INSERT INTO settings (key, value) VALUES
+  ('session_ttl_minutes', '600')
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
+
 -- Доменные группы доступа (подтверждены ИТ, заведены в OSWDOCS; проверка memberOf при логине).
 INSERT INTO settings (key, value) VALUES
   ('allowed_ad_groups', '["SED_HR", "SED_ADMINS", "SED_STEP_EXEC"]')
@@ -59,6 +64,16 @@ ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
 -- реальное значение вносит ИТ/админ на стенде.
 INSERT INTO settings (key, value) VALUES
   ('smtp_from', '"sed@example.com"')
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
+
+-- Логин SMTP-релея (пусто — отправка без авторизации, как внутри сети).
+INSERT INTO settings (key, value) VALUES
+  ('smtp_user', '""')
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
+
+-- Пароль SMTP-релея (пусто — без авторизации; в GET /settings маскируется).
+INSERT INTO settings (key, value) VALUES
+  ('smtp_password', '""')
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
 
 -- Срок хранения сканов в днях (глобальный).

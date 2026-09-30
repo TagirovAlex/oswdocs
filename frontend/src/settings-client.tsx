@@ -25,6 +25,8 @@ export interface SettingsTemplate {
 // Настройки СЭД из таблицы settings (типы — по контракту API, поля nullable:
 // ключа нет в БД — null, значений в коде нет, AGENTS.md п.3).
 export interface SettingsData {
+  // TTL сессии, минут (session_ttl_minutes; 600 = 10 ч).
+  session_ttl_minutes: number | null;
   // TTL отметок, дней (approval_ttl_days).
   approval_ttl_days: number | null;
   // Срок хранения сканов, дней (scan_retention_days).
@@ -39,6 +41,11 @@ export interface SettingsData {
   smtp_port: number | null;
   // Отправитель уведомлений, e-mail (smtp_from).
   smtp_from: string | null;
+  // Логин SMTP-релея (smtp_user; пусто — без авторизации).
+  smtp_user: string | null;
+  // Пароль SMTP-релея (smtp_password): в GET — null либо маска «задан»;
+  // записывается только при вводе нового значения.
+  smtp_password: string | null;
   // Комментарий обязателен при согласовании (require_comment).
   require_comment: boolean | null;
   // Предприятия (enterprises).

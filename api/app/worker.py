@@ -186,6 +186,7 @@ def main() -> None:
         resolve_smtp_from,
         resolve_smtp_host,
         resolve_smtp_port,
+        resolve_smtp_value,
     )
     from .requests_store import DbRequestsStore
     from .settings_routes import DbSettingsStore, SettingsUnavailable, read_setting_value
@@ -202,6 +203,12 @@ def main() -> None:
         smtp_port = resolve_smtp_port(
             read_setting_value(settings_store, "smtp_port"), settings.SMTP_PORT
         )
+        smtp_user = resolve_smtp_value(
+            read_setting_value(settings_store, "smtp_user"), settings.SMTP_USER
+        )
+        smtp_password = resolve_smtp_value(
+            read_setting_value(settings_store, "smtp_password"), settings.SMTP_PASSWORD
+        )
         mail_templates = read_setting_value(settings_store, "mail_templates") or []
         position_escalation = (
             read_setting_value(settings_store, "position_escalation") or {}
@@ -217,8 +224,8 @@ def main() -> None:
     mailer = SmtpMailer(
         host=smtp_host,
         port=smtp_port,
-        username=settings.SMTP_USER,
-        password=settings.SMTP_PASSWORD,
+        username=smtp_user,
+        password=smtp_password,
         from_addr=smtp_from,
     )
     result = run_once(

@@ -25,8 +25,11 @@ class Settings(BaseSettings):
 
     # --- Сессии auth: TTL и режим мока (на ВМ — AUTH_MOCK_ENABLED=false) ---
     SESSION_TTL_MINUTES: int = Field(
-        default=20,
-        description="TTL сессии в Redis (README п.5: сессии 15–20 минут)",
+        default=600,
+        description=(
+            "TTL сессии в Redis (решение бизнеса 2026-09-30: рабочий день 8–10 ч; "
+            "исходное НФТ-значение 15–20 мин отменено владельцем)"
+        ),
     )
     AUTH_MOCK_ENABLED: bool = Field(
         default=True,

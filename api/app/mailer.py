@@ -56,6 +56,11 @@ def resolve_smtp_from(db_value: str | None, env_default: str) -> str:
     return (db_value or "").strip() or env_default
 
 
+def resolve_smtp_value(db_value: object, env_default: str) -> str:
+    """Строковый SMTP-параметр (хост/логин/пароль): из settings (smtp_*), иначе env."""
+    return str(db_value or "").strip() or env_default
+
+
 def resolve_smtp_host(db_value: object, env_default: str) -> str:
     """Хост SMTP-релея: значение из settings (smtp_host), иначе env SMTP_HOST."""
     return str(db_value or "").strip() or env_default
@@ -593,9 +598,10 @@ def get_mail_queue() -> MailQueue:
 
 
 def get_mailer(store: "DbSettingsStore | None" = None) -> Mailer:
-    """Боевой отправитель (SmtpMailer): хост/порт/отправитель — из settings
-    (smtp_host/smtp_port/smtp_from, при отсутствии ключа — env SMTP_*);
-    секреты SMTP_USER/SMTP_PASSWORD — только env (AGENTS.md п.3)."""
+    """Боевой отправитель (SmtpMailer): параметры — из settings
+    (smtp_host/smtp_port/smtp_from/smtp_user/smtp_password, при отсутствии
+    ключа — env SMTP_*). Пароль в GET /settings маскируется, здесь читается
+    настоящее значение из хранилища."""
     from .config import get_settings
     from .settings_routes import DbSettingsStore, read_setting_value
 
@@ -603,14 +609,18 @@ def get_mailer(store: "DbSettingsStore | None" = None) -> Mailer:
     if store is None:
         store = DbSettingsStore(current.DATABASE_URL)
     return SmtpMailer(
-        host=resolve_smtp_host(
+        host=resolve_smtp_value(
             read_setting_value(store, "smtp_host"), current.SMTP_HOST
         ),
         port=resolve_smtp_port(
             read_setting_value(store, "smtp_port"), current.SMTP_PORT
         ),
-        username=current.SMTP_USER,
-        password=current.SMTP_PASSWORD,
+        username=resolve_smtp_value(
+            read_setting_value(store, "smtp_user"), current.SMTP_USER
+        ),
+        password=resolve_smtp_value(
+            read_setting_value(store, "smtp_password"), current.SMTP_PASSWORD
+        ),
         from_addr=resolve_smtp_from(
             read_setting_value(store, "smtp_from"), current.SMTP_FROM
         ),

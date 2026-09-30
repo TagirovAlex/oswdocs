@@ -30,10 +30,11 @@ class SettingsUnavailable(Exception):
 
 # Прикладные ключи админки (состав — контракт B2 GET/PUT /settings, дополнен
 # W3a: doc_templates/mail_templates — бегунки и письма; W5a: scan_allowed_types —
-# MIME-allowlist сканов; SMTP: smtp_host/smtp_port/smtp_from — параметры релея
-# из settings, секреты SMTP_USER/SMTP_PASSWORD — только env).
+# MIME-allowlist сканов; SMTP: smtp_host/smtp_port/smtp_from/smtp_user/smtp_password —
+# параметры релея из settings; пароль маскируется в GET и пишется только при вводе).
 # Порядок — как в контракте: базовые, справочники, шаблоны.
 SETTINGS_KEYS: tuple[str, ...] = (
+    "session_ttl_minutes",
     "approval_ttl_days",
     "scan_retention_days",
     "scan_max_mb",
@@ -42,6 +43,8 @@ SETTINGS_KEYS: tuple[str, ...] = (
     "smtp_host",
     "smtp_port",
     "smtp_from",
+    "smtp_user",
+    "smtp_password",
     "require_comment",
     "enterprises",
     "allowed_ad_groups",
@@ -51,6 +54,15 @@ SETTINGS_KEYS: tuple[str, ...] = (
     "doc_templates",
     "mail_templates",
 )
+
+# Маска пароля SMTP в GET /settings: наружу отдаём только признак «задан/не задан»,
+# само значение — только запись (PUT) при явном вводе нового пароля.
+SMTP_PASSWORD_MASK = "********"
+
+
+def _mask_smtp_password(value: object) -> object:
+    """Пароль SMTP в ответе: маска если задан, иначе None (значение не отдаём)."""
+    return SMTP_PASSWORD_MASK if isinstance(value, str) and value else None
 
 
 def _to_stored(value: object) -> str:
@@ -202,6 +214,9 @@ class SettingsPayload(BaseModel):
     """Тело GET/PUT /settings: все прикладные ключи; в PUT все опциональны
     (частичное обновление — пишутся только присутствующие в теле ключи)."""
 
+    session_ttl_minutes: int | None = Field(
+        default=None, description="TTL сессии в минутах (10 ч = 600; иначе env SESSION_TTL_MINUTES)"
+    )
     approval_ttl_days: int | None = Field(
         default=None, description="Срок отметки шага в днях"
     )
@@ -225,6 +240,16 @@ class SettingsPayload(BaseModel):
     )
     smtp_from: str | None = Field(
         default=None, description="Отправитель уведомлений (SMTP FROM)"
+    )
+    smtp_user: str | None = Field(
+        default=None, description="Логин SMTP-релея (пусто — без авторизации)"
+    )
+    smtp_password: str | None = Field(
+        default=None,
+        description=(
+            "Пароль SMTP-релея: пишется только при вводе нового значения; "
+            "пусто/маска в PUT — сохранить текущий; в GET — маска или null"
+        ),
     )
     require_comment: bool | None = Field(
         default=None, description="Комментарий обязателен на шаге всегда"
@@ -273,7 +298,10 @@ def _require_hr(user: CurrentUser) -> None:
 def _settings_dict(store: DbSettingsStore) -> dict:
     """Типизированный словарь настроек из хранилища (None — ключа нет в БД)."""
     raw = store.get_many(SETTINGS_KEYS)
-    return {key: _from_stored(raw.get(key)) for key in SETTINGS_KEYS}
+    values = {key: _from_stored(raw.get(key)) for key in SETTINGS_KEYS}
+    # Пароль SMTP наружу не отдаём: только признак «задан/не задан».
+    values["smtp_password"] = _mask_smtp_password(values.get("smtp_password"))
+    return values
 
 
 @router.get("/settings")
@@ -312,6 +340,10 @@ def update_settings(
     # exclude_unset: только явно переданные ключи (в т.ч. внутри шаблонов);
     # дефолтов нет — отсутствующий ключ в БД остается как был.
     updates = payload.model_dump(mode="json", exclude_unset=True)
+    # Пароль SMTP: пустое значение/маска = «не менять» (текущий сохраняется);
+    # реальное значение — только явный ввод нового пароля.
+    if updates.get("smtp_password") in (None, "", SMTP_PASSWORD_MASK):
+        updates.pop("smtp_password", None)
     stored = {key: _to_stored(value) for key, value in updates.items()}
     try:
         store.set_many(stored)

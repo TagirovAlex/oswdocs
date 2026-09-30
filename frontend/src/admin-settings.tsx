@@ -261,6 +261,7 @@ export function AdminSettings(props: AdminSettingsProps) {
   const [saved, setSaved] = useState<string>("");
   const [busy, setBusy] = useState<boolean>(false);
   // Значения формы — только из API (без хардкод-дефолтов).
+  const [sessionTtl, setSessionTtl] = useState<number | null>(null);
   const [ttl, setTtl] = useState<number | null>(null);
   const [retentionDays, setRetentionDays] = useState<number | null>(null);
   const [maxMb, setMaxMb] = useState<number | null>(null);
@@ -268,6 +269,10 @@ export function AdminSettings(props: AdminSettingsProps) {
   const [smtpHost, setSmtpHost] = useState<string | null>(null);
   const [smtpPort, setSmtpPort] = useState<number | null>(null);
   const [smtpFrom, setSmtpFrom] = useState<string | null>(null);
+  const [smtpUser, setSmtpUser] = useState<string | null>(null);
+  // Пароль релея в форме: поле всегда пустое; smtpPasswordSet — признак «задан».
+  const [smtpPassword, setSmtpPassword] = useState<string>("");
+  const [smtpPasswordSet, setSmtpPasswordSet] = useState<boolean>(false);
   const [requireComment, setRequireComment] = useState<boolean | null>(null);
   const [enterprises, setEnterprises] = useState<SettingsEnterprise[]>([]);
   const [adGroups, setAdGroups] = useState<string[]>([]);
@@ -282,6 +287,7 @@ export function AdminSettings(props: AdminSettingsProps) {
     getSettings()
       .then((data) => {
         if (alive) {
+          setSessionTtl(data.session_ttl_minutes);
           setTtl(data.approval_ttl_days);
           setRetentionDays(data.scan_retention_days);
           setMaxMb(data.scan_max_mb);
@@ -289,6 +295,10 @@ export function AdminSettings(props: AdminSettingsProps) {
           setSmtpHost(data.smtp_host);
           setSmtpPort(data.smtp_port);
           setSmtpFrom(data.smtp_from);
+          setSmtpUser(data.smtp_user ?? "");
+          // Пароль из API не приходит (маска/null): поле пустое, только признак.
+          setSmtpPassword("");
+          setSmtpPasswordSet(data.smtp_password !== null);
           setRequireComment(data.require_comment);
           setEnterprises(data.enterprises ?? []);
           setAdGroups(data.allowed_ad_groups ?? []);
@@ -317,6 +327,7 @@ export function AdminSettings(props: AdminSettingsProps) {
     setSaved("");
     // Пустые поля (ключа нет в БД) — честно просим заполнить, а не подставляем дефолты.
     if (
+      sessionTtl === null ||
       ttl === null ||
       retentionDays === null ||
       maxMb === null ||
@@ -331,6 +342,7 @@ export function AdminSettings(props: AdminSettingsProps) {
     setBusy(true);
     try {
       const data: SettingsData = {
+        session_ttl_minutes: sessionTtl,
         approval_ttl_days: ttl,
         scan_retention_days: retentionDays,
         scan_max_mb: maxMb,
@@ -338,6 +350,9 @@ export function AdminSettings(props: AdminSettingsProps) {
         smtp_host: smtpHost,
         smtp_port: smtpPort,
         smtp_from: smtpFrom,
+        smtp_user: smtpUser ?? "",
+        // Пустое значение — сервер сохранит текущий пароль (не перезапишет).
+        smtp_password: smtpPassword,
         require_comment: requireComment ?? false,
         enterprises,
         allowed_ad_groups: adGroups,
@@ -366,6 +381,15 @@ export function AdminSettings(props: AdminSettingsProps) {
       <div className="sed-note">Значения хранятся в settings БД и применяются без пересборки.</div>
       <fieldset>
         <legend>Базовые настройки</legend>
+        <label style={{ display: "block", marginTop: 8 }}>
+          Длительность сессии, минут (session_ttl_minutes; 600 = 10 часов)
+          <input
+            aria-label="Длительность сессии"
+            type="number"
+            value={sessionTtl ?? ""}
+            onChange={(e) => setSessionTtl(Number(e.target.value))}
+          />
+        </label>
         <label style={{ display: "block", marginTop: 8 }}>
           TTL отметок, дней (approval_ttl_days)
           <input
@@ -435,6 +459,25 @@ export function AdminSettings(props: AdminSettingsProps) {
             type="email"
             value={smtpFrom ?? ""}
             onChange={(e) => setSmtpFrom(e.target.value)}
+          />
+        </label>
+        <label style={{ display: "block", marginTop: 8 }}>
+          Логин SMTP-релея (smtp_user; пусто — отправка без авторизации)
+          <input
+            aria-label="Логин SMTP-релея"
+            type="text"
+            value={smtpUser ?? ""}
+            onChange={(e) => setSmtpUser(e.target.value)}
+          />
+        </label>
+        <label style={{ display: "block", marginTop: 8 }}>
+          Пароль SMTP-релея (smtp_password; оставьте пустым, чтобы сохранить текущий)
+          <input
+            aria-label="Пароль SMTP-релея"
+            type="password"
+            placeholder={smtpPasswordSet ? "задан (не менять)" : "не задан"}
+            value={smtpPassword}
+            onChange={(e) => setSmtpPassword(e.target.value)}
           />
         </label>
       </fieldset>
