@@ -242,3 +242,18 @@ def test_load_bases_from_env_rejects_bad_json(monkeypatch):
 def test_employee_card_is_plain_data():
     card = EmployeeCard(enterprise=ENT, base_code="zup_a", tab_num="1", fio=FIOS["a100"])
     assert card.mol_flag is None  # TODO флаг МОЛ: nullable до выяснения на стенде
+
+
+def test_normalize_odata_base_url():
+    """URL веб-клиента дополняется /odata/standard.odata; полный OData-URL не меняется."""
+    from app.onec_client import build_entity_url, normalize_odata_base_url
+
+    assert normalize_odata_base_url("http://h/zup/ru/") == "http://h/zup/ru/odata/standard.odata"
+    assert normalize_odata_base_url("http://h/zup") == "http://h/zup/odata/standard.odata"
+    assert (
+        normalize_odata_base_url("http://h/zup/odata/standard.odata/")
+        == "http://h/zup/odata/standard.odata"
+    )
+    assert build_entity_url("http://h/zup/ru/", "Catalog_Организации") == (
+        "http://h/zup/ru/odata/standard.odata/Catalog_Организации?$format=json"
+    )

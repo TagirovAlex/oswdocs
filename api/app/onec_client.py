@@ -208,9 +208,21 @@ def build_enterprise_map(bases: Dict[str, OneCBaseConfig]) -> Dict[str, List[str
     return index
 
 
+def normalize_odata_base_url(url: str) -> str:
+    """OData-база публикации: добавляет /odata/standard.odata если не указан.
+
+    Админ в карточке базы может ввести URL веб-клиента
+    (напр. http://host/zup/ru/) — сервис OData живёт по тому же пути
+    + /odata/standard.odata (с локалью тоже отвечает)."""
+    url = (url or "").rstrip("/")
+    if url and "/odata/standard.odata" not in url:
+        url = url + "/odata/standard.odata"
+    return url
+
+
 def build_entity_url(base_url: str, entity: str) -> str:
-    """OData-URL коллекции сущности: {url}/{entity}?$format=json."""
-    return base_url.rstrip("/") + "/" + entity + "?$format=json"
+    """OData-URL коллекции сущности: {base_url}/{entity}?$format=json."""
+    return normalize_odata_base_url(base_url) + "/" + entity + "?$format=json"
 
 
 def parse_collection(body: str) -> List[Dict[str, object]]:
@@ -385,7 +397,7 @@ class OneCClient:
         select = urllib.parse.quote(cls._select_fields(cfg), safe=",;/")
         flt = urllib.parse.quote("%s eq '%s'" % (cfg.tab_num_field, tab_num), safe="")
         url = "%s/%s?$format=json&$top=1&$select=%s&$filter=%s" % (
-            cfg.url.rstrip("/"),
+            normalize_odata_base_url(cfg.url),
             cfg.employee_entity,
             select,
             flt,
@@ -403,7 +415,7 @@ class OneCClient:
             "substringof('%s', %s) eq true" % (query, cfg.fio_field), safe=""
         )
         url = "%s/%s?$format=json&$top=50&$select=%s&$filter=%s" % (
-            cfg.url.rstrip("/"),
+            normalize_odata_base_url(cfg.url),
             cfg.employee_entity,
             select,
             flt,
