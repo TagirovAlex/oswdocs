@@ -81,6 +81,17 @@ def test_sync_wrapped_format(monkeypatch):
     assert items == [{"code": "B", "name": "Бета"}]
 
 
+def test_sync_odata_value_wrapper(monkeypatch):
+    """Стандартная OData-обёртка 1С {"value": [...]} — принимается."""
+    monkeypatch.setattr(
+        onec_sync,
+        "http_get",
+        lambda *a, **kw: '{"value": [{"code": "C", "name": "Гамма"}]}',
+    )
+    items = sync_enterprises(_store(source=_source()))
+    assert items == [{"code": "C", "name": "Гамма"}]
+
+
 def test_sync_skips_entries_without_code(monkeypatch):
     """Записи без code пропускаются; пустая строка name — как есть."""
     monkeypatch.setattr(

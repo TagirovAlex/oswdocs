@@ -34,11 +34,20 @@ def http_get(url: str, user: str, password: str, timeout: float = 15.0) -> str:
 def _parse_enterprises(payload: object) -> list[dict]:
     """Нормализация ответа источника: список [{"code","name"},...].
 
-    Допускается и конверт {"enterprises": [...]}; записи без code пропускаются;
+    Принимаются: голый список, конверт {"enterprises": [...]} и стандартная
+    OData-обёртка 1С {"value": [...]}. Записи без code пропускаются;
     битый формат — OnecSyncUnavailable (не 500)."""
     data = payload
     if isinstance(data, dict):
-        data = data.get("enterprises")
+        # OData 1С возвращает массив в обёртке {"value": [...]} — принимаем
+        # и её, и собственный конверт {"enterprises": [...]}.
+        for key in ("enterprises", "value"):
+            candidate = data.get(key)
+            if isinstance(candidate, list):
+                data = candidate
+                break
+        else:
+            raise OnecSyncUnavailable("Неожиданный формат ответа источника предприятий 1С")
     if not isinstance(data, list):
         raise OnecSyncUnavailable("Неожиданный формат ответа источника предприятий 1С")
     items = []
