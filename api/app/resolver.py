@@ -66,7 +66,7 @@ def resolve_employee(enterprise: str, tab_num: str, client: OneCClient) -> Resol
     errors: List[str] = []
     for code in codes:
         try:
-            card = client.get_employee(code, tab_num)
+            card = client.get_employee(code, tab_num, enterprise)
         except OneCNotFound:
             continue  # в этой базе нет — идём к следующей, это не падение
         except OneCUnknownBase as exc:
@@ -93,7 +93,7 @@ def search_enterprise(enterprise: str, query: str, client: OneCClient) -> Resolv
     found: List[EmployeeCard] = []
     for code in codes:
         try:
-            found.extend(client.search(code, query))
+            found.extend(client.search(code, query, enterprise))
         except Exception as exc:  # падение базы: изолируем, опрос продолжаем
             errors.append("%s: %s: %s" % (code, type(exc).__name__, exc))
             continue

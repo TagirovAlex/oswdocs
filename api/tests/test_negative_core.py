@@ -13,6 +13,7 @@ import base64
 import inspect
 import json
 import os
+import re
 import sys
 import urllib.parse
 from datetime import timedelta
@@ -87,42 +88,74 @@ def _bases() -> dict:
 
 
 def _card_row(tab: str, fio: str) -> dict:
-    """Строка карточки 1С (вымышленная)."""
+    """Строка справочника Catalog_Сотрудники (вымышленная): таб.№ = Code,
+    ФИО = Description; подразделение/должность/приём — в регистре (см. transport)."""
     return {
-        "tab_num": tab, "fio": fio, "dept": "Цех Тестовый",
-        "position": FAKE_POSITION, "employment_type": "Основная",
-        "hire_date": "2023-01-15", "vacation_balance": "14",
+        "Ref_Key": "ref-" + tab, "Code": tab, "Description": fio,
+        "ГоловнаяОрганизация_Key": ENT, "vacation_balance": "14",
+    }
+
+
+def _rows_t1() -> dict[str, dict]:
+    """Записи базы t1: Иван + два дубля одного ФИО."""
+    return {
+        "001": _card_row("001", FIO_IVAN),
+        "003": _card_row("003", FIO_DUBL),
+        "004": _card_row("004", FIO_DUBL),
     }
 
 
 class FakeTransport:
-    """Мок-HTTP 1С: база t1 (Иван + два дубля), база t2 (Петр выдуманный)."""
+    """Мок-HTTP 1С: база t1 (Иван + два дубля), база t2 (пусто).
+
+    URL от клиента: $filter=Code eq 'NNN' / substringof('...', Description)
+    (справочник) и регистр кадровых данных по Сотрудник_Key (второй запрос
+    карточки) — ответы по фактическому $filter."""
+
+    @staticmethod
+    def _respond(rows: dict[str, dict], filter_str: str) -> HttpResult:
+        if "substringof" in filter_str:
+            m = re.search(r"substringof\('([^']*)'", filter_str)
+            needle = (m.group(1) if m else "").lower()
+            hit = [row for row in rows.values() if needle in row["Description"].lower()]
+            return HttpResult(status=200, body=json.dumps({"value": hit}, ensure_ascii=False))
+        m = re.search(r"eq '([^']*)'", filter_str)
+        tab = m.group(1) if m else ""
+        if tab in rows:
+            return HttpResult(status=200, body=json.dumps({"value": [rows[tab]]}, ensure_ascii=False))
+        return HttpResult(status=200, body=json.dumps({"value": []}, ensure_ascii=False))
 
     def get(self, url, headers, timeout):
         parsed = urllib.parse.urlparse(url)
-        query = urllib.parse.parse_qs(parsed.query)
-        if "/t1/Employees" in url:
-            if "tab_num" in query:
-                rows = {
-                    "001": _card_row("001", FIO_IVAN),
-                    "003": _card_row("003", FIO_DUBL),
-                    "004": _card_row("004", FIO_DUBL),
-                }
-                tab = query["tab_num"][0]
-                if tab in rows:
-                    return HttpResult(status=200, body=json.dumps(rows[tab]))
-                return HttpResult(status=404, body="{}")
-            needle = query.get("q", [""])[0].lower()
-            rows = [
-                _card_row("001", FIO_IVAN),
-                _card_row("003", FIO_DUBL),
-                _card_row("004", FIO_DUBL),
-            ]
-            return HttpResult(status=200, body=json.dumps([r for r in rows if needle in r["fio"].lower()]))
-        if "/t2/Employees" in url:
-            if "tab_num" in query:
-                return HttpResult(status=404, body="{}")
-            return HttpResult(status=200, body=json.dumps([]))
+        filter_str = urllib.parse.unquote(
+            urllib.parse.parse_qs(parsed.query).get("$filter", [""])[0]
+        )
+        if "InformationRegister" in url:
+            m = re.search(r"guid'([^']*)'", filter_str)
+            ref = m.group(1) if m else ""
+            tab = ref[len("ref-"):] if ref.startswith("ref-") else ""
+            if tab in _rows_t1():
+                return HttpResult(
+                    status=200,
+                    body=json.dumps(
+                        {
+                            "value": [
+                                {
+                                    "Сотрудник_Key": ref,
+                                    "ТекущееПодразделение": {"Description": "Цех Тестовый"},
+                                    "ТекущаяДолжность": {"Description": FAKE_POSITION},
+                                    "ДатаПриема": "2023-01-15",
+                                }
+                            ]
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+            return HttpResult(status=200, body=json.dumps({"value": []}))
+        if "/t1/" in url:
+            return self._respond(_rows_t1(), filter_str)
+        if "/t2/" in url:
+            return self._respond({}, filter_str)
         return HttpResult(status=404, body="{}")
 
 

@@ -62,13 +62,16 @@ def _bases_from_settings(store: DbSettingsStore | None) -> dict[str, OneCBaseCon
             url=str(item.get("url") or ""),
             user=str(item.get("user") or ""),
             secret=str(item.get("password") or ""),
-            employee_entity=str(item.get("employee_entity") or "Catalog_СотрудникиОрганизаций"),
+            employee_entity=str(item.get("employee_entity") or "Catalog_Сотрудники"),
             organization_entity=str(item.get("organization_entity") or "Catalog_Организации"),
-            tab_num_field=str(item.get("tab_num_field") or "ТабельныйНомер"),
-            fio_field=str(item.get("fio_field") or "Сотрудник/Description"),
-            department_field=str(item.get("department_field") or "Подразделение"),
-            position_field=str(item.get("position_field") or "Должность"),
+            employee_org_field=str(item.get("employee_org_field") or "ГоловнаяОрганизация_Key"),
+            tab_num_field=str(item.get("tab_num_field") or "Code"),
+            fio_field=str(item.get("fio_field") or "Description"),
+            department_field=str(item.get("department_field") or "ТекущееПодразделение/Description"),
+            position_field=str(item.get("position_field") or "ТекущаяДолжность/Description"),
             hire_date_field=str(item.get("hire_date_field") or "ДатаПриема"),
+            hr_entity=str(item.get("hr_entity") or "InformationRegister_ТекущиеКадровыеДанныеСотрудников"),
+            hr_employee_field=str(item.get("hr_employee_field") or "Сотрудник_Key"),
             organization_code_field=str(item.get("organization_code_field") or "Ref_Key"),
             organization_name_field=str(item.get("organization_name_field") or "Description"),
         )
@@ -277,7 +280,9 @@ def search_employees(
                     if linked.enterprise != enterprise:
                         continue
                     try:
-                        extra.append(client.get_employee(linked.base_code, linked.tab_num))
+                        extra.append(
+                            client.get_employee(linked.base_code, linked.tab_num, enterprise)
+                        )
                     except (OneCNotFound, OneCBaseDown, OneCCircuitOpen, OneCError):
                         continue
                     except Exception:
@@ -338,7 +343,7 @@ def employee_card(
     """
     settings.ensure_read_only()
     try:
-        card = client.get_employee(base_code, tab_num)
+        card = client.get_employee(base_code, tab_num, enterprise)
     except OneCNotFound as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)

@@ -59,12 +59,23 @@ def _bases():
 
 
 def _card_row(tab, fio, dept="Цех Тестовый", position="Тестировщик"):
-    # OData-запись по схеме ЗУП (дефолты): русские имена полей, ФИО — вложенное.
+    # OData-запись справочника Catalog_Сотрудники (дефолты): таб.№ = Code,
+    # ФИО = Description, предприятие = ГоловнаяОрганизация_Key.
+    # Подразделение/должность/приём — в регистре кадровых данных (см. transport).
     return {
-        "ТабельныйНомер": tab,
-        "Сотрудник": {"Description": fio},
-        "Подразделение": dept,
-        "Должность": position,
+        "Ref_Key": "ref-" + tab,
+        "Code": tab,
+        "Description": fio,
+        "ГоловнаяОрганизация_Key": ENT,
+    }
+
+
+def _hr_row(tab, dept="Цех Тестовый", position="Тестировщик"):
+    # OData-запись регистра текущих кадровых данных с $expand полей.
+    return {
+        "Сотрудник_Key": "ref-" + tab,
+        "ТекущееПодразделение": {"Description": dept},
+        "ТекущаяДолжность": {"Description": position},
         "ДатаПриема": "2023-01-15",
     }
 
@@ -72,24 +83,30 @@ def _card_row(tab, fio, dept="Цех Тестовый", position="Тестиро
 class FakeTransport:
     """Мок-HTTP 1С: отвечает OData-обёрткой {"value": [...]} по базе.
 
-    URL от клиента: $filter=ТабельныйНомер eq 'NNN' (карточка) либо
-    substringof('...', Сотрудник/Description) eq true (поиск). down_t1
-    имитирует падение базы t1 (5xx)."""
+    URL от клиента: $filter=Code eq 'NNN' (карточка справочника) либо
+    substringof('...', Description) eq true (поиск); регистр кадровых данных
+    отвечает по Сотрудник_Key (guid). down_t1 имитирует падение базы t1 (5xx)."""
 
     def __init__(self, down_t1=False):
         self.down_t1 = down_t1
         self.calls: list[str] = []
+
+    def _rows_t1(self):
+        return {
+            "001": _card_row("001", FIO_IVAN),
+            "003": _card_row("003", FIO_DUBL),
+            "004": _card_row("004", FIO_DUBL),
+        }
+
+    def _rows_t2(self):
+        return {"002": _card_row("002", FIO_PETR)}
 
     @staticmethod
     def _respond(rows: dict[str, dict], filter_str: str) -> HttpResult:
         if "substringof" in filter_str:
             m = re.search(r"substringof\('([^']*)'", filter_str)
             needle = (m.group(1) if m else "").lower()
-            hit = [
-                row
-                for row in rows.values()
-                if needle in row["Сотрудник"]["Description"].lower()
-            ]
+            hit = [row for row in rows.values() if needle in row["Description"].lower()]
             return HttpResult(200, json.dumps({"value": hit}, ensure_ascii=False))
         m = re.search(r"eq '([^']*)'", filter_str)
         tab = m.group(1) if m else ""
@@ -103,17 +120,26 @@ class FakeTransport:
         filter_str = urllib.parse.unquote(
             urllib.parse.parse_qs(parsed.query).get("$filter", [""])[0]
         )
-        rows_t1 = {
-            "001": _card_row("001", FIO_IVAN),
-            "003": _card_row("003", FIO_DUBL),
-            "004": _card_row("004", FIO_DUBL),
-        }
+        if "InformationRegister" in url:
+            # Второй запрос карточки: кадровые данные по Ref_Key сотрудника.
+            m = re.search(r"guid'([^']*)'", filter_str)
+            ref = m.group(1) if m else ""
+            for rows in (self._rows_t1(), self._rows_t2()):
+                for tab, row in rows.items():
+                    if row["Ref_Key"] == ref:
+                        return HttpResult(
+                            200,
+                            json.dumps(
+                                {"value": [_hr_row(tab)]}, ensure_ascii=False
+                            ),
+                        )
+            return HttpResult(200, json.dumps({"value": []}, ensure_ascii=False))
         if "/t1/" in url:
             if self.down_t1:
                 return HttpResult(status=500, body="down")
-            return self._respond(rows_t1, filter_str)
+            return self._respond(self._rows_t1(), filter_str)
         if "/t2/" in url:
-            return self._respond({"002": _card_row("002", FIO_PETR)}, filter_str)
+            return self._respond(self._rows_t2(), filter_str)
         return HttpResult(status=404, body="{}")
 
 
@@ -301,7 +327,10 @@ def test_employees_owner_trimmed_no_pdn(client, owner_headers, b1_mocks):
     item = response.json()["items"][0]
     for forbidden in ("fio", "mail", "vacation_balance", "hire_date", "employment_type", "tab_num"):
         assert forbidden not in item
-    assert item["dept"] == "Цех Тестовый"
+    # В списке справочника нет подразделения/должности (они в карточке —
+    # второй запрос к регистру кадровых данных); у владельца и они пустые.
+    assert item["dept"] == ""
+    assert item["position"] == ""
 
 
 def test_employees_empty_returns_empty(client, hr_headers, b1_mocks):

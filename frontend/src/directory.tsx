@@ -136,8 +136,6 @@ export function Directory(props: DirectoryProps) {
           <tr>
             <th>ФИО</th>
             <th>Таб.№</th>
-            <th>Подразделение</th>
-            <th>Должность</th>
             <th>AD</th>
           </tr>
         </thead>
@@ -146,14 +144,12 @@ export function Directory(props: DirectoryProps) {
             <tr key={hit.key} onClick={() => void handleCard(hit)} style={{ cursor: "pointer" }}>
               <td>{hit.fio}</td>
               <td>{hit.tab_num}</td>
-              <td>{hit.dept}</td>
-              <td>{hit.position}</td>
               <td>{hit.ad_sam ? hit.ad_sam : "—"}</td>
             </tr>
           ))}
           {items.length === 0 && !listError && (
             <tr>
-              <td colSpan={5}>Нажмите «Найти», чтобы загрузить список.</td>
+              <td colSpan={3}>Нажмите «Найти», чтобы загрузить список.</td>
             </tr>
           )}
         </tbody>

@@ -45,7 +45,11 @@ def _bases():
 
 
 def _card_json(tab, fio):
-    return json.dumps({"tab_num": tab, "fio": fio}, ensure_ascii=False)
+    # OData-ответ справочника Catalog_Сотрудники (таб.№ = Code, ФИО = Description).
+    return json.dumps(
+        {"value": [{"Ref_Key": "ref-" + tab, "Code": tab, "Description": fio}]},
+        ensure_ascii=False,
+    )
 
 
 class FakeTransport:
@@ -60,7 +64,7 @@ class FakeTransport:
 
 def test_resolve_finds_in_second_base_when_first_has_no_card():
     def router(url, headers, timeout):
-        if "/a/Employees" in url:
+        if "/a/" in url:
             return HttpResult(404, "{}")
         return HttpResult(200, _card_json("100", FIO_B))
 
@@ -75,7 +79,7 @@ def test_failing_base_does_not_fail_others_mandatory():
     """Обязательный тест приёмки: падение одной базы не валит остальные."""
 
     def router(url, headers, timeout):
-        if "/a/Employees" in url:
+        if "/a/" in url:
             raise OneCConnectionError("сеть базы A недоступна")  # база A упала
         return HttpResult(200, _card_json("100", FIO_B))  # база B жива
 
@@ -89,9 +93,12 @@ def test_failing_base_does_not_fail_others_mandatory():
 
 def test_failing_base_also_isolated_on_search():
     def router(url, headers, timeout):
-        if "/a/Employees" in url:
+        if "/a/" in url:
             return HttpResult(500, "down")
-        return HttpResult(200, json.dumps([{"tab_num": "100", "fio": FIO_B}]))
+        return HttpResult(
+            200,
+            json.dumps([{"Ref_Key": "ref-100", "Code": "100", "Description": FIO_B}]),
+        )
 
     client = OneCClient(_bases(), transport=FakeTransport(router), failure_threshold=10)
     result = search_enterprise(ENT, "Выдуманова", client)

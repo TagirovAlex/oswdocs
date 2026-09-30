@@ -272,18 +272,38 @@ class OnecBaseItem(BaseModel):
         default=None, description="Пароль УЗ (маскируется в GET, пишется при вводе)"
     )
     employee_entity: str = Field(
-        default="Catalog_СотрудникиОрганизаций", description="Сущность сотрудников OData"
+        default="Catalog_Сотрудники",
+        description="Сущность сотрудников OData (справочник; таб.№ = Code, ФИО = Description)",
     )
     organization_entity: str = Field(
         default="Catalog_Организации", description="Сущность организаций (предприятий) OData"
     )
-    tab_num_field: str = Field(default="ТабельныйНомер", description="Поле таб.№")
-    fio_field: str = Field(
-        default="Сотрудник/Description", description="Поле ФИО (может требовать $expand)"
+    employee_org_field: str = Field(
+        default="ГоловнаяОрганизация_Key",
+        description="Поле предприятия в справочнике сотрудников (код = Ref_Key организации)",
     )
-    department_field: str = Field(default="Подразделение", description="Поле подразделения")
-    position_field: str = Field(default="Должность", description="Поле должности")
-    hire_date_field: str = Field(default="ДатаПриема", description="Поле даты приёма")
+    tab_num_field: str = Field(default="Code", description="Поле таб.№ (в Catalog_Сотрудники)")
+    fio_field: str = Field(
+        default="Description", description="Поле ФИО (в Catalog_Сотрудники)"
+    )
+    department_field: str = Field(
+        default="ТекущееПодразделение/Description",
+        description="Поле подразделения (регистр кадровых данных, $expand)",
+    )
+    position_field: str = Field(
+        default="ТекущаяДолжность/Description",
+        description="Поле должности (регистр кадровых данных, $expand)",
+    )
+    hire_date_field: str = Field(
+        default="ДатаПриема", description="Поле даты приёма (регистр кадровых данных)"
+    )
+    hr_entity: str = Field(
+        default="InformationRegister_ТекущиеКадровыеДанныеСотрудников",
+        description="Регистр текущих кадровых данных (второй запрос карточки)",
+    )
+    hr_employee_field: str = Field(
+        default="Сотрудник_Key", description="Поле сотрудника (Ref_Key) в регистре кадровых данных"
+    )
     organization_code_field: str = Field(
         default="Ref_Key", description="Поле кода организации (у ЗУП-«Организаций» кода нет — Ref_Key/ИНН)"
     )

@@ -54,10 +54,9 @@ def _bases():
 
 
 def _card_json(tab, fio):
-    # OData-ответ по схеме ЗУП: обёртка {"value": [...]}, поля — русские имена,
-    # ФИО — вложенный Сотрудник/Description.
+    # OData-ответ справочника Catalog_Сотрудники (таб.№ = Code, ФИО = Description).
     return json.dumps(
-        {"value": [{"ТабельныйНомер": tab, "Сотрудник": {"Description": fio}}]},
+        {"value": [{"Ref_Key": "ref-" + tab, "Code": tab, "Description": fio}]},
         ensure_ascii=False,
     )
 
@@ -123,9 +122,9 @@ def test_caching_get_employee_first_network_second_hit():
     wrapped = CachingOneCClient(client, cache, ttl_seconds=60)
 
     card1 = wrapped.get_employee("zup_a", "100")
-    assert len(transport.calls) == 1  # промах: сеть вызвана один раз
+    assert len(transport.calls) == 2  # промах: справочник + регистр кадровых данных
     card2 = wrapped.get_employee("zup_a", "100")
-    assert len(transport.calls) == 1  # попадание: сеть НЕ вызвана
+    assert len(transport.calls) == 2  # попадание: сеть НЕ вызвана
     assert card1 == card2
     # Запись в кэш — ровно одна, ключ base|tab, TTL из конструктора.
     assert len(cache.sets) == 1
@@ -169,7 +168,7 @@ def test_caching_get_employee_network_error_not_cached_and_raised():
 
 def test_caching_search_not_cached():
     body = json.dumps(
-        {"value": [{"ТабельныйНомер": "100", "Сотрудник": {"Description": FIO_B}}]},
+        {"value": [{"Ref_Key": "ref-100", "Code": "100", "Description": FIO_B}]},
         ensure_ascii=False,
     )
     transport = FakeTransport(lambda u, h, t: HttpResult(200, body))

@@ -783,13 +783,24 @@ export function AdminSettings(props: AdminSettingsProps) {
               <details>
                 <summary>Схема OData (ЗУП 3.х; имена уточняет ИТ по факту)</summary>
                 <label style={{ display: "block", marginTop: 8 }}>
-                  Сущность сотрудников
+                  Сущность сотрудников (справочник)
                   <input
                     aria-label={`Сущность сотрудников базы 1С ${i + 1}`}
                     type="text"
                     value={base.employee_entity}
                     onChange={(e) =>
                       setOnecBases(onecBases.map((b, j) => (j === i ? { ...b, employee_entity: e.target.value } : b)))
+                    }
+                  />
+                </label>
+                <label style={{ display: "block", marginTop: 8 }}>
+                  Поле предприятия (код = Ref_Key организации)
+                  <input
+                    aria-label={`Поле предприятия базы 1С ${i + 1}`}
+                    type="text"
+                    value={base.employee_org_field}
+                    onChange={(e) =>
+                      setOnecBases(onecBases.map((b, j) => (j === i ? { ...b, employee_org_field: e.target.value } : b)))
                     }
                   />
                 </label>
@@ -816,7 +827,7 @@ export function AdminSettings(props: AdminSettingsProps) {
                   />
                 </label>
                 <label style={{ display: "block", marginTop: 8 }}>
-                  Поле ФИО (может требовать $expand, напр. «Сотрудник/Description»)
+                  Поле ФИО
                   <input
                     aria-label={`Поле ФИО базы 1С ${i + 1}`}
                     type="text"
@@ -827,7 +838,7 @@ export function AdminSettings(props: AdminSettingsProps) {
                   />
                 </label>
                 <label style={{ display: "block", marginTop: 8 }}>
-                  Поле подразделения
+                  Поле подразделения (регистр кадровых данных, $expand)
                   <input
                     aria-label={`Поле подразделения базы 1С ${i + 1}`}
                     type="text"
@@ -838,7 +849,7 @@ export function AdminSettings(props: AdminSettingsProps) {
                   />
                 </label>
                 <label style={{ display: "block", marginTop: 8 }}>
-                  Поле должности
+                  Поле должности (регистр кадровых данных, $expand)
                   <input
                     aria-label={`Поле должности базы 1С ${i + 1}`}
                     type="text"
@@ -849,13 +860,35 @@ export function AdminSettings(props: AdminSettingsProps) {
                   />
                 </label>
                 <label style={{ display: "block", marginTop: 8 }}>
-                  Поле даты приёма
+                  Поле даты приёма (регистр кадровых данных)
                   <input
                     aria-label={`Поле даты приёма базы 1С ${i + 1}`}
                     type="text"
                     value={base.hire_date_field}
                     onChange={(e) =>
                       setOnecBases(onecBases.map((b, j) => (j === i ? { ...b, hire_date_field: e.target.value } : b)))
+                    }
+                  />
+                </label>
+                <label style={{ display: "block", marginTop: 8 }}>
+                  Регистр кадровых данных (второй запрос карточки)
+                  <input
+                    aria-label={`Регистр кадровых данных базы 1С ${i + 1}`}
+                    type="text"
+                    value={base.hr_entity}
+                    onChange={(e) =>
+                      setOnecBases(onecBases.map((b, j) => (j === i ? { ...b, hr_entity: e.target.value } : b)))
+                    }
+                  />
+                </label>
+                <label style={{ display: "block", marginTop: 8 }}>
+                  Поле сотрудника в регистре (Ref_Key)
+                  <input
+                    aria-label={`Поле сотрудника в регистре базы 1С ${i + 1}`}
+                    type="text"
+                    value={base.hr_employee_field}
+                    onChange={(e) =>
+                      setOnecBases(onecBases.map((b, j) => (j === i ? { ...b, hr_employee_field: e.target.value } : b)))
                     }
                   />
                 </label>
@@ -909,13 +942,16 @@ export function AdminSettings(props: AdminSettingsProps) {
                     url: "",
                     user: "",
                     password: "",
-                    employee_entity: "Catalog_СотрудникиОрганизаций",
+                    employee_entity: "Catalog_Сотрудники",
                     organization_entity: "Catalog_Организации",
-                    tab_num_field: "ТабельныйНомер",
-                    fio_field: "Сотрудник/Description",
-                    department_field: "Подразделение",
-                    position_field: "Должность",
+                    employee_org_field: "ГоловнаяОрганизация_Key",
+                    tab_num_field: "Code",
+                    fio_field: "Description",
+                    department_field: "ТекущееПодразделение/Description",
+                    position_field: "ТекущаяДолжность/Description",
                     hire_date_field: "ДатаПриема",
+                    hr_entity: "InformationRegister_ТекущиеКадровыеДанныеСотрудников",
+                    hr_employee_field: "Сотрудник_Key",
                     organization_code_field: "Ref_Key",
                     organization_name_field: "Description",
                   },

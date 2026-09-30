@@ -4,7 +4,7 @@
 // Сотрудник: поиск в 1С (GET /api/employees); без баз (503) — ручной ввод полей.
 import { useEffect, useRef, useState } from "react";
 import { ApiHttpError } from "./auth-client";
-import { createRequest, getEnterprises, getStepGroups, searchEmployees } from "./requests-client";
+import { createRequest, getEmployeeCard, getEnterprises, getStepGroups, searchEmployees } from "./requests-client";
 import type { EmployeeHit, Enterprise } from "./requests-client";
 import type { Role } from "./api-mock";
 
@@ -105,11 +105,25 @@ export function CreateForm(props: CreateFormProps) {
   }
 
   // Выбор сотрудника из списка 1С заполняет поля заявки.
+  // Подразделение/должность в списке справочника пустые (они в карточке —
+  // второй запрос к регистру кадровых данных): догружаем карточкой.
   function pickEmployee(hit: EmployeeHit): void {
     setFio(hit.fio);
     setTabNum(hit.tab_num);
-    setDepartment(hit.dept);
-    setPosition(hit.position);
+    setDepartment("");
+    setPosition("");
+    const parts = hit.key.split("|");
+    if (parts.length < 3) {
+      return; // битый ключ — подразделение/должность ОК введёт вручную
+    }
+    void getEmployeeCard(enterprise, parts[1], hit.tab_num)
+      .then((card) => {
+        setDepartment(card.dept ?? "");
+        setPosition(card.position ?? "");
+      })
+      .catch(() => {
+        // Карточка недоступна — подразделение/должность ОК введёт вручную.
+      });
   }
 
   // Переключение группы ручного конструктора.
@@ -210,7 +224,7 @@ export function CreateForm(props: CreateFormProps) {
                 <option value="">— выберите —</option>
                 {empHits.map((h) => (
                   <option key={h.key} value={h.tab_num}>
-                    {h.fio} · {h.tab_num} · {h.position}
+                    {h.fio} · {h.tab_num}
                   </option>
                 ))}
               </select>

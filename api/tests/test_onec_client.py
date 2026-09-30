@@ -50,18 +50,26 @@ def _bases():
     }
 
 
-def _card_json(tab, fio, **kw):
-    # OData-ответ по схеме ЗУП (дефолты): поля — русские имена, ФИО — через
-    # вложенный Сотрудник/Description (требует $expand в URL).
+def _card_json(tab, fio, ref=None, org=ENT):
+    # OData-ответ справочника Catalog_Сотрудники (дефолты схемы): таб.№ = Code,
+    # ФИО = Description, предприятие = ГоловнаяОрганизация_Key (код = Ref_Key).
     item = {
-        "ТабельныйНомер": tab,
-        "Сотрудник": {"Description": fio},
-        "Подразделение": kw.get("dept", "Цех тестовый"),
-        "Должность": kw.get("position", "Тестировщик"),
-        "ДатаПриема": kw.get("hire_date", "2020-01-15"),
+        "Ref_Key": ref or ("ref-" + tab),
+        "Code": tab,
+        "Description": fio,
+        "ГоловнаяОрганизация_Key": org,
     }
-    if kw.get("vacation_balance") is not None:
-        item["ОстатокОтпуска"] = kw["vacation_balance"]
+    return json.dumps({"value": [item]}, ensure_ascii=False)
+
+
+def _hr_json(ref, dept="Цех тестовый", position="Тестировщик", hire_date="2020-01-15"):
+    # OData-ответ регистра текущих кадровых данных с $expand подразделения/должности.
+    item = {
+        "Сотрудник_Key": ref,
+        "ТекущееПодразделение": {"Description": dept},
+        "ТекущаяДолжность": {"Description": position},
+        "ДатаПриема": hire_date,
+    }
     return json.dumps({"value": [item]}, ensure_ascii=False)
 
 
@@ -79,7 +87,7 @@ class FakeTransport:
 
 
 def _ok_a(url, headers, timeout):
-    # URL карточки/поиска по схеме: сущность + $filter по ТабельныйНомер.
+    # URL карточки/поиска по схеме: сущность Catalog_Сотрудники + $filter по Code.
     if "/a/" in url:
         return HttpResult(200, _card_json("100", FIOS["a100"]))
     return HttpResult(404, "{}")
@@ -207,7 +215,7 @@ def test_search_returns_cards():
         return HttpResult(
             200,
             json.dumps(
-                {"value": [{"ТабельныйНомер": "200", "Сотрудник": {"Description": FIOS["b200"]}}]},
+                {"value": [{"Ref_Key": "ref-200", "Code": "200", "Description": FIOS["b200"]}]},
                 ensure_ascii=False,
             ),
         )
@@ -215,6 +223,7 @@ def test_search_returns_cards():
     c = OneCClient({"zup_b": _bases()["zup_b"]}, transport=FakeTransport(h))
     cards = c.search("zup_b", "Несуществов")
     assert len(cards) == 1 and cards[0].fio == FIOS["b200"]
+    assert cards[0].ref_key == "ref-200"
 
 
 def test_load_bases_from_env_parses_documented_format(monkeypatch):
@@ -270,5 +279,94 @@ def test_built_urls_are_ascii():
     search = OneCClient._build_search_url(cfg, "Сказочников")
     for url in (emp, search):
         url.encode("ascii")  # не бросает UnicodeEncodeError
-    assert quote("Catalog_СотрудникиОрганизаций") in emp
+    assert quote("Catalog_Сотрудники") in emp
     assert "СотрудникиОрганизаций" not in emp  # сырой кириллицы в пути нет
+
+
+def test_employee_url_has_org_filter():
+    """Карточка с предприятием: в $filter условие ГоловнаяОрганизация_Key eq guid'...'."""
+    from urllib.parse import parse_qs, unquote, urlparse
+
+    from app.onec_client import OneCClient
+
+    cfg = _bases()["zup_a"]
+    url = OneCClient._build_employee_url(cfg, "100", ENT)
+    flt = unquote(parse_qs(urlparse(url).query)["$filter"][0])
+    assert "Code eq '100'" in flt
+    assert "ГоловнаяОрганизация_Key eq guid'%s'" % ENT in flt
+    # Без предприятия — фильтра по организации нет.
+    plain = OneCClient._build_employee_url(cfg, "100")
+    assert "ГоловнаяОрганизация_Key" not in unquote(parse_qs(urlparse(plain).query)["$filter"][0])
+
+
+def test_search_url_has_org_filter():
+    """Поиск с предприятием: substringof по ФИО + фильтр организации в одном $filter."""
+    from urllib.parse import parse_qs, unquote, urlparse
+
+    from app.onec_client import OneCClient
+
+    cfg = _bases()["zup_b"]
+    url = OneCClient._build_search_url(cfg, "Выдуманова", ENT)
+    flt = unquote(parse_qs(urlparse(url).query)["$filter"][0])
+    assert "substringof('Выдуманова', Description) eq true" in flt
+    assert "ГоловнаяОрганизация_Key eq guid'%s'" % ENT in flt
+
+
+def test_get_employee_enriches_from_hr_register():
+    """Карточка: после справочника второй запрос к регистру кадровых данных
+    ($expand подразделения/должности) заполняет депт/должность/дату приёма."""
+    ref = "ref-100"
+    seen = []
+
+    def h(url, headers, timeout):
+        seen.append(url)
+        # ASCII-префикс «InformationRegister» в URL не кодируется (кириллица — да).
+        if "InformationRegister" in url:
+            return HttpResult(200, _hr_json(ref, dept="Цех тестовый", position="Тестировщик"))
+        return HttpResult(200, _card_json("100", FIOS["a100"], ref=ref))
+
+    c = OneCClient({"zup_a": _bases()["zup_a"]}, transport=FakeTransport(h))
+    card = c.get_employee("zup_a", "100", ENT)
+    assert card.fio == FIOS["a100"]
+    assert card.dept == "Цех тестовый"
+    assert card.position == "Тестировщик"
+    assert card.hire_date == "2020-01-15"
+    assert card.ref_key == ref
+    assert len(seen) == 2  # справочник + регистр
+    # Второй запрос: фильтр по Сотрудник_Key (guid) + $expand подразделения/должности.
+    from urllib.parse import parse_qs, unquote, urlparse
+
+    q = parse_qs(urlparse(seen[1]).query)
+    assert "Сотрудник_Key eq guid'%s'" % ref in unquote(q["$filter"][0])
+    assert "ТекущееПодразделение" in unquote(q["$expand"][0])
+    assert "ТекущаяДолжность" in unquote(q["$expand"][0])
+
+
+def test_hr_register_not_found_keeps_brief_card():
+    """Записи кадровых данных нет (404) — карточка остаётся без депт/должности/приёма."""
+    def h(url, headers, timeout):
+        if "InformationRegister_ТекущиеКадровыеДанныеСотрудников" in url:
+            return HttpResult(404, "{}")
+        return HttpResult(200, _card_json("100", FIOS["a100"]))
+
+    c = OneCClient({"zup_a": _bases()["zup_a"]}, transport=FakeTransport(h))
+    card = c.get_employee("zup_a", "100")
+    assert card.fio == FIOS["a100"]
+    assert card.dept == "" and card.position == "" and card.hire_date == ""
+
+
+def test_hr_register_not_configured_skips_second_request():
+    """Регистр кадровых данных не настроен (hr_entity='') — только один запрос."""
+    from dataclasses import replace
+
+    seen = []
+
+    def h(url, headers, timeout):
+        seen.append(url)
+        return HttpResult(200, _card_json("100", FIOS["a100"]))
+
+    cfg = replace(_bases()["zup_a"], hr_entity="", hr_employee_field="")
+    c = OneCClient({"zup_a": cfg}, transport=FakeTransport(h))
+    card = c.get_employee("zup_a", "100")
+    assert card.fio == FIOS["a100"]
+    assert len(seen) == 1

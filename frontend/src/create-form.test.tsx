@@ -4,7 +4,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiHttpError } from "./auth-client";
 import { CreateForm } from "./create-form";
-import { createRequest, getEnterprises, getStepGroups, searchEmployees } from "./requests-client";
+import { createRequest, getEmployeeCard, getEnterprises, getStepGroups, searchEmployees } from "./requests-client";
 
 // Мок клиента заявок; чистые функции (toRequestRow и др.) — реальные.
 vi.mock("./requests-client", async (importOriginal) => {
@@ -14,6 +14,7 @@ vi.mock("./requests-client", async (importOriginal) => {
     getEnterprises: vi.fn(),
     getStepGroups: vi.fn(),
     searchEmployees: vi.fn(),
+    getEmployeeCard: vi.fn(),
     createRequest: vi.fn(),
   };
 });
@@ -27,6 +28,7 @@ beforeEach(() => {
   vi.mocked(getEnterprises).mockReset();
   vi.mocked(getStepGroups).mockReset();
   vi.mocked(searchEmployees).mockReset();
+  vi.mocked(getEmployeeCard).mockReset();
   vi.mocked(createRequest).mockReset();
   vi.mocked(getEnterprises).mockResolvedValue(enterprises);
   vi.mocked(getStepGroups).mockResolvedValue(groups);
@@ -88,7 +90,7 @@ describe("CreateForm", () => {
     vi.mocked(searchEmployees).mockResolvedValue({
       items: [
         {
-          key: "ENT_PRIMER_1#Т-000201",
+          key: "ENT_PRIMER_1|zup_t1|Т-000201",
           tab_num: "Т-000201",
           fio: "Громов Игорь Олегович",
           dept: "Цех № 1",
@@ -96,6 +98,20 @@ describe("CreateForm", () => {
           needs_manual_review: false,
         },
       ],
+    });
+    // Подразделение/должность — из карточки (в списке справочника их нет).
+    vi.mocked(getEmployeeCard).mockResolvedValue({
+      key: "ENT_PRIMER_1|zup_t1|Т-000201",
+      enterprise: "ENT_PRIMER_1",
+      base_code: "zup_t1",
+      tab_num: "Т-000201",
+      truth_source: "1c",
+      link: { linked: false },
+      divergences: [],
+      needs_manual_review: false,
+      fio: "Громов Игорь Олегович",
+      dept: "Цех № 1",
+      position: "Слесарь",
     });
 
     render(<CreateForm role="hr" />);
@@ -106,8 +122,10 @@ describe("CreateForm", () => {
 
     await waitFor(() => expect(screen.getByLabelText("Сотрудник")).toBeInTheDocument());
     expect(screen.queryByLabelText("Табельный №")).not.toBeInTheDocument();
-    // Выбор сотрудника заполняет поля → можно перейти к маршруту.
+    // Выбор сотрудника заполняет поля (карточка догружает подразделение/должность)
+    // → можно перейти к маршруту.
     fireEvent.change(screen.getByLabelText("Сотрудник"), { target: { value: "Т-000201" } });
+    await waitFor(() => expect(getEmployeeCard).toHaveBeenCalled());
     fireEvent.click(screen.getByText("Далее"));
     expect(screen.getByText("Маршрут согласования")).toBeInTheDocument();
   });

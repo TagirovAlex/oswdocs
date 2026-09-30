@@ -147,7 +147,8 @@ def _bases():
 
 
 class FakeTransport:
-    """Мок-HTTP 1С: карточка Ивана по таб. номеру 001 (OData-схема ЗУП)."""
+    """Мок-HTTP 1С: карточка Ивана по таб. номеру 001 (справочник Catalog_Сотрудники)
+    + регистр кадровых данных (второй запрос карточки)."""
 
     def get(self, url, headers, timeout):
         parsed = urllib.parse.urlparse(url)
@@ -157,12 +158,30 @@ class FakeTransport:
         if "/t1/" not in url:
             return HttpResult(status=404, body="{}")
         row = {
-            "ТабельныйНомер": "001",
-            "Сотрудник": {"Description": FIO_IVAN},
-            "Подразделение": "Цех Тестовый",
-            "Должность": "Тестировщик",
-            "ДатаПриема": "2023-01-15",
+            "Ref_Key": "ref-001",
+            "Code": "001",
+            "Description": FIO_IVAN,
+            "ГоловнаяОрганизация_Key": ENT,
         }
+        if "InformationRegister" in url:
+            if "guid'ref-001'" in filter_str:
+                return HttpResult(
+                    status=200,
+                    body=json.dumps(
+                        {
+                            "value": [
+                                {
+                                    "Сотрудник_Key": "ref-001",
+                                    "ТекущееПодразделение": {"Description": "Цех Тестовый"},
+                                    "ТекущаяДолжность": {"Description": "Тестировщик"},
+                                    "ДатаПриема": "2023-01-15",
+                                }
+                            ]
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+            return HttpResult(status=200, body=json.dumps({"value": []}))
         if "substringof" in filter_str:
             m = re.search(r"substringof\('([^']*)'", filter_str)
             needle = (m.group(1) if m else "").lower()

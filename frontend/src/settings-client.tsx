@@ -48,20 +48,26 @@ export interface SettingsOnecBase {
   user: string;
   // Пароль УЗ (в GET — маска либо null; записывается только при вводе).
   password: string | null;
-  // Сущность сотрудников OData (дефолт ЗУП).
+  // Сущность сотрудников OData (справочник; таб.№ = Code, ФИО = Description).
   employee_entity: string;
   // Сущность организаций (предприятий) OData (дефолт ЗУП).
   organization_entity: string;
+  // Поле предприятия в справочнике сотрудников (код = Ref_Key организации).
+  employee_org_field: string;
   // Поле таб.№.
   tab_num_field: string;
-  // Поле ФИО (может требовать $expand).
+  // Поле ФИО.
   fio_field: string;
-  // Поле подразделения.
+  // Поле подразделения (регистр кадровых данных, $expand).
   department_field: string;
-  // Поле должности.
+  // Поле должности (регистр кадровых данных, $expand).
   position_field: string;
-  // Поле даты приёма.
+  // Поле даты приёма (регистр кадровых данных).
   hire_date_field: string;
+  // Регистр текущих кадровых данных (второй запрос карточки).
+  hr_entity: string;
+  // Поле сотрудника (Ref_Key) в регистре кадровых данных.
+  hr_employee_field: string;
   // Поле кода организации (у ЗУП-«Организаций» кода нет — Ref_Key/ИНН).
   organization_code_field: string;
   // Поле названия организации.

@@ -131,7 +131,7 @@ def create_link(
             detail="Ридер AD не настроен (в offline — подмена фейковым шлюзом)",
         )
     try:
-        card = client.get_employee(body.base_code, body.tab_num)
+        card = client.get_employee(body.base_code, body.tab_num, body.enterprise)
     except OneCNotFound as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)

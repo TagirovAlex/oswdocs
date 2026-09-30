@@ -85,13 +85,22 @@ class OneCBaseConfig:
     url: str = ""  # OData-URL публикации базы (до /odata/standard.odata/)
     user: str = ""  # сервисная УЗ чтения (имя)
     secret: str = ""  # сервисная УЗ чтения (пароль, только из env/настроек)
-    employee_entity: str = "Catalog_СотрудникиОрганизаций"
+    # Справочник сотрудников: в ЗУП это Catalog_Сотрудники (таб.№ = Code,
+    # ФИО = Description), а не Catalog_СотрудникиОрганизаций (не публикуется).
+    employee_entity: str = "Catalog_Сотрудники"
     organization_entity: str = "Catalog_Организации"
-    tab_num_field: str = "ТабельныйНомер"
-    fio_field: str = "Сотрудник/Description"
-    department_field: str = "Подразделение"
-    position_field: str = "Должность"
+    # Фильтр предприятия в справочнике сотрудников: код предприятия = Ref_Key
+    # организации (у «Организаций» кода нет), таб. номера по базам пересекаются.
+    employee_org_field: str = "ГоловнаяОрганизация_Key"
+    tab_num_field: str = "Code"
+    fio_field: str = "Description"
+    # Подразделение/должность/дата приёма — из регистра текущих кадровых данных
+    # (второй запрос карточки; поля с '/' — через $expand, напр. «ТекущееПодразделение/Description»).
+    department_field: str = "ТекущееПодразделение/Description"
+    position_field: str = "ТекущаяДолжность/Description"
     hire_date_field: str = "ДатаПриема"
+    hr_entity: str = "InformationRegister_ТекущиеКадровыеДанныеСотрудников"
+    hr_employee_field: str = "Сотрудник_Key"  # поле сотрудника (Ref_Key) в регистре
     organization_code_field: str = "Ref_Key"
     organization_name_field: str = "Description"
 
@@ -112,6 +121,9 @@ class EmployeeCard:
     # (обрезка — в B1, здесь поле просто присутствует как nullable).
     vacation_balance: Optional[str] = None
     mol_flag: Optional[bool] = None  # TODO: флаг МОЛ из 1С не подтверждён, nullable
+    # Ref_Key записи справочника сотрудников: нужен для второго запроса карточки
+    # (регистр текущих кадровых данных); наружу как ПДн не отдаётся.
+    ref_key: str = ""
 
     def key(self) -> str:
         """Составной ключ карточки."""
@@ -283,11 +295,17 @@ class OneCClient:
         self._require_base(base_code)
         return self._circuits[base_code].is_open
 
-    def get_employee(self, base_code: str, tab_num: str) -> EmployeeCard:
-        """Прочитать карточку сотрудника по таб. номеру (GET одной базы)."""
+    def get_employee(
+        self, base_code: str, tab_num: str, enterprise: Optional[str] = None
+    ) -> EmployeeCard:
+        """Прочитать карточку сотрудника по таб. номеру (GET одной базы).
+
+        enterprise — фильтр предприятия (код = Ref_Key организации); карточка
+        дополняется текущими кадровыми данными (подразделение/должность/дата
+        приёма) вторым запросом к регистру кадровых данных."""
         cfg = self._require_base(base_code)
         self._ensure_allowed(base_code)
-        url = self._build_employee_url(cfg, tab_num)
+        url = self._build_employee_url(cfg, tab_num, enterprise)
         try:
             result = self._transport.get(url, self._auth_headers(cfg), self._timeout)
         except OneCTimeoutError:
@@ -310,13 +328,19 @@ class OneCClient:
         if result.status != 200:
             raise OneCError("база %r ответила %s" % (base_code, result.status))
         self._on_success(base_code)
-        return self._parse_card(cfg, result.body, tab_num)
+        card = self._parse_card(cfg, result.body, tab_num, enterprise)
+        return self._enrich_hr(cfg, card)
 
-    def search(self, base_code: str, query: str) -> List[EmployeeCard]:
-        """Поиск сотрудников базы по подстроке ФИО (GET одной базы)."""
+    def search(
+        self, base_code: str, query: str, enterprise: Optional[str] = None
+    ) -> List[EmployeeCard]:
+        """Поиск сотрудников базы по подстроке ФИО (GET одной базы).
+
+        enterprise — фильтр предприятия (код = Ref_Key организации); результаты
+        справочника лёгкие (без кадровых данных — они в карточке get_employee)."""
         cfg = self._require_base(base_code)
         self._ensure_allowed(base_code)
-        url = self._build_search_url(cfg, query)
+        url = self._build_search_url(cfg, query, enterprise)
         try:
             result = self._transport.get(url, self._auth_headers(cfg), self._timeout)
         except OneCTimeoutError:
@@ -336,7 +360,64 @@ class OneCClient:
         if result.status != 200:
             raise OneCError("база %r ответила %s" % (base_code, result.status))
         self._on_success(base_code)
-        return self._parse_cards(cfg, result.body)
+        return self._parse_cards(cfg, result.body, enterprise)
+
+    def _enrich_hr(self, cfg: OneCBaseConfig, card: EmployeeCard) -> EmployeeCard:
+        """Дополнить карточку текущими кадровыми данными (регистр, $expand).
+
+        Регистр не настроен или записи кадровых данных нет — карточка остаётся
+        как есть (не ошибка); падение базы на этом запросе — ошибка (счётчик)."""
+        if not cfg.hr_entity or not cfg.hr_employee_field or not card.ref_key:
+            return card
+        self._ensure_allowed(cfg.code)
+        url = self._build_hr_url(cfg, card.ref_key)
+        try:
+            result = self._transport.get(url, self._auth_headers(cfg), self._timeout)
+        except OneCTimeoutError:
+            self._on_failure(cfg.code)
+            raise
+        except OneCConnectionError as exc:
+            self._on_failure(cfg.code)
+            raise OneCBaseDown("база %r недоступна: %s" % (cfg.code, exc)) from exc
+        except OneCCircuitOpen:
+            raise
+        except Exception as exc:
+            self._on_failure(cfg.code)
+            raise OneCBaseDown("база %r недоступна: %s" % (cfg.code, exc)) from exc
+        if result.status == 404:
+            return card  # кадровых данных нет (напр. уволен) — карточка как есть
+        if result.status >= 500:
+            self._on_failure(cfg.code)
+            raise OneCBaseDown("база %r ответила %s" % (cfg.code, result.status))
+        if result.status != 200:
+            raise OneCError("база %r ответила %s" % (cfg.code, result.status))
+        self._on_success(cfg.code)
+        return self._parse_hr(cfg, result.body, card)
+
+    @classmethod
+    def _parse_hr(cls, cfg: OneCBaseConfig, body: str, card: EmployeeCard) -> EmployeeCard:
+        """Наложить запись регистра кадровых данных на карточку (поля схемы)."""
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise OneCError("база %r вернула не-JSON" % cfg.code) from exc
+        items = data.get("value") if isinstance(data, dict) else data
+        if not isinstance(items, list) or not items or not isinstance(items[0], dict):
+            return card  # запись не найдена — карточка без кадровых данных
+        item = items[0]
+        return EmployeeCard(
+            enterprise=card.enterprise,
+            base_code=card.base_code,
+            tab_num=card.tab_num,
+            fio=card.fio,
+            dept=cls._field(item, cfg.department_field) or card.dept,
+            position=cls._field(item, cfg.position_field) or card.position,
+            employment_type=card.employment_type,
+            hire_date=cls._field(item, cfg.hire_date_field) or card.hire_date,
+            vacation_balance=card.vacation_balance,
+            mol_flag=card.mol_flag,
+            ref_key=card.ref_key,
+        )
 
     # -- внутренние методы --
 
@@ -381,43 +462,60 @@ class OneCClient:
         return part if part and "/" in fio_field else ""
 
     @staticmethod
-    def _select_fields(cfg: OneCBaseConfig) -> str:
-        """Список полей $select по схеме базы (уникальные, без пустых)."""
-        fields = [
-            cfg.tab_num_field,
-            cfg.fio_field,
-            cfg.department_field,
-            cfg.position_field,
-            cfg.hire_date_field,
-        ]
+    def _unique_fields(fields: List[str]) -> List[str]:
+        """Поля без пустых и дублей (порядок сохраняется)."""
         seen: List[str] = []
         for f in fields:
             if f and f not in seen:
                 seen.append(f)
-        return ",".join(seen)
+        return seen
+
+    @staticmethod
+    def _employee_select_fields(cfg: OneCBaseConfig) -> str:
+        """Поля $select справочника сотрудников: ключ + таб.№ + ФИО + фильтр предприятия.
+
+        Ref_Key — ключ записи для второго запроса карточки (кадровые данные)."""
+        return ",".join(
+            OneCClient._unique_fields(
+                ["Ref_Key", cfg.tab_num_field, cfg.fio_field, cfg.employee_org_field]
+            )
+        )
 
     @classmethod
-    def _build_employee_url(cls, cfg: OneCBaseConfig, tab_num: str) -> str:
-        """OData-URL карточки: сущность + $filter по таб.№ + $select схемы."""
-        select = urllib.parse.quote(cls._select_fields(cfg), safe=",;/")
-        flt = urllib.parse.quote("%s eq '%s'" % (cfg.tab_num_field, tab_num), safe="")
+    def _org_filter(cls, cfg: OneCBaseConfig, enterprise: Optional[str]) -> str:
+        """Условие фильтра по предприятию (код = Ref_Key организации), если задано."""
+        if enterprise and cfg.employee_org_field:
+            return " and %s eq guid'%s'" % (cfg.employee_org_field, enterprise)
+        return ""
+
+    @classmethod
+    def _build_employee_url(
+        cls, cfg: OneCBaseConfig, tab_num: str, enterprise: Optional[str] = None
+    ) -> str:
+        """OData-URL карточки: сущность + $filter по таб.№ (+предприятие) + $select."""
+        select = urllib.parse.quote(cls._employee_select_fields(cfg), safe=",;/")
+        flt = urllib.parse.quote(
+            "%s eq '%s'%s" % (cfg.tab_num_field, tab_num, cls._org_filter(cfg, enterprise)),
+            safe="",
+        )
         url = "%s/%s?$format=json&$top=1&$select=%s&$filter=%s" % (
             normalize_odata_base_url(cfg.url),
             urllib.parse.quote(cfg.employee_entity),  # кириллица в имени сущности
             select,
             flt,
         )
-        expand = cls._expand_part(cfg.fio_field)
-        if expand:
-            url += "&$expand=" + urllib.parse.quote(expand)
         return url
 
     @classmethod
-    def _build_search_url(cls, cfg: OneCBaseConfig, query: str) -> str:
-        """OData-URL поиска: подстрока ФИО через substringof по полю схемы."""
-        select = urllib.parse.quote(cls._select_fields(cfg), safe=",;/")
+    def _build_search_url(
+        cls, cfg: OneCBaseConfig, query: str, enterprise: Optional[str] = None
+    ) -> str:
+        """OData-URL поиска: подстрока ФИО (substringof) по полю схемы (+предприятие)."""
+        select = urllib.parse.quote(cls._employee_select_fields(cfg), safe=",;/")
         flt = urllib.parse.quote(
-            "substringof('%s', %s) eq true" % (query, cfg.fio_field), safe=""
+            "substringof('%s', %s) eq true%s"
+            % (query, cfg.fio_field, cls._org_filter(cfg, enterprise)),
+            safe="",
         )
         url = "%s/%s?$format=json&$top=50&$select=%s&$filter=%s" % (
             normalize_odata_base_url(cfg.url),
@@ -425,7 +523,30 @@ class OneCClient:
             select,
             flt,
         )
-        expand = cls._expand_part(cfg.fio_field)
+        return url
+
+    @classmethod
+    def _build_hr_url(cls, cfg: OneCBaseConfig, ref_key: str) -> str:
+        """OData-URL регистра кадровых данных: по сотруднику (Ref_Key) + $expand.
+
+        $expand берётся из полей подразделения/должности (часть до '/' в имени),
+        чтобы получить их Description без отдельного запроса к справочникам."""
+        flt = urllib.parse.quote(
+            "%s eq guid'%s'" % (cfg.hr_employee_field, ref_key), safe=""
+        )
+        url = "%s/%s?$format=json&$top=1&$filter=%s" % (
+            normalize_odata_base_url(cfg.url),
+            urllib.parse.quote(cfg.hr_entity),  # кириллица в имени сущности
+            flt,
+        )
+        expand = ",".join(
+            part
+            for part in (
+                cls._expand_part(cfg.department_field),
+                cls._expand_part(cfg.position_field),
+            )
+            if part
+        )
         if expand:
             url += "&$expand=" + urllib.parse.quote(expand)
         return url
@@ -441,7 +562,9 @@ class OneCClient:
         return str(value) if value is not None else ""
 
     @staticmethod
-    def _parse_card(cfg: OneCBaseConfig, body: str, tab_num: str) -> EmployeeCard:
+    def _parse_card(
+        cfg: OneCBaseConfig, body: str, tab_num: str, enterprise: Optional[str] = None
+    ) -> EmployeeCard:
         # OData-ответ — обёртка {"value": [...]}; поля — по схеме базы.
         try:
             data = json.loads(body)
@@ -457,21 +580,26 @@ class OneCClient:
         fio = OneCClient._field(data, cfg.fio_field)
         if not fio:
             raise OneCError("база %r вернула карточку без ФИО" % cfg.code)
+        # Подразделение/должность/дата приёма — из регистра кадровых данных
+        # (см. _enrich_hr); здесь — пустые, чтобы справочник оставался лёгким.
         return EmployeeCard(
-            enterprise=cfg.enterprise,
+            enterprise=enterprise or cfg.enterprise,
             base_code=cfg.code,
             tab_num=OneCClient._field(data, cfg.tab_num_field) or tab_num,
             fio=fio,
-            dept=OneCClient._field(data, cfg.department_field),
-            position=OneCClient._field(data, cfg.position_field),
+            dept="",
+            position="",
             employment_type="",
-            hire_date=OneCClient._field(data, cfg.hire_date_field),
+            hire_date="",
             vacation_balance=data.get("vacation_balance"),
             mol_flag=data.get("mol_flag"),
+            ref_key=str(data.get("Ref_Key") or ""),
         )
 
     @staticmethod
-    def _parse_cards(cfg: OneCBaseConfig, body: str) -> List[EmployeeCard]:
+    def _parse_cards(
+        cfg: OneCBaseConfig, body: str, enterprise: Optional[str] = None
+    ) -> List[EmployeeCard]:
         try:
             data = json.loads(body)
         except json.JSONDecodeError as exc:
@@ -491,16 +619,17 @@ class OneCClient:
                 continue
             cards.append(
                 EmployeeCard(
-                    enterprise=cfg.enterprise,
+                    enterprise=enterprise or cfg.enterprise,
                     base_code=cfg.code,
                     tab_num=OneCClient._field(item, cfg.tab_num_field),
                     fio=fio,
-                    dept=OneCClient._field(item, cfg.department_field),
-                    position=OneCClient._field(item, cfg.position_field),
+                    dept="",
+                    position="",
                     employment_type="",
-                    hire_date=OneCClient._field(item, cfg.hire_date_field),
+                    hire_date="",
                     vacation_balance=item.get("vacation_balance"),
                     mol_flag=item.get("mol_flag"),
+                    ref_key=str(item.get("Ref_Key") or ""),
                 )
             )
         return cards
