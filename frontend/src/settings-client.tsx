@@ -52,6 +52,16 @@ export interface SettingsOnecBase {
   password: string | null;
 }
 
+// Источник справочника предприятий 1С (settings.onec_enterprises_source).
+export interface SettingsOnecSource {
+  // OData-URL источника предприятий.
+  url: string;
+  // Сервисная УЗ чтения (при заданном user — basic auth).
+  user: string;
+  // Пароль УЗ (в GET — маска либо null; записывается только при вводе).
+  password: string | null;
+}
+
 // Настройки СЭД из таблицы settings (типы — по контракту API, поля nullable:
 // ключа нет в БД — null, значений в коде нет, AGENTS.md п.3).
 export interface SettingsData {
@@ -94,6 +104,8 @@ export interface SettingsData {
   mail_templates: SettingsMailTemplate[] | null;
   // Подключения к базам 1С (onec_bases; пароль маскируется в GET).
   onec_bases: SettingsOnecBase[] | null;
+  // Источник справочника предприятий 1С (onec_enterprises_source; пароль в GET — маска).
+  onec_enterprises_source: SettingsOnecSource | null;
 }
 
 // Контент-настройки (GET/PUT /api/settings/content): контент-ключи для
@@ -169,4 +181,39 @@ export async function getSettingsContent(): Promise<ContentSettingsData> {
 // PUT /api/settings/content: частичное сохранение контента (только контент-ключи).
 export async function saveSettingsContent(data: ContentSettingsData): Promise<ContentSettingsData> {
   return requestSettings<ContentSettingsData>("/api/settings/content", "PUT", data);
+}
+
+// Результат синхронизации предприятий из 1С (POST /api/settings/enterprises/sync).
+export interface EnterprisesSyncResult {
+  // Флаг успеха.
+  synced: boolean;
+  // Сколько предприятий записано в settings.
+  count: number;
+  // Обновлённый список [{"code", "name"}, ...].
+  enterprises: unknown[];
+}
+
+// POST /api/settings/enterprises/sync: принудительная синхронизация предприятий
+// (только админ). Ошибки: 401/403/503 — понятным текстом из клиента.
+export async function syncEnterprises(): Promise<EnterprisesSyncResult> {
+  const token = getToken();
+  if (!token) {
+    throw new ApiHttpError(401, "Нет токена");
+  }
+  let res: Response;
+  try {
+    res = await fetch("/api/settings/enterprises/sync", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+  } catch {
+    throw new Error("Сервис недоступен");
+  }
+  if (res.status === 401) throw new ApiHttpError(401, "Сессия истекла");
+  if (res.status === 403) throw new ApiHttpError(403, "Настройки — только админам");
+  if (res.status === 503) throw new ApiHttpError(503, "Источник предприятий 1С недоступен");
+  if (!res.ok) {
+    throw new ApiHttpError(res.status, "Ошибка синхронизации предприятий");
+  }
+  return (await res.json()) as EnterprisesSyncResult;
 }

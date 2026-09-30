@@ -70,6 +70,7 @@ SEED_VALUES = {
         ' "body_html": "<html>Заявка {{ request_id }} назначена {{ fio }}</html>"}]'
     ),
     "onec_bases": "[]",
+    "onec_enterprises_source": '{"url": "", "user": "", "password": ""}',
 }
 
 # Контрактный ответ GET /settings (все ключи на месте, типы по B2).
@@ -118,6 +119,7 @@ CONTRACT_VALUES = {
         }
     ],
     "onec_bases": [],
+    "onec_enterprises_source": {"url": "", "user": "", "password": None},
 }
 
 # Контент-часть контракта: только ключи CONTENT_KEYS (для GET/PUT /settings/content).
@@ -175,6 +177,11 @@ UPDATED_VALUES = {
             "password": None,
         }
     ],
+    "onec_enterprises_source": {
+        "url": "https://1c-mock.local/enterprises",
+        "user": "reader",
+        "password": None,
+    },
 }
 
 
@@ -519,6 +526,41 @@ def test_settings_content_ignores_onec_bases(client, hr_admin_headers, mock_stor
     response = client.get("/settings/content", headers=hr_admin_headers)
     assert response.status_code == 200
     assert "onec_bases" not in response.json()
+
+
+# --- onec_enterprises_source (источник предприятий: маска/слив пароля) ---
+
+def test_settings_put_onec_source_password_stored_and_masked(client, admin_headers, mock_store):
+    """PUT источника с паролем: в БД пароль сохранён, в ответе замаскирован."""
+    source = {
+        "url": "https://1c-mock.local/enterprises",
+        "user": "reader",
+        "password": "secret-src",
+    }
+    response = client.put("/settings", json={"onec_enterprises_source": source}, headers=admin_headers)
+    assert response.status_code == 200
+    assert response.json()["onec_enterprises_source"]["password"] == SMTP_PASSWORD_MASK
+    stored = json.loads(mock_store._data["onec_enterprises_source"])
+    assert stored["password"] == "secret-src"
+    got = client.get("/settings", headers=admin_headers)
+    assert got.json()["onec_enterprises_source"]["password"] == SMTP_PASSWORD_MASK
+
+
+def test_settings_put_onec_source_empty_password_keeps_existing(client, admin_headers, mock_store):
+    """Пустое значение/маска пароля источника — текущий из БД сохраняется."""
+    source = {
+        "url": "https://1c-mock.local/enterprises",
+        "user": "reader",
+        "password": "secret-src",
+    }
+    assert client.put("/settings", json={"onec_enterprises_source": source}, headers=admin_headers).status_code == 200
+    kept = {"url": "https://1c-mock.local/enterprises", "user": "reader", "password": ""}
+    response = client.put("/settings", json={"onec_enterprises_source": kept}, headers=admin_headers)
+    assert response.status_code == 200
+    assert json.loads(mock_store._data["onec_enterprises_source"])["password"] == "secret-src"
+    masked = {"url": "https://1c-mock.local/enterprises", "user": "reader", "password": SMTP_PASSWORD_MASK}
+    assert client.put("/settings", json={"onec_enterprises_source": masked}, headers=admin_headers).status_code == 200
+    assert json.loads(mock_store._data["onec_enterprises_source"])["password"] == "secret-src"
 
 
 # --- GET/PUT /settings/content (контент: руководитель ОК + админ) ---

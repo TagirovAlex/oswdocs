@@ -6,7 +6,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AdminSettings } from "./admin-settings";
 import { ApiHttpError } from "./auth-client";
-import { getSettings, getSettingsContent, saveSettings, saveSettingsContent } from "./settings-client";
+import { getSettings, getSettingsContent, saveSettings, saveSettingsContent, syncEnterprises } from "./settings-client";
 import type { SettingsData } from "./settings-client";
 
 // Мок клиента настроек (fetch не вызывается).
@@ -15,6 +15,7 @@ vi.mock("./settings-client", () => ({
   saveSettings: vi.fn(),
   getSettingsContent: vi.fn(),
   saveSettingsContent: vi.fn(),
+  syncEnterprises: vi.fn(),
 }));
 
 // Настройки, как их отдаёт GET /api/settings (полный объект по контракту B2).
@@ -46,6 +47,7 @@ const settings: SettingsData = {
   ],
   mail_templates: [{ code: "assigned", subject: "Заявка {{ request_id }}", body_html: "<html>{{ fio }}</html>" }],
   onec_bases: [],
+  onec_enterprises_source: { url: "", user: "", password: null },
 };
 
 // Контентная часть (как отдаёт GET /api/settings/content для руководителя ОК).
@@ -69,6 +71,7 @@ const contentOnly: SettingsData = {
   doc_templates: [],
   mail_templates: [],
   onec_bases: [],
+  onec_enterprises_source: null,
 };
 
 beforeEach(() => {
@@ -76,6 +79,7 @@ beforeEach(() => {
   vi.mocked(saveSettings).mockReset();
   vi.mocked(getSettingsContent).mockReset();
   vi.mocked(saveSettingsContent).mockReset();
+  vi.mocked(syncEnterprises).mockReset();
 });
 
 describe("AdminSettings", () => {
@@ -275,5 +279,21 @@ describe("AdminSettings", () => {
         }),
       ),
     );
+  });
+
+  // Админ: на вкладке «Инфра» кнопка «Обновить из 1С» синхронизирует предприятия.
+  it("обновляет предприятия из 1С по кнопке", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+    vi.mocked(syncEnterprises).mockResolvedValue({ synced: true, count: 3, enterprises: [] });
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Инфра" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Инфра" }));
+    await waitFor(() => expect(screen.getByText("Источник предприятий 1С")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByText("Обновить из 1С"));
+
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent(/Обновлено: 3 предприятий/));
+    expect(syncEnterprises).toHaveBeenCalledTimes(1);
   });
 });

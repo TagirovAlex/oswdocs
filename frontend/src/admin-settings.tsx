@@ -3,7 +3,13 @@
 // для руководителя ОК), в коде не хардкодятся. Вкладки: Процесс / Справочники /
 // Шаблоны (контент) и Инфра (только админ).
 import { useEffect, useState } from "react";
-import { getSettings, getSettingsContent, saveSettings, saveSettingsContent } from "./settings-client";
+import {
+  getSettings,
+  getSettingsContent,
+  saveSettings,
+  saveSettingsContent,
+  syncEnterprises,
+} from "./settings-client";
 import type {
   ContentSettingsData,
   SettingsData,
@@ -11,6 +17,7 @@ import type {
   SettingsEnterprise,
   SettingsMailTemplate,
   SettingsOnecBase,
+  SettingsOnecSource,
   SettingsTemplate,
   SettingsTemplateStep,
 } from "./settings-client";
@@ -301,6 +308,11 @@ export function AdminSettings(props: AdminSettingsProps) {
   // Базы 1С: поля формы + параллельный признак «пароль задан» для placeholder.
   const [onecBases, setOnecBases] = useState<SettingsOnecBase[]>([]);
   const [onecBasesSet, setOnecBasesSet] = useState<boolean[]>([]);
+  // Источник предприятий 1С: поля формы + признак «пароль задан» + статус синхронизации.
+  const [onecSource, setOnecSource] = useState<SettingsOnecSource>({ url: "", user: "", password: "" });
+  const [onecSourcePasswordSet, setOnecSourcePasswordSet] = useState<boolean>(false);
+  const [syncStatus, setSyncStatus] = useState<string>("");
+  const [syncError, setSyncError] = useState<string>("");
   // Эскалация в форме не редактируется (отдельная волна), передаём как загружено.
   const [positionEscalation, setPositionEscalation] = useState<Record<string, number> | null>(null);
 
@@ -327,6 +339,10 @@ export function AdminSettings(props: AdminSettingsProps) {
           // Базы 1С: пароль очищаем, признак «задан» — из маски/None.
           setOnecBases((full.onec_bases ?? []).map((b) => ({ ...b, password: "" })));
           setOnecBasesSet((full.onec_bases ?? []).map((b) => b.password !== null));
+          // Источник предприятий 1С: пароль очищаем, признак «задан» — из маски/None.
+          const src = full.onec_enterprises_source;
+          setOnecSource({ url: src?.url ?? "", user: src?.user ?? "", password: "" });
+          setOnecSourcePasswordSet(src?.password !== null);
         }
         setTtl(data.approval_ttl_days);
         setPaperRequired(data.require_paper_signature);
@@ -394,6 +410,8 @@ export function AdminSettings(props: AdminSettingsProps) {
           smtp_password: smtpPassword,
           // Пароль базы — как введено (пустое → сервер сохранит текущий).
           onec_bases: onecBases,
+          // Источник предприятий 1С (пустой пароль → сервер сохранит текущий).
+          onec_enterprises_source: onecSource,
         };
         const result = await saveSettings(full);
         setSaved(
@@ -409,6 +427,18 @@ export function AdminSettings(props: AdminSettingsProps) {
       setSaveError(e instanceof Error ? e.message : "Ошибка сохранения настроек");
     } finally {
       setBusy(false);
+    }
+  }
+
+  // Принудительная синхронизация предприятий из 1С (POST /settings/enterprises/sync).
+  async function handleSyncEnterprises(): Promise<void> {
+    setSyncError("");
+    setSyncStatus("");
+    try {
+      const result = await syncEnterprises();
+      setSyncStatus(`Обновлено: ${result.count} предприятий`);
+    } catch (e: unknown) {
+      setSyncError(e instanceof Error ? e.message : "Ошибка синхронизации предприятий");
     }
   }
 
@@ -661,6 +691,51 @@ export function AdminSettings(props: AdminSettingsProps) {
               Добавить базу 1С
             </button>
           </div>
+        </fieldset>
+      )}
+
+      {activeTab === "Инфра" && isAdmin && (
+        <fieldset>
+          <legend>Источник предприятий 1С</legend>
+          <div className="sed-note">
+            Справочник предприятий синхронизируется из отдельного OData-эндпоинта 1С
+            (еженедельно и по кнопке).
+          </div>
+          <label style={{ display: "block", marginTop: 8 }}>
+            OData-URL источника
+            <input
+              aria-label="URL источника предприятий 1С"
+              type="text"
+              value={onecSource.url}
+              onChange={(e) => setOnecSource({ ...onecSource, url: e.target.value })}
+            />
+          </label>
+          <label style={{ display: "block", marginTop: 8 }}>
+            Сервисная УЗ чтения (user)
+            <input
+              aria-label="УЗ источника предприятий 1С"
+              type="text"
+              value={onecSource.user}
+              onChange={(e) => setOnecSource({ ...onecSource, user: e.target.value })}
+            />
+          </label>
+          <label style={{ display: "block", marginTop: 8 }}>
+            Пароль УЗ (оставьте пустым, чтобы сохранить текущий)
+            <input
+              aria-label="Пароль источника предприятий 1С"
+              type="password"
+              placeholder={onecSourcePasswordSet ? "задан (не менять)" : "не задан"}
+              value={onecSource.password ?? ""}
+              onChange={(e) => setOnecSource({ ...onecSource, password: e.target.value })}
+            />
+          </label>
+          <div className="sed-toolbar" style={{ marginTop: 12 }}>
+            <button type="button" className="sed-btn" onClick={handleSyncEnterprises}>
+              Обновить из 1С
+            </button>
+          </div>
+          {syncStatus && <div role="status">{syncStatus}</div>}
+          {syncError && <div role="alert">{syncError}</div>}
         </fieldset>
       )}
 

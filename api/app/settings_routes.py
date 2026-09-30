@@ -59,6 +59,7 @@ INFRA_KEYS: tuple[str, ...] = (
     "smtp_user",
     "smtp_password",
     "onec_bases",
+    "onec_enterprises_source",
 )
 
 SETTINGS_KEYS: tuple[str, ...] = CONTENT_KEYS + INFRA_KEYS
@@ -88,6 +89,17 @@ def _mask_onec_bases(value: object) -> object:
         row["password"] = SMTP_PASSWORD_MASK if isinstance(password, str) and password else None
         masked.append(row)
     return masked
+
+
+def _mask_onec_source(value: object) -> object:
+    """Пароль источника предприятий 1С в ответе: маска если задан, иначе None
+    (значение не отдаём), как у smtp_password."""
+    if not isinstance(value, dict):
+        return value
+    row = dict(value)
+    password = row.get("password")
+    row["password"] = SMTP_PASSWORD_MASK if isinstance(password, str) and password else None
+    return row
 
 
 def _merge_onec_bases(incoming: list[dict], stored: object) -> list[dict]:
@@ -268,6 +280,16 @@ class OnecBaseItem(BaseModel):
     )
 
 
+class OnecEnterprisesSource(BaseModel):
+    """Источник справочника предприятий 1С (отдельный OData-эндпоинт)."""
+
+    url: str = Field(description="OData-URL источника предприятий")
+    user: str = Field(default="", description="Сервисная УЗ чтения")
+    password: str | None = Field(
+        default=None, description="Пароль УЗ (маскируется в GET, пишется при вводе)"
+    )
+
+
 class SettingsPayload(BaseModel):
     """Тело GET/PUT /settings: все прикладные ключи; в PUT все опциональны
     (частичное обновление — пишутся только присутствующие в теле ключи)."""
@@ -335,6 +357,9 @@ class SettingsPayload(BaseModel):
     )
     onec_bases: list[OnecBaseItem] | None = Field(
         default=None, description="Подключения к базам 1С (OData, пароль маскируется)"
+    )
+    onec_enterprises_source: OnecEnterprisesSource | None = Field(
+        default=None, description="Источник справочника предприятий 1С"
     )
 
 
@@ -411,6 +436,8 @@ def _settings_dict(store: DbSettingsStore) -> dict:
     values["smtp_password"] = _mask_smtp_password(values.get("smtp_password"))
     # Пароли баз 1С наружу не отдаём: маска/None (аналог smtp_password).
     values["onec_bases"] = _mask_onec_bases(values.get("onec_bases"))
+    # Пароль источника предприятий 1С наружу не отдаём: маска/None.
+    values["onec_enterprises_source"] = _mask_onec_source(values.get("onec_enterprises_source"))
     return values
 
 
@@ -467,6 +494,13 @@ def update_settings(
             updates["onec_bases"] = _merge_onec_bases(
                 updates["onec_bases"], _from_stored(store.get("onec_bases"))
             )
+        # Пароль источника предприятий 1С: пустое/маска = сохранить текущий.
+        if "onec_enterprises_source" in updates:
+            source = updates["onec_enterprises_source"]
+            if isinstance(source, dict) and source.get("password") in (None, "", SMTP_PASSWORD_MASK):
+                saved = _from_stored(store.get("onec_enterprises_source"))
+                saved_password = saved.get("password") if isinstance(saved, dict) else None
+                source["password"] = saved_password
         stored = {key: _to_stored(value) for key, value in updates.items()}
         store.set_many(stored)
         values = _settings_dict(store)
@@ -542,6 +576,41 @@ def update_content_settings(
         )
     )
     return values
+
+
+@router.post("/settings/enterprises/sync")
+def sync_enterprises_endpoint(
+    user: CurrentUser = Depends(get_current_user),
+    store: DbSettingsStore = Depends(get_settings_store),
+) -> dict:
+    """Принудительная синхронизация предприятий из 1С: только admin.
+
+    Источник не настроен/недоступен/битый ответ — 503 (не 500); успех —
+    {"synced": true, "count": N, "enterprises": [...]}. Парсинг — в onec_sync.
+    """
+    _require_admin(user)
+    from .onec_sync import OnecSyncUnavailable, sync_enterprises
+
+    try:
+        items = sync_enterprises(store)
+    except OnecSyncUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    except SettingsUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    audit_log.append(
+        AuditEvent(
+            actor=user.sam,
+            action="settings.update",
+            entity="settings",
+            entity_id="enterprises.sync",
+            detail="count=%d" % len(items),
+        )
+    )
+    return {"synced": True, "count": len(items), "enterprises": items}
 
 
 @router.get("/enterprises")

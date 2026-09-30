@@ -219,6 +219,17 @@ def main() -> None:
     except SettingsUnavailable as exc:
         raise SystemExit(f"Настройки недоступны (worker остановлен): {exc}") from exc
 
+    # Еженедельная синхронизация справочника предприятий из 1С (Фаза 4):
+    # тихо (сбой не валит проход), печать только при реальной синхронизации.
+    from .onec_sync import maybe_sync_weekly
+
+    try:
+        if maybe_sync_weekly(settings_store):
+            enterprises = read_setting_value(settings_store, "enterprises") or []
+            print("sync: предприятий=%d" % len(enterprises))
+    except Exception:
+        pass
+
     store = DbRequestsStore(settings.DATABASE_URL)
     mail_queue = DbMailQueue(settings.DATABASE_URL)
     mailer = SmtpMailer(
