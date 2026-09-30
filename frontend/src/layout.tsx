@@ -36,9 +36,10 @@ import { useTheme } from "./theme";
 // Экраны волны B4: создание и админка — реальный API.
 import { AdminSettings } from "./admin-settings";
 import { CreateForm } from "./create-form";
+import { Directory } from "./directory";
 
 // Вкладки скелета.
-const TABS = ["Заявки", "Создание", "Настройки"] as const;
+const TABS = ["Заявки", "Создание", "Справочник", "Настройки"] as const;
 type Tab = (typeof TABS)[number];
 
 // Подписи ролей в шапке (матрица README п.1).
@@ -88,10 +89,12 @@ export function SedLayout(props: SedLayoutProps) {
   const [listVersion, setListVersion] = useState<number>(0);
 
   // Видимые вкладки по роли: «Настройки» — админу и руководителю ОК (контент),
-  // «Создание» — ОК, руководителю ОК и админу.
+  // «Создание» и «Справочник» — ОК, руководителю ОК и админу.
   const visibleTabs = useMemo(() => {
     const tabs: Tab[] = ["Заявки"];
-    if (role === "hr" || role === "hr_admin" || role === "admin") tabs.push("Создание");
+    if (role === "hr" || role === "hr_admin" || role === "admin") {
+      tabs.push("Создание", "Справочник");
+    }
     if (role === "admin" || role === "hr_admin") tabs.push("Настройки");
     return tabs;
   }, [role]);
@@ -399,6 +402,7 @@ export function SedLayout(props: SedLayoutProps) {
         {/* Контент: вкладка создания/настроек — экраны B4, иначе таблица. */}
         <main className="sed-content">
           {tab === "Создание" && <CreateForm role={role} />}
+          {tab === "Справочник" && <Directory role={role} />}
           {tab === "Настройки" && <AdminSettings role={role} />}
           {tab === "Заявки" && (
           <>

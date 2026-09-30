@@ -112,11 +112,33 @@ def get_onec_client(
 
 
 def get_ad_reader() -> AdReader | None:
-    """Ридер AD волны A4. Необязательный: без него — только данные 1С.
+    """Ридер AD (только чтение). Необязательный: без него — только данные 1С.
 
-    В offline-тестах подменяется фейковым шлюзом; падения AD не кладут API.
-    """
-    return None
+    На стенде — реальный Ldap3Gateway из env (как в auth.get_auth_service);
+    сбой конфигурации AD — None (API не падает, AD-блок просто недоступен)."""
+    try:
+        from .ad_reader import (
+            AdReader,
+            AdReaderSettings,
+            InMemoryCache,
+            Ldap3Gateway,
+            reader_secret_from_env,
+        )
+
+        current = get_settings()
+        ad_settings = AdReaderSettings(
+            ad_url=current.AD_URL,
+            base_dn=current.AD_BASE_DN,
+            reader_dn=current.AD_READER_DN,
+            reader_secret=reader_secret_from_env(),
+            cache_ttl_seconds=current.LDAP_CACHE_TTL,
+            tls_validate=current.AD_TLS_VALIDATE,
+            ca_certs_file=current.AD_CA_CERT,
+        )
+        gateway = Ldap3Gateway(ad_settings)
+        return AdReader(ad_settings, gateway=gateway, cache=InMemoryCache())
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -216,18 +238,19 @@ def _link_sam_for(card: EmployeeCard) -> str | None:
 @router.get("/employees")
 def search_employees(
     enterprise: str = Query(..., min_length=1, description="Предприятие из настроек"),
-    q: str = Query(..., min_length=1, description="Подстрока ФИО, таб. номера или логина"),
+    q: str = Query(default="", max_length=200, description="Подстрока ФИО, таб. № или логина (пусто — весь список)"),
     limit: int = Query(default=25, ge=1, le=100, description="Максимум записей в выдаче"),
     user: CurrentUser = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
     client: OneCClient = Depends(get_onec_client),
     reader: AdReader | None = Depends(get_ad_reader),
 ) -> dict:
-    """Поиск сотрудников предприятия с ролевой обрезкой и изоляцией падения баз.
+    """Справочник/поиск сотрудников предприятия с ролевой обрезкой.
 
-    Падение одной базы 1С не валит остальные: ошибки баз возвращаются списком,
-    живые базы — обычным результатом. Дубли одного ФИО не склеиваются —
-    помечаются флагом на ручную сверку ОК.
+    q пустой — вернуть список (до limit), для справочника. Падение одной базы
+    1С не валит остальные: ошибки баз возвращаются списком, живые базы — обычным
+    результатом. Дубли одного ФИО не склеиваются — помечаются флагом на ручную
+    сверку ОК.
     """
     settings.ensure_read_only()
     try:
@@ -266,7 +289,8 @@ def search_employees(
     merged: dict[str, EmployeeCard] = {}
     for card in list(found.cards) + extra:
         merged.setdefault(card.key(), card)
-    cards = [c for c in merged.values() if _match_query(c, _link_sam_for(c), q)][:limit]
+    # Пустой q — весь список (справочник), иначе фильтр по ФИО/таб.№/логину.
+    cards = [c for c in merged.values() if (not q.strip()) or _match_query(c, _link_sam_for(c), q)][:limit]
     duplicates = _duplicated_fios(cards)
     privileged = is_privileged(user)
     items = [

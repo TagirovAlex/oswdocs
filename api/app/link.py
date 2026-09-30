@@ -118,12 +118,12 @@ def create_link(
     reader: AdReader | None = Depends(get_ad_reader),
     store: LinksStore = Depends(get_links_store),
 ) -> dict:
-    """Создать/подтвердить связку вручную. Только ОК/админы; владельцам — 403."""
+    """Создать/подтвердить связку вручную. Только админ (ОК/владельцам — 403)."""
     settings.ensure_read_only()
-    if not is_privileged(user):
+    if user.role != "admin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Связку 1С-AD подтверждает только ОК",
+            detail="Связку 1С-AD привязывает только админ",
         )
     if reader is None:
         raise HTTPException(

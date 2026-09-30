@@ -229,6 +229,18 @@ def _hr_headers():
     }
 
 
+def _admin_headers():
+    """Заголовки админа (привязка 1С-AD — только админ)."""
+    import base64
+
+    b64 = lambda s: base64.b64encode(s.encode("utf-8")).decode("ascii")
+    return {
+        "X-Mock-Sam": "root.adm",
+        "X-Mock-Fio": b64("Админов Корень Системович"),
+        "X-Mock-Groups": "SED_ADMINS",
+    }
+
+
 @pytest.fixture
 def links_override():
     """Тестовые группы + мок-клиент 1С/ридер AD + возврат подмен после теста."""
@@ -262,7 +274,7 @@ def test_endpoints_go_through_store(client, links_override):
     store = CountingLinksStore()
     app.dependency_overrides[get_links_store] = lambda: store
     try:
-        headers = _hr_headers()
+        headers = _admin_headers()
         created = client.post(
             "/link_1c_ad",
             json={"enterprise": ENT, "base_code": "zup_t1", "tab_num": "001", "sam": "t.ivan"},

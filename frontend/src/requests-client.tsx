@@ -80,6 +80,9 @@ export interface EmployeeHit {
   fio: string;
   dept: string;
   position: string;
+  hire_date?: string | null;
+  vacation_balance?: string | null;
+  ad_sam?: string | null;
   needs_manual_review: boolean;
 }
 
@@ -297,6 +300,57 @@ export async function searchEmployees(
   return requestJson<EmployeeSearchResult>(
     `/api/employees?enterprise=${encodeURIComponent(enterprise)}&q=${encodeURIComponent(q)}`,
   );
+}
+
+// Карточка сотрудника: 1С-блок + AD-блок + связка и расхождения (GET /api/employees/card).
+export interface EmployeeCardData {
+  key: string;
+  enterprise: string;
+  base_code: string;
+  tab_num?: string | null;
+  truth_source: string;
+  link: { linked: boolean; sam?: string | null; by?: string | null; at?: string | null; verified?: boolean | null };
+  divergences: string[];
+  needs_manual_review: boolean;
+  fio?: string | null;
+  dept?: string | null;
+  position?: string | null;
+  hire_date?: string | null;
+  vacation_balance?: string | null;
+  ad_sam?: string | null;
+  snapshot_1c?: Record<string, unknown> | null;
+  snapshot_ad?: {
+    sam?: string | null;
+    display_name?: string | null;
+    department?: string | null;
+    title?: string | null;
+    mail?: string | null;
+    manager_dn?: string | null;
+  } | null;
+  ad_error?: string | null;
+}
+
+export async function getEmployeeCard(
+  enterprise: string,
+  baseCode: string,
+  tabNum: string,
+): Promise<EmployeeCardData> {
+  const params = new URLSearchParams({ enterprise, base_code: baseCode, tab_num: tabNum });
+  return requestJson<EmployeeCardData>(`/api/employees/card?${params.toString()}`);
+}
+
+// POST /api/link_1c_ad: привязка 1С→AD (только админ).
+export async function createLink(body: {
+  enterprise: string;
+  base_code: string;
+  tab_num: string;
+  sam: string;
+}): Promise<Record<string, unknown>> {
+  return requestJson<Record<string, unknown>>(`/api/link_1c_ad`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
 }
 
 // Маппинг RequestOut → строка таблицы: шаг — первый ожидающий, срок — его expires_at.

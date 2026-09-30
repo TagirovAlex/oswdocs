@@ -336,12 +336,12 @@ def test_employees_duplicates_flag_no_merge(client, hr_headers, b1_mocks):
     assert all(i["needs_manual_review"] is True for i in body["items"])
 
 
-def test_employees_login_search_by_sam(client, hr_headers, b1_mocks):
+def test_employees_login_search_by_sam(client, hr_headers, admin_headers, b1_mocks):
     """Поиск по логину находит связанную карточку (мост — link_1c_ad)."""
     created = client.post(
         "/link_1c_ad",
         json={"enterprise": ENT, "base_code": "zup_t1", "tab_num": "001", "sam": "t.ivan"},
-        headers=hr_headers,
+        headers=admin_headers,
     )
     assert created.status_code == 201
     response = client.get(
@@ -378,12 +378,12 @@ def test_employees_base_down_isolated(client, hr_headers, b1_settings):
 
 # --- Карточка со снапшотами ---
 
-def test_card_hr_full_with_snapshots(client, hr_headers, b1_mocks):
+def test_card_hr_full_with_snapshots(client, hr_headers, admin_headers, b1_mocks):
     """ОК: полные снапшоты 1С/AD, истина — 1С, расхождений нет."""
     client.post(
         "/link_1c_ad",
         json={"enterprise": ENT, "base_code": "zup_t1", "tab_num": "001", "sam": "t.ivan"},
-        headers=hr_headers,
+        headers=admin_headers,
     )
     response = client.get(
         "/employees/card",
@@ -400,12 +400,12 @@ def test_card_hr_full_with_snapshots(client, hr_headers, b1_mocks):
     assert body["divergences"] == []
 
 
-def test_card_owner_trimmed_no_pdn(client, hr_headers, owner_headers, b1_mocks):
+def test_card_owner_trimmed_no_pdn(client, hr_headers, admin_headers, owner_headers, b1_mocks):
     """Владелец в карточке: без ФИО/почты/отпуска и без значений снапшотов."""
     client.post(
         "/link_1c_ad",
         json={"enterprise": ENT, "base_code": "zup_t1", "tab_num": "001", "sam": "t.ivan"},
-        headers=hr_headers,
+        headers=admin_headers,
     )
     response = client.get(
         "/employees/card",
@@ -433,23 +433,23 @@ def test_card_404_unknown_tab(client, hr_headers, b1_mocks):
 
 # --- Связка link_1c_ad ---
 
-def test_link_create_hr_verified(client, hr_headers, b1_mocks):
-    """ОК создает связку: verified, истина — 1С, снапшоты приложены."""
+def test_link_create_hr_verified(client, hr_headers, admin_headers, b1_mocks):
+    """Админ создает связку: verified, истина — 1С, снапшоты приложены."""
     response = client.post(
         "/link_1c_ad",
         json={"enterprise": ENT, "base_code": "zup_t1", "tab_num": "001", "sam": "t.ivan"},
-        headers=hr_headers,
+        headers=admin_headers,
     )
     assert response.status_code == 201
     body = response.json()
     assert body["link"]["verified"] is True
-    assert body["link"]["by"] == "ok.ivnova"
+    assert body["link"]["by"] == "adm.petrov"
     assert body["truth_source"] == "1c"
     assert body["snapshot_1c"]["fio"] == FIO_IVAN
     assert body["link"]["needs_manual_review"] is False
 
 
-def test_link_create_diverged_truth_is_1c(client, hr_headers, b1_mocks):
+def test_link_create_diverged_truth_is_1c(client, hr_headers, admin_headers, b1_mocks):
     """Расхождение ФИО: связка создана, флаг diverged, истина — значения 1С."""
     response = client.post(
         "/link_1c_ad",
@@ -459,7 +459,7 @@ def test_link_create_diverged_truth_is_1c(client, hr_headers, b1_mocks):
             "tab_num": "001",
             "sam": "t.chuzhoi",
         },
-        headers=hr_headers,
+        headers=admin_headers,
     )
     assert response.status_code == 201
     body = response.json()
@@ -470,12 +470,12 @@ def test_link_create_diverged_truth_is_1c(client, hr_headers, b1_mocks):
     assert body["snapshot_ad"]["display_name"] == "Чужой Человек Выдуманный"
 
 
-def test_link_create_duplicates_need_manual(client, hr_headers, b1_mocks):
+def test_link_create_duplicates_need_manual(client, hr_headers, admin_headers, b1_mocks):
     """Связка дубля ФИО: создана, но требует ручной сверки."""
     response = client.post(
         "/link_1c_ad",
         json={"enterprise": ENT, "base_code": "zup_t1", "tab_num": "003", "sam": "t.dubl"},
-        headers=hr_headers,
+        headers=admin_headers,
     )
     assert response.status_code == 201
     assert response.json()["link"]["needs_manual_review"] is True
@@ -491,7 +491,7 @@ def test_link_create_owner_403(client, owner_headers, b1_mocks):
     assert response.status_code == 403
 
 
-def test_link_create_unknown_sam_404(client, hr_headers, b1_mocks):
+def test_link_create_unknown_sam_404(client, hr_headers, admin_headers, b1_mocks):
     """Неизвестный логин AD — 404 (автосклейки нет)."""
     response = client.post(
         "/link_1c_ad",
@@ -501,17 +501,27 @@ def test_link_create_unknown_sam_404(client, hr_headers, b1_mocks):
             "tab_num": "001",
             "sam": "no.such",
         },
-        headers=hr_headers,
+        headers=admin_headers,
     )
     assert response.status_code == 404
 
 
-def test_link_read_returns_fact(client, hr_headers, owner_headers, b1_mocks):
+def test_link_create_hr_403(client, hr_headers, b1_mocks):
+    """ОК (рядовой) не привязывает AD — 403 (привязка только админу)."""
+    response = client.post(
+        "/link_1c_ad",
+        json={"enterprise": ENT, "base_code": "zup_t1", "tab_num": "001", "sam": "t.ivan"},
+        headers=hr_headers,
+    )
+    assert response.status_code == 403
+
+
+def test_link_read_returns_fact(client, hr_headers, admin_headers, owner_headers, b1_mocks):
     """Чтение связки: факт без ПДн доступен и ОК, и владельцу."""
     client.post(
         "/link_1c_ad",
         json={"enterprise": ENT, "base_code": "zup_t1", "tab_num": "001", "sam": "t.ivan"},
-        headers=hr_headers,
+        headers=admin_headers,
     )
     for headers in (hr_headers, owner_headers):
         response = client.get(
