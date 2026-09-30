@@ -296,4 +296,81 @@ describe("AdminSettings", () => {
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent(/Обновлено: 3 предприятий/));
     expect(syncEnterprises).toHaveBeenCalledTimes(1);
   });
+
+  // Админ: на вкладке «Шаблоны» видит редакторы бланков/писем, добавляет и сохраняет.
+  it("админ видит редакторы бланков/писем и сохраняет их", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+    vi.mocked(saveSettings).mockImplementation(async (data) => data);
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Шаблоны" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Шаблоны" }));
+    await waitFor(() => expect(screen.getByText("Бланки бегунков (doc_templates)")).toBeInTheDocument());
+    expect(screen.getByText("Письма (mail_templates)")).toBeInTheDocument();
+    // Существующие бланк и письмо загружены из настроек.
+    expect(screen.getByLabelText("Служба бланка 1")).toHaveValue("Бухгалтерия");
+    expect(screen.getByLabelText("Код письма 1")).toHaveValue("assigned");
+
+    fireEvent.click(screen.getByText("Добавить бланк"));
+    fireEvent.change(screen.getByLabelText("Служба бланка 2"), { target: { value: "Служба-2" } });
+    fireEvent.change(screen.getByLabelText("Категория бланка 2"), { target: { value: "линейный" } });
+    fireEvent.change(screen.getByLabelText("Тело бланка 2"), { target: { value: "Бегунок 2: {{ fio }}" } });
+
+    fireEvent.click(screen.getByText("Добавить письмо"));
+    fireEvent.change(screen.getByLabelText("Код письма 2"), { target: { value: "reminder" } });
+    fireEvent.change(screen.getByLabelText("Тема письма 2"), { target: { value: "Напоминание" } });
+    fireEvent.change(screen.getByLabelText("HTML письма 2"), { target: { value: "<html>напоминание</html>" } });
+
+    fireEvent.click(screen.getByText("Сохранить"));
+
+    await waitFor(() =>
+      expect(saveSettings).toHaveBeenCalledWith(
+        expect.objectContaining({
+          doc_templates: [
+            { service: "Бухгалтерия", category: "Увольнение", body: "Бегунок: {{ fio }}" },
+            { service: "Служба-2", category: "линейный", body: "Бегунок 2: {{ fio }}" },
+          ],
+          mail_templates: [
+            { code: "assigned", subject: "Заявка {{ request_id }}", body_html: "<html>{{ fio }}</html>" },
+            { code: "reminder", subject: "Напоминание", body_html: "<html>напоминание</html>" },
+          ],
+        }),
+      ),
+    );
+  });
+
+  // Руководитель ОК: редакторы бланков/писем на «Шаблонах», сохранение через content.
+  it("руководитель ОК редактирует бланки/письма и сохраняет через content", async () => {
+    vi.mocked(getSettingsContent).mockResolvedValue(contentOnly);
+    vi.mocked(saveSettingsContent).mockImplementation(async (data) => data);
+
+    render(<AdminSettings role="hr_admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Шаблоны" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Шаблоны" }));
+    await waitFor(() => expect(screen.getByText("Бланки бегунков (doc_templates)")).toBeInTheDocument());
+    expect(screen.getByText("Письма (mail_templates)")).toBeInTheDocument();
+    // contentOnly: бланков/писем нет — редакторы пустые, но доступны.
+
+    fireEvent.click(screen.getByText("Добавить бланк"));
+    fireEvent.change(screen.getByLabelText("Служба бланка 1"), { target: { value: "Служба" } });
+    fireEvent.change(screen.getByLabelText("Категория бланка 1"), { target: { value: "линейный" } });
+    fireEvent.change(screen.getByLabelText("Тело бланка 1"), { target: { value: "Бегунок: {{ fio }}" } });
+
+    fireEvent.click(screen.getByText("Добавить письмо"));
+    fireEvent.change(screen.getByLabelText("Код письма 1"), { target: { value: "assigned" } });
+    fireEvent.change(screen.getByLabelText("Тема письма 1"), { target: { value: "Заявка" } });
+    fireEvent.change(screen.getByLabelText("HTML письма 1"), { target: { value: "<html>заявка</html>" } });
+
+    fireEvent.click(screen.getByText("Сохранить"));
+
+    await waitFor(() =>
+      expect(saveSettingsContent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          doc_templates: [{ service: "Служба", category: "линейный", body: "Бегунок: {{ fio }}" }],
+          mail_templates: [{ code: "assigned", subject: "Заявка", body_html: "<html>заявка</html>" }],
+        }),
+      ),
+    );
+    expect(saveSettings).not.toHaveBeenCalled();
+  });
 });

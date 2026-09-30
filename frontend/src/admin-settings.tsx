@@ -273,6 +273,128 @@ function TemplatesEditor(props: { value: SettingsTemplate[]; onChange: (v: Setti
   );
 }
 
+// Редактор бланков бегунков (doc_templates): служба + категория + тело DOCX (Jinja).
+function DocTemplatesEditor(props: { value: SettingsDocTemplate[]; onChange: (v: SettingsDocTemplate[]) => void }) {
+  const { value, onChange } = props;
+  function update(index: number, patch: Partial<SettingsDocTemplate>): void {
+    onChange(value.map((doc, i) => (i === index ? { ...doc, ...patch } : doc)));
+  }
+  return (
+    <fieldset>
+      <legend>Бланки бегунков (doc_templates)</legend>
+      {value.length === 0 && <div className="sed-note">не задано</div>}
+      {value.map((doc, i) => (
+        <div key={i} style={{ border: "1px solid #ccc", marginTop: 8, padding: 8 }}>
+          <label style={{ display: "block" }}>
+            Служба
+            <input
+              aria-label={`Служба бланка ${i + 1}`}
+              value={doc.service}
+              onChange={(e) => update(i, { service: e.target.value })}
+            />
+          </label>
+          <label style={{ display: "block", marginTop: 8 }}>
+            Категория
+            <input
+              aria-label={`Категория бланка ${i + 1}`}
+              value={doc.category}
+              onChange={(e) => update(i, { category: e.target.value })}
+            />
+          </label>
+          <label style={{ display: "block", marginTop: 8 }}>
+            Тело бегунка (Jinja-плейсхолдеры)
+            <textarea
+              aria-label={`Тело бланка ${i + 1}`}
+              rows={4}
+              value={doc.body}
+              onChange={(e) => update(i, { body: e.target.value })}
+            />
+          </label>
+          <div className="sed-toolbar" style={{ marginTop: 8 }}>
+            <button
+              type="button"
+              className="sed-btn sed-btn--ghost"
+              onClick={() => onChange(value.filter((_, j) => j !== i))}
+            >
+              Удалить бланк
+            </button>
+          </div>
+        </div>
+      ))}
+      <div className="sed-toolbar" style={{ marginTop: 12 }}>
+        <button
+          type="button"
+          className="sed-btn"
+          onClick={() => onChange([...value, { service: "", category: "", body: "" }])}
+        >
+          Добавить бланк
+        </button>
+      </div>
+    </fieldset>
+  );
+}
+
+// Редактор писем (mail_templates): код события + тема + HTML-тело (Jinja).
+function MailTemplatesEditor(props: { value: SettingsMailTemplate[]; onChange: (v: SettingsMailTemplate[]) => void }) {
+  const { value, onChange } = props;
+  function update(index: number, patch: Partial<SettingsMailTemplate>): void {
+    onChange(value.map((mail, i) => (i === index ? { ...mail, ...patch } : mail)));
+  }
+  return (
+    <fieldset>
+      <legend>Письма (mail_templates)</legend>
+      {value.length === 0 && <div className="sed-note">не задано</div>}
+      {value.map((mail, i) => (
+        <div key={i} style={{ border: "1px solid #ccc", marginTop: 8, padding: 8 }}>
+          <label style={{ display: "block" }}>
+            Код события (code)
+            <input
+              aria-label={`Код письма ${i + 1}`}
+              value={mail.code}
+              onChange={(e) => update(i, { code: e.target.value })}
+            />
+          </label>
+          <label style={{ display: "block", marginTop: 8 }}>
+            Тема письма (subject)
+            <input
+              aria-label={`Тема письма ${i + 1}`}
+              value={mail.subject}
+              onChange={(e) => update(i, { subject: e.target.value })}
+            />
+          </label>
+          <label style={{ display: "block", marginTop: 8 }}>
+            HTML-тело (body_html; Jinja-плейсхолдеры)
+            <textarea
+              aria-label={`HTML письма ${i + 1}`}
+              rows={4}
+              value={mail.body_html}
+              onChange={(e) => update(i, { body_html: e.target.value })}
+            />
+          </label>
+          <div className="sed-toolbar" style={{ marginTop: 8 }}>
+            <button
+              type="button"
+              className="sed-btn sed-btn--ghost"
+              onClick={() => onChange(value.filter((_, j) => j !== i))}
+            >
+              Удалить письмо
+            </button>
+          </div>
+        </div>
+      ))}
+      <div className="sed-toolbar" style={{ marginTop: 12 }}>
+        <button
+          type="button"
+          className="sed-btn"
+          onClick={() => onChange([...value, { code: "", subject: "", body_html: "" }])}
+        >
+          Добавить письмо
+        </button>
+      </div>
+    </fieldset>
+  );
+}
+
 // Админка: контент (TTL/флаги, справочники, шаблоны) + инфра (сессия/сканы/SMTP).
 // Админ видит все вкладки (GET/PUT /api/settings), руководитель ОК — только
 // контент (GET/PUT /api/settings/content). Всё — из settings БД.
@@ -509,7 +631,8 @@ export function AdminSettings(props: AdminSettingsProps) {
       {activeTab === "Шаблоны" && (
         <>
           <TemplatesEditor value={templates} onChange={setTemplates} />
-          <div className="sed-note">Редакторы бегунков (doc_templates) и писем (mail_templates) — Фаза 4.</div>
+          <DocTemplatesEditor value={docTemplates} onChange={setDocTemplates} />
+          <MailTemplatesEditor value={mailTemplates} onChange={setMailTemplates} />
         </>
       )}
 
