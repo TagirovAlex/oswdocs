@@ -110,6 +110,8 @@ export interface SettingsData {
   mail_templates: SettingsMailTemplate[] | null;
   // Подключения к базам 1С (onec_bases; пароль маскируется в GET).
   onec_bases: SettingsOnecBase[] | null;
+  // Дата/время последней синхронизации предприятий (read-only, пишет синхронизация).
+  onec_enterprises_synced_at: string | null;
 }
 
 // Контент-настройки (GET/PUT /api/settings/content): контент-ключи для

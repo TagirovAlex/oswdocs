@@ -429,6 +429,8 @@ export function AdminSettings(props: AdminSettingsProps) {
   // Базы 1С: поля формы + параллельный признак «пароль задан» для placeholder.
   const [onecBases, setOnecBases] = useState<SettingsOnecBase[]>([]);
   const [onecBasesSet, setOnecBasesSet] = useState<boolean[]>([]);
+  // Дата/время последней синхронизации предприятий (read-only).
+  const [onecSyncedAt, setOnecSyncedAt] = useState<string | null>(null);
   // Статус принудительной синхронизации предприятий из баз 1С.
   const [syncStatus, setSyncStatus] = useState<string>("");
   const [syncError, setSyncError] = useState<string>("");
@@ -458,6 +460,7 @@ export function AdminSettings(props: AdminSettingsProps) {
           // Базы 1С: пароль очищаем, признак «задан» — из маски/None.
           setOnecBases((full.onec_bases ?? []).map((b) => ({ ...b, password: "" })));
           setOnecBasesSet((full.onec_bases ?? []).map((b) => b.password !== null));
+          setOnecSyncedAt(full.onec_enterprises_synced_at);
         }
         setTtl(data.approval_ttl_days);
         setPaperRequired(data.require_paper_signature);
@@ -525,6 +528,8 @@ export function AdminSettings(props: AdminSettingsProps) {
           smtp_password: smtpPassword,
           // Пароль базы — как введено (пустое → сервер сохранит текущий).
           onec_bases: onecBases,
+          // Read-only: пишет синхронизация (сервер игнорирует на PUT).
+          onec_enterprises_synced_at: onecSyncedAt,
         };
         const result = await saveSettings(full);
         setSaved(
@@ -925,6 +930,11 @@ export function AdminSettings(props: AdminSettingsProps) {
             <button type="button" className="sed-btn" onClick={handleSyncEnterprises}>
               Обновить из 1С
             </button>
+          </div>
+          <div className="sed-note">
+            {onecSyncedAt
+              ? `Последняя синхронизация предприятий: ${new Date(onecSyncedAt).toLocaleString("ru-RU")}`
+              : "Синхронизация предприятий ещё не выполнялась"}
           </div>
           {syncStatus && <div role="status">{syncStatus}</div>}
           {syncError && <div role="alert">{syncError}</div>}

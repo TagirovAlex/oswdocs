@@ -59,8 +59,12 @@ INFRA_KEYS: tuple[str, ...] = (
     "smtp_user",
     "smtp_password",
     "onec_bases",
+    "onec_enterprises_synced_at",
 )
 
+# SETTINGS_KEYS: полный набор (контент + инфра). Поле onec_enterprises_synced_at
+# читается GET /settings (read-only, пишет только синхронизация) — в SettingsPayload
+# его НЕТ, админ изменить не может.
 SETTINGS_KEYS: tuple[str, ...] = CONTENT_KEYS + INFRA_KEYS
 
 # Маска пароля SMTP в GET /settings: наружу отдаём только признак «задан/не задан»,

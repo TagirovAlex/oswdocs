@@ -118,6 +118,7 @@ CONTRACT_VALUES = {
         }
     ],
     "onec_bases": [],
+    "onec_enterprises_synced_at": None,
 }
 
 # Контент-часть контракта: только ключи CONTENT_KEYS (для GET/PUT /settings/content).
@@ -176,6 +177,7 @@ UPDATED_VALUES = {
             "organization_entity": "Catalog_Организации",
         }
     ],
+    "onec_enterprises_synced_at": None,
 }
 
 

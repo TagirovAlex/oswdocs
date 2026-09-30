@@ -47,6 +47,7 @@ const settings: SettingsData = {
   ],
   mail_templates: [{ code: "assigned", subject: "Заявка {{ request_id }}", body_html: "<html>{{ fio }}</html>" }],
   onec_bases: [],
+  onec_enterprises_synced_at: "2026-09-30T14:00:00+00:00",
 };
 
 // Контентная часть (как отдаёт GET /api/settings/content для руководителя ОК).
@@ -70,6 +71,7 @@ const contentOnly: SettingsData = {
   doc_templates: [],
   mail_templates: [],
   onec_bases: [],
+  onec_enterprises_synced_at: null,
 };
 
 beforeEach(() => {
