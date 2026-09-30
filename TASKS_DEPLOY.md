@@ -2,12 +2,15 @@
 
 > ## Статус (2026-09-30): ВЫПОЛНЕНО
 >
-> Результат: код Волн 1–5 залит, миграция `0002` накатана, `settings` — 15 ключей
-> (включая `scan_allowed_types`, `smtp_host`, `smtp_port`), фронт собран и в volume
-> `sed_frontend_dist`, api/worker Up без рестартов, `/api/health` 200, 401 на
-> settings/me/enterprises/login(wrongpass), IMPORT_OK, `soffice=True` (вариант a).
-> SMTP-параметры (smtp_host/smtp_port/smtp_from) вынесены в settings — см. шаг 3 и коммит `9be6e6f`.
-> Отклонения и открытое — в разделе «ОТЧЁТ» и в шапке `TASKS_REAL.md`.
+> Результат: код Волн 1–5 залит, миграция `0002` накатана, `settings` — 18 ключей
+> (включая `scan_allowed_types`, `smtp_host/smtp_port/smtp_user/smtp_password`,
+> `session_ttl_minutes`), фронт собран и в volume `sed_frontend_dist`, api/worker Up без
+> рестартов, `/api/health` 200, 401 на settings/me/enterprises/login(wrongpass), IMPORT_OK,
+> `soffice=True` (вариант a). Вход реальным паролем подтверждён.
+> Дополнительно (B-фазы, коммиты `21648c7`→`25a3771`): роль `hr_admin` (SED_HR_ADMIN),
+> разделение настроек контент/инфра (`/settings/content`), 1С-базы и источник предприятий
+> в settings (маска паролей), синхронизация предприятий из 1С, редакторы бланков/писем,
+> TTL сессии 10 ч, SMTP-учётка в settings. Отклонения и открытое — в `TASKS_REAL.md`.
 
 Запускается ОТДЕЛЬНОЙ сессией. Прочитай перед стартом: `AGENTS.md`, `README.md`
 п.2/п.6, `TASKS_REAL.md` (что деплоим), хелперы `temp/ssh_probe.py`,

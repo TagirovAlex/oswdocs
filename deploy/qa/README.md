@@ -37,11 +37,12 @@ npx playwright install chromium
 export SED_BASE_URL=https://sed.company.local
 export LOGIN_ADMIN=...   PASS_ADMIN=...
 export LOGIN_HR=...      PASS_HR=...
+export LOGIN_HR_ADMIN=... PASS_HR_ADMIN=...
 export LOGIN_OWNER=...   PASS_OWNER=...
 ```
 
-Учетки — реальные доменные из групп `SED_ADMINS`, `SED_HR`, `SED_STEP_EXEC`
-(или группы шага). Учетка не задана в env — тест роли пропускается (skip).
+Учетки — реальные доменные из групп `SED_ADMINS`, `SED_HR`, `SED_HR_ADMIN`,
+`SED_STEP_EXEC` (или группы шага). Учетка не задана в env — тест роли пропускается (skip).
 
 ### Запуск
 
@@ -53,8 +54,9 @@ npx playwright test roles-matrix.spec.ts --reporter=line
 
 | Роль | Вкладки (layout.tsx) | Создание | Настройки | Карточка |
 |------|----------------------|----------|-----------|----------|
-| admin | Заявки / Создание / Настройки | мастер открывается | форма + `GET /api/settings` 200 | полные колонки с ПДн |
-| hr | Заявки / Создание | мастер открывается | вкладки нет, API 403 | полные колонки с ПДн |
+| admin | Заявки / Создание / Настройки | мастер открывается | форма + `GET /api/settings` 200 (всё) | полные колонки с ПДн |
+| hr_admin (руководитель ОК) | Заявки / Создание / Настройки | мастер открывается | только контент: `GET /api/settings/content` 200, `GET /api/settings` 403 | полные колонки с ПДн |
+| hr | Заявки / Создание | мастер открывается | вкладки нет, `GET /api/settings*` 403 | полные колонки с ПДн |
 | owner | Заявки | вкладки нет | вкладки нет, API 403 | колонка-маска, `fio/tab_num/enterprise=null`, ячейка «Сотрудник № …» |
 | guest | нет (экран логина) | нет | `GET /api/*` → 401 | данных нет |
 

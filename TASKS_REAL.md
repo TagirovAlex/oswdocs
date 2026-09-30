@@ -2,22 +2,35 @@
 
 > ## Статус (2026-09-30): Волны 1–5 РЕАЛИЗОВАНЫ и ЗАДЕПЛОЕНЫ на стенд `10.0.70.117`
 >
-> Залито: `api/app` целиком (включая requests_store/link_store/documents/attachments/worker),
-> миграция `0002` (alembic `head`), сиды `settings` обновлены (на стенде 15 ключей:
-> `scan_allowed_types` + `smtp_host`/`smtp_port` от деплоя, `templates` — добавлен через админку),
+> Залито: `api/app` целиком (включая requests_store/link_store/documents/attachments/worker,
+> onec_sync), миграция `0002` (alembic `head`), сиды `settings` (18 ключей на стенде),
 > фронт (свежая сборка), `docker-compose.yml` (совпадает с ВМ). api/worker Up и стабильны,
-> `/api/health` 200, вход LDAPS+TLS (wrongpass → 401), IMPORT_OK, `soffice` в образе (вариант a).
-> Коммиты: `1f9bf99` (fix deploy: LibreOffice/docxtpl/python-multipart/worker-loop), `9be6e6f`
-> (SMTP-параметры в settings).
+> `/api/health` 200, вход LDAPS+TLS ПОДТВЕРЖДЁН реальным паролем (учётка пользователя),
+> IMPORT_OK, `soffice` в образе.
+>
+> ### Дополнительно (B-фазы 2026-09-30, коммиты 21648c7→25a3771)
+> - Роль «руководитель ОК» (`hr_admin`, группа `SED_HR_ADMIN` в AD и в `.env` на ВМ):
+>   полные карточки, создание заявок, контент-настройки; рядовой ОК — без настроек.
+> - Настройки разделены: `GET/PUT /settings` (admin, всё) и `GET/PUT /settings/content`
+>   (admin + hr_admin, контент: предприятия/группы/должности/шаблоны/бланки/письма/процесс);
+>   инфра (сессии, сканы, SMTP, 1С-базы, источник) — только admin.
+> - 1С-базы (`onec_bases`) и источник предприятий (`onec_enterprises_source`) в settings
+>   (пароли маскируются, пишутся при вводе); клиент 1С читает базы из settings (fallback env).
+> - Синхронизация предприятий из 1С: `POST /settings/enterprises/sync` (admin) + еженедельно
+>   в worker (`onec_sync.maybe_sync_weekly`); до OData-контракта ИТ — ошибка «не настроено».
+> - Редакторы бланков (`doc_templates`) и писем (`mail_templates`) на вкладке «Шаблоны».
+> - TTL сессии 10 ч (`session_ttl_minutes=600` в settings) и SMTP-учётка (`smtp_user`/`smtp_password`)
+>   в settings (пароль маскируется); сессия читается из settings при входе.
 >
 > ### Открытые пункты (не код, данные/операции)
-> - Вход реальным доменным паролем — ждёт человека (официально не проверялся).
-> - `ONEC_BASES_JSON` не задан — карточки/поиск сотрудников из 1С недоступны (1С вне объёма).
+> - `ONEC_BASES_JSON`/базы в settings не заполнены — 1С ждёт OData-контракт и учётки от ИТ;
+>   синхронизация предприятий заработает после настройки `onec_enterprises_source`.
 > - SMTP: релей `intsrvmail.fidelio.local:587`, отправитель `tagirovam@yaltaintourist.ru`
->   (в settings); `SMTP_USER`/`SMTP_PASSWORD` пусты — если релею нужна авторизация, дать учётку.
+>   (в settings); отправка без авторизации работает; `smtp_user`/`smtp_password` — при
+>   необходимости стороннего релея (ввод в админке, пароль маскируется).
 > - Реальные `doc_templates`/`mail_templates` (образцы корп. бланков/писем) не заведены.
 > - QA-прогон на стенде (`deploy/qa/roles-matrix.spec.ts`, `audit-fullness.sql`) не выполнялся
->   (нужны реальные доменные учётки).
+>   (нужны реальные доменные учётки, включая `SED_HR_ADMIN`).
 >
 > ### Известные пробелы кода (не входят в Волны 1–5)
 > - Событие письма «закрыта» (EVENT_CLOSED) не ставится в очередь (нет при finish).
