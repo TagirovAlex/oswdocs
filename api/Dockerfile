@@ -2,8 +2,9 @@
 # Контекст сборки: ./api (см. docker-compose.yml Задачи 1).
 # worker использует ТОТ ЖЕ образ с другой командой (celery/rq — в Фазе 4,
 # команда переопределяется в compose, отдельный Dockerfile для worker не нужен).
-# LibreOffice (soffice) для DOCX->PDF — СИСТЕМНЫЙ пакет, ставится ТОЛЬКО
-# на ВМ в worker-вариант (Фаза 4/W3a); в pip-зависимости образа НЕ включается.
+# LibreOffice (soffice) для DOCX->PDF — системный пакет, ставится в образ
+# (TASKS_DEPLOY.md шаг 6, вариант a), чтобы печать работала сразу;
+# в pip-зависимости образа НЕ включается.
 
 FROM python:3.12-slim
 
@@ -21,6 +22,10 @@ RUN pip install --no-cache-dir --upgrade pip \
 
 # Только нужный код (реальный код app/ появляется в Фазах 2-4).
 COPY ./app ./app
+
+# LibreOffice (soffice) для генерации PDF из DOCX (W3a): headless-конвертер.
+RUN apt-get update && apt-get install -y --no-install-recommends libreoffice-writer \
+    && rm -rf /var/lib/apt/lists/*
 
 # Non-root запуск.
 RUN groupadd -r appuser && useradd -r -g appuser appuser \

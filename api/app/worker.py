@@ -235,4 +235,14 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    # Контейнерный worker (compose, restart: unless-stopped) должен оставаться
+    # Up: проходы — циклически с паузой (интервал из env WORKER_POLL_SECONDS,
+    # дефолт 60), иначе контейнер завершится после первого прохода и Docker
+    # будет перезапускать его (статус Restarting вместо Up).
+    import os
+    import time
+
+    interval = int(os.environ.get("WORKER_POLL_SECONDS", "60"))
+    while True:
+        main()
+        time.sleep(interval)

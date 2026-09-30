@@ -17,6 +17,9 @@ pydantic-settings>=2.3
 httpx>=0.27
 pytest>=8.0
 
+# --- W5a (multipart-загрузка сканов через File/UploadFile FastAPI) ---
+python-multipart>=0.0.7
+
 # --- Задел A3 (1С per-base HTTP): раскомментирует агент A3 ---
 # httpx уже выше; circuit-breaker — tenacity>=8.0
 
@@ -25,5 +28,7 @@ ldap3>=2.9
 
 # --- W3a (бланки DOCX + QR; PDF — системный LibreOffice в worker-варианте,
 # пакет libreoffice через pip НЕ ставится, см. Dockerfile) ---
-python-docx-template>=0.4
+# Имя пакета на PyPI — docxtpl (импорт: from docxtpl import DocxTemplate);
+# "python-docx-template" — только название проекта/репозитория, пакета нет.
+docxtpl>=0.4
 qrcode>=7.4
