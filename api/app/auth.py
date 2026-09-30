@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import Callable, Protocol
 
 import redis
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from .ad_reader import (
@@ -135,6 +135,77 @@ class RedisSessionStore:
             self._redis.delete(self._key(token))
         except redis.RedisError as exc:
             raise SessionUnavailable(f"Хранилище сессий недоступно: {exc}") from exc
+
+
+# ---------------------------------------------------------------------------
+# Rate-limit входа (W5a): Redis-счётчик sed:login:{ip}:{login} перед проверкой
+# пароля. Лимит/окно — из env (LOGIN_RATE_LIMIT/LOGIN_RATE_WINDOW_SECONDS);
+# падение Redis — лимит пропускается (вход работает, а не 503, как
+# SessionUnavailable-паттерн). Успешный вход сбрасывает счётчик.
+# ---------------------------------------------------------------------------
+
+_LOGIN_RATE_KEY_PREFIX = "sed:login:"
+
+
+class LoginRateLimiter(Protocol):
+    """Граница лимитера входа (в бою — Redis, в тестах — in-memory фейк)."""
+
+    def allowed(self, ip: str, login: str) -> bool:
+        """Разрешить ли попытку: False — лимит исчерпан (429), до проверки пароля."""
+        ...  # pragma: no cover
+
+    def reset(self, ip: str, login: str) -> None:
+        """Сбросить счётчик (успешный вход)."""
+        ...  # pragma: no cover
+
+
+class RedisLoginRateLimiter:
+    """Счётчик попыток входа в Redis: ключ `sed:login:{ip}:{login}`.
+
+    INCR + EXPIRE(NX) атомарно в pipeline: окно отсчитывается от первой
+    попытки. Падение Redis — allowed() возвращает True (лимит пропускаем,
+    вход работает), reset() — молча пропускаем.
+    """
+
+    def __init__(self, redis_url: str, limit: int, window_seconds: int) -> None:
+        self._redis = redis.from_url(redis_url, decode_responses=True)
+        self._limit = limit
+        self._window_seconds = window_seconds
+
+    @staticmethod
+    def _key(ip: str, login: str) -> str:
+        return f"{_LOGIN_RATE_KEY_PREFIX}{ip}:{login}"
+
+    def allowed(self, ip: str, login: str) -> bool:
+        key = self._key(ip, login)
+        try:
+            pipe = self._redis.pipeline()
+            pipe.incr(key)
+            # EXPIRE с NX: TTL ставится только на первой попытке, окно не продлевается.
+            pipe.expire(key, self._window_seconds, nx=True)
+            current, _ = pipe.execute()
+        except redis.RedisError:
+            return True
+        return current <= self._limit
+
+    def reset(self, ip: str, login: str) -> None:
+        try:
+            self._redis.delete(self._key(ip, login))
+        except redis.RedisError:
+            return
+
+
+def get_login_limiter(settings: Settings = Depends(get_settings)) -> LoginRateLimiter:
+    """Боевой лимитер: тот же Redis, что и сессии (REDIS_URL из env).
+
+    В офлайн-тестах переопределяется in-memory фейком через
+    dependency_overrides (как get_auth_service/get_settings_store).
+    """
+    return RedisLoginRateLimiter(
+        settings.REDIS_URL,
+        settings.LOGIN_RATE_LIMIT,
+        settings.LOGIN_RATE_WINDOW_SECONDS,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -285,9 +356,17 @@ class LoginRequest(BaseModel):
 @router.post("/auth/login")
 def login(
     payload: LoginRequest,
+    request: Request,
     service: AuthService = Depends(get_auth_service),
+    limiter: LoginRateLimiter = Depends(get_login_limiter),
 ) -> dict:
-    """Вход по доменной учетке: 200 {token, user} | 401 | 503 (AD недоступен)."""
+    """Вход по доменной учетке: 200 {token, user} | 401 | 429 (rate-limit) | 503."""
+    ip = request.client.host if request.client is not None else ""
+    if not limiter.allowed(ip, payload.login):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Слишком много попыток входа",
+        )
     try:
         result = service.login(payload.login, payload.password)
     except AuthFailed as exc:
@@ -298,6 +377,8 @@ def login(
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
+    # Успешный вход — сброс счётчика (подбор не копится).
+    limiter.reset(ip, payload.login)
     return {"token": result.token, "user": result.user.model_dump()}
 
 

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from fastapi import Depends, FastAPI
 
+from . import attachments as attachments_routes
 from . import auth as auth_routes
 from . import documents as documents_routes
 from . import employees as employees_routes
@@ -23,6 +24,7 @@ app.include_router(link_routes.router)
 app.include_router(requests_routes.router)
 app.include_router(settings_routes.router)
 app.include_router(documents_routes.router)
+app.include_router(attachments_routes.router)
 
 
 @app.get("/health")

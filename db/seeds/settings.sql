@@ -60,3 +60,8 @@ ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
 INSERT INTO settings (key, value) VALUES
   ('scan_max_mb', '10')
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
+
+-- MIME-типы, разрешенные для сканов (пустой/нет ключа — загрузка запрещена, 409).
+INSERT INTO settings (key, value) VALUES
+  ('scan_allowed_types', '["application/pdf", "image/jpeg", "image/png"]')
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();

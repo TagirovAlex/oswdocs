@@ -29,12 +29,14 @@ class SettingsUnavailable(Exception):
 
 
 # Прикладные ключи админки (состав — контракт B2 GET/PUT /settings, дополнен
-# W3a: doc_templates/mail_templates — бегунки и письма).
+# W3a: doc_templates/mail_templates — бегунки и письма; W5a: scan_allowed_types —
+# MIME-allowlist сканов).
 # Порядок — как в контракте: базовые, справочники, шаблоны.
 SETTINGS_KEYS: tuple[str, ...] = (
     "approval_ttl_days",
     "scan_retention_days",
     "scan_max_mb",
+    "scan_allowed_types",
     "require_paper_signature",
     "smtp_from",
     "require_comment",
@@ -205,6 +207,9 @@ class SettingsPayload(BaseModel):
     )
     scan_max_mb: int | None = Field(
         default=None, description="Максимальный размер скана в МБ"
+    )
+    scan_allowed_types: list[str] | None = Field(
+        default=None, description="MIME-allowlist типов сканов (JSON-массив)"
     )
     require_paper_signature: bool | None = Field(
         default=None, description="Нужна ли бумажная подпись"

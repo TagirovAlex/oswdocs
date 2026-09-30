@@ -108,6 +108,17 @@ export interface DocumentMeta {
   created_at: string;
 }
 
+// Решение владельца шага (контракт POST /requests/{id}/steps/{order}/decision).
+export type StepDecision = "approve" | "reject" | "return";
+
+// Мета вложения заявки (GET /api/requests/{id}/attachments).
+export interface AttachmentMeta {
+  id: string;
+  filename: string;
+  size: number;
+  created_at: string;
+}
+
 // Фильтры над таблицей заявок.
 export interface RequestFilters {
   query: string;
@@ -145,7 +156,10 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiHttpError(401, "Нет токена");
   }
   const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
-  if (init?.body !== undefined) headers["Content-Type"] = "application/json";
+  // Multipart (FormData) — Content-Type ставит браузер с границей, вручную нельзя.
+  if (init?.body !== undefined && !(init.body instanceof FormData)) {
+    headers["Content-Type"] = "application/json";
+  }
   let res: Response;
   try {
     res = await fetch(path, { ...init, headers });
@@ -159,10 +173,18 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
       throw new ApiHttpError(401, detail ?? "Сессия истекла");
     case 403:
       throw new ApiHttpError(403, detail ?? "Доступ запрещён");
-    case 422:
-      throw new ApiHttpError(422, detail ?? "Неверные данные запроса");
     case 404:
       throw new ApiHttpError(404, detail ?? "Не найдено");
+    case 409:
+      throw new ApiHttpError(409, detail ?? "Состояние заявки изменилось");
+    case 410:
+      throw new ApiHttpError(410, detail ?? "Срок шага истек: нужен повтор");
+    case 413:
+      throw new ApiHttpError(413, detail ?? "Файл больше допустимого лимита");
+    case 415:
+      throw new ApiHttpError(415, detail ?? "Недопустимый тип файла");
+    case 422:
+      throw new ApiHttpError(422, detail ?? "Неверные данные запроса");
     case 503:
       throw new ApiHttpError(503, detail ?? "Сервис недоступен");
     default:
@@ -190,6 +212,46 @@ export async function getRequests(): Promise<RequestOut[]> {
   return requestJson<RequestOut[]>("/api/requests");
 }
 
+// GET /api/requests/{id}: карточка заявки (шаги, сроки, отметки).
+export async function getRequest(id: string): Promise<RequestOut> {
+  return requestJson<RequestOut>(`/api/requests/${encodeURIComponent(id)}`);
+}
+
+// POST /api/requests/{id}/steps/{order}/decision: отметка владельца шага.
+// 410 — просрочен, 409 — шаг закрыт/не по порядку, 422 — нет комментария при отказе/возврате.
+export async function decideStep(
+  id: string,
+  order: number,
+  decision: StepDecision,
+  comment?: string,
+): Promise<RequestOut> {
+  return requestJson<RequestOut>(`/api/requests/${encodeURIComponent(id)}/steps/${order}/decision`, {
+    method: "POST",
+    body: JSON.stringify({ decision, comment }),
+  });
+}
+
+// POST /api/requests/{id}/submit: Черновик/На доработке → На согласовании (ОК/админ).
+export async function submitRequest(id: string): Promise<RequestOut> {
+  return requestJson<RequestOut>(`/api/requests/${encodeURIComponent(id)}/submit`, {
+    method: "POST",
+  });
+}
+
+// POST /api/requests/{id}/to-execution: Согласовано → К исполнению (ОК/админ).
+export async function toExecution(id: string): Promise<RequestOut> {
+  return requestJson<RequestOut>(`/api/requests/${encodeURIComponent(id)}/to-execution`, {
+    method: "POST",
+  });
+}
+
+// POST /api/requests/{id}/finish: К исполнению → Завершено (ОК/админ).
+export async function finishRequest(id: string): Promise<RequestOut> {
+  return requestJson<RequestOut>(`/api/requests/${encodeURIComponent(id)}/finish`, {
+    method: "POST",
+  });
+}
+
 // POST /api/requests: создание заявки от ОК/админа (201 → созданная заявка).
 export async function createRequest(body: CreateRequestBody): Promise<RequestOut> {
   return requestJson<RequestOut>("/api/requests", {
@@ -209,6 +271,22 @@ export async function printRequest(id: string): Promise<PrintResult> {
 // GET /api/documents/{id}: мета документов заявки (версии, пути, QR).
 export async function getDocuments(id: string): Promise<DocumentMeta[]> {
   return requestJson<DocumentMeta[]>(`/api/documents/${encodeURIComponent(id)}`);
+}
+
+// GET /api/requests/{id}/attachments: мета вложений заявки.
+export async function getAttachments(id: string): Promise<AttachmentMeta[]> {
+  return requestJson<AttachmentMeta[]>(`/api/requests/${encodeURIComponent(id)}/attachments`);
+}
+
+// POST /api/requests/{id}/attachments: загрузка скана (multipart).
+// 413 — больше лимита, 415 — тип вне allowlist, 409 — лимит не задан.
+export async function uploadAttachment(id: string, file: File): Promise<AttachmentMeta> {
+  const form = new FormData();
+  form.append("file", file);
+  return requestJson<AttachmentMeta>(`/api/requests/${encodeURIComponent(id)}/attachments`, {
+    method: "POST",
+    body: form,
+  });
 }
 
 // GET /api/employees: поиск сотрудников предприятия; без баз 1С — 503.

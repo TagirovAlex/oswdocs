@@ -34,6 +34,14 @@ class Settings(BaseSettings):
             "Мок-заголовки X-Mock-* для офлайн-тестов; на ВМ — false, реальный Bearer-токен"
         ),
     )
+    LOGIN_RATE_LIMIT: int = Field(
+        default=5,
+        description="Rate-limit входа: максимум неудач за окно (W5a)",
+    )
+    LOGIN_RATE_WINDOW_SECONDS: int = Field(
+        default=60,
+        description="Окно rate-limit входа в секундах (W5a)",
+    )
 
     # --- Active Directory (только чтение через LDAPS bind, проверка memberOf) ---
     AD_URL: str = Field(default="ldaps://localhost:636")

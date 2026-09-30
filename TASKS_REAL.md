@@ -149,12 +149,45 @@ in-memory (теряется при рестарте), нет документо�
    на PDF `GET /api/documents/{id}/pdf?version=v1`). Без хардкода текстов/путей.
 10. Тесты на печать/документы (мок requests-client).
 
-## Волна 5 — QA/НФТ (Фаза 6)
-- Матрица ролей (playwright-скрипты в `deploy/qa/`), негативные тесты (403, дубли ФИО,
-  просрочка TTL, лимиты скана, rate-limit логина через Redis), полнота `audit_log`,
-  «нет записи в 1С/AD» (инварианты уже покрыты тестами), TLS/HSTS (уже в nginx).
-- rate-limit логина: Redis-счётчик на `login:{ip}:{login}` (N попыток/мин из settings/env),
-  429 после лимита; тесты с фейковым Redis.
+## Волна 5 — QA/НФТ, отметки владельцев, скан-вложения (Фаза 5–6)
+- Матрица ролей (playwright-скрипты в `deploy/qa/`), негативные тесты, rate-limit
+  логина через Redis, полнота `audit_log`, «нет записи в 1С/AD».
+- Реальная карточка заявки (шаги, отметки владельца approve/reject/return, submit/
+  to-execution/finish для ОК), скан-вложения (лимиты из settings).
+
+### Контракты Волны 5 (согласованы, не менять)
+
+**W5a — backend (fastapi-sed, qa-sed):**
+1. Rate-limit логина: Redis-счётчик `sed:login:{ip}:{login}` — `LOGIN_RATE_LIMIT`
+   попыток за окно `LOGIN_RATE_WINDOW_SECONDS` (env, дефолты 5/60), 429 после лимита
+   (до проверки пароля), сброс при успехе. Редкость: падение Redis — пропускать
+   лимит (не валить вход), как SessionUnavailable-паттерн.
+2. Скан-вложения: `POST /requests/{id}/attachments` (multipart; hr/admin/владелец
+   своего шага) — лимит размера `scan_max_mb` из settings (нет ключа → без лимита? НЕТ:
+   без ключа → 409 «лимит не задан»), MIME-allowlist из settings `scan_allowed_types`
+   (default [] → пусто = запрещено, но если список пуст и в БД — 409). Файл →
+   `/app/files/attachments/{request_id}/`, мета в таблицу `attachments` (0001),
+   `scan_retention_days` — мета, не применяется на чтении. `GET /requests/{id}/attachments`
+   → мета; `GET /attachments/{id}/file` → FileResponse (роли как у заявки).
+3. Тесты: rate-limit (фейковый Redis: 429 после N, сброс при успехе, Redis-down →
+   вход работает), attachments (мок хранилища файлов: размер>лимит → 413, тип вне
+   allowlist → 415, мета в store).
+
+**W5b — frontend (react-sed):**
+4. Реальная карточка заявки под таблицей (layout.tsx): `GET /api/requests/{id}` →
+   шаги (группа/статус/срок), кнопки владельцу своего шага «Согласовать/Отказать/
+   Вернуть» + комментарий (обязателен при отказе/возврате) → `POST /api/requests/{id}/
+   steps/{order}/decision`; ОК/админу — submit/to-execution/finish. Отметки пишутся в
+   карточку сразу (refetch).
+5. Скан-вложения в карточке: список `GET /api/requests/{id}/attachments`, загрузка
+   `POST .../attachments` (input file), удаление? (нет delete — только мета). Ошибки
+   413/415/409 — понятный текст.
+6. Тесты (мок requests-client): карточка, отметка владельца, submit ОК, загрузка скана.
+
+**W5c — QA-скрипты (qa-sed):**
+7. `deploy/qa/` — playwright-скрипт матрицы ролей (admin/hr/owner/guest: видимость
+   вкладок, создание, настройки, карточка) + чек-лист `deploy/qa/README.md` + проверка
+   полноты `audit_log` (скрипт sql-запросов). На ВМ — после деплоя, локально не гонять.
 
 ## Запреты
 - 1С/AD только чтение; настройки только settings/env; хардкода нет; коммиты — по команде;
