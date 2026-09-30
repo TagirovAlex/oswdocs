@@ -50,6 +50,14 @@ SEED_VALUES = {
         ' "steps": [{"owner_group": "SED_STEP_BUH"},'
         ' {"owner_group": "SED_STEP_HR", "require_comment": true}]}]'
     ),
+    "doc_templates": (
+        '[{"service": "Служба вымышленного учета", "category": "линейный",'
+        ' "body": "Бегунок увольнения: {{ fio }}, {{ department }}"}]'
+    ),
+    "mail_templates": (
+        '[{"code": "assigned", "subject": "Заявка {{ request_id }}",'
+        ' "body_html": "<html>Заявка {{ request_id }} назначена {{ fio }}</html>"}]'
+    ),
 }
 
 # Контрактный ответ GET /settings (все ключи на месте, типы по B2).
@@ -77,6 +85,20 @@ CONTRACT_VALUES = {
             ],
         }
     ],
+    "doc_templates": [
+        {
+            "service": "Служба вымышленного учета",
+            "category": "линейный",
+            "body": "Бегунок увольнения: {{ fio }}, {{ department }}",
+        }
+    ],
+    "mail_templates": [
+        {
+            "code": "assigned",
+            "subject": "Заявка {{ request_id }}",
+            "body_html": "<html>Заявка {{ request_id }} назначена {{ fio }}</html>",
+        }
+    ],
 }
 
 # Полный обновленный набор для PUT (все ключи переданы явно).
@@ -99,6 +121,20 @@ UPDATED_VALUES = {
             "service": "Служба вымышленного учета",
             "category": "руководитель",
             "steps": [{"owner_group": "SED_STEP_HR"}],
+        }
+    ],
+    "doc_templates": [
+        {
+            "service": "Служба вымышленного учета",
+            "category": "руководитель",
+            "body": "Бегунок руководителя: {{ fio }}, {{ position }}",
+        }
+    ],
+    "mail_templates": [
+        {
+            "code": "reminder",
+            "subject": "Напоминание {{ request_id }}",
+            "body_html": "<html>Напомним про {{ request_id }}</html>",
         }
     ],
 }
@@ -291,6 +327,10 @@ def test_settings_put_wrong_types_422(client, admin_headers, mock_store):
         dict(CONTRACT_VALUES, templates="not-a-list"),
         dict(CONTRACT_VALUES, templates=[{"service": "S", "category": "C"}]),
         dict(CONTRACT_VALUES, templates=[{"service": "S", "category": "C", "steps": [{"resolver": "by_group"}]}]),
+        dict(CONTRACT_VALUES, doc_templates="not-a-list"),
+        dict(CONTRACT_VALUES, doc_templates=[{"service": "S", "category": "C"}]),
+        dict(CONTRACT_VALUES, mail_templates="not-a-list"),
+        dict(CONTRACT_VALUES, mail_templates=[{"code": "assigned"}]),
     ]
     for bad in bad_cases:
         assert client.put("/settings", json=bad, headers=admin_headers).status_code == 422

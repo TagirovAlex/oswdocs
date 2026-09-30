@@ -15,6 +15,7 @@ import struct
 import zipfile
 import zlib
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, List, Protocol
 
 # Метка PDF-стаба: рендер настоящего PDF — только на стенде через LibreOffice.
@@ -208,3 +209,172 @@ class StdlibDocxRenderer:
             docx=self.render_docx(request_id, version, template_body, context, base_url),
             pdf_stub=self.render_pdf_stub(request_id, version),
         )
+
+
+# ---------------------------------------------------------------------------
+# W3a: боевая генерация бегунка (DOCX -> PDF + QR) на стенде.
+# Зависимости стенда (python-docx-template/qrcode/LibreOffice) импортируются
+# лениво: офлайн их нет — generate_bypass вернет generated=False с причиной
+# (не 500). Тексты шаблонов — только из doc_templates/settings, хардкода нет.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class BypassResult:
+    """Итог генерации бегунка: файлы на диске или причина отказа (не ошибка)."""
+
+    generated: bool = False
+    reason: str = ""
+    docx_path: str = ""
+    pdf_path: str = ""
+    qr_payload: str = ""
+
+
+def find_doc_template(
+    templates: object, service: str, category: str | None
+) -> dict | None:
+    """Подбор шаблона бегунка по службе+категории (поля 1С); нет — None."""
+    if not category or not isinstance(templates, list):
+        return None
+    for item in templates:
+        if (
+            isinstance(item, dict)
+            and item.get("service") == service
+            and item.get("category") == category
+            and (item.get("body") or "").strip()
+        ):
+            return item
+    return None
+
+
+def manual_bypass_body(request: object) -> str:
+    """Тело бегунка без шаблона: ручной конструктор из шагов заявки
+    (состав маршрута; тексты-шаблоны в код не зашиты)."""
+    lines = [
+        "Сотрудник: {{ fio }}",
+        "Служба: {{ department }}",
+        "Должность: {{ position }}",
+        "",
+        "Маршрут согласования:",
+    ]
+    for step in sorted(request.steps, key=lambda s: s.order):
+        owner = getattr(step, "assignee", None) or step.owner_group
+        lines.append(f"{step.order}. {owner} — {step.status}")
+    return "\n".join(lines)
+
+
+def build_bypass_context(request: object) -> Dict[str, object]:
+    """Контекст бегунка: поля 1С заявки без ПДн (mail/отпуск — не включаем)."""
+    return {
+        "request_id": request.id,
+        "fio": request.fio,
+        "department": request.department,
+        "position": request.position,
+        "category": request.category or "",
+        "enterprise": request.enterprise or "",
+    }
+
+
+def _render_docx_stand(template_body: str, context: Dict[str, object]) -> bytes:
+    """DOCX через python-docx-template (docxtpl): body — Jinja-подобный текст."""
+    import io
+
+    from docx import Document
+    from docxtpl import DocxTemplate
+
+    base = Document()
+    for line in template_body.splitlines():
+        base.add_paragraph(line)
+    buf = io.BytesIO()
+    base.save(buf)
+    buf.seek(0)
+    tpl = DocxTemplate(buf)
+    tpl.render(context)
+    out = io.BytesIO()
+    tpl.save(out)
+    return out.getvalue()
+
+
+def _render_qr_png(url: str) -> bytes:
+    """QR-матрица библиотекой qrcode (payload — URL заявки)."""
+    import io
+
+    import qrcode
+
+    img = qrcode.make(url)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _soffice_binary() -> str | None:
+    """Путь к soffice (системный LibreOffice на ВМ) либо None."""
+    import shutil
+
+    return shutil.which("soffice")
+
+
+def _convert_to_pdf(docx_path: str, out_dir: str, soffice: str | None) -> str | None:
+    """soffice --convert-to pdf; путь к PDF либо None при сбое."""
+    if soffice is None:
+        return None
+    import subprocess
+
+    result = subprocess.run(
+        [soffice, "--headless", "--convert-to", "pdf", "--outdir", out_dir, docx_path],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if result.returncode != 0:
+        return None
+    pdf = str(Path(docx_path).with_suffix(".pdf"))
+    return pdf if Path(pdf).exists() else None
+
+
+def generate_bypass(
+    request_id: str,
+    version: str,
+    template_body: str,
+    context: Dict[str, object],
+    base_url: str,
+    files_dir: str,
+) -> BypassResult:
+    """Собрать бегунок: DOCX (python-docx-template) -> PDF (LibreOffice) + QR.
+
+    Офлайн (нет python-docx-template/qrcode/soffice) или сбой LibreOffice —
+    BypassResult(generated=False, reason=...): файлы не записываются в документы
+    (в БД только мета успешной генерации). QR payload — URL заявки.
+    """
+    safe = sanitize_context(dict(context, request_id=request_id))
+    url = request_url(base_url, request_id)
+    try:
+        docx_bytes = _render_docx_stand(template_body, safe)
+        qr_bytes = _render_qr_png(url)
+    except Exception as exc:  # нет python-docx-template/qrcode — офлайн
+        return BypassResult(
+            generated=False,
+            reason=f"офлайн: библиотеки стенда недоступны ({exc.__class__.__name__})",
+        )
+    out_dir = Path(files_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    docx_path = out_dir / f"bypass_{request_id}_v{version}.docx"
+    docx_path.write_bytes(docx_bytes)
+    pdf_path = _convert_to_pdf(str(docx_path), str(out_dir), _soffice_binary())
+    if pdf_path is None:
+        # PDF не создан: бегунок не состоялся, файл не оставляем.
+        try:
+            docx_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return BypassResult(
+            generated=False, reason="нет LibreOffice (soffice): PDF не создан"
+        )
+    qr_path = out_dir / f"bypass_{request_id}_v{version}_qr.png"
+    qr_path.write_bytes(qr_bytes)
+    return BypassResult(
+        generated=True,
+        docx_path=str(docx_path),
+        pdf_path=str(pdf_path),
+        qr_payload=url,
+    )

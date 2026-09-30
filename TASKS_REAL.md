@@ -104,13 +104,57 @@ in-memory (теряется при рестарте), нет документо�
   LibreOffice), версии v1/v2, `mail_queue`+`mail_templates`, SMTP Exchange, эскалация.
 - `GET /documents/{id}` (печать), POST печать. Worker-модуль `app/worker`.
 
-## Волна 4 — 1С и связки (данные ИТ)
-- ONEC_BASES_JSON на ВМ; `/employees` живой; создание через выбор сотрудника из базы;
-  `link_1c_ad` в Postgres; снапшот 1С в заявке.
+### Контракты Волны 3 (согласованы, не менять)
+
+**W3a — backend (docs.py, mailer.py, worker.py, эндпоинты; скилы approval-templates, mail-docs):**
+1. Настройки из БД (ключи settings, admin управляет через /settings): `doc_templates`
+   ([{service, category, body} — шаблон бегунка по службе+категории]),
+   `mail_templates` ([{code, subject, body_html}] — события v1: назначена/напоминание/
+   эскалация/закрыта/возврат), `position_escalation` ({должность: часы}) — уже есть.
+   В коде НЕ хардкодить ни шаблонов, ни подписей, ни TTL.
+2. `POST /requests/{id}/print` (ОК/админ): генерация бегунка по doc_templates
+   (служба+категория заявки); нет шаблона → ручной конструктор (см. request_steps).
+   Версия: v1 — первая, v2 — повторная (документ с тем же номером, version=v2).
+   DOCX — через `python-docx-template` (Jinja-подобный), PDF — LibreOffice headless
+   (`soffice --convert-to pdf`), QR — `qrcode` с payload = url заявки. Офлайн/нет
+   LibreOffice → файл не создаётся, в ответе `{"generated": false, "reason": ...}`
+   (не 500!). Запись в таблицу documents (version, docx_path, pdf_path, qr_payload).
+   Возврат: {version, pdf_path, qr_payload}.
+3. `GET /documents/{request_id}` (ОК/админ/владелец своего шага): мета документов
+   заявки (версии, пути, QR). `GET /documents/{request_id}/pdf?version=v1` →
+   FileResponse pdf (404 если нет).
+4. `mailer.py`: реальный SMTP через `smtplib` (SMTP_HOST/FROM/USER/PASSWORD из env,
+   STARTTLS), письма — из `mail_templates` (Jinja-рендер по событию), получатель —
+   `mail` из AD (шаг: владелец группы), события: назначена (при submit), напоминание
+   (TTL/2), эскалация (position_escalation часов), закрыта/возврат. Офлайн —
+   существующий MockMailer. Очередь: `mail_queue` из 0001 (если таблицы нет —
+   FileMailQueue как offline, БД — на стенде через 0003? НЕ создавать миграцию без
+   нужды: проверь 0001, есть ли mail_queue/mail_templates).
+5. `app/worker.py` (новый): цикл (или однократный запуск по команде) — берёт заявки
+   «На согласовании» с невыполненными шагами: просроченные (expires_at < now) →
+   статус шага «просрочен» + заявка «На доработке» + письмо «возврат»; эскалация —
+   письмо руководителю через position_escalation; напоминания за N часов до дедлайна.
+   Только чтение/обновление заявок через RequestsStore (никакой записи в 1С/AD).
+   Команда в compose у worker уже есть (`python -m app.worker`).
+6. `requirements.txt`: раскомментировать `python-docx-template`, `qrcode` (LibreOffice —
+   системный пакет на ВМ, пометка в Dockerfile). НЕ ставить софт локально.
+7. Тесты: генерация версий v1/v2 (мок subprocess/LibreOffice), маршрут print без
+   шаблона → ручной, нет шаблона и нет шагов → 422, mailer MockMailer-очередь,
+   worker-логика на InMemoryRequestsStore (просрочка → «На доработке» + письмо).
+
+**W3b — frontend (скил react-sed):**
+8. `requests-client.tsx`: `printRequest(id)`, `getDocuments(id)`.
+9. `layout.tsx`/`requests.tsx`: кнопка «Печать» в тулбаре/строке → printRequest → статус
+   «v1 сгенерирован / v2» или ошибка; блок «Документы» в карточке заявки (версии, ссылка
+   на PDF `GET /api/documents/{id}/pdf?version=v1`). Без хардкода текстов/путей.
+10. Тесты на печать/документы (мок requests-client).
 
 ## Волна 5 — QA/НФТ (Фаза 6)
-- Матрица ролей (playwright), негативные тесты, rate-limit логина, HSTS/TLS,
-  полнота `audit_log`, «нет записи в 1С/AD».
+- Матрица ролей (playwright-скрипты в `deploy/qa/`), негативные тесты (403, дубли ФИО,
+  просрочка TTL, лимиты скана, rate-limit логина через Redis), полнота `audit_log`,
+  «нет записи в 1С/AD» (инварианты уже покрыты тестами), TLS/HSTS (уже в nginx).
+- rate-limit логина: Redis-счётчик на `login:{ip}:{login}` (N попыток/мин из settings/env),
+  429 после лимита; тесты с фейковым Redis.
 
 ## Запреты
 - 1С/AD только чтение; настройки только settings/env; хардкода нет; коммиты — по команде;

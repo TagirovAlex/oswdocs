@@ -23,6 +23,7 @@ pytest>=8.0
 # --- A4 (AD LDAPS bind + кэш): живой шлюз Ldap3Gateway в app/ad_reader.py ---
 ldap3>=2.9
 
-# --- Задел B3 (письма/DOCX/QR): раскомментирует агент B3 ---
-# python-docx-template>=0.4
-# qrcode>=7.4
+# --- W3a (бланки DOCX + QR; PDF — системный LibreOffice в worker-варианте,
+# пакет libreoffice через pip НЕ ставится, см. Dockerfile) ---
+python-docx-template>=0.4
+qrcode>=7.4

@@ -20,11 +20,27 @@ from pydantic import BaseModel, Field
 from .audit import AuditEvent, audit_log
 from .config import Settings, get_settings
 from .deps import CurrentUser, get_current_user
+from .docs import request_url
+from .employees import get_ad_reader
+from .mailer import (
+    EVENT_ASSIGNED,
+    MailQueue,
+    enqueue_event,
+    get_mail_queue,
+    resolve_smtp_from,
+    step_owner_mail,
+)
 from .requests_store import (
     InMemoryRequestsStore,
     RequestsStore,
     RequestsUnavailable,
     get_requests_store,
+)
+from .settings_routes import (
+    DbSettingsStore,
+    SettingsUnavailable,
+    get_settings_store,
+    read_setting_value,
 )
 
 router = APIRouter(tags=["requests"])
@@ -370,6 +386,45 @@ def _audit(actor: str, action: str, entity_id: str, detail: str = "") -> None:
     )
 
 
+def _notify_assigned(
+    request: _Request,
+    queue: MailQueue,
+    settings_store: DbSettingsStore,
+    ad_reader: object | None,
+    settings: Settings,
+) -> None:
+    """Письмо «назначена» владельцу первого шага при submit (W3a).
+
+    Получатель — mail из AD (только чтение); шаблон — из mail_templates/settings.
+    Любой сбой (офлайн без AD/БД, нет шаблона) тихо пропускается: уведомление
+    не должно валить подачу заявки.
+    """
+    try:
+        step = _current_pending(request)
+        if step is None:
+            return
+        templates = read_setting_value(settings_store, "mail_templates")
+        smtp_from = read_setting_value(settings_store, "smtp_from")
+        to = step_owner_mail(step, ad_reader)
+        if not to:
+            return
+        enqueue_event(
+            queue,
+            to,
+            request.id,
+            EVENT_ASSIGNED,
+            templates or [],
+            {
+                "fio": request.fio,
+                "request_id": request.id,
+                "url": request_url(settings.APP_BASE_URL, request.id),
+            },
+            subject_prefix=resolve_smtp_from(smtp_from, settings.SMTP_FROM),
+        )
+    except Exception:
+        return
+
+
 @router.post("/requests", response_model=RequestOut, status_code=201)
 def create_request(
     body: CreateRequestIn,
@@ -523,8 +578,15 @@ def submit_request(
     user: CurrentUser = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
     store: RequestsStore = Depends(get_requests_store),
+    mail_queue: MailQueue = Depends(get_mail_queue),
+    settings_store: DbSettingsStore = Depends(get_settings_store),
+    ad_reader: object | None = Depends(get_ad_reader),
 ) -> RequestOut:
-    """Черновик/На доработке → На согласовании (только ОК-автор, нужны шаги)."""
+    """Черновик/На доработке → На согласовании (только ОК-автор, нужны шаги).
+
+    При подаче ставится письмо «назначена» владельцу первого шага (W3a);
+    офлайн/нет AD/шаблона — уведомление тихо пропускается.
+    """
     settings.ensure_read_only()
     _require_hr(user)
     try:
@@ -540,6 +602,7 @@ def submit_request(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
     _audit(user.sam, "request.submit", request.id, "")
+    _notify_assigned(request, mail_queue, settings_store, ad_reader, settings)
     return _public_view(request, user)
 
 

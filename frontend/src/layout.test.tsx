@@ -2,10 +2,11 @@
 // Данные — из requests-client (мокается), сеть не нужна.
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { ApiHttpError } from "./auth-client";
 import { SedLayout } from "./layout";
 import { ThemeProvider } from "./theme";
-import { getEnterprises, getFolders, getRequests } from "./requests-client";
-import type { Folder, RequestOut } from "./requests-client";
+import { getDocuments, getEnterprises, getFolders, getRequests, printRequest } from "./requests-client";
+import type { DocumentMeta, Folder, RequestOut } from "./requests-client";
 import type { Role } from "./api-mock";
 
 // Мок клиента заявок; чистые функции (toRequestRow/filterRequests) — реальные.
@@ -16,6 +17,8 @@ vi.mock("./requests-client", async (importOriginal) => {
     getEnterprises: vi.fn(),
     getFolders: vi.fn(),
     getRequests: vi.fn(),
+    printRequest: vi.fn(),
+    getDocuments: vi.fn(),
   };
 });
 
@@ -61,7 +64,10 @@ beforeEach(() => {
   vi.mocked(getEnterprises).mockReset();
   vi.mocked(getFolders).mockReset();
   vi.mocked(getRequests).mockReset();
+  vi.mocked(printRequest).mockReset();
+  vi.mocked(getDocuments).mockReset();
   vi.mocked(getEnterprises).mockResolvedValue(enterprises);
+  vi.mocked(getDocuments).mockResolvedValue([]);
 });
 
 describe("SedLayout", () => {
@@ -156,5 +162,83 @@ describe("SedLayout", () => {
     renderWithTheme("hr", onLogout);
     fireEvent.click(screen.getByRole("button", { name: "Выйти" }));
     expect(onLogout).toHaveBeenCalledTimes(1);
+  });
+
+  // Печать бегунка: до выбора заявки кнопка недоступна, после — статус «v1/v2 сгенерирован».
+  it("кнопка «Печать» генерирует бегунок и показывает версию", async () => {
+    vi.mocked(getFolders).mockResolvedValue(folders);
+    vi.mocked(getRequests).mockResolvedValue([requestWith("Громов Игорь Олегович", "На согласовании")]);
+    vi.mocked(printRequest).mockResolvedValue({ version: "v2", generated: true, pdf_path: "/data/2.pdf", qr_payload: "q" });
+
+    renderWithTheme("hr");
+    await waitFor(() => expect(screen.getByText("REQ-0001")).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Печать" })).toBeDisabled();
+    fireEvent.click(screen.getByText("REQ-0001"));
+    fireEvent.click(screen.getByRole("button", { name: "Печать" }));
+    await waitFor(() => expect(screen.getByText("Бегунок v2 сгенерирован")).toBeInTheDocument());
+    expect(vi.mocked(printRequest)).toHaveBeenCalledWith("REQ-0001");
+  });
+
+  // generated=false с reason (нет LibreOffice/шаблона) — показываем reason как статус, не ошибку.
+  it("печать без LibreOffice показывает reason как статус, не как ошибку", async () => {
+    vi.mocked(getFolders).mockResolvedValue(folders);
+    vi.mocked(getRequests).mockResolvedValue([requestWith("Громов Игорь Олегович", "На согласовании")]);
+    vi.mocked(printRequest).mockResolvedValue({ version: "v1", generated: false, reason: "LibreOffice не настроен" });
+
+    renderWithTheme("hr");
+    await waitFor(() => expect(screen.getByText("REQ-0001")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("REQ-0001"));
+    fireEvent.click(screen.getByRole("button", { name: "Печать" }));
+    await waitFor(() => expect(screen.getByText("LibreOffice не настроен")).toBeInTheDocument());
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  // Ошибка печати (403) — понятный текст в alert.
+  it("ошибка печати показывает понятный текст", async () => {
+    vi.mocked(getFolders).mockResolvedValue(folders);
+    vi.mocked(getRequests).mockResolvedValue([requestWith("Громов Игорь Олегович", "На согласовании")]);
+    vi.mocked(printRequest).mockRejectedValue(new ApiHttpError(403, "Печать доступна только ОК"));
+
+    renderWithTheme("hr");
+    await waitFor(() => expect(screen.getByText("REQ-0001")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("REQ-0001"));
+    fireEvent.click(screen.getByRole("button", { name: "Печать" }));
+    await waitFor(() => expect(screen.getByText("Печать доступна только ОК")).toBeInTheDocument());
+  });
+
+  // Блок «Документы»: версии выбранной заявки со ссылками на PDF (URL строится из id).
+  it("блок «Документы» показывает версии со ссылками на PDF", async () => {
+    vi.mocked(getFolders).mockResolvedValue(folders);
+    vi.mocked(getRequests).mockResolvedValue([requestWith("Громов Игорь Олегович", "На согласовании")]);
+    const docs: DocumentMeta[] = [
+      { version: "v1", pdf_path: "/data/1.pdf", qr_payload: "q", created_at: "2026-09-28T10:00:00+00:00" },
+      { version: "v2", pdf_path: "/data/2.pdf", qr_payload: "q", created_at: "2026-09-29T10:00:00+00:00" },
+    ];
+    vi.mocked(getDocuments).mockResolvedValue(docs);
+
+    renderWithTheme("hr");
+    await waitFor(() => expect(screen.getByText("REQ-0001")).toBeInTheDocument());
+    expect(screen.queryByLabelText("Документы")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText("REQ-0001"));
+    await waitFor(() => expect(screen.getByLabelText("Документы")).toBeInTheDocument());
+    expect(screen.getByText(/Бегунок v1/)).toBeInTheDocument();
+    expect(screen.getByText(/Бегунок v2/)).toBeInTheDocument();
+    const links = screen.getAllByRole("link");
+    expect(links.map((l) => l.getAttribute("href"))).toEqual([
+      "/api/documents/REQ-0001/pdf?version=v1",
+      "/api/documents/REQ-0001/pdf?version=v2",
+    ]);
+  });
+
+  // 404 по документам — понятный текст, не пустой экран.
+  it("404 документов показывает понятный текст", async () => {
+    vi.mocked(getFolders).mockResolvedValue(folders);
+    vi.mocked(getRequests).mockResolvedValue([requestWith("Громов Игорь Олегович", "На согласовании")]);
+    vi.mocked(getDocuments).mockRejectedValue(new ApiHttpError(404, "Не найдено"));
+
+    renderWithTheme("hr");
+    await waitFor(() => expect(screen.getByText("REQ-0001")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("REQ-0001"));
+    await waitFor(() => expect(screen.getByText("Не найдено")).toBeInTheDocument());
   });
 });

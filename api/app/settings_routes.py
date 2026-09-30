@@ -28,7 +28,8 @@ class SettingsUnavailable(Exception):
     """Хранилище настроек (БД) недоступно — роутер отвечает 503, а не 500."""
 
 
-# Прикладные ключи админки (состав — контракт B2 GET/PUT /settings).
+# Прикладные ключи админки (состав — контракт B2 GET/PUT /settings, дополнен
+# W3a: doc_templates/mail_templates — бегунки и письма).
 # Порядок — как в контракте: базовые, справочники, шаблоны.
 SETTINGS_KEYS: tuple[str, ...] = (
     "approval_ttl_days",
@@ -42,6 +43,8 @@ SETTINGS_KEYS: tuple[str, ...] = (
     "position_to_category",
     "position_escalation",
     "templates",
+    "doc_templates",
+    "mail_templates",
 )
 
 
@@ -62,6 +65,13 @@ def _from_stored(raw: str | None) -> object:
     except (ValueError, TypeError):
         # JSONB всегда валиден, ветка чисто защитная.
         return None
+
+
+def read_setting_value(store: DbSettingsStore, key: str) -> object:
+    """Типизированное значение ключа настроек для прикладных модулей
+    (бланки/письма/worker): паттерн ключ -> сид-строка -> значение.
+    Ключа нет в БД — None; падение БД — SettingsUnavailable (503)."""
+    return _from_stored(store.get(key))
 
 
 class DbSettingsStore:
@@ -167,6 +177,22 @@ class TemplateItem(BaseModel):
     steps: list[TemplateStepItem] = Field(description="Шаги шаблона по порядку")
 
 
+class DocTemplateItem(BaseModel):
+    """Шаблон бегунка (W3a): служба + категория → текст-шаблон DOCX (Jinja)."""
+
+    service: str = Field(description="Служба увольняемого (поле 1С)")
+    category: str = Field(description="Категория (МОЛ/линейный/руководитель)")
+    body: str = Field(description="Тело бегунка с плейсхолдерами {{ fio }} и др.")
+
+
+class MailTemplateItem(BaseModel):
+    """Шаблон письма (W3a): код события v1 + тема и Jinja-HTML тело."""
+
+    code: str = Field(description="Событие v1: assigned/reminder/escalation/closed/returned")
+    subject: str = Field(description="Тема письма (Jinja-подобная)")
+    body_html: str = Field(description="HTML-тело письма (Jinja-подобное)")
+
+
 class SettingsPayload(BaseModel):
     """Тело GET/PUT /settings: все прикладные ключи; в PUT все опциональны
     (частичное обновление — пишутся только присутствующие в теле ключи)."""
@@ -203,6 +229,12 @@ class SettingsPayload(BaseModel):
     )
     templates: list[TemplateItem] | None = Field(
         default=None, description="Шаблоны маршрутов (служба+категория→шаги)"
+    )
+    doc_templates: list[DocTemplateItem] | None = Field(
+        default=None, description="Шаблоны бегунков (служба+категория→тело DOCX)"
+    )
+    mail_templates: list[MailTemplateItem] | None = Field(
+        default=None, description="Шаблоны писем (код события→тема+HTML-тело)"
     )
 
 

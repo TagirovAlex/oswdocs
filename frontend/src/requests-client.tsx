@@ -90,6 +90,24 @@ export interface EmployeeSearchResult {
   needs_manual_review?: boolean;
 }
 
+// Результат POST /api/requests/{id}/print: сгенерированный бегунок (v1/v2).
+// generated=false + reason — НЕ ошибка (нет LibreOffice/шаблона), текст показывает экран.
+export interface PrintResult {
+  version: "v1" | "v2";
+  pdf_path?: string;
+  qr_payload?: string;
+  generated: boolean;
+  reason?: string;
+}
+
+// Мета документа заявки (GET /api/documents/{id}).
+export interface DocumentMeta {
+  version: "v1" | "v2";
+  pdf_path?: string;
+  qr_payload?: string;
+  created_at: string;
+}
+
 // Фильтры над таблицей заявок.
 export interface RequestFilters {
   query: string;
@@ -143,6 +161,8 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
       throw new ApiHttpError(403, detail ?? "Доступ запрещён");
     case 422:
       throw new ApiHttpError(422, detail ?? "Неверные данные запроса");
+    case 404:
+      throw new ApiHttpError(404, detail ?? "Не найдено");
     case 503:
       throw new ApiHttpError(503, detail ?? "Сервис недоступен");
     default:
@@ -176,6 +196,19 @@ export async function createRequest(body: CreateRequestBody): Promise<RequestOut
     method: "POST",
     body: JSON.stringify(body),
   });
+}
+
+// POST /api/requests/{id}/print: генерация бегунка (ОК/админ). При отсутствии
+// LibreOffice/шаблона — generated=false с reason (не ошибка).
+export async function printRequest(id: string): Promise<PrintResult> {
+  return requestJson<PrintResult>(`/api/requests/${encodeURIComponent(id)}/print`, {
+    method: "POST",
+  });
+}
+
+// GET /api/documents/{id}: мета документов заявки (версии, пути, QR).
+export async function getDocuments(id: string): Promise<DocumentMeta[]> {
+  return requestJson<DocumentMeta[]>(`/api/documents/${encodeURIComponent(id)}`);
 }
 
 // GET /api/employees: поиск сотрудников предприятия; без баз 1С — 503.

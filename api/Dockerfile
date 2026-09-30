@@ -2,7 +2,8 @@
 # Контекст сборки: ./api (см. docker-compose.yml Задачи 1).
 # worker использует ТОТ ЖЕ образ с другой командой (celery/rq — в Фазе 4,
 # команда переопределяется в compose, отдельный Dockerfile для worker не нужен).
-# TODO(phase4): libreoffice — ставить ТОЛЬКО в worker-вариант в Фазе 4, здесь НЕ ставить.
+# LibreOffice (soffice) для DOCX->PDF — СИСТЕМНЫЙ пакет, ставится ТОЛЬКО
+# на ВМ в worker-вариант (Фаза 4/W3a); в pip-зависимости образа НЕ включается.
 
 FROM python:3.12-slim
 

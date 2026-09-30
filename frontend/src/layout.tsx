@@ -5,12 +5,21 @@ import { useEffect, useMemo, useState } from "react";
 import {
   EMPTY_FILTERS,
   filterRequests,
+  getDocuments,
   getEnterprises,
   getFolders,
   getRequests,
+  printRequest,
   toRequestRow,
 } from "./requests-client";
-import type { Enterprise, Folder, FolderId, RequestFilters, RequestRow } from "./requests-client";
+import type {
+  DocumentMeta,
+  Enterprise,
+  Folder,
+  FolderId,
+  RequestFilters,
+  RequestRow,
+} from "./requests-client";
 import type { Role } from "./api-mock";
 import { useTheme } from "./theme";
 // Экраны волны B4: создание и админка — реальный API.
@@ -47,6 +56,12 @@ export function SedLayout(props: SedLayoutProps) {
   const [rows, setRows] = useState<RequestRow[]>([]);
   const [filters, setFilters] = useState<RequestFilters>(EMPTY_FILTERS);
   const [error, setError] = useState<string>("");
+  // Печать бегунка и документы (W3b): выбранная заявка + результат печати + список версий.
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [printStatus, setPrintStatus] = useState<string>("");
+  const [printError, setPrintError] = useState<string>("");
+  const [docs, setDocs] = useState<DocumentMeta[]>([]);
+  const [docsError, setDocsError] = useState<string>("");
 
   // Видимые вкладки по роли: «Настройки» — только админу, «Создание» — ОК и админу.
   const visibleTabs = useMemo(() => {
@@ -110,6 +125,50 @@ export function SedLayout(props: SedLayoutProps) {
       alive = false;
     };
   }, [folder, filters, role, tab]);
+
+  // Загрузка документов выбранной заявки (GET /api/documents/{id}).
+  useEffect(() => {
+    let alive = true;
+    if (!selectedId) {
+      setDocs([]);
+      setDocsError("");
+      return;
+    }
+    getDocuments(selectedId)
+      .then((data) => {
+        if (alive) {
+          setDocs(data);
+          setDocsError("");
+        }
+      })
+      .catch((e: unknown) => {
+        if (alive) {
+          setDocs([]);
+          setDocsError(e instanceof Error ? e.message : "Ошибка загрузки документов");
+        }
+      });
+    return () => {
+      alive = false;
+    };
+  }, [selectedId]);
+
+  // Печать бегунка: POST /api/requests/{id}/print. generated=false с reason —
+  // НЕ ошибка: показываем reason как статус, не как сбой.
+  async function handlePrint(): Promise<void> {
+    if (!selectedId) return;
+    setPrintError("");
+    setPrintStatus("");
+    try {
+      const result = await printRequest(selectedId);
+      setPrintStatus(result.generated ? `Бегунок ${result.version} сгенерирован` : (result.reason ?? "Бегунок не сгенерирован"));
+      // После генерации версии список документов мог измениться.
+      getDocuments(selectedId)
+        .then((data) => setDocs(data))
+        .catch(() => undefined);
+    } catch (e: unknown) {
+      setPrintError(e instanceof Error ? e.message : "Ошибка печати");
+    }
+  }
 
   // Заголовок таблицы зависит от роли (владельцу — без колонки ПДн).
   const columns = useMemo(() => {
@@ -183,7 +242,13 @@ export function SedLayout(props: SedLayoutProps) {
             <button type="button" className="sed-btn">
               Создать заявку
             </button>
-            <button type="button" className="sed-btn sed-btn--ghost">
+            <button
+              type="button"
+              className="sed-btn sed-btn--ghost"
+              disabled={!selectedId}
+              onClick={handlePrint}
+              title={selectedId ? `Печать бегунка ${selectedId}` : "Выберите заявку в таблице"}
+            >
               Печать
             </button>
             <button
@@ -233,6 +298,8 @@ export function SedLayout(props: SedLayoutProps) {
           </div>
 
           {error && <div role="alert">Ошибка: {error}</div>}
+          {printStatus && <div role="status">{printStatus}</div>}
+          {printError && <div role="alert">{printError}</div>}
 
           {/* Таблица заявок. */}
           <table className="sed-table" aria-label="Заявки">
@@ -245,7 +312,15 @@ export function SedLayout(props: SedLayoutProps) {
             </thead>
             <tbody>
               {rows.map((row) => (
-                <tr key={row.id}>
+                <tr
+                  key={row.id}
+                  onClick={() => setSelectedId(row.id)}
+                  style={
+                    selectedId === row.id
+                      ? { background: "var(--sed-primary-soft)", cursor: "pointer" }
+                      : { cursor: "pointer" }
+                  }
+                >
                   <td>{row.id}</td>
                   <td>{row.fio}</td>
                   {role !== "owner" && (
@@ -265,6 +340,25 @@ export function SedLayout(props: SedLayoutProps) {
               )}
             </tbody>
           </table>
+
+          {/* Блок документов выбранной заявки: версии бегунка и ссылки на PDF. */}
+          {selectedId && (
+            <section aria-label="Документы">
+              <h3>Документы заявки {selectedId}</h3>
+              {docsError && <div role="alert">{docsError}</div>}
+              {docs.length === 0 && !docsError && <div className="sed-note">Документов нет</div>}
+              <ul>
+                {docs.map((doc) => (
+                  <li key={doc.version}>
+                    Бегунок {doc.version} · {doc.created_at} ·{" "}
+                    <a href={`/api/documents/${encodeURIComponent(selectedId)}/pdf?version=${encodeURIComponent(doc.version)}`}>
+                      PDF
+                    </a>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
 
           <div className="sed-note">
             Волна 1: данные — из реального API; карточка заявки под таблицей — Волна 2.

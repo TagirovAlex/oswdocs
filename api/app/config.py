@@ -70,9 +70,21 @@ class Settings(BaseSettings):
     # считается разрешающей (конкретные имена — в settings, волна A1).
     STEP_GROUP_PREFIX: str = Field(default="EXAMPLE_STEP_")
 
-    # --- SMTP Exchange (уведомления; отправка — в волне B3) ---
+    # --- SMTP Exchange (уведомления; отправка — волна B3/W3a) ---
     SMTP_HOST: str = Field(default="localhost")
     SMTP_FROM: str = Field(default="sed@example.com")
+    SMTP_PORT: int = Field(
+        default=587,
+        description="Порт SMTP (STARTTLS); секреты/учетка — SMTP_USER/SMTP_PASSWORD",
+    )
+    SMTP_USER: str = Field(default="", description="Учетка SMTP (если нужна релею)")
+    SMTP_PASSWORD: str = Field(default="", description="Пароль SMTP (секрет, только env)")
+
+    # --- Публичный адрес СЭД (ссылки в QR/письмах; из env на стенде) ---
+    APP_BASE_URL: str = Field(default="https://sed.company.local")
+
+    # --- Каталог файлов документов/сканов (volume files в compose) ---
+    FILES_DIR: str = Field(default="/app/files")
 
     # --- TLS-сертификат (read-only mount в proxy) ---
     CERT_PATH: str = Field(default="/srv/sed/certs")

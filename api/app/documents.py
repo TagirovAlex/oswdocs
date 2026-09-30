@@ -1,0 +1,445 @@
+# Документы заявок (W3a): мета сгенерированных бегунков (таблица documents из
+# 0001) + эндпоинты печати и выдачи PDF. Файлы генерирует docs.generate_bypass
+# (модульная функция — тесты подменяют её, на стенде — python-docx-template +
+# LibreOffice + qrcode). Шаблоны бегунков — из таблицы settings (doc_templates)
+# через DbSettingsStore (read_setting_value), хардкода шаблонов нет.
+# Печать — только ОК/админы; чтение мета/PDF — ОК/админы и владелец своего шага.
+# ПДн владельцу не светят: отдаются только пути/версии/QR, PDF не парсится.
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Protocol
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
+from sqlalchemy import create_engine, text
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import sessionmaker
+
+from .audit import AuditEvent, audit_log
+from .config import Settings, get_settings
+from .deps import CurrentUser, get_current_user
+from .docs import (
+    build_bypass_context,
+    find_doc_template,
+    generate_bypass,
+    manual_bypass_body,
+)
+from .requests import _get_request_or_404
+from .requests_store import RequestsStore, RequestsUnavailable, get_requests_store
+from .settings_routes import (
+    DbSettingsStore,
+    SettingsUnavailable,
+    get_settings_store,
+    read_setting_value,
+)
+
+router = APIRouter(tags=["документы"])
+
+
+class DocumentsUnavailable(Exception):
+    """Хранилище документов (БД) недоступно — роутер отвечает 503, а не 500."""
+
+
+class DocumentRecord(BaseModel):
+    """Мета бегунка заявки (таблица documents: version, пути, QR, автор)."""
+
+    request_id: str = Field(description="Бизнес-номер заявки REQ-XXXX")
+    version: str = Field(description="Версия бегунка v1/v2/...")
+    docx_path: str | None = Field(default=None, description="Путь к DOCX в volume")
+    pdf_path: str | None = Field(default=None, description="Путь к PDF в volume")
+    qr_payload: str | None = Field(default=None, description="URL заявки в QR")
+    created_by: str = Field(default="", description="Кто инициировал печать (sam)")
+    created_at: datetime | None = Field(default=None, description="Момент генерации")
+
+
+class DocumentOut(BaseModel):
+    """Мета бегунка наружу (версии/пути/QR; без ПДн)."""
+
+    version: str
+    docx_path: str | None = None
+    pdf_path: str | None = None
+    qr_payload: str | None = None
+    created_at: str | None = None
+    created_by: str = ""
+
+
+class DocumentsStore(Protocol):
+    """Интерфейс хранилища документов: единый для in-memory и Postgres."""
+
+    def create(self, record: DocumentRecord) -> None:
+        """Сохранить запись бегунка (UNIQUE(request_id, version))."""
+        ...
+
+    def list_by_request(self, request_id: str) -> list[DocumentRecord]:
+        """Все версии бегунков заявки по порядку."""
+        ...
+
+    def get(self, request_id: str, version: str) -> DocumentRecord | None:
+        """Конкретная версия бегунка либо None."""
+        ...
+
+
+def version_number(version: str) -> int:
+    """'v1' -> 1 (битое значение — 0, для сортировки версий)."""
+    if version.startswith("v") and version[1:].isdigit():
+        return int(version[1:])
+    return 0
+
+
+def next_version_label(existing: list[DocumentRecord]) -> str:
+    """Следующая версия бегунка: v1 — первая, v2/v3 — повторы."""
+    return "v" + str(max((version_number(r.version) for r in existing), default=0) + 1)
+
+
+class InMemoryDocumentsStore:
+    """Офлайн-хранилище документов (dict), интерфейс DocumentsStore."""
+
+    def __init__(self) -> None:
+        self._records: dict[tuple[str, str], DocumentRecord] = {}
+
+    def reset(self) -> None:
+        """Сброс состояния. Только для изоляции pytest."""
+        self._records.clear()
+
+    def create(self, record: DocumentRecord) -> None:
+        self._records[(record.request_id, record.version)] = record
+
+    def list_by_request(self, request_id: str) -> list[DocumentRecord]:
+        records = [r for (rid, _), r in self._records.items() if rid == request_id]
+        return sorted(records, key=lambda r: version_number(r.version))
+
+    def get(self, request_id: str, version: str) -> DocumentRecord | None:
+        return self._records.get((request_id, version))
+
+
+class DbDocumentsStore:
+    """Хранилище документов в Postgres (таблица documents из 0001).
+
+    Заявка в модели — бизнес-номер REQ-XXXX (code), в БД FK на внутренний id
+    dismissal_requests; перевод — запросом по code (как DbRequestsStore).
+    Ошибки БД оборачиваются в DocumentsUnavailable (503).
+    """
+
+    _SELECT_REQUEST_ID_BY_CODE = text(
+        "SELECT id FROM dismissal_requests WHERE code = :code"
+    )
+    _INSERT = text(
+        """
+        INSERT INTO documents (
+          request_id, version, docx_path, pdf_path, qr_payload, created_by
+        )
+        VALUES (
+          :request_id, :version, :docx_path, :pdf_path, :qr_payload, :created_by
+        )
+        """
+    )
+    _SELECT_BY_REQUEST = text(
+        """
+        SELECT version, docx_path, pdf_path, qr_payload, created_by, created_at
+        FROM documents
+        WHERE request_id = :request_id
+        ORDER BY version
+        """
+    )
+    _SELECT_ONE = text(
+        """
+        SELECT version, docx_path, pdf_path, qr_payload, created_by, created_at
+        FROM documents
+        WHERE request_id = :request_id AND version = :version
+        """
+    )
+
+    def __init__(self, database_url: str) -> None:
+        self._engine = create_engine(database_url, pool_pre_ping=True)
+        self._session_factory = sessionmaker(
+            bind=self._engine, expire_on_commit=False
+        )
+
+    def _build(self, request_id: str, row) -> DocumentRecord:
+        return DocumentRecord(
+            request_id=request_id,
+            version=row.version,
+            docx_path=row.docx_path,
+            pdf_path=row.pdf_path,
+            qr_payload=row.qr_payload,
+            created_by=row.created_by or "",
+            created_at=row.created_at,
+        )
+
+    def create(self, record: DocumentRecord) -> None:
+        try:
+            with self._session_factory() as session:
+                internal = session.execute(
+                    self._SELECT_REQUEST_ID_BY_CODE, {"code": record.request_id}
+                ).first()
+                if internal is None:
+                    raise DocumentsUnavailable(
+                        f"Заявка {record.request_id} не найдена в хранилище"
+                    )
+                session.execute(
+                    self._INSERT,
+                    {
+                        "request_id": internal[0],
+                        "version": record.version,
+                        "docx_path": record.docx_path,
+                        "pdf_path": record.pdf_path,
+                        "qr_payload": record.qr_payload,
+                        "created_by": record.created_by or None,
+                    },
+                )
+                session.commit()
+        except DocumentsUnavailable:
+            raise
+        except SQLAlchemyError as exc:
+            raise DocumentsUnavailable(
+                f"Хранилище документов недоступно: {exc}"
+            ) from exc
+
+    def list_by_request(self, request_id: str) -> list[DocumentRecord]:
+        try:
+            with self._session_factory() as session:
+                internal = session.execute(
+                    self._SELECT_REQUEST_ID_BY_CODE, {"code": request_id}
+                ).first()
+                if internal is None:
+                    return []
+                rows = session.execute(
+                    self._SELECT_BY_REQUEST, {"request_id": internal[0]}
+                ).all()
+        except SQLAlchemyError as exc:
+            raise DocumentsUnavailable(
+                f"Хранилище документов недоступно: {exc}"
+            ) from exc
+        return [self._build(request_id, row) for row in rows]
+
+    def get(self, request_id: str, version: str) -> DocumentRecord | None:
+        try:
+            with self._session_factory() as session:
+                internal = session.execute(
+                    self._SELECT_REQUEST_ID_BY_CODE, {"code": request_id}
+                ).first()
+                if internal is None:
+                    return None
+                row = session.execute(
+                    self._SELECT_ONE,
+                    {"request_id": internal[0], "version": version},
+                ).first()
+        except SQLAlchemyError as exc:
+            raise DocumentsUnavailable(
+                f"Хранилище документов недоступно: {exc}"
+            ) from exc
+        if row is None:
+            return None
+        return self._build(request_id, row)
+
+
+_db_documents_store: DbDocumentsStore | None = None
+
+
+def get_documents_store(
+    settings: Settings = Depends(get_settings),
+) -> DocumentsStore:
+    """Боевое хранилище документов (Postgres): один движок на процесс.
+
+    В офлайн-тестах переопределяется InMemoryDocumentsStore через
+    dependency_overrides (как get_requests_store/get_settings_store).
+    """
+    global _db_documents_store
+    if _db_documents_store is None:
+        _db_documents_store = DbDocumentsStore(settings.DATABASE_URL)
+    return _db_documents_store
+
+
+def _require_hr(user: CurrentUser) -> None:
+    """Печать бегунка — только разрешенной группе (ОК/админы), иначе 403."""
+    if user.role not in ("hr", "admin"):
+        raise HTTPException(
+            status_code=403, detail="Печать бегунка — только разрешенной группе"
+        )
+
+
+def _can_view(request: object, user: CurrentUser) -> bool:
+    """Доступ к документам: ОК/админы или владелец одного из шагов заявки."""
+    if user.role in ("hr", "admin"):
+        return True
+    return any(
+        s.owner_group in user.groups or (s.assignee and s.assignee == user.sam)
+        for s in request.steps
+    )
+
+
+def _bypass_body(request: object, doc_templates: object) -> str | None:
+    """Тело бегунка: шаблон doc_templates по службе+категории, иначе ручной
+    конструктор из шагов; нет шаблона и нет шагов — None (422)."""
+    template = find_doc_template(doc_templates, request.department, request.category)
+    if template is not None:
+        return template["body"]
+    if not request.steps:
+        return None
+    return manual_bypass_body(request)
+
+
+@router.post("/requests/{request_id}/print")
+def print_bypass(
+    request_id: str,
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+    store: RequestsStore = Depends(get_requests_store),
+    doc_store: DocumentsStore = Depends(get_documents_store),
+    settings_store: DbSettingsStore = Depends(get_settings_store),
+) -> dict:
+    """Печать бегунка (ОК/админ): DOCX->PDF+QR по doc_templates или ручному
+    маршруту; офлайн/нет LibreOffice — {"generated": false, "reason": ...} (не 500)."""
+    settings.ensure_read_only()
+    _require_hr(user)
+    try:
+        request = _get_request_or_404(store, request_id)
+        doc_templates = read_setting_value(settings_store, "doc_templates")
+    except RequestsUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except SettingsUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    body = _bypass_body(request, doc_templates)
+    if body is None:
+        raise HTTPException(
+            status_code=422,
+            detail="Нет шаблона бегунка и нет шагов: задайте doc_templates или маршрут",
+        )
+    try:
+        existing = doc_store.list_by_request(request.id)
+    except DocumentsUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    version = next_version_label(existing)
+    result = generate_bypass(
+        request_id=request.id,
+        version=version,
+        template_body=body,
+        context=build_bypass_context(request),
+        base_url=settings.APP_BASE_URL,
+        files_dir=settings.FILES_DIR,
+    )
+    if not result.generated:
+        return {
+            "version": version,
+            "pdf_path": None,
+            "qr_payload": None,
+            "generated": False,
+            "reason": result.reason,
+        }
+    try:
+        doc_store.create(
+            DocumentRecord(
+                request_id=request.id,
+                version=version,
+                docx_path=result.docx_path,
+                pdf_path=result.pdf_path,
+                qr_payload=result.qr_payload,
+                created_by=user.sam,
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+    except DocumentsUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    audit_log.append(
+        AuditEvent(
+            actor=user.sam,
+            action="document.print",
+            entity="document",
+            entity_id=request.id,
+            detail=f"version={version}",
+        )
+    )
+    return {
+        "version": version,
+        "pdf_path": result.pdf_path,
+        "qr_payload": result.qr_payload,
+        "generated": True,
+    }
+
+
+@router.get("/documents/{request_id}", response_model=list[DocumentOut])
+def list_documents(
+    request_id: str,
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+    store: RequestsStore = Depends(get_requests_store),
+    doc_store: DocumentsStore = Depends(get_documents_store),
+) -> list[DocumentOut]:
+    """Мета документов заявки (версии/пути/QR): ОК/админы и владелец своего шага."""
+    settings.ensure_read_only()
+    try:
+        request = _get_request_or_404(store, request_id)
+    except RequestsUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if not _can_view(request, user):
+        raise HTTPException(status_code=403, detail="Нет доступа к документам заявки")
+    try:
+        records = doc_store.list_by_request(request.id)
+    except DocumentsUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    audit_log.append(
+        AuditEvent(
+            actor=user.sam,
+            action="document.read",
+            entity="document",
+            entity_id=request.id,
+            detail=f"versions={len(records)}",
+        )
+    )
+    return [
+        DocumentOut(
+            version=r.version,
+            docx_path=r.docx_path,
+            pdf_path=r.pdf_path,
+            qr_payload=r.qr_payload,
+            created_at=r.created_at.isoformat() if r.created_at else None,
+            created_by=r.created_by,
+        )
+        for r in records
+    ]
+
+
+@router.get("/documents/{request_id}/pdf")
+def download_pdf(
+    request_id: str,
+    version: str = Query(default="v1", description="Версия бегунка (v1/v2/...)"),
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+    store: RequestsStore = Depends(get_requests_store),
+    doc_store: DocumentsStore = Depends(get_documents_store),
+):
+    """PDF бегунка: ОК/админы и владелец своего шага; 404 — нет версии/файла."""
+    settings.ensure_read_only()
+    try:
+        request = _get_request_or_404(store, request_id)
+    except RequestsUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if not _can_view(request, user):
+        raise HTTPException(status_code=403, detail="Нет доступа к документам заявки")
+    try:
+        record = doc_store.get(request.id, version)
+    except DocumentsUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if record is None or not record.pdf_path:
+        raise HTTPException(status_code=404, detail="Документ не найден")
+    pdf_path = Path(record.pdf_path)
+    if not pdf_path.is_file():
+        raise HTTPException(status_code=404, detail="PDF-файл не найден")
+    audit_log.append(
+        AuditEvent(
+            actor=user.sam,
+            action="document.download",
+            entity="document",
+            entity_id=request.id,
+            detail=f"version={version}",
+        )
+    )
+    return FileResponse(
+        str(pdf_path),
+        media_type="application/pdf",
+        filename=f"bypass_{request.id}_{version}.pdf",
+    )
