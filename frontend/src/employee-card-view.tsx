@@ -18,15 +18,15 @@ interface EmployeeCardViewProps {
   role: Role;
 }
 
-// Стиль строки «поле — значение» внутри блока.
+// Стиль строки «поле — значение» внутри блока (цвета — переменные темы).
 const rowStyle: React.CSSProperties = {
   display: "flex",
   justifyContent: "space-between",
   gap: 16,
   padding: "6px 0",
-  borderBottom: "1px solid #e5e7eb",
+  borderBottom: "1px solid var(--sed-border)",
 };
-const labelStyle: React.CSSProperties = { opacity: 0.7, whiteSpace: "nowrap" };
+const labelStyle: React.CSSProperties = { color: "var(--sed-text-muted)", whiteSpace: "nowrap" };
 
 // Строка «подпись: значение» в блоке.
 function FieldRow({ label, value }: { label: string; value: string }) {
@@ -160,7 +160,14 @@ export function EmployeeCardView(props: EmployeeCardViewProps) {
   return (
     <section
       aria-label="Карточка сотрудника"
-      style={{ maxWidth: 760, margin: "0 auto", padding: "28px 32px", background: "#fff", borderRadius: 8 }}
+      style={{
+        maxWidth: 760,
+        margin: "0 auto",
+        padding: "28px 32px",
+        background: "var(--sed-surface)",
+        color: "var(--sed-text)",
+        borderRadius: "var(--sed-radius)",
+      }}
     >
       {/* Шапка: ФИО по 1С (крупно) и ФИО из AD (мельче). */}
       <header>
@@ -178,14 +185,28 @@ export function EmployeeCardView(props: EmployeeCardViewProps) {
       {card && (
         <div style={{ display: "flex", flexDirection: "column", gap: 20, marginTop: 20 }}>
           {/* Блок: должность (1С и AD). */}
-          <fieldset style={{ margin: 0, border: "1px solid #e5e7eb", borderRadius: 8, padding: "12px 16px" }}>
+          <fieldset
+            style={{
+              margin: 0,
+              border: "1px solid var(--sed-border)",
+              borderRadius: "var(--sed-radius)",
+              padding: "12px 16px",
+            }}
+          >
             <legend style={{ padding: "0 6px", fontWeight: 600 }}>Должность</legend>
             <FieldRow label="1С" value={card.position ?? "—"} />
             <FieldRow label="AD" value={adInfo?.title ?? "—"} />
           </fieldset>
 
           {/* Блок: контактные данные — двумя колонками (1С и AD). */}
-          <fieldset style={{ margin: 0, border: "1px solid #e5e7eb", borderRadius: 8, padding: "12px 16px" }}>
+          <fieldset
+            style={{
+              margin: 0,
+              border: "1px solid var(--sed-border)",
+              borderRadius: "var(--sed-radius)",
+              padding: "12px 16px",
+            }}
+          >
             <legend style={{ padding: "0 6px", fontWeight: 600 }}>Контактные данные</legend>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24 }}>
               <div>
@@ -202,7 +223,14 @@ export function EmployeeCardView(props: EmployeeCardViewProps) {
           </fieldset>
 
           {/* Блок: связка 1С↔AD. */}
-          <fieldset style={{ margin: 0, border: "1px solid #e5e7eb", borderRadius: 8, padding: "12px 16px" }}>
+          <fieldset
+            style={{
+              margin: 0,
+              border: "1px solid var(--sed-border)",
+              borderRadius: "var(--sed-radius)",
+              padding: "12px 16px",
+            }}
+          >
             <legend style={{ padding: "0 6px", fontWeight: 600 }}>Связка 1С↔AD</legend>
             {linked ? (
               <FieldRow

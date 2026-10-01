@@ -213,7 +213,7 @@ function TemplatesEditor(props: { value: SettingsTemplate[]; onChange: (v: Setti
       <legend>Шаблоны маршрутов</legend>
       {value.length === 0 && <div className="sed-note">не задано</div>}
       {value.map((template, i) => (
-        <div key={i} style={{ border: "1px solid #ccc", marginTop: 8, padding: 8 }}>
+        <div key={i} style={{ border: "1px solid var(--sed-border)", marginTop: 8, padding: 8 }}>
           <label style={{ display: "block" }}>
             Служба
             <input
@@ -285,7 +285,7 @@ function DocTemplatesEditor(props: { value: SettingsDocTemplate[]; onChange: (v:
       <legend>Бланки бегунков (doc_templates)</legend>
       {value.length === 0 && <div className="sed-note">не задано</div>}
       {value.map((doc, i) => (
-        <div key={i} style={{ border: "1px solid #ccc", marginTop: 8, padding: 8 }}>
+        <div key={i} style={{ border: "1px solid var(--sed-border)", marginTop: 8, padding: 8 }}>
           <label style={{ display: "block" }}>
             Служба
             <input
@@ -346,7 +346,7 @@ function MailTemplatesEditor(props: { value: SettingsMailTemplate[]; onChange: (
       <legend>Письма (mail_templates)</legend>
       {value.length === 0 && <div className="sed-note">не задано</div>}
       {value.map((mail, i) => (
-        <div key={i} style={{ border: "1px solid #ccc", marginTop: 8, padding: 8 }}>
+        <div key={i} style={{ border: "1px solid var(--sed-border)", marginTop: 8, padding: 8 }}>
           <label style={{ display: "block" }}>
             Код события (code)
             <input
@@ -839,7 +839,7 @@ export function AdminSettings(props: AdminSettingsProps) {
           </div>
           {onecBases.length === 0 && <div className="sed-note">не задано</div>}
           {onecBases.map((base, i) => (
-            <div key={i} style={{ border: "1px solid #ccc", marginTop: 8, padding: 8 }}>
+            <div key={i} style={{ border: "1px solid var(--sed-border)", marginTop: 8, padding: 8 }}>
               <label style={{ display: "block" }}>
                 Код базы 1С (base_code)
                 <input
