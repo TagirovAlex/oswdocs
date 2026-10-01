@@ -9,9 +9,11 @@ import {
   createLink,
   getEmployeeCard,
   getEnterprises,
+  searchAd,
   searchEmployees,
+  syncLinks,
 } from "./requests-client";
-import type { EmployeeCardData, EmployeeHit, Enterprise } from "./requests-client";
+import type { AdCandidate, EmployeeCardData, EmployeeHit, Enterprise } from "./requests-client";
 
 interface DirectoryProps {
   // Роль (привязку AD видит только админ; ОК/руководитель — просмотр).
@@ -28,9 +30,15 @@ export function Directory(props: DirectoryProps) {
   const [listError, setListError] = useState<string>("");
   const [card, setCard] = useState<EmployeeCardData | null>(null);
   const [cardError, setCardError] = useState<string>("");
-  const [linkSam, setLinkSam] = useState<string>("");
+  // Интерактивная привязка AD (админ): поиск кандидатов вместо голого логина.
+  const [adQuery, setAdQuery] = useState<string>("");
+  const [adCandidates, setAdCandidates] = useState<AdCandidate[]>([]);
+  const [adSearchError, setAdSearchError] = useState<string>("");
   const [linkStatus, setLinkStatus] = useState<string>("");
   const [linkError, setLinkError] = useState<string>("");
+  // Принудительная автосвязка 1С↔AD по точному ФИО (админ).
+  const [syncStatus, setSyncStatus] = useState<string>("");
+  const [syncError, setSyncError] = useState<string>("");
 
   useEffect(() => {
     let alive = true;
@@ -57,6 +65,8 @@ export function Directory(props: DirectoryProps) {
     setCard(null);
     setLinkStatus("");
     setLinkError("");
+    setSyncStatus("");
+    setSyncError("");
     try {
       const result = await searchEmployees(enterprise, query);
       setItems(result.items);
@@ -70,6 +80,8 @@ export function Directory(props: DirectoryProps) {
     setCardError("");
     setLinkStatus("");
     setLinkError("");
+    setAdCandidates([]);
+    setAdSearchError("");
     try {
       setCard(await getEmployeeCard(enterprise, hit.key.split("|")[1], hit.tab_num));
     } catch (e: unknown) {
@@ -77,11 +89,26 @@ export function Directory(props: DirectoryProps) {
     }
   }
 
-  async function handleLink(): Promise<void> {
-    if (!card || linkSam.trim() === "") {
-      setLinkError("Введите логин AD (sAMAccountName)");
+  // Поиск кандидатов AD по ФИО карточки (админ, интерактивная привязка).
+  async function handleAdSearch(): Promise<void> {
+    if (!card || adQuery.trim() === "") {
+      setAdSearchError("Введите подстроку ФИО для поиска в AD");
       return;
     }
+    setAdSearchError("");
+    setLinkError("");
+    setLinkStatus("");
+    try {
+      const items = await searchAd(adQuery.trim());
+      setAdCandidates(items);
+      if (items.length === 0) setAdSearchError("Ничего не найдено в AD");
+    } catch (e: unknown) {
+      setAdSearchError(e instanceof Error ? e.message : "Ошибка поиска в AD");
+    }
+  }
+
+  async function handleLink(sam: string): Promise<void> {
+    if (!card) return;
     setLinkError("");
     setLinkStatus("");
     try {
@@ -89,14 +116,33 @@ export function Directory(props: DirectoryProps) {
         enterprise: card.enterprise,
         base_code: card.base_code,
         tab_num: card.tab_num ?? "",
-        sam: linkSam.trim(),
+        sam,
       });
-      setLinkStatus(`Привязано: ${linkSam.trim()}`);
-      setLinkSam("");
+      setLinkStatus(`Привязано: ${sam}`);
+      setAdCandidates([]);
       // Обновить карточку — покажет блок AD и расхождения.
       setCard(await getEmployeeCard(card.enterprise, card.base_code, card.tab_num ?? ""));
     } catch (e: unknown) {
       setLinkError(e instanceof Error ? e.message : "Ошибка привязки AD");
+    }
+  }
+
+  // Принудительная автосвязка 1С↔AD по точному ФИО (только админ).
+  async function handleSyncLinks(): Promise<void> {
+    if (!enterprise) {
+      setSyncError("Выберите предприятие");
+      return;
+    }
+    setSyncError("");
+    setSyncStatus("");
+    try {
+      const result = await syncLinks();
+      setSyncStatus(
+        `Автосвязка: создано ${result.created}, просмотрено ${result.scanned}` +
+          (result.errors?.length ? `, ошибок: ${result.errors.length}` : ""),
+      );
+    } catch (e: unknown) {
+      setSyncError(e instanceof Error ? e.message : "Ошибка автосвязки");
     }
   }
 
@@ -129,7 +175,14 @@ export function Directory(props: DirectoryProps) {
         <button type="button" className="sed-btn" onClick={handleSearch}>
           Найти
         </button>
+        {canLink && (
+          <button type="button" className="sed-btn" onClick={handleSyncLinks}>
+            Автосвязка 1С↔AD
+          </button>
+        )}
       </div>
+      {syncError && <div role="alert">{syncError}</div>}
+      {syncStatus && <div role="status">{syncStatus}</div>}
       {listError && <div role="alert">{listError}</div>}
       <table className="sed-table" aria-label="Справочник сотрудников">
         <thead>
@@ -144,7 +197,7 @@ export function Directory(props: DirectoryProps) {
             <tr key={hit.key} onClick={() => void handleCard(hit)} style={{ cursor: "pointer" }}>
               <td>{hit.fio}</td>
               <td>{hit.tab_num}</td>
-              <td>{hit.ad_sam ? hit.ad_sam : "—"}</td>
+              <td>{hit.ad_sam ?? (hit.ad_status === "match" ? "совпадение найдено" : "—")}</td>
             </tr>
           ))}
           {items.length === 0 && !listError && (
@@ -169,6 +222,12 @@ export function Directory(props: DirectoryProps) {
               {card.link.verified ? " (подтверждена)" : " (требует сверки)"}
             </div>
           )}
+          {!card.link.linked && card.ad_status === "match" && (
+            <div role="status">Точное совпадение ФИО в AD найдено — подтвердите привязку</div>
+          )}
+          {!card.link.linked && card.ad_status === "no_match" && (
+            <div className="sed-note">Синхронизация не прошла: точного ФИО в AD нет (или дубли)</div>
+          )}
           {card.divergences.length > 0 && (
             <div role="status">Расхождения (истина — 1С): {card.divergences.join(", ")}</div>
           )}
@@ -182,15 +241,31 @@ export function Directory(props: DirectoryProps) {
           {canLink && (
             <div className="sed-toolbar" style={{ marginTop: 8 }}>
               <input
-                aria-label="Логин AD для привязки"
-                placeholder="sAMAccountName"
-                value={linkSam}
-                onChange={(e) => setLinkSam(e.target.value)}
+                aria-label="Поиск в AD"
+                placeholder="Подстрока ФИО для поиска в AD"
+                value={adQuery}
+                onChange={(e) => setAdQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void handleAdSearch();
+                }}
               />
-              <button type="button" className="sed-btn" onClick={handleLink}>
-                Привязать AD
+              <button type="button" className="sed-btn" onClick={handleAdSearch}>
+                Найти в AD
               </button>
             </div>
+          )}
+          {adSearchError && <div role="alert">{adSearchError}</div>}
+          {adCandidates.length > 0 && canLink && (
+            <ul aria-label="Кандидаты AD">
+              {adCandidates.map((c) => (
+                <li key={c.sam}>
+                  {c.display_name} · {c.sam} · {c.department} · {c.title}
+                  <button type="button" className="sed-btn" onClick={() => void handleLink(c.sam)}>
+                    Привязать
+                  </button>
+                </li>
+              ))}
+            </ul>
           )}
           {linkStatus && <div role="status">{linkStatus}</div>}
           {linkError && <div role="alert">{linkError}</div>}

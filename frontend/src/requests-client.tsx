@@ -82,6 +82,8 @@ export interface EmployeeHit {
   position: string;
   hire_date?: string | null;
   ad_sam?: string | null;
+  // Статус стыковки 1С↔AD: linked | match | no_match (без записи в БД).
+  ad_status?: string | null;
   needs_manual_review: boolean;
 }
 
@@ -317,6 +319,8 @@ export interface EmployeeCardData {
   hire_date?: string | null;
   dismissal_date?: string | null;
   ad_sam?: string | null;
+  // Статус стыковки 1С↔AD: linked | match | no_match (без записи в БД).
+  ad_status?: string | null;
   snapshot_1c?: Record<string, unknown> | null;
   snapshot_ad?: {
     sam?: string | null;
@@ -350,6 +354,40 @@ export async function createLink(body: {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+}
+
+// Кандидат AD для ручной привязки (GET /api/ad/search, только админ).
+export interface AdCandidate {
+  sam: string;
+  display_name: string;
+  department: string;
+  title: string;
+  mail: string;
+}
+
+// GET /api/ad/search: поиск кандидатов AD по ФИО (только админ).
+export async function searchAd(q: string): Promise<AdCandidate[]> {
+  const res = await requestJson<{ items: AdCandidate[] }>(
+    `/api/ad/search?q=${encodeURIComponent(q)}`,
+  );
+  return res.items;
+}
+
+// Итог автосвязки 1С↔AD (POST /api/link_1c_ad/sync, только админ).
+export interface AdSyncResult {
+  synced: boolean;
+  scanned: number;
+  created: number;
+  skipped_linked: number;
+  skipped_1c_duplicates: number;
+  skipped_ad_no_match: number;
+  skipped_ad_duplicates: number;
+  errors: string[];
+}
+
+// POST /api/link_1c_ad/sync: принудительная автосвязка по точному ФИО (только админ).
+export async function syncLinks(): Promise<AdSyncResult> {
+  return requestJson<AdSyncResult>("/api/link_1c_ad/sync", { method: "POST" });
 }
 
 // Маппинг RequestOut → строка таблицы: шаг — первый ожидающий, срок — его expires_at.
