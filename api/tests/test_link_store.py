@@ -133,6 +133,10 @@ class CountingLinksStore:
         self.calls["save"] += 1
         self.inner.save(record)
 
+    def ensure_user(self, row):
+        self.calls["ensure_user"] = self.calls.get("ensure_user", 0) + 1
+        self.inner.ensure_user(row)
+
 
 def _bases():
     return {

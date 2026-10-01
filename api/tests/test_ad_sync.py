@@ -162,6 +162,9 @@ def test_sync_creates_unique_verified_link():
     assert rec.verified is True
     assert rec.sam == "t.ivan"
     assert rec.by == "ad_sync"
+    # Зеркало users заполнено из AD (только наша БД; AD/1С не пишем).
+    assert store._users["t.ivan"]["fio_full"] == FIO_IVAN
+    assert store._users["t.ivan"]["mail"] == "t.ivan@example.local"
     # Дубли AD (002) и дубли 1С (003/004) не связаны.
     assert store.find("|".join([ENT, "zup_t1", "002"])) is None
     assert store.find("|".join([ENT, "zup_t1", "003"])) is None

@@ -38,16 +38,27 @@ class LinksStore(Protocol):
         """Сохранить/перезаписать факт связки (upsert по составному ключу)."""
         ...
 
+    def ensure_user(self, row: dict) -> None:
+        """Зеркало пользователя AD в НАШЕЙ таблице users (только своя БД).
+
+        Нужно для внешнего ключа link_1c_ad.sam -> users(sam): связка может
+        ссылаться на любую учётку AD, а не только на входивших в систему.
+        В AD/1С при этом НЕ пишется — строка создаётся у нас."""
+        ...
+
 
 class InMemoryLinksStore:
     """Офлайн-хранилище связок (словарь процесса), интерфейс LinksStore."""
 
     def __init__(self) -> None:
         self._links: dict[str, LinkRecord] = {}
+        # Зеркало пользователей (для тестов ensure_user): key — sam в нижнем регистре.
+        self._users: dict[str, dict] = {}
 
     def reset(self) -> None:
         """Сброс состояния. Только для изоляции pytest/локального запуска."""
         self._links.clear()
+        self._users.clear()
 
     def find(self, key: str) -> LinkRecord | None:
         return self._links.get(key)
@@ -59,6 +70,11 @@ class InMemoryLinksStore:
 
     def save(self, record: LinkRecord) -> None:
         self._links[record.key] = record
+
+    def ensure_user(self, row: dict) -> None:
+        """Запомнить строку users (в памяти FK нет — только для проверок тестов)."""
+        if row and row.get("sam"):
+            self._users[str(row["sam"]).strip().lower()] = dict(row)
 
 
 class DbLinksStore:
@@ -98,6 +114,22 @@ class DbLinksStore:
                       diverged = EXCLUDED.diverged,
                       needs_manual_review = EXCLUDED.needs_manual_review,
                       truth_source = EXCLUDED.truth_source
+        """
+    )
+    # Зеркало пользователя в НАШЕЙ таблице users: нужно для FK link_1c_ad.sam
+    # -> users(sam). Только своя БД, в AD/1С не пишем. Upsert по sam — зеркало
+    # обновляется при повторной связке (AD — первоисточник).
+    _ENSURE_USER_SQL = text(
+        """
+        INSERT INTO users (sam, fio_full, dept_ad, title_ad, manager_dn, mail)
+        VALUES (:sam, :fio_full, :dept_ad, :title_ad, :manager_dn, :mail)
+        ON CONFLICT (sam) DO UPDATE SET
+            fio_full = EXCLUDED.fio_full,
+            dept_ad = EXCLUDED.dept_ad,
+            title_ad = EXCLUDED.title_ad,
+            manager_dn = EXCLUDED.manager_dn,
+            mail = EXCLUDED.mail,
+            updated_at = now()
         """
     )
 
@@ -187,6 +219,26 @@ class DbLinksStore:
                 session.commit()
         except SQLAlchemyError as exc:
             raise LinksUnavailable(f"Хранилище связок недоступно: {exc}") from exc
+
+    def ensure_user(self, row: dict) -> None:
+        """Зеркало пользователя AD в таблице users (только своя БД, upsert)."""
+        try:
+            with self._session_factory() as session:
+                session.execute(
+                    self._ENSURE_USER_SQL,
+                    {
+                        "sam": str(row.get("sam") or ""),
+                        # fio_full NOT NULL: пустое displayName — подставляем sam.
+                        "fio_full": str(row.get("fio_full") or row.get("sam") or ""),
+                        "dept_ad": row.get("dept_ad"),
+                        "title_ad": row.get("title_ad"),
+                        "manager_dn": row.get("manager_dn"),
+                        "mail": row.get("mail"),
+                    },
+                )
+                session.commit()
+        except SQLAlchemyError as exc:
+            raise LinksUnavailable(f"Хранилище пользователей недоступно: {exc}") from exc
 
 
 _db_links_store: DbLinksStore | None = None

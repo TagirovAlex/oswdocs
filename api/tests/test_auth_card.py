@@ -482,6 +482,8 @@ def test_link_create_hr_verified(client, hr_headers, admin_headers, b1_mocks):
     assert body["truth_source"] == "1c"
     assert body["snapshot_1c"]["fio"] == FIO_IVAN
     assert body["link"]["needs_manual_review"] is False
+    # Ручная привязка тоже заполняет зеркало users (FK link_1c_ad.sam).
+    assert get_memory_links_store()._users["t.ivan"]["fio_full"] == FIO_IVAN
 
 
 def test_link_create_diverged_truth_is_1c(client, hr_headers, admin_headers, b1_mocks):

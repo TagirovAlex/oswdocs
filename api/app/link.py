@@ -201,6 +201,18 @@ def create_link(
         needs_manual_review=bool(duplicate or diverged),
     )
     try:
+        # Зеркало пользователя в НАШЕЙ таблице users (в AD/1С не пишем): строка
+        # нужна для FK link_1c_ad.sam -> users(sam), т.к. users — не каталог AD.
+        store.ensure_user(
+            {
+                "sam": ad_user.sam,
+                "fio_full": ad_user.display_name or ad_user.sam,
+                "dept_ad": ad_user.department,
+                "title_ad": ad_user.title,
+                "manager_dn": ad_user.manager_dn,
+                "mail": ad_user.mail,
+            }
+        )
         store.save(record)
     except LinksUnavailable as exc:
         raise HTTPException(

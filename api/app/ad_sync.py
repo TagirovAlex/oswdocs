@@ -99,6 +99,18 @@ def _list_enterprise(
             result.skipped_ad_duplicates += 1
             continue
         ad_user = exact[0]
+        # Зеркало пользователя в НАШЕЙ таблице users (в AD/1С не пишем): строка
+        # нужна для FK link_1c_ad.sam -> users(sam) при сохранении связки.
+        store.ensure_user(
+            {
+                "sam": ad_user.sam,
+                "fio_full": ad_user.display_name or ad_user.sam,
+                "dept_ad": ad_user.department,
+                "title_ad": ad_user.title,
+                "manager_dn": ad_user.manager_dn,
+                "mail": ad_user.mail,
+            }
+        )
         store.save(
             LinkRecord(
                 enterprise=card.enterprise,
