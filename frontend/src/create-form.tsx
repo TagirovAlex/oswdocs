@@ -15,11 +15,13 @@ interface CreateFormProps {
   // Колбэк «грязности» формы: true после первого ввода, false после успешного
   // создания (форма сброшена) — для подтверждения закрытия окна (create-window).
   onDirtyChange?: (dirty: boolean) => void;
+  // В окне-попе (?view=create): после успешного создания закрыть окно.
+  closeOnCreate?: boolean;
 }
 
 // Форма создания: единый экран, блоки по зависимостям.
 export function CreateForm(props: CreateFormProps) {
-  const { role, onDirtyChange } = props;
+  const { role, onDirtyChange, closeOnCreate } = props;
   const [enterprises, setEnterprises] = useState<Enterprise[]>([]);
   const [enterprise, setEnterprise] = useState<string>("");
   const [groups, setGroups] = useState<string[]>([]);
@@ -166,7 +168,7 @@ export function CreateForm(props: CreateFormProps) {
         fio,
         steps: manualGroups.map((g) => ({ owner_group: g })),
       });
-      setCreated(`Заявка ${result.id} создана`);
+setCreated(`Заявка ${result.id} создана`);
       setEnterprise("");
       setTabNum("");
       setFio("");
@@ -177,8 +179,9 @@ export function CreateForm(props: CreateFormProps) {
       setManualMode(false);
       setManualNote("");
       setManualGroups([]);
-      setTouched(false);
       onDirtyChange?.(false);
+      // В окне-попе — после создания закрыть окно (список обновится по фокусу).
+      if (closeOnCreate) window.close();
     } catch (e: unknown) {
       setCreateError(e instanceof Error ? e.message : "Ошибка создания заявки");
     } finally {

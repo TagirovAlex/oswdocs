@@ -199,4 +199,26 @@ describe("CreateForm", () => {
     fireEvent.click(screen.getByText("Создать"));
     await waitFor(() => expect(onDirty).toHaveBeenLastCalledWith(false));
   });
+
+  // В окне-попе (?view=create): после успешного создания окно закрывается.
+  it("в окне-попе закрывает окно после создания (closeOnCreate)", async () => {
+    vi.mocked(searchEmployees).mockRejectedValue(new ApiHttpError(503, "Клиент 1С не настроен"));
+    vi.mocked(createRequest).mockResolvedValue({
+      id: "REQ-0003",
+      status: "Черновик",
+      route_origin: "custom",
+      department: "Цех № 1",
+      position: "Слесарь",
+      created_by: "petrov.pp",
+      steps: [],
+    });
+    const close = vi.spyOn(window, "close").mockImplementation(() => {});
+
+    render(<CreateForm role="hr" closeOnCreate />);
+    await fillEmployeeManually();
+    fireEvent.click(screen.getByText("SED_STEP_BUH"));
+    fireEvent.click(screen.getByText("Создать"));
+    await waitFor(() => expect(close).toHaveBeenCalled());
+    close.mockRestore();
+  });
 });

@@ -101,6 +101,8 @@ describe("EmployeeCardView", () => {
       expect(createLink).toHaveBeenCalledWith({ enterprise: "A", base_code: "zup", tab_num: "001", sam: "t.skaz" }),
     );
     await waitFor(() => expect(screen.getByText("Связка сохранена")).toBeInTheDocument());
+    // После сохранения попап закрывается.
+    expect(window.close).toHaveBeenCalled();
   });
 
   it("ОК видит подсказку «подтверждение выполняет админ» без кнопки", async () => {
@@ -130,6 +132,8 @@ describe("EmployeeCardView", () => {
       expect(createLink).toHaveBeenCalledWith({ enterprise: "A", base_code: "zup", tab_num: "001", sam: "t.skaz" }),
     );
     await waitFor(() => expect(screen.getByText("Связка сохранена")).toBeInTheDocument());
+    // После сохранения попап закрывается.
+    expect(window.close).toHaveBeenCalled();
   });
 
   it("«Закрыть» без изменений закрывает окно", async () => {

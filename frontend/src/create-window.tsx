@@ -33,7 +33,7 @@ export function CreateWindow(props: CreateWindowProps) {
         </button>
       </div>
       <main className="sed-content" style={{ maxWidth: 940, margin: "0 auto", padding: 16 }}>
-        <CreateForm role={role} onDirtyChange={setDirty} />
+        <CreateForm role={role} onDirtyChange={setDirty} closeOnCreate />
       </main>
     </div>
   );

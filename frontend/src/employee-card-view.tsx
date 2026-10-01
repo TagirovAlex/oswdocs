@@ -54,8 +54,6 @@ export function EmployeeCardView(props: EmployeeCardViewProps) {
   // Выбранный кандидат AD — несохранённое изменение связки.
   const [pendingSam, setPendingSam] = useState<string | null>(null);
   const [saving, setSaving] = useState<boolean>(false);
-  // Закрыть после успешного сохранения (подтверждение «Сохранить?» при закрытии).
-  const [closeAfterSave, setCloseAfterSave] = useState<boolean>(false);
 
   useEffect(() => {
     let alive = true;
@@ -107,6 +105,7 @@ export function EmployeeCardView(props: EmployeeCardViewProps) {
   }
 
   // Сохранение связки (sam — выбранный кандидат либо подтверждаемое совпадение).
+  // После успешного сохранения попап закрывается (карточка только в окне).
   async function saveLink(sam: string): Promise<void> {
     if (!card || saving) return;
     setSaving(true);
@@ -120,17 +119,9 @@ export function EmployeeCardView(props: EmployeeCardViewProps) {
         sam,
       });
       setLinkStatus("Связка сохранена");
-      const fresh = await getEmployeeCard(card.enterprise, card.base_code, card.tab_num ?? "");
-      setCard(fresh);
-      setPendingSam(null);
-      setEditMode(false);
-      setAdCandidates([]);
-      setAdQuery("");
-      if (closeAfterSave) {
-        setCloseAfterSave(false);
-        window.close();
-      }
+      window.close();
     } catch (e: unknown) {
+      // Ошибка сохранения — окно НЕ закрываем, показываем текст.
       setLinkError(e instanceof Error ? e.message : "Ошибка сохранения связки");
     } finally {
       setSaving(false);
@@ -145,7 +136,6 @@ export function EmployeeCardView(props: EmployeeCardViewProps) {
   function handleClose(): void {
     if (pendingSam) {
       if (window.confirm("Есть несохранённые изменения связки. Сохранить?")) {
-        setCloseAfterSave(true);
         void handleSave();
         return;
       }
