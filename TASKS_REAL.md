@@ -22,6 +22,27 @@
 > - TTL сессии 10 ч (`session_ttl_minutes=600` в settings) и SMTP-учётка (`smtp_user`/`smtp_password`)
 >   в settings (пароль маскируется); сессия читается из settings при входе.
 >
+> ### Следующая сессия (2026-10-01, коммиты 8ea483c→6b57588; на стенд не задеплоено)
+> - **Карточка сотрудника**: дата увольнения (`dismissal_date`, конфиг
+>   `termination_date_field` дефолт `ДатаУвольнения`, пустое значение регистра
+>   `0001-01-01T00:00:00` нормализуется в `""`); убраны `vacation_balance`/`mol_flag`
+>   из кода/фронта (колонки БД `employee_base_map` НЕ тронуты — только по согласованию).
+> - **Автосвязка 1С↔AD по точному ФИО**: `AdReader.search_users` (displayName, SUBTREE),
+>   `OneCClient.list_employees` (пагинация `$skip/$top`), движок `api/app/ad_sync.py`
+>   (уникальные совпадения с обеих сторон → `LinkRecord(verified=True, by=ad_sync)`),
+>   запуск еженедельно из worker (`maybe_sync_links_weekly`) + `POST /link_1c_ad/sync`
+>   (admin), метка `ad_links_synced_at` (read-only); флаг `ad_status`
+>   (linked/match/no_match) в `/employees` и `/employees/card` без записи в БД;
+>   `GET /ad/search` (admin) для ручной привязки.
+> - **Фронт**: карточки заявки/сотрудника и создание — в отдельных окнах-попах
+>   (`?view=request&id=…`, `?view=employee&key=…`, `?view=create`, лёгкий роутинг
+>   без роутера); создание заявки — единой формой без стадий (блоки по
+>   зависимостям предприятие→сотрудник→маршрут). Компоненты `RequestCard`,
+>   `EmployeeCardView` вынесены из layout/directory.
+> - Тесты: бэкенд пофайлово зелёный (кроме предсуществующих «висящих» файлов —
+>   `test_requests_store/negative_core/requests/requests_contract` без Postgres),
+>   фронт 76 passed + typecheck.
+>
 > ### Открытые пункты (не код, данные/операции)
 > - `ONEC_BASES_JSON`/базы в settings не заполнены — 1С ждёт OData-контракт и учётки от ИТ;
 >   синхронизация предприятий заработает после настройки `onec_enterprises_source`.

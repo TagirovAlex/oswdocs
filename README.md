@@ -18,13 +18,13 @@
 * **Auth:** доменные логин+пароль через LDAPS bind, проверка `memberOf` по группам из настроек. Пароли не храним. OU `OSWDOCS` + группы (`SED_HR, SED_ADMINS, SED_STEP_EXEC` — три основные на старте, `SED_HR_ADMIN` — руководители ОК с 2026-09-30) + RO-учетку создает ИТ к тесту, пути — в настройках.
 * **AD — только чтение:** `manager`, подразделение/должность, группы, `mail`. Стыковка 1С↔AD только по полному ФИО, при расхождении истина — 1С, решает ОК вручную (`link_1c_ad`).
 * **1С ЗУП — только чтение:** несколько баз на 1С web-сервере. В настройках — предприятия → привязанные базы с путями + сервисная УЗ чтения на каждую. сценарий ОК: предприятие → сотрудник. Ключ `enterprise+base_code+tab_num`. Значимые действия в 1С/AD — только люди руками.
-* **Единая карточка:** `1С (предприятие, таб.№, ФИО, подразделение, должность, вид занятости, дата приема, остаток отпуска — только ОК)` + `AD (sam, manager, dept/title, memberOf, mail — только для уведомлений)`. Категории `МОЛ/линейный/руководитель` через таблицу `position_to_category` (ручное заполнение после запуска). Флаг МОЛ из 1С — TODO.
+* **Единая карточка:** `1С (предприятие, таб.№, ФИО, подразделение, должность, вид занятости, дата приёма, дата увольнения — только ОК)` + `AD (sam, manager, dept/title, memberOf, mail — только для уведомлений)`. Статус стыковки `ad_status` (linked/match/no_match) — без записи в БД. Категории `МОЛ/линейный/руководитель` через таблицу `position_to_category` (ручное заполнение после запуска). Флаг МОЛ из 1С — TODO (колонка в БД не используется).
 * **Процесс:** бумажное заявление (скан опционален) → заявка только от ОК (`SED_HR`) → шаблон по службе/категории или ручной конструктор (только разрешенная группа, замена руководителя, fallback если шаблона нет) → генерация бегунка DOCX→PDF с QR → печать на обычном принтере → отметки владельцев шагов (любой из группы, отметка = решение + дата + автор + комментарий: при согласовании опционален, при отказе/возврате обязателен, шаблон может требовать всегда) → сверка ОК → закрытие. Статусы: `Черновик → На согласовании → На доработке → Согласовано → К исполнению → Завершено / Отклонено / Отозвано`.
 * **Бланки/письма:** `doc_templates` по службе+МОЛ в корп. виде (образцы к тесту, разметка подписи перед запуском), версии `v1/v2`. `mail_templates` (Jinja HTML) под корп. вид. Печать/письма — через `worker` (`python-docx-template → LibreOffice PDF`, SMTP Exchange).
 * **Уведомления/эскалация:** Exchange SMTP на `mail` из AD. События v1: `назначена → напоминание → эскалация → закрыта/возврат` (правки после пилота). Эскалация включаемая по `position_escalation` должности увольняемого. TTL отметок `approval_ttl_days`, общего дедлайна нет.
 * **Поиск/доступ:** по ФИО/логину после логина. ОК и руководитель ОК — все + полная карточка, владелец — только свои задачи + урезанная без ПДн, админы — все + настройки, руководитель ОК — контент-настройки (маршруты/бланки/письма/предприятия/группы/должности), рядовой ОК и остальные — без настроек.
 * **Файлы/ПДн:** скан — глобальные `retention_days / max_mb / форматы`. Чувствительные поля — только ОК.
-* **Задел:** `AdLifecycle.disable (AD_WRITE_ENABLED=false)` — только disable, никогда delete. Автосинхронизация AD+1С — backlog (регламентный worker + очередь сверки ОК).
+* **Задел:** `AdLifecycle.disable (AD_WRITE_ENABLED=false)` — только disable, никогда delete. Автосвязка 1С↔AD по точному ФИО — реализована (worker еженедельно + кнопка админа, verified-связки при уникальном совпадении; сложные случаи — ручная сверка ОК).
 
 ## 2. Архитектура
 
@@ -44,7 +44,7 @@ Browser --HTTPS--> proxy (nginx :80→443 + :443, корп. cert)
 ## 3. Каталог настроек (все вне кода)
 
 Инфра (`env`, секреты): `DATABASE_URL` (= `PG_URL` для MCP postgres, см. AI_SKILLS_MCP.md), `REDIS_URL, AD_URL/BASE_DN/READER_DN+secret, LDAP_CACHE_TTL, ONEC_BASES_JSON (enterprise→base→url+user+secret; с 2026-09-30 fallback — базы можно вести в settings), AD_WRITE_ENABLED=false, CERT_PATH, ADMIN_GROUPS, HR_GROUPS, HR_ADMIN_GROUPS (руководители ОК, SED_HR_ADMIN), SMTP_USER/SMTP_PASSWORD` (учётка релея — секреты; хост/порт/from — в settings).
-Прикладные (`settings` в БД; разделены на КОНТЕНТ — правит руководитель ОК + админ, и ИНФРА — только админ): контент — `sed_ou, allowed_ad_groups, enterprises, position_to_category, position_escalation, approval_ttl_days, require_paper_signature, require_comment, templates, doc_templates, mail_templates`; инфра — `session_ttl_minutes (TTL сессии, 600 = 10 ч), scan_retention_days/scan_max_mb/scan_allowed_types, smtp_host/smtp_port/smtp_from/smtp_user/smtp_password (пароль маскируется), onec_bases (подключения 1С: предприятие/база/url/учётка с маской пароля), onec_enterprises_source (url+учётка источника списка предприятий для синхронизации)`. Эндпоинты: `GET/PUT /settings` (admin, все ключи), `GET/PUT /settings/content` (контент), `POST /settings/enterprises/sync` (admin, принудительная синхронизация).
+Прикладные (`settings` в БД; разделены на КОНТЕНТ — правит руководитель ОК + админ, и ИНФРА — только админ): контент — `sed_ou, allowed_ad_groups, enterprises, position_to_category, position_escalation, approval_ttl_days, require_paper_signature, require_comment, templates, doc_templates, mail_templates`; инфра — `session_ttl_minutes (TTL сессии, 600 = 10 ч), scan_retention_days/scan_max_mb/scan_allowed_types, smtp_host/smtp_port/smtp_from/smtp_user/smtp_password (пароль маскируется), onec_bases (подключения 1С: предприятие/база/url/учётка с маской пароля), onec_enterprises_synced_at, ad_links_synced_at (метки синхронизаций, read-only), onec_enterprises_source (url+учётка источника списка предприятий для синхронизации)`. Эндпоинты: `GET/PUT /settings` (admin, все ключи), `GET/PUT /settings/content` (контент), `POST /settings/enterprises/sync` (admin, принудительная синхронизация), `POST /link_1c_ad/sync` (admin, автосвязка 1С↔AD), `GET /ad/search` (admin, поиск кандидатов AD).
 
 ## 4. Схема Postgres (ядро)
 
@@ -77,8 +77,17 @@ TLS 1.2+, HSTS, сессии 10 ч (решение бизнеса 2026-09-30: р
 Фаза 7 (пилот) — ждёт от ИТ: OData-контракт 1С (базы/источник предприятий), образцы
 бланков/писем, SMTP-учётку релея (если нужна).
 
+Следующая сессия (коммиты `8ea483c`→`6b57588`, задеплоить на стенд):
+карточка сотрудника — дата увольнения (`dismissal_date`, `termination_date_field`,
+пустое `0001-01-01…` → `""`), убраны остаток отпуска и флаг МОЛ (колонки БД не тронуты);
+автосвязка 1С↔AD по точному ФИО — `search_users` в AD-ридере, `list_employees` (пагинация),
+движок `ad_sync` (verified-связки при уникальном совпадении), `POST /link_1c_ad/sync`
+(admin) + еженедельно в worker, флаг `ad_status` (linked/match/no_match) в карточке/списке,
+`GET /ad/search` для ручной привязки; фронт — карточки и создание в отдельных окнах-попах
+(`?view=request/employee/create`), создание заявки — единой формой без стадий.
+
 Правила агентам: минимальный дифф, тесты на затронутое, настройки — в `settings/env` а не в код, смена архитектуры/схемы/контракта — только вопросом человеку. Скилы: `fastapi-sed, pg-sed, ad-reader, onec-multibase, approval-templates, debian-ops, mail-docs, qa-sed, react-sed`. MCP: `postgres, fetch/http (1С), playwright (UI)`.
 
 ## 7. Backlog
 
-Автосинхронизация AD+1С (сверка карточек, worker + очередь, метрики расхождений) — **не реализовано** (есть ручной `link_1c_ad`; синхронизация СПИСКА предприятий из 1С реализована в Фазе B4). auto-disable AD (отдельное согласование с ИБ) — **не реализовано** (только заглушка-флаг `AD_WRITE_ENABLED=false`). Флаг МОЛ из 1С — **TODO** (`mol_flag` nullable, не используется). Событие письма «закрыта» — не подключено (см. `TASKS_REAL.md`).
+auto-disable AD (отдельное согласование с ИБ) — **не реализовано** (только заглушка-флаг `AD_WRITE_ENABLED=false`). Флаг МОЛ из 1С — **TODO** (`mol_flag` nullable, не используется). Событие письма «закрыта» — не подключено (см. `TASKS_REAL.md`). Автосвязка 1С↔AD по точному ФИО — реализована (см. п.1); сверка сложных случаев (дубли/расхождения) — ручная (`link_1c_ad`).
