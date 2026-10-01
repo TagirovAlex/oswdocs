@@ -101,8 +101,10 @@ describe("EmployeeCardView", () => {
       expect(createLink).toHaveBeenCalledWith({ enterprise: "A", base_code: "zup", tab_num: "001", sam: "t.skaz" }),
     );
     await waitFor(() => expect(screen.getByText("Связка сохранена")).toBeInTheDocument());
-    // После сохранения попап закрывается.
-    expect(window.close).toHaveBeenCalled();
+    // «Подтвердить привязку» НЕ закрывает окно (карточка обновляется).
+    expect(window.close).not.toHaveBeenCalled();
+    // Карточка перечитана после сохранения (связка отразится на экране).
+    await waitFor(() => expect(vi.mocked(getEmployeeCard).mock.calls.length).toBeGreaterThan(1));
   });
 
   it("ОК видит подсказку «подтверждение выполняет админ» без кнопки", async () => {

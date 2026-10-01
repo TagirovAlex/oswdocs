@@ -80,8 +80,9 @@ export function CreateForm(props: CreateFormProps) {
   const enterpriseName = enterprises.find((ent) => ent.code === enterprise)?.name ?? enterprise;
 
   // Готовность формы: предприятие → сотрудник → маршрут (без стадий).
-  const employeeReady =
-    fio.trim() !== "" && tabNum.trim() !== "" && department.trim() !== "" && position.trim() !== "";
+  // Подразделение/должность в 1С могут быть пустыми (уволен/нет кадровых
+  // данных) — для создания они необязательны (их можно дополнить вручную).
+  const employeeReady = fio.trim() !== "" && tabNum.trim() !== "";
   const canCreate = enterprise !== "" && employeeReady && manualGroups.length > 0 && !busy;
 
   // Поиск сотрудника в 1С; без баз (503) или пустой результат — ручной ввод полей.
@@ -251,9 +252,12 @@ setCreated(`Заявка ${result.id} создана`);
               </select>
             </label>
           )}
-          {manualMode && (
+          {/* Данные сотрудника: при выборе из 1С — заполнены и редактируемы
+              (подразделение/должность из 1С могут быть пустыми — можно
+              дополнить), при ручном режиме (503/ничего не найдено) — пустые. */}
+          {(manualMode || tabNum !== "") && (
             <fieldset>
-              <legend>Данные сотрудника (вручную)</legend>
+              <legend>{manualMode ? "Данные сотрудника (вручную)" : "Данные сотрудника"}</legend>
               {manualNote && <div className="sed-note">{manualNote}</div>}
               <label style={{ display: "block", marginTop: 8 }}>
                 ФИО
@@ -273,7 +277,7 @@ setCreated(`Заявка ${result.id} создана`);
               </label>
             </fieldset>
           )}
-          {!manualMode && empHits.length === 0 && !empSearching && (
+          {!manualMode && empHits.length === 0 && !empSearching && tabNum === "" && (
             <div className="sed-note">Введите запрос для поиска в 1С либо укажите данные вручную.</div>
           )}
         </fieldset>

@@ -104,9 +104,10 @@ export function EmployeeCardView(props: EmployeeCardViewProps) {
     setLinkStatus("");
   }
 
-  // Сохранение связки (sam — выбранный кандидат либо подтверждаемое совпадение).
-  // После успешного сохранения попап закрывается (карточка только в окне).
-  async function saveLink(sam: string): Promise<void> {
+  // Сохранение связки. closeAfter=true — окно закрывается после сохранения
+// (кнопка «Сохранить» и подтверждение при «Закрыть»); false — карточка
+// остаётся открытой, обновляется (кнопка «Подтвердить привязку»).
+  async function saveLink(sam: string, closeAfter: boolean): Promise<void> {
     if (!card || saving) return;
     setSaving(true);
     setLinkError("");
@@ -119,7 +120,17 @@ export function EmployeeCardView(props: EmployeeCardViewProps) {
         sam,
       });
       setLinkStatus("Связка сохранена");
-      window.close();
+      if (closeAfter) {
+        window.close();
+        return;
+      }
+      // Карточка остаётся открытой: обновляем её до связанной.
+      const fresh = await getEmployeeCard(card.enterprise, card.base_code, card.tab_num ?? "");
+      setCard(fresh);
+      setPendingSam(null);
+      setEditMode(false);
+      setAdCandidates([]);
+      setAdQuery("");
     } catch (e: unknown) {
       // Ошибка сохранения — окно НЕ закрываем, показываем текст.
       setLinkError(e instanceof Error ? e.message : "Ошибка сохранения связки");
@@ -128,11 +139,17 @@ export function EmployeeCardView(props: EmployeeCardViewProps) {
     }
   }
 
+  // «Сохранить»: применяет выбранного кандидата и закрывает окно.
   async function handleSave(): Promise<void> {
-    if (pendingSam) await saveLink(pendingSam);
+    if (pendingSam) await saveLink(pendingSam, true);
   }
 
-  // Закрыть: при несохранённой связке — подтверждение (OK → сохранить и закрыть).
+  // «Подтвердить привязку»: сохраняет найденное совпадение, окно НЕ закрывает.
+  async function handleConfirmLink(sam: string): Promise<void> {
+    await saveLink(sam, false);
+  }
+
+  // «Закрыть»: при несохранённой связке — подтверждение (OK → сохранить и закрыть).
   function handleClose(): void {
     if (pendingSam) {
       if (window.confirm("Есть несохранённые изменения связки. Сохранить?")) {
@@ -236,7 +253,7 @@ export function EmployeeCardView(props: EmployeeCardViewProps) {
                       type="button"
                       className="sed-btn"
                       disabled={saving}
-                      onClick={() => void saveLink(matchSam)}
+                      onClick={() => void handleConfirmLink(matchSam)}
                     >
                       Подтвердить привязку
                     </button>
