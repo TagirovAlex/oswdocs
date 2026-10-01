@@ -433,6 +433,8 @@ def test_card_hr_full_with_snapshots(client, hr_headers, admin_headers, b1_mocks
     assert body["snapshot_ad"]["display_name"] == FIO_IVAN
     assert body["link"]["verified"] is True
     assert body["divergences"] == []
+    # Блок ad при связке — снапшот связанной записи AD.
+    assert body["ad"] == body["snapshot_ad"]
 
 
 def test_card_owner_trimmed_no_pdn(client, hr_headers, admin_headers, owner_headers, b1_mocks):
@@ -452,6 +454,8 @@ def test_card_owner_trimmed_no_pdn(client, hr_headers, admin_headers, owner_head
     for forbidden in ("fio", "hire_date", "dismissal_date", "employment_type"):
         assert forbidden not in body
     assert body["snapshot_ad"] is None
+    # Владельцу блок ad не отдаётся (ПДн AD).
+    assert "ad" not in body
     assert "fio" not in body["snapshot_1c"]
     assert body["truth_source"] == "1c"
 
@@ -464,6 +468,21 @@ def test_card_404_unknown_tab(client, hr_headers, b1_mocks):
         headers=hr_headers,
     )
     assert response.status_code == 404
+
+
+def test_card_hr_unlinked_ad_match_block(client, hr_headers, b1_mocks):
+    """ОК без связки: блок ad — уникальное точное совпадение ФИО в AD (кандидат на привязку)."""
+    response = client.get(
+        "/employees/card",
+        params={"enterprise": ENT, "base_code": "zup_t1", "tab_num": "001"},
+        headers=hr_headers,
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ad_status"] == "match"
+    assert body["ad"]["sam"] == "t.ivan"
+    assert body["ad"]["display_name"] == FIO_IVAN
+    assert body["ad"]["manager_dn"] == ""
 
 
 # --- Связка link_1c_ad ---

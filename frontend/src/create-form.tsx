@@ -12,11 +12,14 @@ import type { Role } from "./api-mock";
 interface CreateFormProps {
   // Роль (создание — только ОК/админам, гард как в API _is_hr).
   role: Role;
+  // Колбэк «грязности» формы: true после первого ввода, false после успешного
+  // создания (форма сброшена) — для подтверждения закрытия окна (create-window).
+  onDirtyChange?: (dirty: boolean) => void;
 }
 
 // Форма создания: единый экран, блоки по зависимостям.
 export function CreateForm(props: CreateFormProps) {
-  const { role } = props;
+  const { role, onDirtyChange } = props;
   const [enterprises, setEnterprises] = useState<Enterprise[]>([]);
   const [enterprise, setEnterprise] = useState<string>("");
   const [groups, setGroups] = useState<string[]>([]);
@@ -38,6 +41,16 @@ export function CreateForm(props: CreateFormProps) {
   const [position, setPosition] = useState<string>("");
   // Порядковый номер поиска: устаревшие ответы отбрасываем.
   const searchSeq = useRef(0);
+  // Флаг «грязности» формы: true после первого ввода пользователя — для
+  // подтверждения закрытия окна (create-window). Сбрасывается после создания.
+  const [touched, setTouched] = useState<boolean>(false);
+
+  // Пометить форму изменённой: onDirtyChange(true) только при первом действии.
+  function markTouched(): void {
+    if (touched) return;
+    setTouched(true);
+    onDirtyChange?.(true);
+  }
 
   // Предприятия и группы ручного конструктора — только из API.
   useEffect(() => {
@@ -71,6 +84,7 @@ export function CreateForm(props: CreateFormProps) {
 
   // Поиск сотрудника в 1С; без баз (503) или пустой результат — ручной ввод полей.
   function handleSearch(query: string): void {
+    markTouched();
     setEmpQuery(query);
     const q = query.trim();
     if (q === "") {
@@ -133,6 +147,7 @@ export function CreateForm(props: CreateFormProps) {
 
   // Переключение группы ручного конструктора.
   function toggleGroup(group: string): void {
+    markTouched();
     setManualGroups((prev) => (prev.includes(group) ? prev.filter((g) => g !== group) : [...prev, group]));
   }
 
@@ -162,6 +177,8 @@ export function CreateForm(props: CreateFormProps) {
       setManualMode(false);
       setManualNote("");
       setManualGroups([]);
+      setTouched(false);
+      onDirtyChange?.(false);
     } catch (e: unknown) {
       setCreateError(e instanceof Error ? e.message : "Ошибка создания заявки");
     } finally {
@@ -179,7 +196,14 @@ export function CreateForm(props: CreateFormProps) {
       {/* Предприятие из настроек (без хардкод-массивов) — шаг 1 формы. */}
       <label>
         Предприятие
-        <select aria-label="Предприятие" value={enterprise} onChange={(e) => setEnterprise(e.target.value)}>
+        <select
+          aria-label="Предприятие"
+          value={enterprise}
+          onChange={(e) => {
+            markTouched();
+            setEnterprise(e.target.value);
+          }}
+        >
           <option value="">— выберите —</option>
           {enterprises.map((ent) => (
             <option key={ent.code} value={ent.code}>
@@ -210,6 +234,7 @@ export function CreateForm(props: CreateFormProps) {
                 aria-label="Сотрудник"
                 value={tabNum}
                 onChange={(e) => {
+                  markTouched();
                   const hit = empHits.find((h) => h.tab_num === e.target.value);
                   if (hit) pickEmployee(hit);
                 }}
@@ -229,19 +254,19 @@ export function CreateForm(props: CreateFormProps) {
               {manualNote && <div className="sed-note">{manualNote}</div>}
               <label style={{ display: "block", marginTop: 8 }}>
                 ФИО
-                <input aria-label="ФИО" value={fio} onChange={(e) => setFio(e.target.value)} />
+                <input aria-label="ФИО" value={fio} onChange={(e) => { markTouched(); setFio(e.target.value); }} />
               </label>
               <label style={{ display: "block", marginTop: 8 }}>
                 Табельный №
-                <input aria-label="Табельный №" value={tabNum} onChange={(e) => setTabNum(e.target.value)} />
+                <input aria-label="Табельный №" value={tabNum} onChange={(e) => { markTouched(); setTabNum(e.target.value); }} />
               </label>
               <label style={{ display: "block", marginTop: 8 }}>
                 Подразделение
-                <input aria-label="Подразделение" value={department} onChange={(e) => setDepartment(e.target.value)} />
+                <input aria-label="Подразделение" value={department} onChange={(e) => { markTouched(); setDepartment(e.target.value); }} />
               </label>
               <label style={{ display: "block", marginTop: 8 }}>
                 Должность
-                <input aria-label="Должность" value={position} onChange={(e) => setPosition(e.target.value)} />
+                <input aria-label="Должность" value={position} onChange={(e) => { markTouched(); setPosition(e.target.value); }} />
               </label>
             </fieldset>
           )}

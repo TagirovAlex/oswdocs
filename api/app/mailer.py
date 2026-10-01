@@ -32,8 +32,16 @@ EVENT_REMINDER = "reminder"  # напоминание
 EVENT_ESCALATION = "escalation"  # эскалация
 EVENT_CLOSED = "closed"  # закрыта
 EVENT_RETURNED = "returned"  # возврат
+EVENT_REGLAMENT = "reglament"  # уведомление регламентной операции (тема/текст — из settings)
 
-KNOWN_EVENTS = frozenset({EVENT_ASSIGNED, EVENT_REMINDER, EVENT_ESCALATION, EVENT_CLOSED, EVENT_RETURNED})
+KNOWN_EVENTS = frozenset({
+    EVENT_ASSIGNED,
+    EVENT_REMINDER,
+    EVENT_ESCALATION,
+    EVENT_CLOSED,
+    EVENT_RETURNED,
+    EVENT_REGLAMENT,
+})
 
 
 def render_mail(template_html: str, context: Dict[str, object]) -> str:

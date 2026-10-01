@@ -219,36 +219,57 @@ def main() -> None:
     except SettingsUnavailable as exc:
         raise SystemExit(f"Настройки недоступны (worker остановлен): {exc}") from exc
 
-    # Еженедельная синхронизация справочника предприятий из 1С (Фаза 4):
-    # тихо (сбой не валит проход), печать только при реальной синхронизации.
-    from .onec_sync import maybe_sync_weekly
+    # Очередь писем нужна и регламентным уведомлениям, и проходу заявок ниже —
+    # создаём заранее (одна БД-очередь на проход).
+    mail_queue = DbMailQueue(settings.DATABASE_URL)
+
+    # Регламентная синхронизация справочника предприятий из 1С: тихо (сбой не
+    # валит проход); при реальной синхронизации — уведомление по расписанию
+    # schedule_enterprises_sync, если оно настроено.
+    from .onec_sync import maybe_sync_weekly, notify_schedule
 
     try:
         if maybe_sync_weekly(settings_store):
             enterprises = read_setting_value(settings_store, "enterprises") or []
             print("sync: предприятий=%d" % len(enterprises))
+            notify_schedule(
+                settings_store,
+                mail_queue,
+                "schedule_enterprises_sync",
+                smtp_from,
+                "предприятий: %d" % len(enterprises),
+            )
     except Exception:
         pass
 
-    # Еженедельная автосвязка 1С↔AD по точному ФИО (Задача 2.4): тихо,
-    # толерантность как у maybe_sync_weekly; запись — только связки у нас.
+    # Регламентная автосвязка 1С↔AD по точному ФИО: тихо, толерантность как у
+    # maybe_sync_weekly; запись — только связки у нас; при реальном проходе —
+    # уведомление по расписанию schedule_ad_links_sync.
     try:
         from .ad_sync import maybe_sync_links_weekly
         from .employees import get_ad_reader, get_onec_client
         from .link_store import DbLinksStore
 
-        if maybe_sync_links_weekly(
+        sync_result = maybe_sync_links_weekly(
             settings_store,
             get_onec_client(settings, settings_store),
             get_ad_reader(),
             DbLinksStore(settings.DATABASE_URL),
-        ):
+        )
+        if sync_result:
             print("sync: автосвязка 1С-AD выполнена")
+            notify_schedule(
+                settings_store,
+                mail_queue,
+                "schedule_ad_links_sync",
+                smtp_from,
+                "связок создано: %d; просмотрено: %d"
+                % (sync_result.created, sync_result.scanned),
+            )
     except Exception:
         pass
 
     store = DbRequestsStore(settings.DATABASE_URL)
-    mail_queue = DbMailQueue(settings.DATABASE_URL)
     mailer = SmtpMailer(
         host=smtp_host,
         port=smtp_port,

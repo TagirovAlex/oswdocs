@@ -12,6 +12,13 @@ export function RequestWindow(props: RequestWindowProps) {
   const { requestId, role } = props;
   return (
     <div className="sed-shell">
+      {/* Верхняя полоса попапа: закрыть окно. В карточке нет несохранённых
+          правок (отметки отправляются сразу) — подтверждение не нужно. */}
+      <div className="sed-toolbar">
+        <button type="button" className="sed-btn" onClick={() => window.close()}>
+          Закрыть
+        </button>
+      </div>
       <main className="sed-content" style={{ maxWidth: 940, margin: "0 auto", padding: 16 }}>
         <RequestCard requestId={requestId} role={role} />
       </main>

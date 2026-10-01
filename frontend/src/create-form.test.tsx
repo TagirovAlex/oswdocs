@@ -174,4 +174,29 @@ describe("CreateForm", () => {
     render(<CreateForm role="owner" />);
     expect(screen.getByRole("alert")).toHaveTextContent(/только ОК/);
   });
+
+  // onDirtyChange: true после первого ввода, false после успешного создания.
+  it("onDirtyChange: true после ввода, false после создания", async () => {
+    vi.mocked(searchEmployees).mockRejectedValue(new ApiHttpError(503, "Клиент 1С не настроен"));
+    vi.mocked(createRequest).mockResolvedValue({
+      id: "REQ-0002",
+      status: "Черновик",
+      route_origin: "custom",
+      department: "Цех № 1",
+      position: "Слесарь",
+      created_by: "petrov.pp",
+      steps: [],
+    });
+    const onDirty = vi.fn();
+
+    render(<CreateForm role="hr" onDirtyChange={onDirty} />);
+    await waitFor(() => expect(screen.getByLabelText("Предприятие")).toBeInTheDocument());
+    expect(onDirty).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText("Предприятие"), { target: { value: "ENT_PRIMER_1" } });
+    expect(onDirty).toHaveBeenCalledWith(true);
+    await fillEmployeeManually();
+    fireEvent.click(screen.getByText("SED_STEP_BUH"));
+    fireEvent.click(screen.getByText("Создать"));
+    await waitFor(() => expect(onDirty).toHaveBeenLastCalledWith(false));
+  });
 });

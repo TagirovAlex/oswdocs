@@ -95,22 +95,109 @@ def sync_enterprises(store) -> list[dict]:
     return list(enterprises.values())
 
 
-def maybe_sync_weekly(store) -> bool:
-    """Еженедельная синхронизация предприятий (worker): тихо, без сбоев.
+def _weekly_due(moment: datetime, last: datetime | None) -> bool:
+    """«Пора» при отсутствии/невалидном расписании: раз в 7 дней от last."""
+    if last is None:
+        return True
+    return moment >= last + timedelta(days=7)
 
-    Базы не настроены — False; последняя синхронизация свежая (< 7 дней) —
-    False; иначе sync_enterprises (сбой не валит worker — False), успех — True."""
-    bases = read_setting_value(store, "onec_bases")
-    if not isinstance(bases, list) or not bases:
-        return False
-    last_raw = read_setting_value(store, "onec_enterprises_synced_at")
+
+def due_schedule(schedule, last_raw: str | None, now: datetime | None = None) -> bool:
+    """«Пора» ли выполнять регламентную операцию по расписанию.
+
+    schedule — dict из settings (mode: interval|daily; interval_hours/daily_time);
+    last_raw — строка ISO последнего выполнения либо None. Расписания нет/не dict
+    или невалидно (интервал <1 ч, битое daily_time, неизвестный режим) — прежнее
+    поведение: раз в 7 дней от last_raw (не «пора всегда», иначе worker гонял бы
+    операцию каждый проход). Битое last — «пора» (True).
+    now — инжектируемые часы для детерминированных тестов (UTC), иначе текущие.
+    """
+    moment = now or datetime.now(timezone.utc)
+    last = None
     if isinstance(last_raw, str) and last_raw:
         try:
             last = datetime.fromisoformat(last_raw)
-            if datetime.now(timezone.utc) - last < timedelta(days=7):
-                return False
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
         except ValueError:
-            pass  # битое значение — считаем, что синхронизации не было
+            pass  # битое значение — считаем, что выполнения не было
+    if not isinstance(schedule, dict) or not schedule:
+        return _weekly_due(moment, last)
+    mode = schedule.get("mode")
+    if mode == "interval":
+        try:
+            interval = timedelta(hours=float(schedule.get("interval_hours") or 0))
+        except (TypeError, ValueError):
+            interval = timedelta(0)
+        if interval <= timedelta():  # 0/пусто/отрицательное — расписание не настроено
+            return _weekly_due(moment, last)
+        if last is None:
+            return True
+        return moment >= last + interval
+    if mode == "daily":
+        try:
+            hours, minutes = str(schedule.get("daily_time") or "").split(":", 1)
+            when = datetime(
+                moment.year, moment.month, moment.day,
+                int(hours), int(minutes), tzinfo=timezone.utc,
+            )
+        except (TypeError, ValueError):
+            return _weekly_due(moment, last)  # битое время — расписание не настроено
+        if moment < when:
+            return False  # сегодняшнее время ещё не наступило
+        return last is None or last < when
+    return _weekly_due(moment, last)  # неизвестный режим — раз в 7 дней
+
+
+def notify_schedule(store, queue, schedule_key: str, smtp_from: str, summary: str) -> int:
+    """Разослать уведомление о выполненном регламенте (event=reglament).
+
+    Расписание — settings.schedule_key: notify=false или адресатов нет — 0.
+    Письмо каждому адресату: тема subject (с префиксом smtp_from, как у прочих
+    писем), тело body с подстановкой {{summary}}. Тексты — из настроек, не из кода.
+    """
+    from .mailer import EVENT_REGLAMENT, MailMessage, new_message_id  # лениво: избегаем циклов импорта
+
+    schedule = read_setting_value(store, schedule_key)
+    if not isinstance(schedule, dict) or not schedule.get("notify"):
+        return 0
+    recipients = schedule.get("recipients")
+    if not isinstance(recipients, list):
+        return 0
+    subject = str(schedule.get("subject") or "")
+    if smtp_from:
+        subject = (smtp_from + " " + subject).strip()
+    body = str(schedule.get("body") or "").replace("{{summary}}", summary)
+    count = 0
+    for address in recipients:
+        if not isinstance(address, str) or not address.strip():
+            continue
+        queue.enqueue(
+            MailMessage(
+                id=new_message_id(),
+                to=address.strip(),
+                subject=subject,
+                html=body,
+                event=EVENT_REGLAMENT,
+            )
+        )
+        count += 1
+    return count
+
+
+def maybe_sync_weekly(store) -> bool:
+    """Регламентная синхронизация предприятий (worker): тихо, без сбоев.
+
+    Базы не настроены — False; «не пора» по расписанию schedule_enterprises_sync
+    (нет расписания — раз в 7 дней от onec_enterprises_synced_at) — False;
+    иначе sync_enterprises (сбой не валит worker — False), успех — True."""
+    bases = read_setting_value(store, "onec_bases")
+    if not isinstance(bases, list) or not bases:
+        return False
+    schedule = read_setting_value(store, "schedule_enterprises_sync")
+    last_raw = read_setting_value(store, "onec_enterprises_synced_at")
+    if not due_schedule(schedule, last_raw):
+        return False
     try:
         sync_enterprises(store)
         return True

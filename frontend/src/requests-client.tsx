@@ -318,9 +318,21 @@ export interface EmployeeCardData {
   position?: string | null;
   hire_date?: string | null;
   dismissal_date?: string | null;
+  phone?: string | null;
+  email?: string | null;
   ad_sam?: string | null;
   // Статус стыковки 1С↔AD: linked | match | no_match (без записи в БД).
   ad_status?: string | null;
+  // Блок AD для отображения (только ОК/админу): при связке — снапшот,
+  // без связки — уникальное точное совпадение ФИО (кандидат на привязку).
+  ad?: {
+    sam?: string | null;
+    display_name?: string | null;
+    department?: string | null;
+    title?: string | null;
+    manager_dn?: string | null;
+    mail?: string | null;
+  } | null;
   snapshot_1c?: Record<string, unknown> | null;
   snapshot_ad?: {
     sam?: string | null;

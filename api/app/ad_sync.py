@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, List, Optional
 
 from .ad_reader import AdReader, AdUnavailable
@@ -204,12 +204,35 @@ def run_ad_sync(
     return result
 
 
-def compute_ad_status(card, link: Optional["LinkRecord"], reader: Optional[AdReader]) -> str:
+def find_unique_ad_match(reader: Optional[AdReader], fio: str):
+    """Уникальная запись AD с точным ФИО (регистр/пробелы не различаются).
+
+    Несколько AD-записей с тем же displayName либо нет ридера — None
+    (дубли/недоступность — ручная сверка)."""
+    wanted = _norm(fio)
+    if not wanted or reader is None:
+        return None
+    try:
+        exact = [
+            u for u in reader.search_users(fio) if _norm(u.display_name) == wanted
+        ]
+    except Exception:
+        return None
+    return exact[0] if len(exact) == 1 else None
+
+
+def compute_ad_status(
+    card,
+    link: Optional["LinkRecord"],
+    reader: Optional[AdReader],
+    exact_match=None,
+) -> str:
     """Статус стыковки 1С↔AD для карточки/списка (без записи в БД).
 
     linked — связка есть; match — точное уникальное совпадение ФИО в AD
     (ждёт синхронизации/подтверждения); no_match — совпадения нет/дубли
-    (в т.ч. AD недоступен) — «синхронизация не прошла»."""
+    (в т.ч. AD недоступен) — «синхронизация не прошла». exact_match — уже
+    найденное совпадение (избегаем повторного LDAP-поиска в карточке)."""
     if link is not None:
         return "linked"
     if reader is None:
@@ -217,39 +240,32 @@ def compute_ad_status(card, link: Optional["LinkRecord"], reader: Optional[AdRea
     wanted = _norm(card.fio)
     if not wanted:
         return "no_match"
-    try:
-        exact = [
-            u for u in reader.search_users(card.fio) if _norm(u.display_name) == wanted
-        ]
-    except Exception:
-        return "no_match"
-    return "match" if len(exact) == 1 else "no_match"
+    if exact_match is None:
+        exact_match = find_unique_ad_match(reader, card.fio)
+    return "match" if exact_match is not None else "no_match"
 
 
 # --- Регламентный запуск из worker (толерантность как у maybe_sync_weekly) ----
 
-_SYNC_INTERVAL = timedelta(days=7)
-
 
 def maybe_sync_links_weekly(
     store, client: OneCClient, reader: Optional[AdReader], links_store: LinksStore
-) -> bool:
-    """Еженедельная автосвязка (worker): тихо, без сбоев.
+) -> "AdSyncResult | bool":
+    """Регламентная автосвязка (worker): тихо, без сбоев.
 
-    Последний запуск свежий (< 7 дней) — False; нет ридера AD — False;
-    иначе run_ad_sync (сбой не валит worker — False), успех — True."""
+    «Не пора» по расписанию schedule_ad_links_sync (нет расписания — раз в 7
+    дней от ad_links_synced_at) — False; нет ридера AD — False; иначе
+    run_ad_sync (сбой не валит worker — False). Возврат: результат прохода
+    AdSyncResult (истина — сводка для уведомления), пустой проход — False."""
+    from .onec_sync import due_schedule
     from .settings_routes import read_setting_value
 
     if reader is None:
         return False
+    schedule = read_setting_value(store, "schedule_ad_links_sync")
     last_raw = read_setting_value(store, "ad_links_synced_at")
-    if isinstance(last_raw, str) and last_raw:
-        try:
-            last = datetime.fromisoformat(last_raw)
-            if datetime.now(timezone.utc) - last < _SYNC_INTERVAL:
-                return False
-        except ValueError:
-            pass  # битое значение — считаем, что синхронизации не было
+    if not due_schedule(schedule, last_raw):
+        return False
     raw = read_setting_value(store, "enterprises")
     if not isinstance(raw, list) or not raw:
         return False
@@ -260,6 +276,6 @@ def maybe_sync_links_weekly(
             "ad_links_synced_at",
             json.dumps(datetime.now(timezone.utc).isoformat()),
         )
-        return result.scanned > 0 or result.created > 0
+        return result if (result.scanned > 0 or result.created > 0) else False
     except Exception:
         return False

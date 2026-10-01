@@ -76,6 +76,27 @@ export interface SettingsOnecBase {
   organization_name_field: string;
 }
 
+// Расписание регламентной операции (settings.schedule_*): режим повтора
+// (interval — каждые N часов, daily — ежедневно в HH:MM) и уведомление о
+// выполнении (письмо каждому адресату; body с {{summary}}). Поля опциональны:
+// пустое/незаполненное расписание в коде не подставляется («не настроено»).
+export interface ScheduleReglament {
+  // Режим: interval — повтор каждые interval_hours, daily — ежедневно в daily_time.
+  mode?: "interval" | "daily";
+  // Интервал повтора в часах (mode=interval).
+  interval_hours?: number;
+  // Время ежедневного запуска HH:MM (mode=daily).
+  daily_time?: string;
+  // Отправлять ли письмо о выполненной операции.
+  notify?: boolean;
+  // Тема письма.
+  subject?: string;
+  // Тело письма ({{summary}} — сводка операции).
+  body?: string;
+  // Адресаты уведомления (e-mail).
+  recipients?: string[];
+}
+
 // Настройки СЭД из таблицы settings (типы — по контракту API, поля nullable:
 // ключа нет в БД — null, значений в коде нет, AGENTS.md п.3).
 export interface SettingsData {
@@ -120,6 +141,10 @@ export interface SettingsData {
   onec_bases: SettingsOnecBase[] | null;
   // Дата/время последней синхронизации предприятий (read-only, пишет синхронизация).
   onec_enterprises_synced_at: string | null;
+  // Расписание синхронизации предприятий из 1С (schedule_enterprises_sync).
+  schedule_enterprises_sync?: ScheduleReglament | null;
+  // Расписание автосвязки 1С↔AD (schedule_ad_links_sync).
+  schedule_ad_links_sync?: ScheduleReglament | null;
 }
 
 // Контент-настройки (GET/PUT /api/settings/content): контент-ключи для

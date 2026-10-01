@@ -119,6 +119,9 @@ def make_snapshot_1c(card: EmployeeCard, now: Optional[_dt.datetime] = None) -> 
         "position": card.position,
         "employment_type": card.employment_type,
         "hire_date": card.hire_date,
+        "dismissal_date": card.dismissal_date,
+        "phone": card.phone,
+        "email": card.email,
         "fetched_at": moment.isoformat(),
     }
 

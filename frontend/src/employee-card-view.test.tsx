@@ -1,8 +1,10 @@
-// Тесты карточки сотрудника (EmployeeCardView, Задача 3): блок 1С + статус AD,
-// интерактивный поиск кандидатов AD и привязка (только админ). Компонент
-// используется в окне ?view=employee&key=… (см. employee-window.tsx).
+// Тесты учётной карточки сотрудника (EmployeeCardView, Задача 3, редизайн):
+// блоки «Должность»/«Контактные данные» (1С и AD), сохранение связки админом
+// (Сохранить → createLink), закрытие окна с подтверждением несохранённых
+// изменений, ОК/руководитель ОК — только чтение. Компонент используется
+// в окне ?view=employee&key=… (см. employee-window.tsx).
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EmployeeCardView } from "./employee-card-view";
 import { createLink, getEmployeeCard, searchAd } from "./requests-client";
 
@@ -26,10 +28,20 @@ const card = {
   position: "Тестировщик",
   hire_date: "2020-01-15",
   dismissal_date: null,
+  phone: "8-800-555-35-35",
+  email: "skaz@example.local",
   ad_sam: null,
   ad_status: "match",
   snapshot_1c: null,
   snapshot_ad: null,
+  ad: {
+    sam: "t.skaz",
+    display_name: "Сказочников Т. Тестович",
+    department: "Цех",
+    title: "Инженер-тестировщик",
+    manager_dn: "CN=Начальник Тестович,OU=SED,DC=example,DC=local",
+    mail: "t.skaz@example.local",
+  },
 };
 const adCandidate = {
   sam: "t.skaz",
@@ -44,23 +56,39 @@ beforeEach(() => {
   vi.mocked(createLink).mockReset();
   vi.mocked(searchAd).mockReset();
   vi.mocked(getEmployeeCard).mockResolvedValue(card);
+  vi.spyOn(window, "close").mockImplementation(() => {});
 });
 
-function renderView(role: "hr" | "admin" = "hr") {
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+function renderView(role: "hr" | "hr_admin" | "admin" = "hr") {
   return render(<EmployeeCardView enterprise="A" baseCode="zup" tabNum="001" role={role} />);
 }
 
+async function waitCard() {
+  await waitFor(() => expect(screen.getByRole("heading", { level: 3 })).toBeInTheDocument());
+}
+
 describe("EmployeeCardView", () => {
-  it("показывает 1С-блок и статус «совпадение найдено»", async () => {
+  it("показывает блоки учётной карточки: ФИО 1С и AD, должность, контакты", async () => {
     renderView("hr");
-    await waitFor(() => expect(screen.getByText(/Карточка:/)).toBeInTheDocument());
-    expect(screen.getByText(/подразделение Цех/)).toBeInTheDocument();
-    expect(screen.getByText(/Точное совпадение ФИО в AD найдено/)).toBeInTheDocument();
-    // ОК — просмотр: поиска AD нет.
-    expect(screen.queryByLabelText("Поиск в AD")).not.toBeInTheDocument();
+    await waitCard();
+    // Шапка: ФИО по 1С крупно, ниже — ФИО из AD.
+    expect(screen.getByRole("heading", { level: 3, name: "Сказочников Тест Тестович" })).toBeInTheDocument();
+    expect(screen.getByText("Сказочников Т. Тестович")).toBeInTheDocument();
+    // Должность: значение 1С и AD.
+    expect(screen.getByText(/1С: Тестировщик/)).toBeInTheDocument();
+    expect(screen.getByText(/AD: Инженер-тестировщик/)).toBeInTheDocument();
+    // Контактные данные: телефон/e-mail 1С и e-mail/руководитель AD.
+    expect(screen.getByText(/1С: телефон 8-800-555-35-35/)).toBeInTheDocument();
+    expect(screen.getByText(/e-mail skaz@example\.local/)).toBeInTheDocument();
+    expect(screen.getByText(/AD: e-mail t\.skaz@example\.local/)).toBeInTheDocument();
+    expect(screen.getByText(/руководитель CN=Начальник Тестович/)).toBeInTheDocument();
   });
 
-  it("админ ищет в AD и привязывает выбранного кандидата", async () => {
+  it("админ сохраняет связку: выбор кандидата и «Сохранить» вызывают createLink", async () => {
     vi.mocked(searchAd).mockResolvedValue([adCandidate]);
     vi.mocked(createLink).mockResolvedValue({});
 
@@ -70,15 +98,47 @@ describe("EmployeeCardView", () => {
     fireEvent.click(screen.getByText("Найти в AD"));
     await waitFor(() => expect(screen.getByLabelText("Кандидаты AD")).toBeInTheDocument());
 
+    const save = screen.getByRole("button", { name: "Сохранить" });
+    expect(save).toBeDisabled();
     fireEvent.click(screen.getByText("Привязать"));
+    expect(save).toBeEnabled();
+    fireEvent.click(save);
     await waitFor(() =>
       expect(createLink).toHaveBeenCalledWith({ enterprise: "A", base_code: "zup", tab_num: "001", sam: "t.skaz" }),
     );
+    await waitFor(() => expect(screen.getByText("Связка сохранена")).toBeInTheDocument());
   });
 
-  it("показывает статус «синхронизация не прошла» при no_match", async () => {
-    vi.mocked(getEmployeeCard).mockResolvedValue({ ...card, ad_status: "no_match" });
+  it("«Закрыть» без изменений закрывает окно", async () => {
     renderView("hr");
-    await waitFor(() => expect(screen.getByText(/Синхронизация не прошла/)).toBeInTheDocument());
+    await waitCard();
+    fireEvent.click(screen.getByText("Закрыть"));
+    expect(window.close).toHaveBeenCalled();
+  });
+
+  it("Закрытие с несохранённой связкой спрашивает подтверждение (отмена — без сохранения)", async () => {
+    vi.mocked(searchAd).mockResolvedValue([adCandidate]);
+    vi.mocked(createLink).mockResolvedValue({});
+    vi.spyOn(window, "confirm").mockReturnValue(false);
+
+    renderView("admin");
+    await waitFor(() => expect(screen.getByLabelText("Поиск в AD")).toBeInTheDocument());
+    fireEvent.change(screen.getByLabelText("Поиск в AD"), { target: { value: "Сказочников" } });
+    fireEvent.click(screen.getByText("Найти в AD"));
+    await waitFor(() => expect(screen.getByLabelText("Кандидаты AD")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("Привязать"));
+    fireEvent.click(screen.getByText("Закрыть"));
+
+    expect(window.confirm).toHaveBeenCalledWith("Есть несохранённые изменения связки. Сохранить?");
+    expect(window.close).toHaveBeenCalled();
+    expect(createLink).not.toHaveBeenCalled();
+  });
+
+  it("hr видит только чтение: нет поиска AD и кнопки «Сохранить»", async () => {
+    renderView("hr");
+    await waitCard();
+    expect(screen.queryByLabelText("Поиск в AD")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Сохранить" })).not.toBeInTheDocument();
+    expect(screen.getByText("Закрыть")).toBeInTheDocument();
   });
 });

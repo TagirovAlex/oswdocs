@@ -100,6 +100,10 @@ class OneCBaseConfig:
     position_field: str = "ТекущаяДолжность/Description"
     hire_date_field: str = "ДатаПриема"
     termination_date_field: str = "ДатаУвольнения"
+    # Контактные поля сотрудника (в OData базы пока не опубликованы — пустые
+    # дефолты; ИТ заполняет в карточке базы, когда опубликует). Схема — настраиваемая.
+    phone_field: str = ""
+    email_field: str = ""
     hr_entity: str = "InformationRegister_ТекущиеКадровыеДанныеСотрудников"
     hr_employee_field: str = "Сотрудник_Key"  # поле сотрудника (Ref_Key) в регистре
     organization_code_field: str = "Ref_Key"
@@ -122,6 +126,9 @@ class EmployeeCard:
     # исполнителям не отдавать (обрезка — в B1, здесь поле просто присутствует
     # как nullable-строка). Пустое значение регистра (0001-01-01...) — "".
     dismissal_date: str = ""
+    # Контакты 1С (настраиваемые поля схемы; в OData пока не опубликованы — "").
+    phone: str = ""
+    email: str = ""
     # Ref_Key записи справочника сотрудников: нужен для второго запроса карточки
     # (регистр текущих кадровых данных); наружу как ПДн не отдаётся.
     ref_key: str = ""
@@ -458,6 +465,8 @@ class OneCClient:
             employment_type=card.employment_type,
             hire_date=cls._field(item, cfg.hire_date_field) or card.hire_date,
             dismissal_date=cls._normalize_date(cls._field(item, cfg.termination_date_field)),
+            phone=card.phone,
+            email=card.email,
             ref_key=card.ref_key,
         )
 
@@ -664,6 +673,8 @@ class OneCClient:
             position="",
             employment_type="",
             hire_date="",
+            phone=OneCClient._field(data, cfg.phone_field) if cfg.phone_field else "",
+            email=OneCClient._field(data, cfg.email_field) if cfg.email_field else "",
             ref_key=str(data.get("Ref_Key") or ""),
         )
 
@@ -698,6 +709,8 @@ class OneCClient:
                     position="",
                     employment_type="",
                     hire_date="",
+                    phone=OneCClient._field(item, cfg.phone_field) if cfg.phone_field else "",
+                    email=OneCClient._field(item, cfg.email_field) if cfg.email_field else "",
                     ref_key=str(item.get("Ref_Key") or ""),
                 )
             )

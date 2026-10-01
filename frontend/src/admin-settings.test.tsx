@@ -48,6 +48,15 @@ const settings: SettingsData = {
   mail_templates: [{ code: "assigned", subject: "Заявка {{ request_id }}", body_html: "<html>{{ fio }}</html>" }],
   onec_bases: [],
   onec_enterprises_synced_at: "2026-09-30T14:00:00+00:00",
+  schedule_enterprises_sync: {
+    mode: "interval",
+    interval_hours: 3,
+    notify: true,
+    subject: "Синхронизация выполнена",
+    body: "Сводка: {{summary}}",
+    recipients: ["adm.petrov@example.com"],
+  },
+  schedule_ad_links_sync: null,
 };
 
 // Контентная часть (как отдаёт GET /api/settings/content для руководителя ОК).
@@ -385,5 +394,45 @@ describe("AdminSettings", () => {
       ),
     );
     expect(saveSettings).not.toHaveBeenCalled();
+  });
+
+  // Админ: вкладка «Регламенты» видна только админу, расписания грузятся из
+  // настроек и сохраняются через общий PUT /settings (поля schedule_*).
+  it("админ видит вкладку Регламенты и сохраняет расписания через PUT", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+    vi.mocked(saveSettings).mockImplementation(async (data: SettingsData) => data);
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Регламенты" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Регламенты" }));
+    await waitFor(() => expect(screen.getByText("Синхронизация предприятий из 1С")).toBeInTheDocument());
+    expect(screen.getByText("Автосвязка 1С↔AD")).toBeInTheDocument();
+
+    // Загруженное расписание предприятий видно в форме (mode/интервал).
+    expect(screen.getByLabelText("Режим расписания предприятий")).toHaveValue("interval");
+    expect(screen.getByLabelText("Интервал часов предприятий")).toHaveValue(3);
+
+    // Изменяем интервал и сохраняем: PUT уходит с расписаниями schedule_*.
+    fireEvent.change(screen.getByLabelText("Интервал часов предприятий"), { target: { value: "6" } });
+    fireEvent.click(screen.getByText("Сохранить"));
+
+    await waitFor(() =>
+      expect(saveSettings).toHaveBeenCalledWith(
+        expect.objectContaining({
+          schedule_enterprises_sync: expect.objectContaining({ mode: "interval", interval_hours: 6 }),
+          schedule_ad_links_sync: null,
+        }),
+      ),
+    );
+  });
+
+  // Руководитель ОК: вкладки «Регламенты» нет (инфра — только админ).
+  it("руководитель ОК не видит вкладку Регламенты", async () => {
+    vi.mocked(getSettingsContent).mockResolvedValue(contentOnly);
+
+    render(<AdminSettings role="hr_admin" />);
+    await waitFor(() => expect(screen.getByLabelText("TTL отметок")).toBeInTheDocument());
+
+    expect(screen.queryByRole("button", { name: "Регламенты" })).not.toBeInTheDocument();
   });
 });

@@ -12,7 +12,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from .ad_reader import AdNotFound, AdReader, AdUnavailable, build_snapshot
-from .ad_sync import compute_ad_status
+from .ad_sync import compute_ad_status, find_unique_ad_match
 from .audit import AuditEvent, audit_log
 from .config import Settings, get_settings
 from .deps import CurrentUser, get_current_user, is_privileged
@@ -72,6 +72,8 @@ def _bases_from_settings(store: DbSettingsStore | None) -> dict[str, OneCBaseCon
             position_field=str(item.get("position_field") or "ТекущаяДолжность/Description"),
             hire_date_field=str(item.get("hire_date_field") or "ДатаПриема"),
             termination_date_field=str(item.get("termination_date_field") or "ДатаУвольнения"),
+            phone_field=str(item.get("phone_field") or ""),
+            email_field=str(item.get("email_field") or ""),
             hr_entity=str(item.get("hr_entity") or "InformationRegister_ТекущиеКадровыеДанныеСотрудников"),
             hr_employee_field=str(item.get("hr_employee_field") or "Сотрудник_Key"),
             organization_code_field=str(item.get("organization_code_field") or "Ref_Key"),
@@ -502,7 +504,25 @@ def employee_card(
     }
     if ad_error is not None:
         base["ad_error"] = ad_error
+    # Уникальное точное совпадение ФИО в AD (без связки) — один поиск для
+    # ad_status и блока ad (не гоняем LDAP дважды).
+    exact_match = None
+    if stored is None and reader is not None:
+        exact_match = find_unique_ad_match(reader, card.fio)
+    ad_status = compute_ad_status(card, stored, reader, exact_match)
     if is_privileged(user):
+        # Блок AD для отображения: при связке — снапшот связанной записи,
+        # без связки — уникальное точное совпадение ФИО (кандидат на привязку).
+        ad_block: dict | None = snapshot_ad
+        if stored is None and exact_match is not None:
+            ad_block = {
+                "sam": exact_match.sam,
+                "display_name": exact_match.display_name,
+                "department": exact_match.department,
+                "title": exact_match.title,
+                "manager_dn": exact_match.manager_dn,
+                "mail": exact_match.mail,
+            }
         base.update(
             {
                 "fio": card.fio,
@@ -511,8 +531,11 @@ def employee_card(
                 "employment_type": card.employment_type,
                 "hire_date": card.hire_date,
                 "dismissal_date": card.dismissal_date,
+                "phone": card.phone,
+                "email": card.email,
                 "ad_sam": link_info.get("sam"),
-                "ad_status": compute_ad_status(card, stored, reader),
+                "ad_status": ad_status,
+                "ad": ad_block,
                 "snapshot_1c": snapshot_1c,
                 "snapshot_ad": snapshot_ad,
             }
@@ -526,7 +549,7 @@ def employee_card(
             "dept": card.dept,
             "position": card.position,
             "ad_sam": link_info.get("sam"),
-            "ad_status": compute_ad_status(card, stored, reader),
+            "ad_status": ad_status,
             "snapshot_1c": {
                 "key": snapshot_1c.get("key"),
                 "fetched_at": snapshot_1c.get("fetched_at"),

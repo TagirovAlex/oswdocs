@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import app.onec_sync as onec_sync  # noqa: E402
 from app.onec_sync import (  # noqa: E402
     OnecSyncUnavailable,
+    due_schedule,
     maybe_sync_weekly,
     sync_enterprises,
 )
@@ -182,3 +183,98 @@ def test_weekly_sync_error_false(monkeypatch):
     """Сбой синхронизации — False (worker не падает)."""
     monkeypatch.setattr(onec_sync, "http_get", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("сеть недоступна")))
     assert maybe_sync_weekly(_store(bases=[_base()])) is False
+
+
+# --- due_schedule (расписание регламентов: interval/daily/без расписания) ---
+
+def _schedule(mode="interval", interval_hours=3, daily_time="03:00"):
+    """Расписание в сид-формате (значение ключа schedule_*)."""
+    return {"mode": mode, "interval_hours": interval_hours, "daily_time": daily_time, "notify": False}
+
+
+def test_due_interval_past_due():
+    """mode=interval: now >= last + interval_hours — пора."""
+    now = datetime(2026, 10, 1, 10, 0, 0, tzinfo=timezone.utc)
+    last = (now - timedelta(hours=4)).isoformat()
+    assert due_schedule(_schedule(interval_hours=3), last, now) is True
+
+
+def test_due_interval_fresh_skips():
+    """mode=interval: last моложе интервала — не пора."""
+    now = datetime(2026, 10, 1, 10, 0, 0, tzinfo=timezone.utc)
+    last = (now - timedelta(hours=1)).isoformat()
+    assert due_schedule(_schedule(interval_hours=3), last, now) is False
+
+
+def test_due_interval_no_last_due():
+    """mode=interval, отметки нет — пора (True)."""
+    assert due_schedule(_schedule(interval_hours=3), None) is True
+
+
+def test_due_daily_passed_and_last_yesterday_due():
+    """mode=daily: время сегодня уже наступило, last вчера — пора."""
+    now = datetime(2026, 10, 1, 10, 0, 0, tzinfo=timezone.utc)
+    last = datetime(2026, 9, 30, 9, 0, 0, tzinfo=timezone.utc).isoformat()
+    assert due_schedule(_schedule(mode="daily", daily_time="03:00"), last, now) is True
+
+
+def test_due_daily_time_not_reached():
+    """mode=daily: время ещё не наступило — не пора (даже без отметки)."""
+    now = datetime(2026, 10, 1, 10, 0, 0, tzinfo=timezone.utc)
+    assert due_schedule(_schedule(mode="daily", daily_time="15:00"), None, now) is False
+
+
+def test_due_daily_already_ran_today():
+    """mode=daily: последний запуск уже был сегодня после daily_time — не пора."""
+    now = datetime(2026, 10, 1, 10, 0, 0, tzinfo=timezone.utc)
+    last = datetime(2026, 10, 1, 3, 5, 0, tzinfo=timezone.utc).isoformat()
+    assert due_schedule(_schedule(mode="daily", daily_time="03:00"), last, now) is False
+
+
+def test_due_no_schedule_falls_back_to_7_days():
+    """Расписания нет — раз в 7 дней от last_raw (совместимость)."""
+    now = datetime(2026, 10, 1, 10, 0, 0, tzinfo=timezone.utc)
+    fresh = (now - timedelta(days=1)).isoformat()
+    old = (now - timedelta(days=8)).isoformat()
+    assert due_schedule(None, fresh, now) is False
+    assert due_schedule({}, old, now) is True
+    assert due_schedule(None, None, now) is True
+
+
+def test_due_broken_last_is_due():
+    """Битое last — «пора» (True)."""
+    now = datetime(2026, 10, 1, 10, 0, 0, tzinfo=timezone.utc)
+    assert due_schedule(_schedule(interval_hours=3), "не-дата", now) is True
+
+
+def test_due_invalid_schedule_falls_back_to_7_days():
+    """Невалидное расписание (интервал 0/битый, битое время, чужой режим) —
+    фолбэк «раз в 7 дней», а не «пора всегда» (worker не гоняет каждый проход)."""
+    now = datetime(2026, 10, 1, 10, 0, 0, tzinfo=timezone.utc)
+    fresh = (now - timedelta(hours=1)).isoformat()
+    old = (now - timedelta(days=8)).isoformat()
+    assert due_schedule(_schedule(mode="interval", interval_hours=0), fresh, now) is False
+    assert due_schedule(_schedule(mode="interval", interval_hours="много"), old, now) is True
+    assert due_schedule(_schedule(mode="daily", daily_time="25:99"), fresh, now) is False
+    assert due_schedule({"mode": "неизвестный"}, fresh, now) is False
+
+
+# --- maybe_sync_weekly с расписанием (мок store с сид-значениями) ---
+
+def test_weekly_interval_due_syncs(monkeypatch):
+    """Интервальное расписание: прошло 4 часа при интервале 3 — выполняется."""
+    monkeypatch.setattr(onec_sync, "http_get", lambda *a, **kw: _orgs_json(("A", "Альфа")))
+    store = _store(bases=[_base()], synced_at=(datetime.now(timezone.utc) - timedelta(hours=4)).isoformat())
+    store._data["schedule_enterprises_sync"] = json.dumps(_schedule(mode="interval", interval_hours=3), ensure_ascii=False)
+    assert maybe_sync_weekly(store) is True
+    assert json.loads(store._data["enterprises"]) == [{"code": "A", "name": "Альфа"}]
+
+
+def test_weekly_interval_fresh_skips(monkeypatch):
+    """Интервальное расписание: прошёл 1 час при интервале 3 — пропуск."""
+    called = []
+    monkeypatch.setattr(onec_sync, "http_get", lambda *a, **kw: called.append(1) or "[]")
+    store = _store(bases=[_base()], synced_at=(datetime.now(timezone.utc) - timedelta(hours=1)).isoformat())
+    store._data["schedule_enterprises_sync"] = json.dumps(_schedule(mode="interval", interval_hours=3), ensure_ascii=False)
+    assert maybe_sync_weekly(store) is False
+    assert called == []

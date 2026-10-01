@@ -12,6 +12,7 @@ import {
 } from "./settings-client";
 import type {
   ContentSettingsData,
+  ScheduleReglament,
   SettingsData,
   SettingsDocTemplate,
   SettingsEnterprise,
@@ -28,9 +29,10 @@ interface AdminSettingsProps {
   role: Role;
 }
 
-// Вкладки админки: контент (Процесс/Справочники/Шаблоны) + Инфра (только админ).
+// Вкладки админки: контент (Процесс/Справочники/Шаблоны) + Инфра и Регламенты
+// (только админ).
 const CONTENT_TABS = ["Процесс", "Справочники", "Шаблоны"] as const;
-const ALL_TABS = ["Процесс", "Справочники", "Шаблоны", "Инфра"] as const;
+const ALL_TABS = ["Процесс", "Справочники", "Шаблоны", "Инфра", "Регламенты"] as const;
 type SettingsTab = (typeof ALL_TABS)[number];
 
 // Пара «должность → категория» для формы (порядок строк сохраняется).
@@ -394,6 +396,112 @@ function MailTemplatesEditor(props: { value: SettingsMailTemplate[]; onChange: (
   );
 }
 
+// Редактор расписания регламентной операции (settings.schedule_*): режим
+// (interval/daily), время/интервал и уведомление о выполнении. value=null —
+// «не настроено»; дефолтов в коде нет (значения — только из settings).
+function ScheduleReglamentEditor(props: {
+  // Суффикс подписей формы (различает два регламента).
+  title: string;
+  value: ScheduleReglament | null;
+  onChange: (v: ScheduleReglament | null) => void;
+}) {
+  const { title, value, onChange } = props;
+  const mode = value?.mode ?? "";
+  const update = (patch: Partial<ScheduleReglament>): void => {
+    // Поля формы опциональны: правим только переданное, остальное как было.
+    onChange({ ...(value ?? {}), ...patch });
+  };
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
+      <label style={{ display: "block" }}>
+        Режим
+        <select
+          aria-label={`Режим расписания ${title}`}
+          value={mode}
+          onChange={(e) => {
+            const next = e.target.value;
+            if (next === "interval" || next === "daily") {
+              update({ mode: next });
+            } else {
+              onChange(null); // «не настроено»
+            }
+          }}
+        >
+          <option value="">не настроено</option>
+          <option value="interval">Интервал (часы)</option>
+          <option value="daily">Ежедневно в …</option>
+        </select>
+      </label>
+      {mode === "interval" && (
+        <label style={{ display: "block", marginTop: 8 }}>
+          Интервал, часов
+          <input
+            aria-label={`Интервал часов ${title}`}
+            type="number"
+            min={1}
+            value={value?.interval_hours ?? ""}
+            onChange={(e) => update({ interval_hours: Number(e.target.value) })}
+          />
+        </label>
+      )}
+      {mode === "daily" && (
+        <label style={{ display: "block", marginTop: 8 }}>
+          Время (HH:MM)
+          <input
+            aria-label={`Время ${title}`}
+            type="time"
+            value={value?.daily_time ?? ""}
+            onChange={(e) => update({ daily_time: e.target.value })}
+          />
+          <div className="sed-note">Время в UTC (серверное); пустое время = «не настроено»</div>
+        </label>
+      )}
+      {mode !== "" && (
+        <>
+          <label style={{ display: "block", marginTop: 8 }}>
+            <input
+              type="checkbox"
+              aria-label={`Отправлять уведомление ${title}`}
+              checked={value?.notify ?? false}
+              onChange={(e) => update({ notify: e.target.checked })}
+            />
+            Отправлять уведомление о выполненной операции
+          </label>
+          <label style={{ display: "block", marginTop: 8 }}>
+            Тема письма
+            <input
+              aria-label={`Тема письма ${title}`}
+              type="text"
+              value={value?.subject ?? ""}
+              onChange={(e) => update({ subject: e.target.value })}
+            />
+          </label>
+          <label style={{ display: "block", marginTop: 8 }}>
+            Текст письма ({"{{summary}}"} — сводка операции)
+            <textarea
+              aria-label={`Текст письма ${title}`}
+              rows={3}
+              value={value?.body ?? ""}
+              onChange={(e) => update({ body: e.target.value })}
+            />
+          </label>
+          <label style={{ display: "block", marginTop: 8 }}>
+            Адресаты (по одному e-mail на строку)
+            <textarea
+              aria-label={`Адресаты ${title}`}
+              rows={2}
+              value={(value?.recipients ?? []).join("\n")}
+              onChange={(e) =>
+                update({ recipients: e.target.value.split("\n").map((s) => s.trim()) })
+              }
+            />
+          </label>
+        </>
+      )}
+    </div>
+  );
+}
+
 // Админка: контент (TTL/флаги, справочники, шаблоны) + инфра (сессия/сканы/SMTP).
 // Админ видит все вкладки (GET/PUT /api/settings), руководитель ОК — только
 // контент (GET/PUT /api/settings/content). Всё — из settings БД.
@@ -431,6 +539,9 @@ export function AdminSettings(props: AdminSettingsProps) {
   const [onecBasesSet, setOnecBasesSet] = useState<boolean[]>([]);
   // Дата/время последней синхронизации предприятий (read-only).
   const [onecSyncedAt, setOnecSyncedAt] = useState<string | null>(null);
+  // Расписания регламентов (null — «не настроено»).
+  const [scheduleEnterprises, setScheduleEnterprises] = useState<ScheduleReglament | null>(null);
+  const [scheduleAdLinks, setScheduleAdLinks] = useState<ScheduleReglament | null>(null);
   // Статус принудительной синхронизации предприятий из баз 1С.
   const [syncStatus, setSyncStatus] = useState<string>("");
   const [syncError, setSyncError] = useState<string>("");
@@ -461,6 +572,9 @@ export function AdminSettings(props: AdminSettingsProps) {
           setOnecBases((full.onec_bases ?? []).map((b) => ({ ...b, password: "" })));
           setOnecBasesSet((full.onec_bases ?? []).map((b) => b.password !== null));
           setOnecSyncedAt(full.onec_enterprises_synced_at);
+          // Пустое расписание — null («не настроено»), дефолты не подставляем.
+          setScheduleEnterprises(full.schedule_enterprises_sync ?? null);
+          setScheduleAdLinks(full.schedule_ad_links_sync ?? null);
         }
         setTtl(data.approval_ttl_days);
         setPaperRequired(data.require_paper_signature);
@@ -530,6 +644,9 @@ export function AdminSettings(props: AdminSettingsProps) {
           onec_bases: onecBases,
           // Read-only: пишет синхронизация (сервер игнорирует на PUT).
           onec_enterprises_synced_at: onecSyncedAt,
+          // Расписания регламентов: null — «не настроено» (хранится в settings).
+          schedule_enterprises_sync: scheduleEnterprises,
+          schedule_ad_links_sync: scheduleAdLinks,
         };
         const result = await saveSettings(full);
         setSaved(
@@ -987,6 +1104,35 @@ export function AdminSettings(props: AdminSettingsProps) {
           {syncStatus && <div role="status">{syncStatus}</div>}
           {syncError && <div role="alert">{syncError}</div>}
         </fieldset>
+      )}
+
+      {activeTab === "Регламенты" && isAdmin && (
+        <>
+          <fieldset>
+            <legend>Синхронизация предприятий из 1С</legend>
+            <div className="sed-note">
+              Регламентная синхронизация справочника предприятий из баз 1С:
+              повтор по интервалу или ежедневно (без настройки — раз в 7 дней).
+            </div>
+            <ScheduleReglamentEditor
+              title="предприятий"
+              value={scheduleEnterprises}
+              onChange={setScheduleEnterprises}
+            />
+          </fieldset>
+          <fieldset>
+            <legend>Автосвязка 1С↔AD</legend>
+            <div className="sed-note">
+              Регламентная автосвязка сотрудников 1С с AD по точному ФИО
+              (без настройки — раз в 7 дней).
+            </div>
+            <ScheduleReglamentEditor
+              title="связок"
+              value={scheduleAdLinks}
+              onChange={setScheduleAdLinks}
+            />
+          </fieldset>
+        </>
       )}
 
       <div className="sed-toolbar" style={{ marginTop: 12 }}>

@@ -61,6 +61,8 @@ INFRA_KEYS: tuple[str, ...] = (
     "onec_bases",
     "onec_enterprises_synced_at",
     "ad_links_synced_at",
+    "schedule_enterprises_sync",
+    "schedule_ad_links_sync",
 )
 
 # SETTINGS_KEYS: полный набор (контент + инфра). Поля onec_enterprises_synced_at
@@ -302,6 +304,12 @@ class OnecBaseItem(BaseModel):
         default="ДатаУвольнения",
         description="Поле даты увольнения (регистр кадровых данных)",
     )
+    phone_field: str = Field(
+        default="", description="Поле телефона сотрудника (OData; пока не опубликовано)"
+    )
+    email_field: str = Field(
+        default="", description="Поле e-mail сотрудника (OData; пока не опубликовано)"
+    )
     hr_entity: str = Field(
         default="InformationRegister_ТекущиеКадровыеДанныеСотрудников",
         description="Регистр текущих кадровых данных (второй запрос карточки)",
@@ -384,6 +392,20 @@ class SettingsPayload(BaseModel):
     )
     onec_bases: list[OnecBaseItem] | None = Field(
         default=None, description="Подключения к базам 1С (OData, пароль маскируется)"
+    )
+    schedule_enterprises_sync: dict | None = Field(
+        default=None,
+        description=(
+            "Расписание синхронизации предприятий из 1С (регламент worker): "
+            "mode interval/daily, уведомление notify/recipients/subject/body"
+        ),
+    )
+    schedule_ad_links_sync: dict | None = Field(
+        default=None,
+        description=(
+            "Расписание автосвязки 1С↔AD (регламент worker): "
+            "mode interval/daily, уведомление notify/recipients/subject/body"
+        ),
     )
 
 

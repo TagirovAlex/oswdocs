@@ -9,13 +9,14 @@ import json
 import os
 import re
 import sys
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app.ad_reader import AdReader, AdReaderSettings, InMemoryCache  # noqa: E402
-from app.ad_sync import compute_ad_status, run_ad_sync  # noqa: E402
+from app.ad_sync import compute_ad_status, maybe_sync_links_weekly, run_ad_sync  # noqa: E402
 from app.config import Settings, get_settings  # noqa: E402
 from app.employees import get_ad_reader, get_onec_client  # noqa: E402
 from app.link import clear_for_tests, get_memory_links_store  # noqa: E402
@@ -342,3 +343,59 @@ def test_ad_search_no_reader_503(client, admin_headers, sync_mocks):
     response = client.get("/ad/search", params={"q": "x"}, headers=admin_headers)
     assert response.status_code == 503
     app.dependency_overrides[get_ad_reader] = lambda: _reader()
+
+
+# ---------------------------------------------------------------------------
+# maybe_sync_links_weekly (регламентная автосвязка, расписание из settings)
+# ---------------------------------------------------------------------------
+
+def test_maybe_sync_links_weekly_interval_due_runs():
+    """Интервальное расписание: «пора» — проход выполнен, метка записана."""
+    store = get_memory_links_store()
+    clear_for_tests()
+    settings_store = InMemorySettingsStore(
+        {
+            "schedule_ad_links_sync": json.dumps({"mode": "interval", "interval_hours": 3}),
+            "ad_links_synced_at": json.dumps(
+                (datetime.now(timezone.utc) - timedelta(hours=100)).isoformat()
+            ),
+            "enterprises": json.dumps([{"code": ENT, "name": "Тест"}], ensure_ascii=False),
+        }
+    )
+    result = maybe_sync_links_weekly(settings_store, _client(), _reader(), store)
+    assert result is not False  # вернулся AdSyncResult (реальный проход)
+    assert result.scanned == 5
+    assert result.created == 1
+    assert "ad_links_synced_at" in settings_store.sets  # метка записана
+
+
+def test_maybe_sync_links_weekly_interval_not_due_skips():
+    """Интервальное расписание: «не пора» — False, метка не перезаписана."""
+    store = get_memory_links_store()
+    clear_for_tests()
+    settings_store = InMemorySettingsStore(
+        {
+            "schedule_ad_links_sync": json.dumps({"mode": "interval", "interval_hours": 3}),
+            "ad_links_synced_at": json.dumps(
+                (datetime.now(timezone.utc) + timedelta(hours=100)).isoformat()
+            ),
+            "enterprises": json.dumps([{"code": ENT, "name": "Тест"}], ensure_ascii=False),
+        }
+    )
+    assert maybe_sync_links_weekly(settings_store, _client(), _reader(), store) is False
+    assert "ad_links_synced_at" not in settings_store.sets
+
+
+def test_maybe_sync_links_weekly_no_schedule_weekly_not_due():
+    """Без расписания — прежнее поведение: раз в 7 дней; сутки назад — не пора."""
+    store = get_memory_links_store()
+    clear_for_tests()
+    settings_store = InMemorySettingsStore(
+        {
+            "ad_links_synced_at": json.dumps(
+                (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+            ),
+            "enterprises": json.dumps([{"code": ENT, "name": "Тест"}], ensure_ascii=False),
+        }
+    )
+    assert maybe_sync_links_weekly(settings_store, _client(), _reader(), store) is False
