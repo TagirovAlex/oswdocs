@@ -236,7 +236,10 @@ class Ldap3Gateway:
 
     def _search_many(self, base_dn: str, filter_str: str, scope: object) -> List[Dict]:
         if self._conn is None:
-            raise AdUnavailable("Шлюз не связан: сначала bind() RO-учеткой.")
+            # Ленивый bind RO-учеткой: шлюз читается самодостаточно (AD-блок
+            # карточки, ручная привязка, автосвязка, worker), а не только после
+            # явного bind_reader() в auth. Повторный bind не нужен — conn уже есть.
+            self.bind()
         self._conn.search(
             search_base=base_dn,
             search_filter=filter_str,

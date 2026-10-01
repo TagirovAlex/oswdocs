@@ -286,10 +286,18 @@ def test_search_users_by_display_name():
     assert len(gw.search_users("Тест")) == 2
 
 
-def test_search_requires_prior_bind():
-    gw = _gateway()
-    with pytest.raises(AdUnavailable, match="не связан"):
-        gw.search_user_by_sam("t.testov")
+def test_search_lazy_binds_reader():
+    """Поиск без явного bind: шлюз сам связывается RO-учеткой (ленивый bind).
+
+    AD-блок карточки, ручная привязка и автосвязка используют ридер из
+    get_ad_reader() без bind_reader() — шлюз обязан быть самодостаточным."""
+    fake = _fake()
+    gw = _gateway(fake)
+    raw = gw.search_user_by_sam("t.testov")
+    assert raw is not None
+    assert raw["sAMAccountName"] == "t.testov"
+    # Ленивый bind выполнен RO-учеткой из настроек.
+    assert (READER_DN, "reader-secret-test") in fake.bind_attempts
 
 
 def test_gateway_raw_parses_into_ad_user():
