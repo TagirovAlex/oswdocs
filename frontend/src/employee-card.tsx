@@ -160,10 +160,6 @@ export function EmployeeCard(props: EmployeeCardProps) {
             <td>Дата приёма</td>
             <td>{card.hireDate}</td>
           </tr>
-          <tr>
-            <td>Остаток отпуска</td>
-            <td>{card.vacationBalance} дн. (только ОК)</td>
-          </tr>
         </tbody>
       </table>
 

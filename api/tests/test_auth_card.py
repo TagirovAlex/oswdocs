@@ -288,8 +288,6 @@ def test_employees_hr_full(client, hr_headers, b1_mocks):
     assert len(body["items"]) == 1
     item = body["items"][0]
     assert item["fio"] == FIO_IVAN
-    # Остаток отпуска — TODO (поле схемы OData не настроено), пока None.
-    assert item["vacation_balance"] is None
     assert item["tab_num"] == "001"
     assert body["needs_manual_review"] is False
 
@@ -311,13 +309,11 @@ def test_employees_hr_admin_full(client, hr_admin_headers, b1_mocks):
     assert response.status_code == 200
     item = response.json()["items"][0]
     assert item["fio"] == FIO_IVAN
-    # Остаток отпуска — TODO (поле схемы OData не настроено), пока None.
-    assert item["vacation_balance"] is None
     assert item["tab_num"] == "001"
 
 
 def test_employees_owner_trimmed_no_pdn(client, owner_headers, b1_mocks):
-    """Владелец: урезанная без ПДн (нет ФИО/почты/отпуска/приема)."""
+    """Владелец: урезанная без ПДн (нет ФИО/почты/дат приёма-увольнения)."""
     response = client.get(
         "/employees",
         params={"enterprise": ENT, "q": "Сказочников"},
@@ -325,7 +321,7 @@ def test_employees_owner_trimmed_no_pdn(client, owner_headers, b1_mocks):
     )
     assert response.status_code == 200
     item = response.json()["items"][0]
-    for forbidden in ("fio", "mail", "vacation_balance", "hire_date", "employment_type", "tab_num"):
+    for forbidden in ("fio", "mail", "dismissal_date", "hire_date", "employment_type", "tab_num"):
         assert forbidden not in item
     # В списке справочника нет подразделения/должности (они в карточке —
     # второй запрос к регистру кадровых данных); у владельца и они пустые.
@@ -430,7 +426,7 @@ def test_card_hr_full_with_snapshots(client, hr_headers, admin_headers, b1_mocks
 
 
 def test_card_owner_trimmed_no_pdn(client, hr_headers, admin_headers, owner_headers, b1_mocks):
-    """Владелец в карточке: без ФИО/почты/отпуска и без значений снапшотов."""
+    """Владелец в карточке: без ФИО/почты/дат приёма-увольнения и без значений снапшотов."""
     client.post(
         "/link_1c_ad",
         json={"enterprise": ENT, "base_code": "zup_t1", "tab_num": "001", "sam": "t.ivan"},
@@ -443,7 +439,7 @@ def test_card_owner_trimmed_no_pdn(client, hr_headers, admin_headers, owner_head
     )
     assert response.status_code == 200
     body = response.json()
-    for forbidden in ("fio", "hire_date", "vacation_balance", "employment_type"):
+    for forbidden in ("fio", "hire_date", "dismissal_date", "employment_type"):
         assert forbidden not in body
     assert body["snapshot_ad"] is None
     assert "fio" not in body["snapshot_1c"]
@@ -564,7 +560,7 @@ def test_link_read_returns_fact(client, hr_headers, admin_headers, owner_headers
 
 
 def test_owner_responses_no_tab_num_pdn(client, owner_headers, b1_mocks):
-    """Владелец: в поиске и карточке нет tab_num/ФИО/почты/остатка отпуска."""
+    """Владелец: в поиске и карточке нет tab_num/ФИО/почты/дат приёма-увольнения."""
     # Поиск: урезанные записи без идентификаторов человека.
     found = client.get(
         "/employees",
@@ -574,7 +570,7 @@ def test_owner_responses_no_tab_num_pdn(client, owner_headers, b1_mocks):
     assert found.status_code == 200
     assert len(found.json()["items"]) == 1
     item = found.json()["items"][0]
-    for forbidden in ("tab_num", "fio", "mail", "vacation_balance", "hire_date"):
+    for forbidden in ("tab_num", "fio", "mail", "dismissal_date", "hire_date"):
         assert forbidden not in item
     # Служебный минимум для отметок остается.
     assert "key" in item and "dept" in item and "position" in item
@@ -586,7 +582,7 @@ def test_owner_responses_no_tab_num_pdn(client, owner_headers, b1_mocks):
     )
     assert card.status_code == 200
     body = card.json()
-    for forbidden in ("tab_num", "fio", "mail", "vacation_balance", "hire_date"):
+    for forbidden in ("tab_num", "fio", "mail", "dismissal_date", "hire_date"):
         assert forbidden not in body
     assert "tab_num" not in body["snapshot_1c"] and "fio" not in body["snapshot_1c"]
     assert body["snapshot_ad"] is None

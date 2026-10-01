@@ -282,6 +282,7 @@ describe("AdminSettings", () => {
               department_field: "ТекущееПодразделение/Description",
               position_field: "ТекущаяДолжность/Description",
               hire_date_field: "ДатаПриема",
+              termination_date_field: "ДатаУвольнения",
               hr_entity: "InformationRegister_ТекущиеКадровыеДанныеСотрудников",
               hr_employee_field: "Сотрудник_Key",
               organization_code_field: "Ref_Key",

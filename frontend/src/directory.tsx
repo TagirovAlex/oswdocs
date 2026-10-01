@@ -160,7 +160,8 @@ export function Directory(props: DirectoryProps) {
           <h4>Карточка: {card.fio ?? card.key}</h4>
           <div>
             <strong>1С:</strong> подразделение {card.dept ?? "—"} · должность {card.position ?? "—"} · приём{" "}
-            {card.hire_date ?? "—"} · отпуск {card.vacation_balance ?? "—"}
+            {card.hire_date ?? "—"}
+            {card.dismissal_date ? ` · уволен ${card.dismissal_date}` : ""}
           </div>
           {card.link.linked && (
             <div>

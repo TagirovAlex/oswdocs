@@ -64,6 +64,8 @@ export interface SettingsOnecBase {
   position_field: string;
   // Поле даты приёма (регистр кадровых данных).
   hire_date_field: string;
+  // Поле даты увольнения (регистр кадровых данных).
+  termination_date_field: string;
   // Регистр текущих кадровых данных (второй запрос карточки).
   hr_entity: string;
   // Поле сотрудника (Ref_Key) в регистре кадровых данных.

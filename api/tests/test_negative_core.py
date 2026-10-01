@@ -92,7 +92,7 @@ def _card_row(tab: str, fio: str) -> dict:
     ФИО = Description; подразделение/должность/приём — в регистре (см. transport)."""
     return {
         "Ref_Key": "ref-" + tab, "Code": tab, "Description": fio,
-        "ГоловнаяОрганизация_Key": ENT, "vacation_balance": "14",
+        "ГоловнаяОрганизация_Key": ENT,
     }
 
 

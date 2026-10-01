@@ -297,6 +297,10 @@ class OnecBaseItem(BaseModel):
     hire_date_field: str = Field(
         default="ДатаПриема", description="Поле даты приёма (регистр кадровых данных)"
     )
+    termination_date_field: str = Field(
+        default="ДатаУвольнения",
+        description="Поле даты увольнения (регистр кадровых данных)",
+    )
     hr_entity: str = Field(
         default="InformationRegister_ТекущиеКадровыеДанныеСотрудников",
         description="Регистр текущих кадровых данных (второй запрос карточки)",

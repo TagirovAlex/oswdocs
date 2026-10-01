@@ -99,6 +99,7 @@ class OneCBaseConfig:
     department_field: str = "ТекущееПодразделение/Description"
     position_field: str = "ТекущаяДолжность/Description"
     hire_date_field: str = "ДатаПриема"
+    termination_date_field: str = "ДатаУвольнения"
     hr_entity: str = "InformationRegister_ТекущиеКадровыеДанныеСотрудников"
     hr_employee_field: str = "Сотрудник_Key"  # поле сотрудника (Ref_Key) в регистре
     organization_code_field: str = "Ref_Key"
@@ -117,10 +118,10 @@ class EmployeeCard:
     position: str = ""
     employment_type: str = ""
     hire_date: str = ""
-    # Остаток отпуска и дата приёма — только роли ОК, исполнителям не отдавать
-    # (обрезка — в B1, здесь поле просто присутствует как nullable).
-    vacation_balance: Optional[str] = None
-    mol_flag: Optional[bool] = None  # TODO: флаг МОЛ из 1С не подтверждён, nullable
+    # Дата увольнения (из регистра кадровых данных) — только роли ОК,
+    # исполнителям не отдавать (обрезка — в B1, здесь поле просто присутствует
+    # как nullable-строка). Пустое значение регистра (0001-01-01...) — "".
+    dismissal_date: str = ""
     # Ref_Key записи справочника сотрудников: нужен для второго запроса карточки
     # (регистр текущих кадровых данных); наружу как ПДн не отдаётся.
     ref_key: str = ""
@@ -414,8 +415,7 @@ class OneCClient:
             position=cls._field(item, cfg.position_field) or card.position,
             employment_type=card.employment_type,
             hire_date=cls._field(item, cfg.hire_date_field) or card.hire_date,
-            vacation_balance=card.vacation_balance,
-            mol_flag=card.mol_flag,
+            dismissal_date=cls._normalize_date(cls._field(item, cfg.termination_date_field)),
             ref_key=card.ref_key,
         )
 
@@ -562,6 +562,14 @@ class OneCClient:
         return str(value) if value is not None else ""
 
     @staticmethod
+    def _normalize_date(raw: str) -> str:
+        """Дата из 1С: пустое значение регистра = 0001-01-01T00:00:00 — вернуть ''."""
+        value = (raw or "").strip()
+        if not value or value.startswith("0001-01-01"):
+            return ""
+        return value
+
+    @staticmethod
     def _parse_card(
         cfg: OneCBaseConfig, body: str, tab_num: str, enterprise: Optional[str] = None
     ) -> EmployeeCard:
@@ -591,8 +599,6 @@ class OneCClient:
             position="",
             employment_type="",
             hire_date="",
-            vacation_balance=data.get("vacation_balance"),
-            mol_flag=data.get("mol_flag"),
             ref_key=str(data.get("Ref_Key") or ""),
         )
 
@@ -627,8 +633,6 @@ class OneCClient:
                     position="",
                     employment_type="",
                     hire_date="",
-                    vacation_balance=item.get("vacation_balance"),
-                    mol_flag=item.get("mol_flag"),
                     ref_key=str(item.get("Ref_Key") or ""),
                 )
             )

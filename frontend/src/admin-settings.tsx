@@ -871,6 +871,17 @@ export function AdminSettings(props: AdminSettingsProps) {
                   />
                 </label>
                 <label style={{ display: "block", marginTop: 8 }}>
+                  Поле даты увольнения (регистр кадровых данных)
+                  <input
+                    aria-label={`Поле даты увольнения базы 1С ${i + 1}`}
+                    type="text"
+                    value={base.termination_date_field}
+                    onChange={(e) =>
+                      setOnecBases(onecBases.map((b, j) => (j === i ? { ...b, termination_date_field: e.target.value } : b)))
+                    }
+                  />
+                </label>
+                <label style={{ display: "block", marginTop: 8 }}>
                   Регистр кадровых данных (второй запрос карточки)
                   <input
                     aria-label={`Регистр кадровых данных базы 1С ${i + 1}`}
@@ -950,6 +961,7 @@ export function AdminSettings(props: AdminSettingsProps) {
                     department_field: "ТекущееПодразделение/Description",
                     position_field: "ТекущаяДолжность/Description",
                     hire_date_field: "ДатаПриема",
+                    termination_date_field: "ДатаУвольнения",
                     hr_entity: "InformationRegister_ТекущиеКадровыеДанныеСотрудников",
                     hr_employee_field: "Сотрудник_Key",
                     organization_code_field: "Ref_Key",

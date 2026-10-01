@@ -53,8 +53,6 @@ export interface EmployeeFull {
   department: string;
   position: string;
   hireDate: string;
-  // Остаток отпуска — только ОК (см. README п.1).
-  vacationBalance: number;
   sam: string;
   mail: string;
   manager: string;
@@ -108,7 +106,6 @@ const MOCK_FULL: Record<string, EmployeeFull> = {
     department: "Цех № 1",
     position: "Слесарь",
     hireDate: "2020-03-11",
-    vacationBalance: 14,
     sam: "petrov.pp",
     mail: "petrov.pp@example.local",
     manager: "Начальник цеха № 1",
@@ -122,7 +119,6 @@ const MOCK_FULL: Record<string, EmployeeFull> = {
     department: "Склад",
     position: "Кладовщик",
     hireDate: "2021-07-01",
-    vacationBalance: 9,
     sam: "sidorova.as",
     mail: "sidorova.as@example.local",
     manager: "Заведующий складом",

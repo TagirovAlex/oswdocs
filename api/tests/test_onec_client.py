@@ -62,7 +62,7 @@ def _card_json(tab, fio, ref=None, org=ENT):
     return json.dumps({"value": [item]}, ensure_ascii=False)
 
 
-def _hr_json(ref, dept="Цех тестовый", position="Тестировщик", hire_date="2020-01-15"):
+def _hr_json(ref, dept="Цех тестовый", position="Тестировщик", hire_date="2020-01-15", dismissal_date=None):
     # OData-ответ регистра текущих кадровых данных с $expand подразделения/должности.
     item = {
         "Сотрудник_Key": ref,
@@ -70,6 +70,8 @@ def _hr_json(ref, dept="Цех тестовый", position="Тестировщи
         "ТекущаяДолжность": {"Description": position},
         "ДатаПриема": hire_date,
     }
+    if dismissal_date is not None:
+        item["ДатаУвольнения"] = dismissal_date
     return json.dumps({"value": [item]}, ensure_ascii=False)
 
 
@@ -250,7 +252,10 @@ def test_load_bases_from_env_rejects_bad_json(monkeypatch):
 
 def test_employee_card_is_plain_data():
     card = EmployeeCard(enterprise=ENT, base_code="zup_a", tab_num="1", fio=FIOS["a100"])
-    assert card.mol_flag is None  # TODO флаг МОЛ: nullable до выяснения на стенде
+    assert card.dismissal_date == ""
+    # Отпуск/МОЛ убраны из карточки (Задача 1) — атрибутов нет.
+    assert not hasattr(card, "vacation_balance")
+    assert not hasattr(card, "mol_flag")
 
 
 def test_normalize_odata_base_url():
@@ -353,6 +358,35 @@ def test_hr_register_not_found_keeps_brief_card():
     card = c.get_employee("zup_a", "100")
     assert card.fio == FIOS["a100"]
     assert card.dept == "" and card.position == "" and card.hire_date == ""
+    assert card.dismissal_date == ""
+
+
+def test_get_employee_parses_dismissal_date():
+    """Дата увольнения уволенного сотрудника — из регистра кадровых данных."""
+    ref = "ref-100"
+
+    def h(url, headers, timeout):
+        if "InformationRegister" in url:
+            return HttpResult(200, _hr_json(ref, dismissal_date="2026-09-30T00:00:00"))
+        return HttpResult(200, _card_json("100", FIOS["a100"], ref=ref))
+
+    c = OneCClient({"zup_a": _bases()["zup_a"]}, transport=FakeTransport(h))
+    card = c.get_employee("zup_a", "100", ENT)
+    assert card.dismissal_date == "2026-09-30T00:00:00"
+
+
+def test_hr_empty_dismissal_date_normalized_to_empty():
+    """Пустая дата увольнения в регистре (0001-01-01T00:00:00) — нормализуется в ''."""
+    ref = "ref-100"
+
+    def h(url, headers, timeout):
+        if "InformationRegister" in url:
+            return HttpResult(200, _hr_json(ref, dismissal_date="0001-01-01T00:00:00"))
+        return HttpResult(200, _card_json("100", FIOS["a100"], ref=ref))
+
+    c = OneCClient({"zup_a": _bases()["zup_a"]}, transport=FakeTransport(h))
+    card = c.get_employee("zup_a", "100", ENT)
+    assert card.dismissal_date == ""
 
 
 def test_hr_register_not_configured_skips_second_request():

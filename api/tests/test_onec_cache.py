@@ -207,8 +207,7 @@ def _full_card():
         position="Разработчик",
         employment_type="Основное место работы",
         hire_date="2019-03-01",
-        vacation_balance=None,
-        mol_flag=None,
+        dismissal_date="2026-09-30",
     )
 
 
@@ -228,14 +227,13 @@ def test_redis_cache_roundtrip():
     assert got.position == card.position
     assert got.employment_type == card.employment_type
     assert got.hire_date == card.hire_date
-    assert got.vacation_balance is None
-    assert got.mol_flag is None
+    assert got.dismissal_date == "2026-09-30"
     # Ключ в redis — с префиксом; TTL по умолчанию передан в set.
     assert "sed:onec:card:zup_a|100" in redis.store
     assert redis.last_ex == 120
 
 
-def test_redis_cache_roundtrip_non_null_nullables():
+def test_redis_cache_roundtrip_dismissal_date():
     redis = FakeRedisClient()
     cache = RedisCardCache(
         redis_url="redis://mock.local:6379/0", ttl_seconds=120, redis_client=redis
@@ -245,14 +243,12 @@ def test_redis_cache_roundtrip_non_null_nullables():
         base_code="zup_a",
         tab_num="100",
         fio=FIO_A,
-        vacation_balance="7",
-        mol_flag=True,
+        dismissal_date="2026-09-30T00:00:00",
     )
     cache.set("zup_a|100", card)
     got = cache.get("zup_a|100")
     assert got == card
-    assert got.vacation_balance == "7"
-    assert got.mol_flag is True
+    assert got.dismissal_date == "2026-09-30T00:00:00"
 
 
 def test_redis_cache_set_ttl_override():

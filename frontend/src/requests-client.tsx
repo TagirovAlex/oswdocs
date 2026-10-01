@@ -81,7 +81,6 @@ export interface EmployeeHit {
   dept: string;
   position: string;
   hire_date?: string | null;
-  vacation_balance?: string | null;
   ad_sam?: string | null;
   needs_manual_review: boolean;
 }
@@ -316,7 +315,7 @@ export interface EmployeeCardData {
   dept?: string | null;
   position?: string | null;
   hire_date?: string | null;
-  vacation_balance?: string | null;
+  dismissal_date?: string | null;
   ad_sam?: string | null;
   snapshot_1c?: Record<string, unknown> | null;
   snapshot_ad?: {

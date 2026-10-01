@@ -3,7 +3,7 @@
 # волны A3 (resolver.search_enterprise). Живых LDAP/HTTP-вызовов здесь нет:
 # транспорт 1С и шлюз AD подменяются моками через зависимости FastAPI.
 # Ролевая обрезка: ОК/админы — полная карточка, владелец шага — урезанная
-# без ПДн (без ФИО/почты/даты приема/остатка отпуска), без групп — 403
+# без ПДн (без ФИО/почты/дат приёма/увольнения), без групп — 403
 # (проверка групп — в deps.get_current_user, здесь не дублируется).
 # При расхождении данных истина — всегда 1С (см. карточку и модуль link).
 
@@ -70,6 +70,7 @@ def _bases_from_settings(store: DbSettingsStore | None) -> dict[str, OneCBaseCon
             department_field=str(item.get("department_field") or "ТекущееПодразделение/Description"),
             position_field=str(item.get("position_field") or "ТекущаяДолжность/Description"),
             hire_date_field=str(item.get("hire_date_field") or "ДатаПриема"),
+            termination_date_field=str(item.get("termination_date_field") or "ДатаУвольнения"),
             hr_entity=str(item.get("hr_entity") or "InformationRegister_ТекущиеКадровыеДанныеСотрудников"),
             hr_employee_field=str(item.get("hr_employee_field") or "Сотрудник_Key"),
             organization_code_field=str(item.get("organization_code_field") or "Ref_Key"),
@@ -164,7 +165,6 @@ def _full_item(
         "position": card.position,
         "employment_type": card.employment_type,
         "hire_date": card.hire_date,
-        "vacation_balance": card.vacation_balance,
         "ad_sam": sam,
         "needs_manual_review": duplicate,
     }
@@ -447,7 +447,7 @@ def employee_card(
                 "position": card.position,
                 "employment_type": card.employment_type,
                 "hire_date": card.hire_date,
-                "vacation_balance": card.vacation_balance,
+                "dismissal_date": card.dismissal_date,
                 "ad_sam": link_info.get("sam"),
                 "snapshot_1c": snapshot_1c,
                 "snapshot_ad": snapshot_ad,
