@@ -133,9 +133,9 @@ class CountingLinksStore:
         self.calls["save"] += 1
         self.inner.save(record)
 
-    def ensure_user(self, row):
-        self.calls["ensure_user"] = self.calls.get("ensure_user", 0) + 1
-        self.inner.ensure_user(row)
+    def ensure_targets(self, base, employee, user):
+        self.calls["ensure_targets"] = self.calls.get("ensure_targets", 0) + 1
+        self.inner.ensure_targets(base, employee, user)
 
 
 def _bases():

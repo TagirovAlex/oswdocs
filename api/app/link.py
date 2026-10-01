@@ -201,9 +201,30 @@ def create_link(
         needs_manual_review=bool(duplicate or diverged),
     )
     try:
-        # Зеркало пользователя в НАШЕЙ таблице users (в AD/1С не пишем): строка
-        # нужна для FK link_1c_ad.sam -> users(sam), т.к. users — не каталог AD.
-        store.ensure_user(
+        # Зеркала ссылок связки в НАШИХ таблицах (one_c_bases/employee_base_map/
+        # users) — нужны для внешних ключей link_1c_ad. В AD/1С не пишем.
+        try:
+            base_cfg = client.base_config(body.base_code)
+            base = {
+                "code": base_cfg.code,
+                "enterprise": card.enterprise,
+                "name": base_cfg.code,
+                "odata_url": base_cfg.url,
+            }
+        except Exception:
+            base = None  # база неизвестна — зеркалим только сотрудника и пользователя
+        store.ensure_targets(
+            base,
+            {
+                "enterprise": card.enterprise,
+                "base_code": card.base_code,
+                "tab_num": card.tab_num,
+                "fio": card.fio,
+                "dept_1c": card.dept,
+                "position_1c": card.position,
+                "employment_type": card.employment_type,
+                "hire_date": card.hire_date or None,
+            },
             {
                 "sam": ad_user.sam,
                 "fio_full": ad_user.display_name or ad_user.sam,
@@ -211,7 +232,7 @@ def create_link(
                 "title_ad": ad_user.title,
                 "manager_dn": ad_user.manager_dn,
                 "mail": ad_user.mail,
-            }
+            },
         )
         store.save(record)
     except LinksUnavailable as exc:

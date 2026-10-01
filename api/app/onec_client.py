@@ -291,6 +291,12 @@ class OneCClient:
         """Коды баз, привязанных к предприятию (маппинг из синхронизации)."""
         return sorted(self._enterprise_index.get(enterprise, []))
 
+    def base_config(self, base_code: str) -> OneCBaseConfig:
+        """Конфиг базы (только чтение): код/предприятие/URL для зеркала one_c_bases.
+
+        Неизвестный код — OneCUnknownBase (как _require_base)."""
+        return self._require_base(base_code)
+
     def circuit_is_open(self, base_code: str) -> bool:
         """Открыта ли цепь базы (для диагностики и тестов)."""
         self._require_base(base_code)

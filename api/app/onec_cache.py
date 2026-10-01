@@ -120,6 +120,10 @@ class CachingOneCClient:
         """Коды баз предприятия (проброс к клиенту)."""
         return self._client.bases_for_enterprise(enterprise)
 
+    def base_config(self, base_code: str):
+        """Конфиг базы (проброс к клиенту, только чтение)."""
+        return self._client.base_config(base_code)
+
     def circuit_is_open(self, base_code: str) -> bool:
         """Открыта ли цепь базы (проброс к клиенту)."""
         return self._client.circuit_is_open(base_code)

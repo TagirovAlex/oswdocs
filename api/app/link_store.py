@@ -38,12 +38,14 @@ class LinksStore(Protocol):
         """Сохранить/перезаписать факт связки (upsert по составному ключу)."""
         ...
 
-    def ensure_user(self, row: dict) -> None:
-        """Зеркало пользователя AD в НАШЕЙ таблице users (только своя БД).
+    def ensure_targets(self, base: dict | None, employee: dict | None, user: dict | None) -> None:
+        """Зеркало ссылок связки в НАШИХ таблицах (one_c_bases/employee_base_map/users).
 
-        Нужно для внешнего ключа link_1c_ad.sam -> users(sam): связка может
-        ссылаться на любую учётку AD, а не только на входивших в систему.
-        В AD/1С при этом НЕ пишется — строка создаётся у нас."""
+        Нужно для внешних ключей link_1c_ad: sam -> users(sam), (enterprise,
+        base_code, tab_num) -> employee_base_map, employee_base_map.base_code ->
+        one_c_bases(code). Связка может ссылаться на любого сотрудника 1С и
+        учётку AD, а не только на уже занесённых в таблицы. В AD/1С при этом
+        НЕ пишется — строки создаются у нас (только своя БД)."""
         ...
 
 
@@ -52,12 +54,16 @@ class InMemoryLinksStore:
 
     def __init__(self) -> None:
         self._links: dict[str, LinkRecord] = {}
-        # Зеркало пользователей (для тестов ensure_user): key — sam в нижнем регистре.
-        self._users: dict[str, dict] = {}
+        # Зеркала ensure_targets (для проверок тестов): ключи как в БД.
+        self._bases: dict[str, dict] = {}  # код базы
+        self._employees: dict[str, dict] = {}  # enterprise|base_code|tab_num
+        self._users: dict[str, dict] = {}  # sam в нижнем регистре
 
     def reset(self) -> None:
         """Сброс состояния. Только для изоляции pytest/локального запуска."""
         self._links.clear()
+        self._bases.clear()
+        self._employees.clear()
         self._users.clear()
 
     def find(self, key: str) -> LinkRecord | None:
@@ -71,10 +77,19 @@ class InMemoryLinksStore:
     def save(self, record: LinkRecord) -> None:
         self._links[record.key] = record
 
-    def ensure_user(self, row: dict) -> None:
-        """Запомнить строку users (в памяти FK нет — только для проверок тестов)."""
-        if row and row.get("sam"):
-            self._users[str(row["sam"]).strip().lower()] = dict(row)
+    def ensure_targets(self, base: dict | None, employee: dict | None, user: dict | None) -> None:
+        """Запомнить зеркала (в памяти FK нет — только для проверок тестов)."""
+        if base and base.get("code"):
+            self._bases[str(base["code"]).strip().lower()] = dict(base)
+        if employee and employee.get("tab_num"):
+            key = "%s|%s|%s" % (
+                employee.get("enterprise"),
+                employee.get("base_code"),
+                employee.get("tab_num"),
+            )
+            self._employees[key] = dict(employee)
+        if user and user.get("sam"):
+            self._users[str(user["sam"]).strip().lower()] = dict(user)
 
 
 class DbLinksStore:
@@ -129,6 +144,37 @@ class DbLinksStore:
             title_ad = EXCLUDED.title_ad,
             manager_dn = EXCLUDED.manager_dn,
             mail = EXCLUDED.mail,
+            updated_at = now()
+        """
+    )
+    # Зеркало базы 1С в НАШЕЙ таблице one_c_bases: нужно для FK
+    # employee_base_map.base_code -> one_c_bases(code). Имя/URL — код базы,
+    # если в настройках нет названия (реальный источник — settings.onec_bases).
+    _ENSURE_BASE_SQL = text(
+        """
+        INSERT INTO one_c_bases (code, enterprise, name, odata_url)
+        VALUES (:code, :enterprise, :name, :odata_url)
+        ON CONFLICT (code) DO UPDATE SET
+            enterprise = EXCLUDED.enterprise,
+            name = EXCLUDED.name,
+            odata_url = EXCLUDED.odata_url
+        """
+    )
+    # Зеркало сотрудника 1С в НАШЕЙ таблице employee_base_map: нужно для FK
+    # link_1c_ad(enterprise, base_code, tab_num) -> employee_base_map(...).
+    # Только своя БД, в 1С не пишем (истина — живой OData).
+    _ENSURE_EMPLOYEE_SQL = text(
+        """
+        INSERT INTO employee_base_map
+            (enterprise, base_code, tab_num, fio, dept_1c, position_1c, employment_type, hire_date)
+        VALUES (:enterprise, :base_code, :tab_num, :fio, :dept_1c, :position_1c,
+                :employment_type, CAST(:hire_date AS DATE))
+        ON CONFLICT (enterprise, base_code, tab_num) DO UPDATE SET
+            fio = EXCLUDED.fio,
+            dept_1c = EXCLUDED.dept_1c,
+            position_1c = EXCLUDED.position_1c,
+            employment_type = EXCLUDED.employment_type,
+            hire_date = EXCLUDED.hire_date,
             updated_at = now()
         """
     )
@@ -220,25 +266,53 @@ class DbLinksStore:
         except SQLAlchemyError as exc:
             raise LinksUnavailable(f"Хранилище связок недоступно: {exc}") from exc
 
-    def ensure_user(self, row: dict) -> None:
-        """Зеркало пользователя AD в таблице users (только своя БД, upsert)."""
+    def ensure_targets(self, base: dict | None, employee: dict | None, user: dict | None) -> None:
+        """Зеркала ссылок связки (одной транзакцией): база/сотрудник/пользователь.
+
+        Только своя БД (one_c_bases/employee_base_map/users), в AD/1С не пишем.
+        Каждое зеркало опционально — создаём только переданные."""
         try:
             with self._session_factory() as session:
-                session.execute(
-                    self._ENSURE_USER_SQL,
-                    {
-                        "sam": str(row.get("sam") or ""),
-                        # fio_full NOT NULL: пустое displayName — подставляем sam.
-                        "fio_full": str(row.get("fio_full") or row.get("sam") or ""),
-                        "dept_ad": row.get("dept_ad"),
-                        "title_ad": row.get("title_ad"),
-                        "manager_dn": row.get("manager_dn"),
-                        "mail": row.get("mail"),
-                    },
-                )
+                if base and base.get("code"):
+                    session.execute(
+                        self._ENSURE_BASE_SQL,
+                        {
+                            "code": str(base.get("code") or ""),
+                            "enterprise": str(base.get("enterprise") or ""),
+                            "name": str(base.get("name") or base.get("code") or ""),
+                            "odata_url": str(base.get("odata_url") or base.get("code") or ""),
+                        },
+                    )
+                if employee and employee.get("tab_num"):
+                    session.execute(
+                        self._ENSURE_EMPLOYEE_SQL,
+                        {
+                            "enterprise": str(employee.get("enterprise") or ""),
+                            "base_code": str(employee.get("base_code") or ""),
+                            "tab_num": str(employee.get("tab_num") or ""),
+                            "fio": str(employee.get("fio") or employee.get("tab_num") or ""),
+                            "dept_1c": employee.get("dept_1c"),
+                            "position_1c": employee.get("position_1c"),
+                            "employment_type": employee.get("employment_type"),
+                            "hire_date": employee.get("hire_date") or None,
+                        },
+                    )
+                if user and user.get("sam"):
+                    session.execute(
+                        self._ENSURE_USER_SQL,
+                        {
+                            "sam": str(user.get("sam") or ""),
+                            # fio_full NOT NULL: пустое displayName — подставляем sam.
+                            "fio_full": str(user.get("fio_full") or user.get("sam") or ""),
+                            "dept_ad": user.get("dept_ad"),
+                            "title_ad": user.get("title_ad"),
+                            "manager_dn": user.get("manager_dn"),
+                            "mail": user.get("mail"),
+                        },
+                    )
                 session.commit()
         except SQLAlchemyError as exc:
-            raise LinksUnavailable(f"Хранилище пользователей недоступно: {exc}") from exc
+            raise LinksUnavailable(f"Хранилище связок недоступно: {exc}") from exc
 
 
 _db_links_store: DbLinksStore | None = None
