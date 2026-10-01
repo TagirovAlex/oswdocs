@@ -1,4 +1,5 @@
-// Тесты формы создания ОК (волна B4): шаги предприятие→сотрудник→маршрут.
+// Тесты формы создания ОК (Задача 3.3): единая форма без стадий — блоки
+// активируются по зависимостям (предприятие → сотрудник → маршрут → «Создать»).
 // Сеть не нужна: модуль requests-client мокается (как в admin-settings.test.tsx).
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -6,7 +7,7 @@ import { ApiHttpError } from "./auth-client";
 import { CreateForm } from "./create-form";
 import { createRequest, getEmployeeCard, getEnterprises, getStepGroups, searchEmployees } from "./requests-client";
 
-// Мок клиента заявок; чистые функции (toRequestRow и др.) — реальные.
+// Мок клиента заявок; чистые функции — реальные.
 vi.mock("./requests-client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./requests-client")>();
   return {
@@ -34,13 +35,11 @@ beforeEach(() => {
   vi.mocked(getStepGroups).mockResolvedValue(groups);
 });
 
-// Проход мастера до шага «Маршрут»: предприятие → поиск 1С → 503 → ручной ввод.
-async function walkToRouteStep(): Promise<void> {
-  render(<CreateForm role="hr" />);
+// Заполнение формы до маршрута: предприятие → поиск 1С (503) → ручной ввод.
+async function fillEmployeeManually(): Promise<void> {
   await waitFor(() => expect(screen.getByLabelText("Предприятие")).toBeInTheDocument());
   fireEvent.change(screen.getByLabelText("Предприятие"), { target: { value: "ENT_PRIMER_1" } });
-  fireEvent.click(screen.getByText("Далее"));
-  // Шаг 2: поиск; без баз 1С — 503 → ручной ввод с пометкой.
+  // Поиск; без баз 1С — 503 → ручной ввод с пометкой.
   fireEvent.change(screen.getByLabelText("Поиск сотрудника"), { target: { value: "Громов" } });
   await waitFor(() => expect(screen.getByLabelText("Табельный №")).toBeInTheDocument());
   expect(screen.getByText(/введите вручную/)).toBeInTheDocument();
@@ -48,12 +47,12 @@ async function walkToRouteStep(): Promise<void> {
   fireEvent.change(screen.getByLabelText("Табельный №"), { target: { value: "Т-000201" } });
   fireEvent.change(screen.getByLabelText("Подразделение"), { target: { value: "Цех № 1" } });
   fireEvent.change(screen.getByLabelText("Должность"), { target: { value: "Слесарь" } });
-  fireEvent.click(screen.getByText("Далее"));
-  expect(screen.getByText("Маршрут согласования")).toBeInTheDocument();
+  // Маршрут появляется, когда сотрудник заполнен (без стадий и «Далее»).
+  await waitFor(() => expect(screen.getByText("Маршрут согласования")).toBeInTheDocument());
 }
 
 describe("CreateForm", () => {
-  // Полный проход мастера до создания: 201 → статус + сброс на шаг 1.
+  // Полный путь: предприятие → сотрудник → маршрут → 201 → статус + сброс.
   it("создаёт заявку через API и сбрасывает форму", async () => {
     vi.mocked(searchEmployees).mockRejectedValue(new ApiHttpError(503, "Клиент 1С не настроен"));
     vi.mocked(createRequest).mockResolvedValue({
@@ -66,7 +65,8 @@ describe("CreateForm", () => {
       steps: [],
     });
 
-    await walkToRouteStep();
+    render(<CreateForm role="hr" />);
+    await fillEmployeeManually();
     fireEvent.click(screen.getByText("SED_STEP_BUH"));
     fireEvent.click(screen.getByText("Создать"));
 
@@ -81,8 +81,10 @@ describe("CreateForm", () => {
         steps: [{ owner_group: "SED_STEP_BUH" }],
       }),
     );
-    // Сброс формы на шаг 1.
-    expect(screen.getByText("Создание заявки (шаг 1 из 3)")).toBeInTheDocument();
+    // Сброс формы: предприятие пусто → маршрут скрыт, «Создать» недоступен.
+    await waitFor(() => expect(screen.getByLabelText("Предприятие")).toHaveValue(""));
+    expect(screen.queryByText("Маршрут согласования")).not.toBeInTheDocument();
+    expect(screen.getByText("Создать")).toBeDisabled();
   });
 
   // При 200 поиск показывает список найденных сотрудников.
@@ -117,17 +119,14 @@ describe("CreateForm", () => {
     render(<CreateForm role="hr" />);
     await waitFor(() => expect(screen.getByLabelText("Предприятие")).toBeInTheDocument());
     fireEvent.change(screen.getByLabelText("Предприятие"), { target: { value: "ENT_PRIMER_1" } });
-    fireEvent.click(screen.getByText("Далее"));
     fireEvent.change(screen.getByLabelText("Поиск сотрудника"), { target: { value: "Громов" } });
 
     await waitFor(() => expect(screen.getByLabelText("Сотрудник")).toBeInTheDocument());
-    expect(screen.queryByLabelText("Табельный №")).not.toBeInTheDocument();
     // Выбор сотрудника заполняет поля (карточка догружает подразделение/должность)
-    // → можно перейти к маршруту.
+    // → появляется маршрут (без «Далее»).
     fireEvent.change(screen.getByLabelText("Сотрудник"), { target: { value: "Т-000201" } });
     await waitFor(() => expect(getEmployeeCard).toHaveBeenCalled());
-    fireEvent.click(screen.getByText("Далее"));
-    expect(screen.getByText("Маршрут согласования")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText("Маршрут согласования")).toBeInTheDocument());
   });
 
   // Ошибка 422 при создании — alert с текстом от API.
@@ -137,7 +136,8 @@ describe("CreateForm", () => {
       new ApiHttpError(422, "Шаблон не найден: задайте ручной маршрут (steps)"),
     );
 
-    await walkToRouteStep();
+    render(<CreateForm role="hr" />);
+    await fillEmployeeManually();
     fireEvent.click(screen.getByText("SED_STEP_BUH"));
     fireEvent.click(screen.getByText("Создать"));
 
@@ -146,23 +146,26 @@ describe("CreateForm", () => {
     );
   });
 
-  // Без предприятия дальше не пускает.
-  it("не пускает дальше без предприятия", () => {
+  // Без предприятия/сотрудника/маршрута «Создать» недоступен.
+  it("кнопка «Создать» недоступна без полных данных", () => {
     render(<CreateForm role="hr" />);
-    expect(screen.getByText("Далее")).toBeDisabled();
+    expect(screen.getByText("Создать")).toBeDisabled();
+    // Блоки сотрудника и маршрута не видны, пока не выбрано предприятие.
+    expect(screen.queryByLabelText("Поиск сотрудника")).not.toBeInTheDocument();
+    expect(screen.queryByText("Маршрут согласования")).not.toBeInTheDocument();
   });
 
   // Админ тоже может создавать (роль admin, как в API _is_hr).
   it("админу создание доступно", async () => {
     render(<CreateForm role="admin" />);
-    await waitFor(() => expect(screen.getByText("Создание заявки (шаг 1 из 3)")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("Создание заявки")).toBeInTheDocument());
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
   // Руководитель ОК тоже может создавать (роль hr_admin, как в API _is_hr).
   it("руководителю ОК создание доступно", async () => {
     render(<CreateForm role="hr_admin" />);
-    await waitFor(() => expect(screen.getByText("Создание заявки (шаг 1 из 3)")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("Создание заявки")).toBeInTheDocument());
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 

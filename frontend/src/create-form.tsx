@@ -1,5 +1,6 @@
-// Форма создания заявки для ОК (волна B4, реальный API).
-// Шаги: предприятие → сотрудник → маршрут → POST /api/requests.
+// Форма создания заявки для ОК (Задача 3.3): единая форма без стадий.
+// Блоки появляются/активируются по зависимостям: предприятие → сотрудник →
+// маршрут → «Создать»; невалидное — недоступно (кнопка «Создать» disabled).
 // Предприятия и группы — только из API (settings БД), хардкода нет (AGENTS.md п.3).
 // Сотрудник: поиск в 1С (GET /api/employees); без баз (503) — ручной ввод полей.
 import { useEffect, useRef, useState } from "react";
@@ -13,10 +14,9 @@ interface CreateFormProps {
   role: Role;
 }
 
-// Форма создания: мастер из трёх шагов.
+// Форма создания: единый экран, блоки по зависимостям.
 export function CreateForm(props: CreateFormProps) {
   const { role } = props;
-  const [step, setStep] = useState<number>(0);
   const [enterprises, setEnterprises] = useState<Enterprise[]>([]);
   const [enterprise, setEnterprise] = useState<string>("");
   const [groups, setGroups] = useState<string[]>([]);
@@ -63,6 +63,11 @@ export function CreateForm(props: CreateFormProps) {
 
   // Название выбранного предприятия (код — в составном ключе сотрудника).
   const enterpriseName = enterprises.find((ent) => ent.code === enterprise)?.name ?? enterprise;
+
+  // Готовность формы: предприятие → сотрудник → маршрут (без стадий).
+  const employeeReady =
+    fio.trim() !== "" && tabNum.trim() !== "" && department.trim() !== "" && position.trim() !== "";
+  const canCreate = enterprise !== "" && employeeReady && manualGroups.length > 0 && !busy;
 
   // Поиск сотрудника в 1С; без баз (503) или пустой результат — ручной ввод полей.
   function handleSearch(query: string): void {
@@ -131,16 +136,7 @@ export function CreateForm(props: CreateFormProps) {
     setManualGroups((prev) => (prev.includes(group) ? prev.filter((g) => g !== group) : [...prev, group]));
   }
 
-  // Проверка шага перед переходом дальше.
-  function canNext(): boolean {
-    if (step === 0) return enterprise !== "";
-    if (step === 1) {
-      return fio.trim() !== "" && tabNum.trim() !== "" && department.trim() !== "" && position.trim() !== "";
-    }
-    return false;
-  }
-
-  // Создание заявки: POST /api/requests; при 201 — статус и сброс формы на шаг 1.
+  // Создание заявки: POST /api/requests; при 201 — статус и сброс формы.
   async function handleCreate(): Promise<void> {
     if (busy) return;
     setCreateError("");
@@ -156,7 +152,6 @@ export function CreateForm(props: CreateFormProps) {
         steps: manualGroups.map((g) => ({ owner_group: g })),
       });
       setCreated(`Заявка ${result.id} создана`);
-      setStep(0);
       setEnterprise("");
       setTabNum("");
       setFio("");
@@ -176,30 +171,28 @@ export function CreateForm(props: CreateFormProps) {
 
   return (
     <section aria-label="Создание заявки">
-      <h3>Создание заявки (шаг {step + 1} из 3)</h3>
+      <h3>Создание заявки</h3>
 
       {loadError && <div role="alert">Ошибка: {loadError}</div>}
-      {/* Статус создания виден после сброса формы на шаг 1. */}
       {created && <div role="status">{created}</div>}
 
-      {/* Шаг 1: предприятие из настроек (без хардкод-массивов). */}
-      {step === 0 && (
-        <label>
-          Предприятие
-          <select aria-label="Предприятие" value={enterprise} onChange={(e) => setEnterprise(e.target.value)}>
-            <option value="">— выберите —</option>
-            {enterprises.map((ent) => (
-              <option key={ent.code} value={ent.code}>
-                {ent.name}
-              </option>
-            ))}
-          </select>
-        </label>
-      )}
+      {/* Предприятие из настроек (без хардкод-массивов) — шаг 1 формы. */}
+      <label>
+        Предприятие
+        <select aria-label="Предприятие" value={enterprise} onChange={(e) => setEnterprise(e.target.value)}>
+          <option value="">— выберите —</option>
+          {enterprises.map((ent) => (
+            <option key={ent.code} value={ent.code}>
+              {ent.name}
+            </option>
+          ))}
+        </select>
+      </label>
 
-      {/* Шаг 2: сотрудник (поиск 1С либо ручной ввод при 503). */}
-      {step === 1 && (
-        <div>
+      {/* Сотрудник: активируется после выбора предприятия. */}
+      {enterprise && (
+        <fieldset style={{ marginTop: 12 }}>
+          <legend>Сотрудник</legend>
           <label>
             Поиск сотрудника
             <input
@@ -255,12 +248,12 @@ export function CreateForm(props: CreateFormProps) {
           {!manualMode && empHits.length === 0 && !empSearching && (
             <div className="sed-note">Введите запрос для поиска в 1С либо укажите данные вручную.</div>
           )}
-        </div>
+        </fieldset>
       )}
 
-      {/* Шаг 3: ручной конструктор из групп API (шаблоны из settings пока пусты). */}
-      {step === 2 && (
-        <fieldset>
+      {/* Маршрут: активируется, когда сотрудник заполнен. */}
+      {enterprise && employeeReady && (
+        <fieldset style={{ marginTop: 12 }}>
           <legend>Маршрут согласования</legend>
           <div className="sed-note">Шаблоны маршрутов из настроек не заданы — отметьте группы владельцев вручную.</div>
           {groups.length === 0 && (
@@ -276,31 +269,15 @@ export function CreateForm(props: CreateFormProps) {
               {group}
             </label>
           ))}
-          <div className="sed-toolbar" style={{ marginTop: 12 }}>
-            <button
-              type="button"
-              className="sed-btn"
-              disabled={manualGroups.length === 0 || busy}
-              onClick={handleCreate}
-            >
-              {busy ? "Создание…" : "Создать"}
-            </button>
-          </div>
-          {createError && <div role="alert">{createError}</div>}
         </fieldset>
       )}
 
-      {/* Навигация мастера. */}
       <div className="sed-toolbar" style={{ marginTop: 12 }}>
-        <button type="button" className="sed-btn sed-btn--ghost" disabled={step === 0} onClick={() => setStep(step - 1)}>
-          Назад
+        <button type="button" className="sed-btn" disabled={!canCreate} onClick={handleCreate}>
+          {busy ? "Создание…" : "Создать"}
         </button>
-        {step < 2 && (
-          <button type="button" className="sed-btn" disabled={!canNext()} onClick={() => setStep(step + 1)}>
-            Далее
-          </button>
-        )}
       </div>
+      {createError && <div role="alert">{createError}</div>}
     </section>
   );
 }

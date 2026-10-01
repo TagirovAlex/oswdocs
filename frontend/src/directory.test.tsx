@@ -1,23 +1,15 @@
-// Тесты справочника сотрудников (Directory): поиск, карточка, привязка AD (админ).
+// Тесты справочника сотрудников (Directory, Задача 3): поиск, окно карточки
+// (window.open), автосвязка. Карточка сотрудника и привязка AD — в окне
+// (EmployeeCardView, см. employee-card-view.test.tsx).
 // Сеть не нужна: requests-client мокается; ФИО/предприятия вымышленные.
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Directory } from "./directory";
-import {
-  createLink,
-  getEmployeeCard,
-  getEnterprises,
-  searchAd,
-  searchEmployees,
-  syncLinks,
-} from "./requests-client";
+import { getEnterprises, searchEmployees, syncLinks } from "./requests-client";
 
 vi.mock("./requests-client", () => ({
   getEnterprises: vi.fn(),
   searchEmployees: vi.fn(),
-  getEmployeeCard: vi.fn(),
-  createLink: vi.fn(),
-  searchAd: vi.fn(),
   syncLinks: vi.fn(),
 }));
 
@@ -35,79 +27,30 @@ const hits = [
     needs_manual_review: false,
   },
 ];
-const card = {
-  key: "A|zup|001",
-  enterprise: "A",
-  base_code: "zup",
-  tab_num: "001",
-  truth_source: "1c",
-  link: { linked: false },
-  divergences: [],
-  needs_manual_review: false,
-  fio: "Сказочников Тест Тестович",
-  dept: "Цех",
-  position: "Тестировщик",
-  hire_date: "2020-01-15",
-  dismissal_date: null,
-  ad_sam: null,
-  ad_status: "match",
-  snapshot_1c: null,
-  snapshot_ad: null,
-};
-const adCandidate = {
-  sam: "t.skaz",
-  display_name: "Сказочников Тест Тестович",
-  department: "Цех",
-  title: "Тестировщик",
-  mail: "t.skaz@example.local",
-};
 
 beforeEach(() => {
   vi.mocked(getEnterprises).mockReset();
   vi.mocked(searchEmployees).mockReset();
-  vi.mocked(getEmployeeCard).mockReset();
-  vi.mocked(createLink).mockReset();
-  vi.mocked(searchAd).mockReset();
   vi.mocked(syncLinks).mockReset();
 });
 
 describe("Directory", () => {
-  it("ОК находит сотрудников и видит карточку (просмотр)", async () => {
+  it("ОК находит сотрудников; клик по строке открывает окно карточки", async () => {
     vi.mocked(getEnterprises).mockResolvedValue(enterprises);
     vi.mocked(searchEmployees).mockResolvedValue({ items: hits });
-    vi.mocked(getEmployeeCard).mockResolvedValue(card);
+    const open = vi.spyOn(window, "open").mockImplementation(() => null);
 
     render(<Directory role="hr" />);
     await waitFor(() => expect(screen.getByLabelText("Предприятие справочника")).toBeInTheDocument());
     fireEvent.click(screen.getByText("Найти"));
     await waitFor(() => expect(screen.getByText("Сказочников Тест Тестович")).toBeInTheDocument());
 
+    // ОК — просмотр: кнопки автосвязки нет.
+    expect(screen.queryByText("Автосвязка 1С↔AD")).not.toBeInTheDocument();
+
     fireEvent.click(screen.getByText("Сказочников Тест Тестович"));
-    await waitFor(() => expect(screen.getByText(/Карточка:/)).toBeInTheDocument());
-    // ОК — просмотр: кнопки привязки нет.
-    expect(screen.queryByText("Привязать AD")).not.toBeInTheDocument();
-  });
-
-  it("админ ищет в AD и привязывает выбранного кандидата", async () => {
-    vi.mocked(getEnterprises).mockResolvedValue(enterprises);
-    vi.mocked(searchEmployees).mockResolvedValue({ items: hits });
-    vi.mocked(getEmployeeCard).mockResolvedValue(card);
-    vi.mocked(searchAd).mockResolvedValue([adCandidate]);
-    vi.mocked(createLink).mockResolvedValue({});
-
-    render(<Directory role="admin" />);
-    await waitFor(() => expect(screen.getByLabelText("Предприятие справочника")).toBeInTheDocument());
-    fireEvent.click(screen.getByText("Найти"));
-    await waitFor(() => expect(screen.getByText("Сказочников Тест Тестович")).toBeInTheDocument());
-    fireEvent.click(screen.getByText("Сказочников Тест Тестович"));
-    await waitFor(() => expect(screen.getByLabelText("Поиск в AD")).toBeInTheDocument());
-
-    fireEvent.change(screen.getByLabelText("Поиск в AD"), { target: { value: "Сказочников" } });
-    fireEvent.click(screen.getByText("Найти в AD"));
-    await waitFor(() => expect(screen.getByLabelText("Кандидаты AD")).toBeInTheDocument());
-
-    fireEvent.click(screen.getByText("Привязать"));
-    await waitFor(() => expect(createLink).toHaveBeenCalledWith({ enterprise: "A", base_code: "zup", tab_num: "001", sam: "t.skaz" }));
+    expect(open).toHaveBeenCalledWith("?view=employee&key=A%7Czup%7C001", "_blank", expect.stringContaining("popup"));
+    open.mockRestore();
   });
 
   it("админ запускает автосвязку 1С↔AD", async () => {

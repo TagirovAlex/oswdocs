@@ -8,9 +8,36 @@ import type { AuthUser } from "./auth-client";
 import { SedLayout } from "./layout";
 import { LoginScreen } from "./login-screen";
 import { ThemeProvider } from "./theme";
+import { CreateWindow } from "./create-window";
+import { EmployeeWindow } from "./employee-window";
+import { RequestWindow } from "./request-window";
 
 const rootEl = document.getElementById("root");
 if (!rootEl) throw new Error("Нет корневого элемента #root");
+
+// Лёгкий роутинг окон (Задача 3): query-параметр ?view= без роутера.
+// view=request&id=… — карточка заявки; view=employee&key=… — карточка
+// сотрудника (enterprise|base_code|tab_num); view=create — создание заявки.
+type View =
+  | { view: "main" }
+  | { view: "request"; id: string }
+  | { view: "employee"; key: string }
+  | { view: "create" };
+
+function parseView(): View {
+  const params = new URLSearchParams(window.location.search);
+  const view = params.get("view");
+  if (view === "request") {
+    const id = params.get("id");
+    if (id) return { view: "request", id };
+  }
+  if (view === "employee") {
+    const key = params.get("key");
+    if (key) return { view: "employee", key };
+  }
+  if (view === "create") return { view: "create" };
+  return { view: "main" };
+}
 
 // Приложение: экран логина или каркас в зависимости от сессии.
 function App() {
@@ -56,7 +83,11 @@ function App() {
   if (checking) return <div className="sed-note">Проверка сессии…</div>;
   // Нет сессии — экран логина.
   if (!auth) return <LoginScreen onSuccess={setAuth} />;
-  // Сессия есть — каркас с ролью из /auth/me.
+  // Сессия есть — каркас с ролью из /auth/me; окна-попы — по ?view= (без шапки).
+  const route = parseView();
+  if (route.view === "request") return <RequestWindow requestId={route.id} role={auth.role} />;
+  if (route.view === "employee") return <EmployeeWindow employeeKey={route.key} role={auth.role} />;
+  if (route.view === "create") return <CreateWindow role={auth.role} />;
   return <SedLayout role={auth.role} onLogout={handleLogout} />;
 }
 
