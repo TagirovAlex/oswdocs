@@ -3,11 +3,12 @@
 // Сотрудник — живой поиск (debounce), данные из 1С справочные; маршрут —
 // конструктор блоков с исполнителями из AD. Сеть не нужна: модуль
 // requests-client мокается (как в admin-settings.test.tsx).
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiHttpError } from "./auth-client";
 import { CreateForm } from "./create-form";
 import { createRequest, getAdGroupMembers, getEmployeeCard, getEnterprises, getStepGroups, searchAd, searchEmployees, submitRequest } from "./requests-client";
+import type { AdGroupMember } from "./requests-client";
 
 // Мок клиента заявок; чистые функции — реальные.
 vi.mock("./requests-client", async (importOriginal) => {
@@ -43,6 +44,14 @@ const groupMember = {
   mail: "sidorova.as@example.test",
   department: "Бухгалтерия",
   title: "Главный бухгалтер",
+};
+// Состав второй группы-владельца (тесты удаления блока и гонки ответов).
+const okGroupMember = {
+  sam: "ivanov.ii",
+  display_name: "Иванов Иван Иванович",
+  mail: "ivanov.ii@example.test",
+  department: "Отдел кадров",
+  title: "Начальник",
 };
 
 beforeEach(() => {
@@ -548,6 +557,109 @@ describe("CreateForm", () => {
     // Второй блок не показывает члена первой группы.
     expect(screen.getByLabelText("Состав группы SED_STEP_OK")).toHaveTextContent("Иванов Иван Иванович");
     expect(screen.getByLabelText("Состав группы SED_STEP_BUH")).not.toHaveTextContent("Иванов Иван Иванович");
+  });
+
+  // Регресс B1: удаление блока не отдаёт его группу и состав следующему. Раньше
+  // состояние висело на индексе блока, и у оставшегося подменялись чужие группа
+  // и состав (в теле уходил неверный owner_group).
+  it("удаление первого блока не подменяет группу и состав второму", async () => {
+    vi.mocked(searchEmployees).mockRejectedValue(new ApiHttpError(503, "Клиент 1С не настроен"));
+    vi.mocked(getAdGroupMembers).mockImplementation(async (group: string) =>
+      group === "SED_STEP_BUH" ? [groupMember] : [okGroupMember],
+    );
+    vi.mocked(createRequest).mockResolvedValue({
+      id: "REQ-0006",
+      status: "Черновик",
+      route_origin: "custom",
+      department: "Цех № 1",
+      position: "Слесарь",
+      created_by: "petrov.pp",
+      steps: [],
+    });
+
+    render(<CreateForm role="hr" />);
+    await fillEmployeeManually();
+
+    // Блок 1 — группа SED_STEP_BUH (состав из AD загрузился).
+    fireEvent.click(screen.getByText("Добавить блок"));
+    fireEvent.change(screen.getByLabelText("Тип исполнителя блока 1"), { target: { value: "group" } });
+    await waitFor(() => expect(screen.getByLabelText("Группа блока 1")).toBeInTheDocument());
+    fireEvent.change(screen.getByLabelText("Группа блока 1"), { target: { value: "SED_STEP_BUH" } });
+    await waitFor(() =>
+      expect(screen.getAllByRole("button", { name: "Показать состав" }).length).toBe(1),
+    );
+
+    // Блок 2 — группа SED_STEP_OK со своим составом.
+    fireEvent.click(screen.getByText("Добавить блок"));
+    fireEvent.change(screen.getByLabelText("Тип исполнителя блока 2"), { target: { value: "group" } });
+    await waitFor(() => expect(screen.getByLabelText("Группа блока 2")).toBeInTheDocument());
+    fireEvent.change(screen.getByLabelText("Группа блока 2"), { target: { value: "SED_STEP_OK" } });
+    await waitFor(() =>
+      expect(screen.getAllByRole("button", { name: "Показать состав" }).length).toBe(2),
+    );
+    // Раскрываем состав второго блока — члены SED_STEP_OK, а не первой группы.
+    const showButtons = screen.getAllByRole("button", { name: "Показать состав" });
+    fireEvent.click(showButtons[showButtons.length - 1]);
+    await waitFor(() =>
+      expect(screen.getByLabelText("Состав группы SED_STEP_OK")).toHaveTextContent("Иванов Иван Иванович"),
+    );
+    // Группу второго блока добавляем в маршрут (кнопка под его селектом).
+    fireEvent.click(screen.getAllByRole("button", { name: "Добавить группу" })[1]);
+
+    // Удаляем ПЕРВЫЙ блок: у оставшегося своя группа, свой состав и свой шаг.
+    fireEvent.click(screen.getAllByRole("button", { name: "Удалить блок" })[0]);
+    expect(screen.queryByLabelText("Группа блока 2")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Группа блока 1")).toHaveValue("SED_STEP_OK");
+    expect(screen.getByLabelText("Состав группы SED_STEP_OK")).toHaveTextContent("Иванов Иван Иванович");
+    expect(screen.getByLabelText("Состав группы SED_STEP_OK")).not.toHaveTextContent("Сидорова");
+
+    // В теле создания owner_group второго блока (не группы удалённого блока).
+    fireEvent.click(screen.getByText("Создать"));
+    await waitFor(() =>
+      expect(vi.mocked(createRequest)).toHaveBeenCalledWith(
+        expect.objectContaining({
+          blocks: [
+            { mode: "sequential", steps: [{ owner_group: "SED_STEP_OK", resolver: "by_group" }] },
+          ],
+        }),
+      ),
+    );
+  });
+
+  // Регресс B1 (гонка): медленный ответ состава по прежней группе не должен
+  // перезаписывать состав текущей (счётчик запросов на блок, как adSeq).
+  it("устаревший ответ состава не перезатирает текущий", async () => {
+    vi.mocked(searchEmployees).mockRejectedValue(new ApiHttpError(503, "Клиент 1С не настроен"));
+    // Ответ по SED_STEP_BUH приходит только вручную (после переключения группы).
+    let releaseSlow: (members: AdGroupMember[]) => void = () => {};
+    const slow = new Promise<AdGroupMember[]>((resolve) => {
+      releaseSlow = resolve;
+    });
+    vi.mocked(getAdGroupMembers).mockImplementation((group: string) =>
+      group === "SED_STEP_BUH" ? slow : Promise.resolve([okGroupMember]),
+    );
+
+    render(<CreateForm role="hr" />);
+    await fillEmployeeManually();
+    fireEvent.click(screen.getByText("Добавить блок"));
+    fireEvent.change(screen.getByLabelText("Тип исполнителя блока 1"), { target: { value: "group" } });
+    await waitFor(() => expect(screen.getByLabelText("Группа блока 1")).toBeInTheDocument());
+
+    // Выбрали группу с медленным ответом, сразу переключились на другую.
+    fireEvent.change(screen.getByLabelText("Группа блока 1"), { target: { value: "SED_STEP_BUH" } });
+    fireEvent.change(screen.getByLabelText("Группа блока 1"), { target: { value: "SED_STEP_OK" } });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Показать состав" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Показать состав" }));
+    await waitFor(() =>
+      expect(screen.getByLabelText("Состав группы SED_STEP_OK")).toHaveTextContent("Иванов Иван Иванович"),
+    );
+
+    // Ответ по прежней группе приходит позже — состав текущей не меняется.
+    await act(async () => {
+      releaseSlow([groupMember]);
+    });
+    expect(screen.getByLabelText("Состав группы SED_STEP_OK")).toHaveTextContent("Иванов Иван Иванович");
+    expect(screen.getByLabelText("Состав группы SED_STEP_OK")).not.toHaveTextContent("Сидорова");
   });
 
   // Недоступность состава группы — понятный текст, форма не падает.

@@ -244,6 +244,47 @@ def test_no_template_falls_back_to_manual(client, hr, test_settings_override, ro
     assert len(body["steps"]) == 1
 
 
+def test_step_without_executor_422(client, hr, test_settings_override, route_override):
+    """Шаг без sam и owner_group — 422 от схемы (раньше доходил до _Step и давал 500).
+
+    Пустая/пробельная группа тоже считается отсутствующим исполнителем."""
+    without_group = _create(
+        client, hr, position=FAKE_POSITION_OTHER, steps=[{"resolver": "by_group"}]
+    )
+    assert without_group.status_code == 422
+    assert "owner_group" in without_group.text
+    blank_group = _create(
+        client, hr, position=FAKE_POSITION_OTHER, steps=[{"owner_group": "  "}]
+    )
+    assert blank_group.status_code == 422
+
+
+def test_block_step_without_executor_422(client, hr, test_settings_override, route_override):
+    """Блочный маршрут: шаг без sam и owner_group — 422; контракт блоков цел
+    (групповой шаг owner_group+by_group и персональный sam создаются)."""
+    bad = _create(
+        client, hr, blocks=[{"mode": "sequential", "steps": [{"resolver": "by_group"}]}]
+    )
+    assert bad.status_code == 422
+    group = _create(
+        client,
+        hr,
+        blocks=[
+            {
+                "mode": "sequential",
+                "steps": [{"owner_group": "SED_STEP_BUH", "resolver": "by_group"}],
+            }
+        ],
+    )
+    assert group.status_code == 201
+    personal = _create(client, hr, blocks=[{"mode": "parallel", "steps": [{"sam": BUH_SAM}]}])
+    assert personal.status_code == 201
+    step = personal.json()["steps"][0]
+    assert step["owner_group"] == BUH_SAM
+    assert step["resolver"] == "by_user"
+    assert step["assignee"] == BUH_SAM
+
+
 def test_template_picked_by_service_category(client, hr, test_settings_override, route_override):
     """Шаблон по службе/категории (категория из position_to_category)."""
     response = _create(client, hr)
@@ -560,6 +601,29 @@ def test_assignee_hidden_from_non_owner(
     assert client.get(f"/requests/{rid}", headers=hr).json()["steps"][0]["assignee"] == COLLEAGUE_SAM
 
 
+# --- created_by/done_by (это sAMAccountName): только привилегированным ---
+
+def test_created_by_and_done_by_hidden_from_owner(
+    client, hr, buh_owner, test_settings_override, route_override
+):
+    """Автор заявки и отметивший — логины: владельцу шага не отдаются (как
+    assignee), привилегированному отдаются. Даты отметки (done_at) остаются."""
+    rid = _create(client, hr).json()["id"]
+    assert client.post(f"/requests/{rid}/submit", headers=hr).status_code == 200
+    assert client.post(
+        f"/requests/{rid}/steps/1/decision",
+        json={"decision": "approve"},
+        headers=buh_owner,
+    ).status_code == 200
+    owner_view = client.get(f"/requests/{rid}", headers=buh_owner).json()
+    assert owner_view["created_by"] is None
+    assert owner_view["steps"][0]["done_by"] is None
+    assert owner_view["steps"][0]["done_at"] is not None
+    hr_view = client.get(f"/requests/{rid}", headers=hr).json()
+    assert hr_view["created_by"] == hr["X-Mock-Sam"]
+    assert hr_view["steps"][0]["done_by"] == buh_owner["X-Mock-Sam"]
+
+
 # --- enterprise_name: продакшн-ветка резолва настроек (без dependency_overrides) ---
 
 class _EnterpriseStore:
@@ -572,12 +636,13 @@ class _EnterpriseStore:
         return self._raw
 
 
-def test_enterprise_names_map_reads_real_settings_store(monkeypatch):
+def test_enterprise_names_map_reads_real_settings_store(monkeypatch, real_boundaries):
     """Резолв карты предприятий идёт через боевое хранилище настроек.
 
     Проверяется именно продакшн-ветка (подменён сам _db_store, а не
     dependency_overrides): раньше сюда попадал объект Depends вместо Settings
     и карта молча превращалась в {} — enterprise_name был всегда null.
+    real_boundaries снимает офлайн-подмену границ из conftest.
     """
     monkeypatch.setattr(
         settings_routes, "_db_store",
@@ -586,7 +651,7 @@ def test_enterprise_names_map_reads_real_settings_store(monkeypatch):
     assert _enterprise_names_map() == {"E1": "Первое", "E2": "Второе"}
 
 
-def test_enterprise_names_map_empty_when_settings_fails(monkeypatch):
+def test_enterprise_names_map_empty_when_settings_fails(monkeypatch, real_boundaries):
     """Ключа нет или БД недоступна — пустая карта, без исключения (fail-soft)."""
 
     class BrokenStore:

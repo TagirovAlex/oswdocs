@@ -215,6 +215,58 @@ describe("RequestCard", () => {
     expect(screen.queryByText(/ENT_PRIMER_1/)).not.toBeInTheDocument();
   });
 
+  // Регресс ревью: персональный шаг «замена руководителя»
+  // (resolver=ad_direct_manager, исполнитель в assignee) отличается от by_user
+  // только набором полей — по resolver его не опознать, поэтому в колонке
+  // «Исполнитель» должно быть ФИО, а не название группы-владельца.
+  it("персональный шаг ad_direct_manager: ФИО замены руководителя, а не группа", async () => {
+    vi.mocked(getRequest).mockResolvedValue({
+      ...requestWith("Громов Игорь Олегович", "На согласовании"),
+      steps: [
+        {
+          order: 1,
+          owner_group: "SED_STEP_BUH",
+          resolver: "ad_direct_manager",
+          assignee: "sidorova.as",
+          owner_name: "Сидорова Анна Сергеевна",
+          can_act: true,
+          status: "ожидает",
+          expires_at: "2026-10-05T10:00:00+00:00",
+        },
+      ],
+    });
+
+    renderCard();
+    await waitFor(() => expect(screen.getByLabelText("Шаги заявки")).toBeInTheDocument());
+    const steps = within(screen.getByLabelText("Шаги заявки"));
+    expect(steps.getByText("Сидорова Анна Сергеевна")).toBeInTheDocument();
+    expect(steps.queryByText("SED_STEP_BUH")).not.toBeInTheDocument();
+    // Логин AD замены руководителя в карточке не выводится.
+    expect(screen.queryByText(/sidorova\.as/)).not.toBeInTheDocument();
+  });
+
+  // Групповой шаг без ФИО — название группы владельцев (не прочерк).
+  it("групповой шаг без ФИО: в колонке «Исполнитель» название группы", async () => {
+    vi.mocked(getRequest).mockResolvedValue({
+      ...requestWith("Громов Игорь Олегович", "На согласовании"),
+      steps: [
+        {
+          order: 1,
+          owner_group: "SED_STEP_BUH",
+          resolver: "by_group",
+          can_act: false,
+          status: "ожидает",
+          expires_at: "2026-10-05T10:00:00+00:00",
+        },
+      ],
+    });
+
+    renderCard();
+    await waitFor(() => expect(screen.getByLabelText("Шаги заявки")).toBeInTheDocument());
+    const steps = within(screen.getByLabelText("Шаги заявки"));
+    expect(steps.getByText("SED_STEP_BUH")).toBeInTheDocument();
+  });
+
   // Действия по шагу — строго по can_act: при can_act=false кнопок нет даже у владельца.
   it("can_act=false — кнопок согласования нет даже у владельца", async () => {
     vi.mocked(getRequest).mockResolvedValue(requestWith(null, "На согласовании"));

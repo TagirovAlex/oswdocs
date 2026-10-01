@@ -34,6 +34,8 @@ const folders: Folder[] = [
 
 // Заявка из GET /api/requests (RequestOut; для владельца fio=null).
 // Шаг по умолчанию — групповой, can_act=false (кнопок согласования нет).
+// owner_name бэкенд резолвит из assignee, поэтому у группового шага его нет —
+// подпись шага строится по названию группы.
 function requestWith(
   fio: string | null,
   status: string,
@@ -55,7 +57,6 @@ function requestWith(
         order: 1,
         owner_group: "SED_STEP_BUH",
         resolver: "by_group",
-        owner_name: "Сидорова Анна Сергеевна",
         can_act: false,
         status: "ожидает",
         expires_at: "2026-10-05T10:00:00+00:00",
@@ -272,7 +273,7 @@ describe("SedLayout", () => {
   // Колонка «Текущий согласующий» — только привилегированным: ФИО исполнителя
   // текущего шага (у сотрудника колонки нет). Персональный шаг (by_user) несёт
   // логин в owner_group — в списке он не должен появляться.
-  it("колонка «Текущий согласующий» показывает ФИО шага с can_act", async () => {
+  it("колонка «Текущий согласующий» показывает ФИО персонального шага", async () => {
     vi.mocked(getFolders).mockResolvedValue(folders);
     vi.mocked(getRequests).mockResolvedValue([
       requestWith("Громов Игорь Олегович", "На согласовании", "REQ-0001", myStep),
@@ -287,7 +288,8 @@ describe("SedLayout", () => {
   });
 
   // Регресс п. 3.2: у персонального шага owner_group = sAMAccountName, поэтому
-  // подпись шага строится по resolver, а не по owner_group.
+  // подпись шага строится по ФИО (owner_name), а без неё — нейтральный текст,
+  // но не owner_group.
   it("персональный шаг: в списке ФИО, а не логин (can_act и без него)", () => {
     const withoutCanAct = myStep.map((s) => ({ ...s, can_act: false }));
     const rows = [toRequestRow(requestWith("Громов Игорь Олегович", "На согласовании", "REQ-0001", myStep))];
@@ -308,8 +310,8 @@ describe("SedLayout", () => {
     expect(row.step).toBe("Персональный исполнитель");
   });
 
-  // Без can_act показывается название группы, а не логин согласующего.
-  it("без can_act в колонке согласующего — название группы", async () => {
+  // Групповой шаг (ФИО нет) — название группы, а не логин согласующего.
+  it("групповой шаг в колонке согласующего — название группы", async () => {
     vi.mocked(getFolders).mockResolvedValue(folders);
     vi.mocked(getRequests).mockResolvedValue([
       requestWith("Громов Игорь Олегович", "На согласовании", "REQ-0001"),

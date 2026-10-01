@@ -18,7 +18,7 @@ import {
   toExecution,
   uploadAttachment,
 } from "./requests-client";
-import type { AttachmentMeta, DocumentMeta, RequestOut, StepDecision } from "./requests-client";
+import type { AttachmentMeta, DocumentMeta, RequestOut, RequestStep, StepDecision } from "./requests-client";
 import type { Role } from "./api-mock";
 
 interface RequestCardProps {
@@ -26,6 +26,18 @@ interface RequestCardProps {
   requestId: string;
   // Роль сессии (полная карточка — hr/hr_admin/admin; владельцу — свои шаги без ПДн).
   role: Role;
+}
+
+// Исполнитель шага: ФИО (owner_name), если бэкенд его прислал, иначе название
+// группы. ФИО приходит для персональных шагов (в т.ч. замена руководителя,
+// resolver=ad_direct_manager, исполнитель в assignee) — по признаку resolver
+// их не отличить от группового шага, поэтому смотрим owner_name. У by_user
+// бэкенд кладёт логин в owner_group — без ФИО показываем нейтральный текст.
+// Логика совпадает с stepOwnerLabel в requests-client.
+function stepOwnerCell(step: RequestStep): string {
+  if (step.owner_name) return step.owner_name;
+  if (step.resolver === "by_user") return "Персональный исполнитель";
+  return step.owner_group || "—";
 }
 
 // Карточка заявки со всеми блоками (W5b + документы + вложения).
@@ -319,9 +331,7 @@ export function RequestCard(props: RequestCardProps) {
                 <tr key={step.order}>
                   <td>{stepLabel(step.order)}</td>
                   <td>
-                    {step.resolver === "by_user"
-                      ? (step.owner_name ?? "Персональный исполнитель")
-                      : (step.owner_group || "—")}
+                    {stepOwnerCell(step)}
                   </td>
                   <td>{step.status}</td>
                   <td>{step.expires_at.slice(0, 10)}</td>

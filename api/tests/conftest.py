@@ -19,7 +19,9 @@ if str(API_DIR) not in sys.path:
     sys.path.insert(0, str(API_DIR))
 
 from app.audit import audit_log  # noqa: E402
+from app.employees import get_ad_reader  # noqa: E402
 from app.main import app  # noqa: E402
+from app.settings_routes import get_settings_store  # noqa: E402
 
 # --- Вымышленные пользователи (не реальные ФИО/логины) ---
 FAKE_HR = {
@@ -83,6 +85,62 @@ def mock_headers(user: dict) -> dict:
         "X-Mock-Title": _b64(user["title"]),
         "X-Mock-Groups": ",".join(user["groups"]),
     }
+
+
+class OfflineSettingsStore:
+    """Пустое in-memory хранилище настроек для офлайн-прогонов (без Postgres).
+
+    Контракт DbSettingsStore: значения в сид-формате строками, ключа нет — None.
+    Пустое хранилище = «ключа enterprises нет», поэтому enterprise_name в ответах
+    None (без 500) и ни одного обращения к живой БД."""
+
+    def __init__(self) -> None:
+        self.values: dict[str, str] = {}
+
+    def get(self, key: str) -> str | None:
+        return self.values.get(key)
+
+    def set(self, key: str, value: str) -> None:
+        self.values[key] = value
+
+    def get_many(self, keys) -> dict[str, str | None]:
+        return {key: self.values.get(key) for key in keys}
+
+    def set_many(self, values) -> None:
+        self.values.update(values)
+
+
+# Границы, которые по умолчанию не должны ходить в живую БД/AD (заметка B2 ревью):
+# привилегированные эндпоинты заявок резолвят карту предприятий
+# (_enterprise_names_map -> get_settings_store) и ридер AD, поэтому без подмен
+# весь набор pytest зависал на несуществующем Postgres.
+OFFLINE_BOUNDARIES = (get_settings_store, get_ad_reader)
+
+
+@pytest.fixture(autouse=True)
+def offline_boundaries():
+    """Подменить живые границы офлайн-прогонов: настройки — пусто, AD — None.
+
+    Тесты со своими override'ами перебивают эти значения своими (override ставится
+    после autouse-фикстуры); для юнит-тестов ветки боевого кода без подмен —
+    фикстура real_boundaries. Только чтение: AD/1С/Postgres не трогаются."""
+    app.dependency_overrides[get_settings_store] = lambda: OfflineSettingsStore()
+    app.dependency_overrides[get_ad_reader] = lambda: None
+    yield
+    for factory in OFFLINE_BOUNDARIES:
+        app.dependency_overrides.pop(factory, None)
+
+
+@pytest.fixture
+def real_boundaries():
+    """Снять офлайн-подмены границ (тест проверяет боевое ветвление без них)."""
+    saved = {
+        factory: app.dependency_overrides.pop(factory)
+        for factory in OFFLINE_BOUNDARIES
+        if factory in app.dependency_overrides
+    }
+    yield
+    app.dependency_overrides.update(saved)
 
 
 @pytest.fixture

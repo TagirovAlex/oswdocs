@@ -56,7 +56,8 @@ export interface RequestOut {
   fio?: string | null;
   category?: string | null;
   escalation_hours?: number | null;
-  created_by: string;
+  // Автор заявки (sAMAccountName) — только привилегированным, иначе null.
+  created_by?: string | null;
   steps: RequestStep[];
 }
 
@@ -67,7 +68,8 @@ export interface RequestRow {
   enterprise: string;
   status: string;
   step: string;
-  // Текущий согласующий: ФИО шага с can_act, иначе группа, иначе прочерк.
+  // Текущий согласующий: исполнитель ПЕРВОГО ожидающего шага (can_act здесь не
+  // участвует — это про отметку, а не про подпись): ФИО, иначе группа, иначе прочерк.
   ownerName: string;
   dueDate: string;
   department: string;
@@ -480,13 +482,16 @@ export async function syncLinks(): Promise<AdSyncResult> {
   return requestJson<AdSyncResult>("/api/link_1c_ad/sync", { method: "POST" });
 }
 
-// Подпись исполнителя шага. Для персонального шага бэкенд кладёт sam и в
-// owner_group (resolver=by_user), поэтому логин нельзя выводить: показываем ФИО
-// (owner_name), а если его нет — нейтральный текст. Для группового шага —
-// название группы (это не ПДн).
+// Подпись исполнителя шага. Приоритет у ФИО (owner_name): бэкенд присылает его
+// для персональных шагов, в т.ч. замены руководителя (resolver=ad_direct_manager,
+// исполнитель в assignee) — по одному resolver их отличить нельзя, а потерять
+// ФИО нельзя. Без ФИО показываем группу (owner_group, это не ПДн), а для by_user
+// (бэкенд кладёт туда логин) — нейтральный текст: логин AD в UI не выводится.
+// Логика совпадает с stepOwnerCell в request-card.
 function stepOwnerLabel(step: RequestStep | undefined): string {
   if (!step) return "—";
-  if (step.resolver === "by_user") return step.owner_name ?? "Персональный исполнитель";
+  if (step.owner_name) return step.owner_name;
+  if (step.resolver === "by_user") return "Персональный исполнитель";
   return step.owner_group || "—";
 }
 

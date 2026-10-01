@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from .audit import AuditEvent, audit_log
 from .config import Settings, get_settings
@@ -130,6 +130,21 @@ class StepSpec(BaseModel):
         default=None, description="Исполнитель AD (по выбору ОК): резолвер by_user, owner_group = sam"
     )
 
+    @model_validator(mode="after")
+    def _check_executor(self) -> "StepSpec":
+        """Шаг обязан иметь исполнителя: sam (персональный) либо owner_group
+        (групповой, resolver=by_group).
+
+        Проверка в схеме, а не в _build_steps: без неё шаг без исполнителя доходил
+        до _Step.owner_group (обязателен) и ронял POST /requests с 500 вместо 422.
+        Пустая группа считается отсутствующей — такой шаг некому отметить."""
+        if not (self.sam or (self.owner_group or "").strip()):
+            raise ValueError(
+                "Шаг маршрута: укажите группу-владельца (owner_group)"
+                " или персонального исполнителя (sam)"
+            )
+        return self
+
 
 class RouteBlockSpec(BaseModel):
     """Блок маршрута: последовательный (строго по порядку) либо параллельный
@@ -217,7 +232,10 @@ class RequestOut(BaseModel):
     position: str
     category: str | None = None
     escalation_hours: int | None = None
-    created_by: str
+    created_by: str | None = Field(
+        default=None,
+        description="Автор заявки (sAMAccountName) — только привилегированным",
+    )
     steps: list[StepOut]
 
 
@@ -541,10 +559,10 @@ def _public_view(
 
     ПДн по ролям: enterprise_name (как enterprise/tab_num/fio) — только
     привилегированным, остальным None; owner_name (ФИО согласующего) — всем
-    авторизованным, сотруднику полезно видеть, кто согласует; assignee — это
-    sAMAccountName, поэтому непривилегированному скрывается (None), а
-    владельцу шага остаётся (это его собственный логин); can_act считается
-    всегда и для всех ролей.
+    авторизованным, сотруднику полезно видеть, кто согласует; assignee, created_by
+    и done_by — это sAMAccountName, поэтому скрываются всем, кроме привилегированных
+    (assignee владельцу шага остаётся — это его собственный логин); can_act
+    считается всегда и для всех ролей.
     """
     privileged = user.role in ("hr", "hr_admin", "admin")
     reader = ad_reader if ad_reader is not None else _resolve_dependency(get_ad_reader)
@@ -565,7 +583,7 @@ def _public_view(
             status=s.status,
             require_comment=s.require_comment,
             expires_at=s.expires_at.isoformat(),
-            done_by=s.done_by,
+            done_by=s.done_by if privileged else None,
             done_at=s.done_at.isoformat() if s.done_at else None,
             comment=s.comment,
             can_act=_can_act(request, s, user, pending_orders, now),
@@ -584,7 +602,7 @@ def _public_view(
         position=request.position,
         category=request.category,
         escalation_hours=request.escalation_hours,
-        created_by=request.created_by,
+        created_by=request.created_by if privileged else None,
         steps=steps,
     )
 
@@ -612,10 +630,12 @@ def _notify_assigned(
     пропускается: уведомление не должно валить подачу заявки.
     """
     try:
+        # Шаблон письма и адрес отправителя не зависят от шага — читаем один раз
+        # на заявку (иначе SELECT на каждый шаг активного блока).
+        templates = read_setting_value(settings_store, "mail_templates")
+        smtp_from = read_setting_value(settings_store, "smtp_from")
         # Всем исполнителям активного блока (в параллельном — все шаги блока).
         for step in _current_pending_steps(request):
-            templates = read_setting_value(settings_store, "mail_templates")
-            smtp_from = read_setting_value(settings_store, "smtp_from")
             for to in step_owner_mails(step, ad_reader):
                 enqueue_event(
                     queue,
@@ -880,7 +900,8 @@ def submit_request(
         ) from exc
     _audit(user.sam, "request.submit", request.id, "")
     _notify_assigned(request, mail_queue, settings_store, ad_reader, settings)
-    return _public_view(request, user)
+    # Ридер AD уже разрешён зависимостью — второй раз не резолвим.
+    return _public_view(request, user, ad_reader=ad_reader)
 
 
 @router.post("/requests/{request_id}/withdraw", response_model=RequestOut)
