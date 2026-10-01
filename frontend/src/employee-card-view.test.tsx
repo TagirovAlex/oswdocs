@@ -1,8 +1,8 @@
-// Тесты учётной карточки сотрудника (EmployeeCardView, Задача 3, редизайн):
-// блоки «Должность»/«Контактные данные» (1С и AD), сохранение связки админом
-// (Сохранить → createLink), закрытие окна с подтверждением несохранённых
-// изменений, ОК/руководитель ОК — только чтение. Компонент используется
-// в окне ?view=employee&key=… (см. employee-window.tsx).
+// Тесты учётной карточки сотрудника (EmployeeCardView, редизайн): блоки
+// «Должность»/«Контактные данные» (1С и AD), подтверждение привязки по
+// найденному совпадению (админ, один клик), сохранение связки через поиск AD,
+// закрытие окна с подтверждением несохранённых изменений, ОК — только чтение.
+// Компонент используется в окне ?view=employee&key=… (см. employee-window.tsx).
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EmployeeCardView } from "./employee-card-view";
@@ -79,16 +79,39 @@ describe("EmployeeCardView", () => {
     expect(screen.getByRole("heading", { level: 3, name: "Сказочников Тест Тестович" })).toBeInTheDocument();
     expect(screen.getByText("Сказочников Т. Тестович")).toBeInTheDocument();
     // Должность: значение 1С и AD.
-    expect(screen.getByText(/1С: Тестировщик/)).toBeInTheDocument();
-    expect(screen.getByText(/AD: Инженер-тестировщик/)).toBeInTheDocument();
+    expect(screen.getByText("Тестировщик")).toBeInTheDocument();
+    expect(screen.getByText("Инженер-тестировщик")).toBeInTheDocument();
     // Контактные данные: телефон/e-mail 1С и e-mail/руководитель AD.
-    expect(screen.getByText(/1С: телефон 8-800-555-35-35/)).toBeInTheDocument();
-    expect(screen.getByText(/e-mail skaz@example\.local/)).toBeInTheDocument();
-    expect(screen.getByText(/AD: e-mail t\.skaz@example\.local/)).toBeInTheDocument();
-    expect(screen.getByText(/руководитель CN=Начальник Тестович/)).toBeInTheDocument();
+    expect(screen.getByText("8-800-555-35-35")).toBeInTheDocument();
+    expect(screen.getByText("skaz@example.local")).toBeInTheDocument();
+    expect(screen.getByText("t.skaz@example.local")).toBeInTheDocument();
+    expect(screen.getByText("CN=Начальник Тестович,OU=SED,DC=example,DC=local")).toBeInTheDocument();
   });
 
-  it("админ сохраняет связку: выбор кандидата и «Сохранить» вызывают createLink", async () => {
+  it("админ подтверждает привязку по найденному совпадению одним кликом", async () => {
+    vi.mocked(createLink).mockResolvedValue({});
+
+    renderView("admin");
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Подтвердить привязку" })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Подтвердить привязку" }));
+
+    await waitFor(() =>
+      expect(createLink).toHaveBeenCalledWith({ enterprise: "A", base_code: "zup", tab_num: "001", sam: "t.skaz" }),
+    );
+    await waitFor(() => expect(screen.getByText("Связка сохранена")).toBeInTheDocument());
+  });
+
+  it("ОК видит подсказку «подтверждение выполняет админ» без кнопки", async () => {
+    renderView("hr");
+    await waitCard();
+    expect(screen.getByText(/подтверждение выполняет админ/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Подтвердить привязку" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Сохранить" })).not.toBeInTheDocument();
+  });
+
+  it("админ сохраняет связку: поиск AD, выбор кандидата и «Сохранить» → createLink", async () => {
     vi.mocked(searchAd).mockResolvedValue([adCandidate]);
     vi.mocked(createLink).mockResolvedValue({});
 
@@ -132,13 +155,5 @@ describe("EmployeeCardView", () => {
     expect(window.confirm).toHaveBeenCalledWith("Есть несохранённые изменения связки. Сохранить?");
     expect(window.close).toHaveBeenCalled();
     expect(createLink).not.toHaveBeenCalled();
-  });
-
-  it("hr видит только чтение: нет поиска AD и кнопки «Сохранить»", async () => {
-    renderView("hr");
-    await waitCard();
-    expect(screen.queryByLabelText("Поиск в AD")).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Сохранить" })).not.toBeInTheDocument();
-    expect(screen.getByText("Закрыть")).toBeInTheDocument();
   });
 });
