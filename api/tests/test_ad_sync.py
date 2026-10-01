@@ -333,8 +333,16 @@ def test_ad_search_admin_returns_candidates(client, admin_headers, sync_mocks):
     assert "mail" in items[0] and "department" in items[0]
 
 
-def test_ad_search_hr_403(client, hr_headers, sync_mocks):
+def test_ad_search_hr_allowed(client, hr_headers, sync_mocks):
+    """AD-поиск доступен ОК (выбор исполнителей маршрута), не только админу."""
     response = client.get("/ad/search", params={"q": "Сказочников"}, headers=hr_headers)
+    assert response.status_code == 200
+    assert [i["sam"] for i in response.json()["items"]] == ["t.ivan"]
+
+
+def test_ad_search_owner_403(client, owner_headers, sync_mocks):
+    """Владельцу AD-поиск закрыт (ПДн)."""
+    response = client.get("/ad/search", params={"q": "Сказочников"}, headers=owner_headers)
     assert response.status_code == 403
 
 

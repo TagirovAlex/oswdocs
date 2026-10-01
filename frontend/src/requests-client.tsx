@@ -11,7 +11,7 @@ export interface Enterprise {
 }
 
 // Идентификатор папки дерева (контракт GET /api/folders).
-export type FolderId = "agreement" | "revision" | "done" | "mine";
+export type FolderId = "agreement" | "revision" | "done" | "draft" | "mine";
 
 // Папка дерева со счётчиком.
 export interface Folder {
@@ -71,6 +71,21 @@ export interface CreateRequestBody {
   position: string;
   fio: string;
   steps?: Array<{ owner_group: string }>;
+  // Маршрут блоками: последовательный/параллельный (приоритетнее steps).
+  blocks?: Array<{
+    mode: "sequential" | "parallel";
+    steps: Array<{ sam: string }>;
+  }>;
+}
+
+// Метка шага в UI: в step_order закодирован блок и режим (см. backend requests.py):
+// order = блок*1000 + (100 если параллельный) + позиция. Без кода — обычный порядок.
+export function stepLabel(order: number): string {
+  if (order < 1000) return String(order);
+  const block = Math.floor(order / 1000) + 1;
+  const parallel = Math.floor((order % 1000) / 100) === 1;
+  const pos = order % 100;
+  return `${block}.${pos}${parallel ? " ‖" : ""}`;
 }
 
 // Найденный сотрудник 1С (GET /api/employees; полная карточка — только ОК/админу).
@@ -139,6 +154,7 @@ export const FOLDER_STATUSES: Record<FolderId, string[] | null> = {
   agreement: ["На согласовании"],
   revision: ["На доработке"],
   done: ["Завершено", "Отклонено", "Отозвано"],
+  draft: ["Черновик"],
   mine: null,
 };
 
@@ -368,7 +384,7 @@ export async function createLink(body: {
   });
 }
 
-// Кандидат AD для ручной привязки (GET /api/ad/search, только админ).
+// Кандидат AD для выбора исполнителя маршрута (GET /api/ad/search, ОК и админ).
 export interface AdCandidate {
   sam: string;
   display_name: string;
@@ -377,7 +393,7 @@ export interface AdCandidate {
   mail: string;
 }
 
-// GET /api/ad/search: поиск кандидатов AD по ФИО (только админ).
+// GET /api/ad/search: поиск кандидатов AD по ФИО (ОК и админ; для выбора исполнителей маршрута).
 export async function searchAd(q: string): Promise<AdCandidate[]> {
   const res = await requestJson<{ items: AdCandidate[] }>(
     `/api/ad/search?q=${encodeURIComponent(q)}`,

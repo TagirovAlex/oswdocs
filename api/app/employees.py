@@ -338,7 +338,7 @@ def search_employees(
 
 
 # ---------------------------------------------------------------------------
-# Поиск AD по ФИО (для ручной привязки, только admin)
+# Поиск AD по ФИО (для выбора исполнителей маршрута и ручной привязки, ОК)
 # ---------------------------------------------------------------------------
 
 @router.get("/ad/search")
@@ -348,16 +348,17 @@ def ad_search(
     settings: Settings = Depends(get_settings),
     reader: AdReader | None = Depends(get_ad_reader),
 ) -> dict:
-    """Кандидаты AD по подстроке ФИО (ручная привязка): только admin.
+    """Кандидаты AD по подстроке ФИО (исполнители маршрута/ручная привязка):
+    только ОК, руководитель ОК и админ.
 
     Ридер AD не настроен — 503 (не 500); сбой каталога — 503. Возвращается
     минимальный набор (sam/displayName/депт/должность/mail) для выбора
     в карточке справочника. Только чтение AD."""
     settings.ensure_read_only()
-    if user.role != "admin":
+    if user.role not in ("hr", "hr_admin", "admin"):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Поиск AD доступен только админу",
+            detail="Поиск AD доступен ОК и админу",
         )
     if reader is None:
         raise HTTPException(

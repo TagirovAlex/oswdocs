@@ -114,12 +114,29 @@ def get_route_settings() -> RouteSettings:
 class StepSpec(BaseModel):
     """Шаг ручного конструктора (все исполнители — группы/резолверы из settings)."""
 
-    owner_group: str
+    owner_group: str | None = Field(
+        default=None, description="Группа-владелец шага (для sam-шага подставится логин)"
+    )
     resolver: str = "by_group"
     require_comment: bool = False
     assignee: str | None = Field(
         default=None, description="Персональный исполнитель (замена руководителя)"
     )
+    sam: str | None = Field(
+        default=None,
+        description="Исполнитель AD (по выбору ОК): резолвер by_user, owner_group = sam",
+    )
+    sam: str | None = Field(
+        default=None, description="Исполнитель AD (по выбору ОК): резолвер by_user, owner_group = sam"
+    )
+
+
+class RouteBlockSpec(BaseModel):
+    """Блок маршрута: последовательный (строго по порядку) либо параллельный
+    (шаги блока — одновременно, любой порядок отметок)."""
+
+    mode: Literal["sequential", "parallel"] = "sequential"
+    steps: list[StepSpec] = Field(description="Шаги блока")
 
 
 class CreateRequestIn(BaseModel):
@@ -138,6 +155,9 @@ class CreateRequestIn(BaseModel):
     )
     steps: list[StepSpec] | None = Field(
         default=None, description="Ручной маршрут (обязателен, если шаблона нет)"
+    )
+    blocks: list[RouteBlockSpec] | None = Field(
+        default=None, description="Маршрут блоками (приоритетнее steps)"
     )
 
 
@@ -273,14 +293,59 @@ def _find_template(route: RouteSettings, service: str, category: str | None) -> 
     return None
 
 
+# --- Кодирование блоков маршрута в step_order (без смены схемы БД) ---
+# Блок кодируется в колонке step_order: блок*1000 + (100 если параллельный) + позиция.
+# Позиция 1..99, блоки — с 0; параллельный блок помечается сотней в младшем разряде.
+BLOCK_ORDER_BASE = 1000  # база номера блока
+PARALLEL_MARK = 100  # признак параллельного блока в order
+
+
+def _order_for(block: int, pos: int, parallel: bool) -> int:
+    """step_order блока: блок*1000 + (100 если параллельный) + позиция (1..99)."""
+    return block * BLOCK_ORDER_BASE + (PARALLEL_MARK if parallel else 0) + pos
+
+
+def _block_info(order: int) -> tuple[int, bool, int]:
+    """(индекс блока, параллельный?, позиция в блоке) из step_order."""
+    return (order // BLOCK_ORDER_BASE, (order % BLOCK_ORDER_BASE) // PARALLEL_MARK == 1, order % 100)
+
+
 def _build_steps(
     specs: list[StepSpec] | list[RouteStepTemplate],
     ttl_days: int,
     manager: str | None,
     now: datetime,
+    blocks: list[RouteBlockSpec] | None = None,
 ) -> list[_Step]:
-    """Сборка шагов с expires_at = now + TTL (замена руководителя — в assignee)."""
+    """Сборка шагов с expires_at = now + TTL (замена руководителя — в assignee).
+
+    blocks — маршрут блоками (последовательный/параллельный); приоритетнее
+    плоского списка specs. spec.sam (исполнитель AD по выбору ОК) — резолвер
+    by_user, владелец группы = sam.
+    """
     steps: list[_Step] = []
+    if blocks:
+        for block_index, block in enumerate(blocks):
+            for pos, spec in enumerate(block.steps, start=1):
+                resolver = spec.resolver if spec.resolver in RESOLVERS else "by_group"
+                assignee = getattr(spec, "assignee", None)
+                if spec.sam:
+                    resolver = "by_user"
+                    assignee = spec.sam
+                elif resolver == "ad_direct_manager" and manager:
+                    assignee = manager
+                steps.append(
+                    _Step(
+                        order=_order_for(block_index, pos, block.mode == "parallel"),
+                        owner_group=spec.sam or spec.owner_group,
+                        resolver=resolver,
+                        assignee=assignee,
+                        status=STEP_PENDING,
+                        require_comment=spec.require_comment,
+                        expires_at=now + timedelta(days=ttl_days),
+                    )
+                )
+        return steps
     for index, spec in enumerate(specs):
         resolver = spec.resolver if spec.resolver in RESOLVERS else "by_group"
         assignee = getattr(spec, "assignee", None)
@@ -308,12 +373,31 @@ def _get_request_or_404(store: RequestsStore, request_id: str) -> _Request:
     return request
 
 
+def _current_pending_steps(request: _Request) -> list[_Step]:
+    """Ожидающие шаги текущего блока маршрута.
+
+    Блоки обрабатываются по возрастанию индекса; внутри блока — по order.
+    Параллельный блок — все ожидающие шаги сразу; последовательный — только
+    первый ожидающий. Завершённые блоки пропускаются; пусто — []."""
+    pending_by_block: dict[int, list[_Step]] = {}
+    for step in request.steps:
+        if step.status != STEP_PENDING:
+            continue
+        block_index, _, _ = _block_info(step.order)
+        pending_by_block.setdefault(block_index, []).append(step)
+    for block_index in sorted(pending_by_block):
+        block_steps = sorted(pending_by_block[block_index], key=lambda s: s.order)
+        _, parallel, _ = _block_info(block_steps[0].order)
+        if parallel:
+            return block_steps
+        return [block_steps[0]]
+    return []
+
+
 def _current_pending(request: _Request) -> _Step | None:
-    """Первый ожидающий шаг по порядку (строгая очередность отметок)."""
-    for step in sorted(request.steps, key=lambda s: s.order):
-        if step.status == STEP_PENDING:
-            return step
-    return None
+    """Первый ожидающий шаг текущего блока (строгая очередность внутри блока)."""
+    steps = _current_pending_steps(request)
+    return steps[0] if steps else None
 
 
 def _check_step_owner(step: _Step, user: CurrentUser) -> None:
@@ -400,27 +484,26 @@ def _notify_assigned(
     не должно валить подачу заявки.
     """
     try:
-        step = _current_pending(request)
-        if step is None:
-            return
-        templates = read_setting_value(settings_store, "mail_templates")
-        smtp_from = read_setting_value(settings_store, "smtp_from")
-        to = step_owner_mail(step, ad_reader)
-        if not to:
-            return
-        enqueue_event(
-            queue,
-            to,
-            request.id,
-            EVENT_ASSIGNED,
-            templates or [],
-            {
-                "fio": request.fio,
-                "request_id": request.id,
-                "url": request_url(settings.APP_BASE_URL, request.id),
-            },
-            subject_prefix=resolve_smtp_from(smtp_from, settings.SMTP_FROM),
-        )
+        # Всем исполнителям активного блока (в параллельном — все шаги блока).
+        for step in _current_pending_steps(request):
+            templates = read_setting_value(settings_store, "mail_templates")
+            smtp_from = read_setting_value(settings_store, "smtp_from")
+            to = step_owner_mail(step, ad_reader)
+            if not to:
+                continue
+            enqueue_event(
+                queue,
+                to,
+                request.id,
+                EVENT_ASSIGNED,
+                templates or [],
+                {
+                    "fio": request.fio,
+                    "request_id": request.id,
+                    "url": request_url(settings.APP_BASE_URL, request.id),
+                },
+                subject_prefix=resolve_smtp_from(smtp_from, settings.SMTP_FROM),
+            )
     except Exception:
         return
 
@@ -438,19 +521,34 @@ def create_request(
     _require_hr(user)
     now = _utcnow()
     category = _resolve_category(route, body.position, body.category)
-    template = _find_template(route, body.department, category)
-    if template is not None:
-        steps = _build_steps(template.steps, route.approval_ttl_days, body.manager, now)
-        origin = "template"
-    else:
-        # Fallback без шаблона — только ручной маршрут от разрешенной группы.
-        if not body.steps:
+    if body.blocks is not None:
+        # Явный конструктор ОК (блоками) — приоритетнее шаблона и steps.
+        for block in body.blocks:
+            if len(block.steps) > 99:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Блок маршрута больше 99 шагов — разбейте на несколько блоков",
+                )
+        if not body.blocks or all(not b.steps for b in body.blocks):
             raise HTTPException(
-                status_code=422,
-                detail="Шаблон не найден: задайте ручной маршрут (steps)",
+                status_code=422, detail="Маршрут пуст: добавьте блок с исполнителями"
             )
-        steps = _build_steps(body.steps, route.approval_ttl_days, body.manager, now)
+        steps = _build_steps([], route.approval_ttl_days, body.manager, now, blocks=body.blocks)
         origin = "custom"
+    else:
+        template = _find_template(route, body.department, category)
+        if template is not None:
+            steps = _build_steps(template.steps, route.approval_ttl_days, body.manager, now)
+            origin = "template"
+        else:
+            # Fallback без шаблона — только ручной маршрут от разрешенной группы.
+            if not body.steps:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Шаблон не найден: задайте ручной маршрут (steps)",
+                )
+            steps = _build_steps(body.steps, route.approval_ttl_days, body.manager, now)
+            origin = "custom"
     try:
         request = _Request(
             id=store.next_id(),
@@ -491,7 +589,14 @@ def list_requests(
         ) from exc
     if _is_hr(user):
         return [_public_view(r, user) for r in requests]
-    mine = [r for r in requests if any(s.owner_group in user.groups for s in r.steps)]
+    mine = [
+        r
+        for r in requests
+        if any(
+            s.owner_group in user.groups or (s.assignee and s.assignee == user.sam)
+            for s in r.steps
+        )
+    ]
     return [_public_view(r, user) for r in mine]
 
 
@@ -537,6 +642,11 @@ def list_folders(
                     1 for r in requests if r.status in (DONE, REJECTED, REVOKED)
                 ),
             ),
+            FolderOut(
+                id="draft",
+                title="Черновики",
+                count=sum(1 for r in requests if r.status == DRAFT),
+            ),
         ]
     folders.append(
         FolderOut(
@@ -545,7 +655,11 @@ def list_folders(
             count=sum(
                 1
                 for r in requests
-                if any(s.owner_group in user.groups for s in r.steps)
+                if any(
+                    s.owner_group in user.groups
+                    or (s.assignee and s.assignee == user.sam)
+                    for s in r.steps
+                )
             ),
         )
     )
@@ -567,7 +681,10 @@ def get_request(
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
-    if not _is_hr(user) and not any(s.owner_group in user.groups for s in request.steps):
+    if not _is_hr(user) and not any(
+        s.owner_group in user.groups or (s.assignee and s.assignee == user.sam)
+        for s in request.steps
+    ):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Нет доступа к заявке")
     return _public_view(request, user)
 
@@ -709,9 +826,11 @@ def decide_step(
             raise HTTPException(
                 status_code=410, detail="Срок шага истек: нужен повтор (reissue)"
             )
-        current = _current_pending(request)
-        if current is None or current.order != order:
-            raise HTTPException(status_code=409, detail="Шаги закрываются строго по порядку")
+        if order not in {s.order for s in _current_pending_steps(request)}:
+            raise HTTPException(
+                status_code=409,
+                detail="Шаг не в текущем блоке маршрута (строгий порядок/параллельный блок)",
+            )
         _check_comment(step, body.decision, body.comment)
         step.done_by = user.sam
         step.done_at = now
@@ -787,6 +906,13 @@ def replace_steps(
         request = _get_request_or_404(store, request_id)
         if request.status in (DONE, REJECTED, REVOKED):
             raise HTTPException(status_code=409, detail="Закрытая заявка не правится")
+        if any(s.order >= BLOCK_ORDER_BASE for s in request.steps):
+            # Плоская перенумерация шагов разрушила бы блоки (последовательный/
+            # параллельный). Правка блочного маршрута — отдельная задача.
+            raise HTTPException(
+                status_code=409,
+                detail="Правка маршрута с блоками не поддерживается (создайте заново)",
+            )
         if not body.steps:
             raise HTTPException(status_code=422, detail="Список шагов не может быть пустым")
         now = _utcnow()

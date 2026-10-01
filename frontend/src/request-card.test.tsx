@@ -144,6 +144,26 @@ describe("RequestCard", () => {
     expect(steps.getByText("SED_STEP_OK")).toBeInTheDocument();
   });
 
+  // Шаги с блоками: order кодирует блок/режим — «№» через stepLabel,
+  // персональный исполнитель AD — подпись «персонально: …».
+  it("шаги с блоками: «№» через stepLabel, assignee — «персонально: …»", async () => {
+    vi.mocked(getRequest).mockResolvedValue({
+      ...requestWith("Громов Игорь Олегович", "На согласовании"),
+      steps: [
+        { order: 1101, owner_group: "SED_STEP_BUH", resolver: "by_group", assignee: "buh.ivanov", status: "ожидает", expires_at: "2026-10-05T10:00:00+00:00" },
+        { order: 1102, owner_group: "SED_STEP_OK", resolver: "by_group", status: "ожидает", expires_at: "2026-10-08T10:00:00+00:00" },
+      ],
+    });
+
+    renderCard();
+    await waitFor(() => expect(screen.getByLabelText("Шаги заявки")).toBeInTheDocument());
+    const steps = within(screen.getByLabelText("Шаги заявки"));
+    expect(steps.getByText("2.1 ‖")).toBeInTheDocument();
+    expect(steps.getByText("2.2 ‖")).toBeInTheDocument();
+    expect(steps.getByText("персонально: buh.ivanov")).toBeInTheDocument();
+    expect(steps.getByText("SED_STEP_OK")).toBeInTheDocument();
+  });
+
   // Отметка владельца: при отказе без комментария отметка не отправляется.
   it("владелец: при отказе без комментария отметка не отправляется", async () => {
     vi.mocked(getRequest).mockResolvedValue(requestWith(null, "На согласовании"));

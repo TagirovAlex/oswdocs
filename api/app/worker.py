@@ -28,7 +28,13 @@ from .mailer import (
     recipient_mail,
     step_owner_mail,
 )
-from .requests import IN_APPROVAL, REWORK, STEP_EXPIRED, STEP_PENDING
+from .requests import (
+    IN_APPROVAL,
+    REWORK,
+    STEP_EXPIRED,
+    STEP_PENDING,
+    _current_pending_steps,
+)
 
 
 @dataclass
@@ -94,10 +100,9 @@ def run_once(
     for request in store.list_all():
         if request.status != IN_APPROVAL:
             continue
-        # Просрочки и напоминания — по ожидающим шагам.
-        for step in request.steps:
-            if step.status != STEP_PENDING:
-                continue
+        # Просрочки и напоминания — по ожидающим шагам АКТИВНОГО блока
+        # (в параллельном блоке — все его шаги, а не только первый).
+        for step in _current_pending_steps(request):
             if step.expires_at < now:
                 step.status = STEP_EXPIRED
                 request.status = REWORK
@@ -137,7 +142,8 @@ def run_once(
         if not hours:
             continue
         current = next(
-            (s for s in request.steps if s.status == STEP_PENDING), None
+            (s for s in _current_pending_steps(request) if s.status == STEP_PENDING),
+            None,
         )
         if (
             current is not None

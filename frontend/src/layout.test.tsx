@@ -114,6 +114,23 @@ describe("SedLayout", () => {
     expect(screen.queryByText("REQ-0001")).not.toBeInTheDocument();
   });
 
+  // Папка «Черновики» (id=draft из GET /api/folders) отображается в дереве;
+  // активная по умолчанию остаётся «agreement», переход фильтрует черновики.
+  it("папка «Черновики» из API отображается и фильтрует черновики", async () => {
+    vi.mocked(getFolders).mockResolvedValue([
+      { id: "agreement", title: "На согласовании", count: 1 },
+      { id: "draft", title: "Черновики", count: 1 },
+    ]);
+    vi.mocked(getRequests).mockResolvedValue([requestWith("Громов Игорь Олегович", "Черновик")]);
+
+    renderWithTheme("hr");
+    await waitFor(() => expect(screen.getByText("Черновики")).toBeInTheDocument());
+    // Черновик не виден в «На согласовании», но виден после перехода в «Черновики».
+    expect(screen.queryByText("REQ-0001")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText("Черновики"));
+    await waitFor(() => expect(screen.getByText("REQ-0001")).toBeInTheDocument());
+  });
+
   // Пустой список — «Заявок нет».
   it("пустой список показывает «Заявок нет»", async () => {
     vi.mocked(getFolders).mockResolvedValue(folders);

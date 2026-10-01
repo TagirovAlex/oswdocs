@@ -11,6 +11,7 @@ import {
   getDocuments,
   getRequest,
   printRequest,
+  stepLabel,
   submitRequest,
   toExecution,
   uploadAttachment,
@@ -271,8 +272,8 @@ export function RequestCard(props: RequestCardProps) {
             <tbody>
               {card.steps.map((step) => (
                 <tr key={step.order}>
-                  <td>{step.order}</td>
-                  <td>{step.owner_group}</td>
+                  <td>{stepLabel(step.order)}</td>
+                  <td>{step.assignee ? `персонально: ${step.assignee}` : step.owner_group}</td>
                   <td>{step.status}</td>
                   <td>{step.expires_at.slice(0, 10)}</td>
                   <td>{step.comment ?? "—"}</td>
@@ -284,7 +285,7 @@ export function RequestCard(props: RequestCardProps) {
           {/* Отметка владельца своего ожидающего шага. */}
           {role === "owner" && pendingStep && (
             <div aria-label="Решение владельца">
-              <h4>Моё решение</h4>
+              <h4>Моё решение · Шаг {stepLabel(pendingStep.order)}</h4>
               <input
                 aria-label="Комментарий к решению"
                 placeholder="Комментарий (обязателен при отказе/возврате)"
