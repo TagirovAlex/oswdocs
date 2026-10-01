@@ -10,11 +10,13 @@
 from __future__ import annotations
 
 import datetime as _dt
+import json
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from .ad_reader import AdNotFound, AdUnavailable, build_snapshot
+from .ad_sync import AdSyncUnavailable, run_ad_sync
 from .audit import AuditEvent, audit_log
 from .config import Settings, get_settings
 from .deps import CurrentUser, get_current_user, is_privileged
@@ -33,6 +35,12 @@ from .onec_client import (
     OneCNotFound,
 )
 from .resolver import UnknownEnterpriseError, make_snapshot_1c, search_enterprise
+from .settings_routes import (
+    DbSettingsStore,
+    SettingsUnavailable,
+    get_settings_store,
+    read_setting_value,
+)
 from .ad_reader import AdReader
 
 router = APIRouter(tags=["связка 1С-AD"])
@@ -219,6 +227,81 @@ def create_link(
             "manager_dn": ad_user.manager_dn,
             "mail": ad_user.mail,
         },
+    }
+
+
+@router.post("/link_1c_ad/sync")
+def sync_links_endpoint(
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+    client: OneCClient = Depends(get_onec_client),
+    reader: AdReader | None = Depends(get_ad_reader),
+    store: LinksStore = Depends(get_links_store),
+    settings_store: DbSettingsStore = Depends(get_settings_store),
+) -> dict:
+    """Автосвязка 1С↔AD по точному ФИО «по требованию»: только admin.
+
+    Ридер AD не настроен — 503; предприятий нет — 409; падение хранилища
+    связок/настроек — 503 (не 500). Запись — только связки в нашу БД,
+    1С/AD — только чтение. Ответ — итог прохода (диагностика)."""
+    settings.ensure_read_only()
+    if user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Автосвязку 1С-AD запускает только админ",
+        )
+    if reader is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Ридер AD не настроен (в offline — подмена фейковым шлюзом)",
+        )
+    try:
+        raw = read_setting_value(settings_store, "enterprises")
+    except SettingsUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    enterprises = [
+        str(item["code"])
+        for item in raw
+        if isinstance(item, dict) and item.get("code")
+    ] if isinstance(raw, list) else []
+    if not enterprises:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Предприятия не настроены: выполните синхронизацию из 1С",
+        )
+    try:
+        result = run_ad_sync(client, reader, store, enterprises)
+    except (LinksUnavailable, AdSyncUnavailable) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    try:
+        settings_store.set(
+            "ad_links_synced_at",
+            json.dumps(_dt.datetime.now(_dt.timezone.utc).isoformat()),
+        )
+    except SettingsUnavailable:
+        pass  # метка не критична: сам проход выполнен
+    audit_log.append(
+        AuditEvent(
+            actor=user.sam,
+            action="link.sync",
+            entity="link_1c_ad",
+            entity_id="ad_sync",
+            detail="created=%d scanned=%d" % (result.created, result.scanned),
+        )
+    )
+    return {
+        "synced": True,
+        "scanned": result.scanned,
+        "created": result.created,
+        "skipped_linked": result.skipped_linked,
+        "skipped_1c_duplicates": result.skipped_1c_duplicates,
+        "skipped_ad_no_match": result.skipped_ad_no_match,
+        "skipped_ad_duplicates": result.skipped_ad_duplicates,
+        "errors": result.errors,
     }
 
 

@@ -230,6 +230,23 @@ def main() -> None:
     except Exception:
         pass
 
+    # Еженедельная автосвязка 1С↔AD по точному ФИО (Задача 2.4): тихо,
+    # толерантность как у maybe_sync_weekly; запись — только связки у нас.
+    try:
+        from .ad_sync import maybe_sync_links_weekly
+        from .employees import get_ad_reader, get_onec_client
+        from .link_store import DbLinksStore
+
+        if maybe_sync_links_weekly(
+            settings_store,
+            get_onec_client(settings, settings_store),
+            get_ad_reader(),
+            DbLinksStore(settings.DATABASE_URL),
+        ):
+            print("sync: автосвязка 1С-AD выполнена")
+    except Exception:
+        pass
+
     store = DbRequestsStore(settings.DATABASE_URL)
     mail_queue = DbMailQueue(settings.DATABASE_URL)
     mailer = SmtpMailer(

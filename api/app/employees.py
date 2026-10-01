@@ -12,6 +12,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from .ad_reader import AdNotFound, AdReader, AdUnavailable, build_snapshot
+from .ad_sync import compute_ad_status
 from .audit import AuditEvent, audit_log
 from .config import Settings, get_settings
 from .deps import CurrentUser, get_current_user, is_privileged
@@ -153,6 +154,7 @@ def _full_item(
     card: EmployeeCard,
     sam: str | None = None,
     duplicate: bool = False,
+    ad_status: str = "no_match",
 ) -> dict:
     """Полная карточка для ОК/админов (все поля 1С + служебный логин связи)."""
     return {
@@ -166,6 +168,7 @@ def _full_item(
         "employment_type": card.employment_type,
         "hire_date": card.hire_date,
         "ad_sam": sam,
+        "ad_status": ad_status,
         "needs_manual_review": duplicate,
     }
 
@@ -174,8 +177,9 @@ def _trimmed_item(
     card: EmployeeCard,
     sam: str | None = None,
     duplicate: bool = False,
+    ad_status: str = "no_match",
 ) -> dict:
-    """Урезанная карточка для владельца (без ПДн: нет ФИО/таб.№/почты/отпуска/приема).
+    """Урезанная карточка для владельца (без ПДн: нет ФИО/таб.№/почты/дат приёма-увольнения).
 
     Оставлены только служебные ключи (key, подразделение, должность) —
     достаточно для отметок по своим задачам (фильтр задач — в B2).
@@ -189,6 +193,7 @@ def _trimmed_item(
         "dept": card.dept,
         "position": card.position,
         "ad_sam": sam,
+        "ad_status": ad_status,
         "needs_manual_review": duplicate,
     }
 
@@ -221,16 +226,21 @@ def _match_query(card: EmployeeCard, sam: str | None, query: str) -> bool:
     return False
 
 
-def _link_sam_for(card: EmployeeCard) -> str | None:
-    """Логин связанной AD-записи из хранилища связок (без падения без него)."""
+def _link_for(card: EmployeeCard):
+    """Связка 1С-AD из хранилища (без падения без него)."""
     try:
         from .link import find_link  # локально против циклического импорта
     except Exception:
         return None
     try:
-        found = find_link(card.enterprise, card.base_code, card.tab_num)
+        return find_link(card.enterprise, card.base_code, card.tab_num)
     except Exception:
         return None
+
+
+def _link_sam_for(card: EmployeeCard) -> str | None:
+    """Логин связанной AD-записи из хранилища связок (без падения без него)."""
+    found = _link_for(card)
     return found.sam if found is not None else None
 
 
@@ -298,14 +308,17 @@ def search_employees(
     cards = [c for c in merged.values() if (not q.strip()) or _match_query(c, _link_sam_for(c), q)][:limit]
     duplicates = _duplicated_fios(cards)
     privileged = is_privileged(user)
-    items = [
-        (
-            _full_item(card, _link_sam_for(card), _norm(card.fio) in duplicates)
+    items = []
+    for card in cards:
+        link = _link_for(card)
+        sam = link.sam if link is not None else None
+        ad_status = compute_ad_status(card, link, reader)
+        item = (
+            _full_item(card, sam, _norm(card.fio) in duplicates, ad_status)
             if privileged
-            else _trimmed_item(card, _link_sam_for(card), _norm(card.fio) in duplicates)
+            else _trimmed_item(card, sam, _norm(card.fio) in duplicates, ad_status)
         )
-        for card in cards
-    ]
+        items.append(item)
     audit_log.append(
         AuditEvent(
             actor=user.sam,
@@ -319,6 +332,56 @@ def search_employees(
         "items": items,
         "errors": found.errors,
         "needs_manual_review": bool(duplicates),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Поиск AD по ФИО (для ручной привязки, только admin)
+# ---------------------------------------------------------------------------
+
+@router.get("/ad/search")
+def ad_search(
+    q: str = Query(default="", max_length=200, description="Подстрока ФИО (displayName)"),
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+    reader: AdReader | None = Depends(get_ad_reader),
+) -> dict:
+    """Кандидаты AD по подстроке ФИО (ручная привязка): только admin.
+
+    Ридер AD не настроен — 503 (не 500); сбой каталога — 503. Возвращается
+    минимальный набор (sam/displayName/депт/должность/mail) для выбора
+    в карточке справочника. Только чтение AD."""
+    settings.ensure_read_only()
+    if user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Поиск AD доступен только админу",
+        )
+    if reader is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Ридер AD не настроен (в offline — подмена фейковым шлюзом)",
+        )
+    q = (q or "").strip()
+    if not q:
+        return {"items": []}
+    try:
+        users = reader.search_users(q)
+    except AdUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    return {
+        "items": [
+            {
+                "sam": u.sam,
+                "display_name": u.display_name,
+                "department": u.department,
+                "title": u.title,
+                "mail": u.mail,
+            }
+            for u in users
+        ]
     }
 
 
@@ -449,12 +512,13 @@ def employee_card(
                 "hire_date": card.hire_date,
                 "dismissal_date": card.dismissal_date,
                 "ad_sam": link_info.get("sam"),
+                "ad_status": compute_ad_status(card, stored, reader),
                 "snapshot_1c": snapshot_1c,
                 "snapshot_ad": snapshot_ad,
             }
         )
         return base
-    # Владельцу — обезличенно: без ФИО/таб.№/почты/отпуска/приема и без значений снапшотов.
+    # Владельцу — обезличенно: без ФИО/таб.№/почты/дат приёма-увольнения и без значений снапшотов.
     # Таб.№ убираем из base: идентифицирует человека (правило фронта/requests).
     base.pop("tab_num", None)
     base.update(
@@ -462,6 +526,7 @@ def employee_card(
             "dept": card.dept,
             "position": card.position,
             "ad_sam": link_info.get("sam"),
+            "ad_status": compute_ad_status(card, stored, reader),
             "snapshot_1c": {
                 "key": snapshot_1c.get("key"),
                 "fetched_at": snapshot_1c.get("fetched_at"),

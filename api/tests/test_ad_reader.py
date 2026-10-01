@@ -81,6 +81,19 @@ class FakeLdapGateway:
         found = self._by_dn.get(dn.strip().lower())
         return dict(found) if found else None
 
+    def search_users(self, query):
+        self.search_calls += 1
+        if self._fail_with is not None:
+            raise self._fail_with
+        needle = query.strip().lower()
+        if not needle:
+            return []
+        return [
+            dict(e)
+            for e in self._by_sam.values()
+            if needle in e["displayName"].lower()
+        ]
+
     def mutate(self, sam, **kwargs):
         key = sam.strip().lower()
         self._by_sam[key].update(kwargs)
@@ -250,6 +263,30 @@ def test_unknown_user_raises_not_found():
     reader = _reader()
     with pytest.raises(AdNotFound):
         reader.get_user("net.takogo")
+
+
+def test_search_users_by_name_substring():
+    """Поиск по подстроке displayName: кандидаты для автосвязки 1С↔AD."""
+    reader = _reader()
+    hits = reader.search_users("Тестов Тест")
+    assert [u.sam for u in hits] == ["t.testov"]
+    assert hits[0].display_name == "Тестов Тест Тестович"
+    # Несколько кандидатов: сортировка по sam (детерминированный порядок).
+    hits = reader.search_users("Директоров")
+    assert [u.sam for u in hits] == ["v.directorov"]
+
+
+def test_search_users_empty_query_returns_empty():
+    reader = _reader()
+    assert reader.search_users("") == []
+    assert reader.search_users("   ") == []
+
+
+def test_search_users_ad_unavailable():
+    gateway = FakeLdapGateway(_directory(), fail_with=TimeoutError("ldap timeout"))
+    reader = AdReader(_settings(), gateway, InMemoryCache())
+    with pytest.raises(AdUnavailable, match="AD недоступен"):
+        reader.search_users("Тестов")
 
 
 def test_ad_failure_raises_unavailable_not_crash():

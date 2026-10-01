@@ -151,3 +151,13 @@ class CachingOneCClient:
     ) -> List[EmployeeCard]:
         """Поиск сотрудников базы: не кэшируется (живые данные)."""
         return self._client.search(base_code, query, enterprise)
+
+    def list_employees(
+        self,
+        base_code: str,
+        enterprise: Optional[str] = None,
+        skip: int = 0,
+        top: int = 500,
+    ) -> List[EmployeeCard]:
+        """Выгрузка сотрудников базы страницами (для автосвязки; не кэшируется)."""
+        return self._client.list_employees(base_code, enterprise, skip=skip, top=top)

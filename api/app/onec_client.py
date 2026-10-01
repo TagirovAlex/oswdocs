@@ -363,6 +363,42 @@ class OneCClient:
         self._on_success(base_code)
         return self._parse_cards(cfg, result.body, enterprise)
 
+    def list_employees(
+        self,
+        base_code: str,
+        enterprise: Optional[str] = None,
+        skip: int = 0,
+        top: int = 500,
+    ) -> List[EmployeeCard]:
+        """Выгрузка сотрудников базы по предприятию страницами ($skip/$top, GET).
+
+        Для полной сверки 1С↔AD (автосвязка): обход всех записей предприятия
+        без лимита $top=50 поиска. Результаты лёгкие (без кадровых данных —
+        они в карточке get_employee). Только чтение."""
+        cfg = self._require_base(base_code)
+        self._ensure_allowed(base_code)
+        url = self._build_list_url(cfg, enterprise, skip, top)
+        try:
+            result = self._transport.get(url, self._auth_headers(cfg), self._timeout)
+        except OneCTimeoutError:
+            self._on_failure(base_code)
+            raise
+        except OneCConnectionError as exc:
+            self._on_failure(base_code)
+            raise OneCBaseDown("база %r недоступна: %s" % (base_code, exc)) from exc
+        except OneCCircuitOpen:
+            raise
+        except Exception as exc:
+            self._on_failure(base_code)
+            raise OneCBaseDown("база %r недоступна: %s" % (base_code, exc)) from exc
+        if result.status >= 500:
+            self._on_failure(base_code)
+            raise OneCBaseDown("база %r ответила %s" % (base_code, result.status))
+        if result.status != 200:
+            raise OneCError("база %r ответила %s" % (base_code, result.status))
+        self._on_success(base_code)
+        return self._parse_cards(cfg, result.body, enterprise)
+
     def _enrich_hr(self, cfg: OneCBaseConfig, card: EmployeeCard) -> EmployeeCard:
         """Дополнить карточку текущими кадровыми данными (регистр, $expand).
 
@@ -523,6 +559,29 @@ class OneCClient:
             select,
             flt,
         )
+        return url
+
+    @classmethod
+    def _build_list_url(
+        cls,
+        cfg: OneCBaseConfig,
+        enterprise: Optional[str] = None,
+        skip: int = 0,
+        top: int = 500,
+    ) -> str:
+        """OData-URL выгрузки: страница $top/$skip по предприятию (без подстроки)."""
+        select = urllib.parse.quote(cls._employee_select_fields(cfg), safe=",;/")
+        url = "%s/%s?$format=json&$top=%d&$skip=%d&$select=%s" % (
+            normalize_odata_base_url(cfg.url),
+            urllib.parse.quote(cfg.employee_entity),  # кириллица в имени сущности
+            int(top),
+            int(skip),
+            select,
+        )
+        if enterprise and cfg.employee_org_field:
+            url += "&$filter=" + urllib.parse.quote(
+                "%s eq guid'%s'" % (cfg.employee_org_field, enterprise), safe=""
+            )
         return url
 
     @classmethod

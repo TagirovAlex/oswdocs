@@ -117,6 +117,10 @@ class LdapGateway(Protocol):
         """Сырая запись по DN либо None. Живой поиск — на стенде."""
         ...  # pragma: no cover
 
+    def search_users(self, query: str) -> List[Dict]:
+        """Сырые записи по подстроке displayName либо []. Живой поиск — на стенде."""
+        ...  # pragma: no cover
+
 
 class Ldap3Gateway:
     """Живой LDAP-шлюз на ldap3 (LDAPS, только чтение).
@@ -215,7 +219,22 @@ class Ldap3Gateway:
         """Сырая запись по DN (scope BASE) либо None."""
         return self._search(dn, "(objectClass=user)", self._ldap3.BASE)
 
+    def search_users(self, query: str) -> List[Dict]:
+        """Поиск по подстроке displayName (SUBTREE по BASE_DN) — сырые записи.
+
+        Фильтр displayName=*<q>* — как требует план автосвязки; спецсимволы
+        запроса экранируются (_escape_filter), чтобы не сломать фильтр."""
+        return self._search_many(
+            self._settings.base_dn,
+            "(displayName=*{}*)".format(self._escape_filter(query)),
+            self._ldap3.SUBTREE,
+        )
+
     def _search(self, base_dn: str, filter_str: str, scope: object) -> Optional[Dict]:
+        rows = self._search_many(base_dn, filter_str, scope)
+        return rows[0] if rows else None
+
+    def _search_many(self, base_dn: str, filter_str: str, scope: object) -> List[Dict]:
         if self._conn is None:
             raise AdUnavailable("Шлюз не связан: сначала bind() RO-учеткой.")
         self._conn.search(
@@ -224,9 +243,7 @@ class Ldap3Gateway:
             search_scope=scope,
             attributes=self.SEARCH_ATTRS,
         )
-        if not self._conn.entries:
-            return None
-        return self._to_raw(self._conn.entries[0])
+        return [self._to_raw(entry) for entry in self._conn.entries]
 
     @staticmethod
     def _to_raw(entry: object) -> Dict:
@@ -482,6 +499,22 @@ class AdReader:
         if not raw:
             raise AdNotFound("Запись DN не найдена.")
         return parse_ldap_entry(raw)
+
+    def search_users(self, query: str) -> List[AdUser]:
+        """Кандидаты AD по подстроке ФИО (displayName) для стыковки 1С↔AD.
+
+        Только чтение; пустой запрос — пустой список; сбой каталога — AdUnavailable
+        (API падать не должен). Список сырых записей сортируется по sAMAccountName."""
+        q = (query or "").strip()
+        if not q:
+            return []
+        try:
+            rows = self._gateway.search_users(q)
+        except Exception as exc:
+            raise AdUnavailable(f"AD недоступен (поиск по имени): {exc}") from exc
+        users = [parse_ldap_entry(row) for row in rows]
+        users.sort(key=lambda u: u.sam.strip().lower())
+        return users
 
     def refresh(self, sam: str) -> AdUser:
         """Кнопка «обновить»: сбросить кэш и перечитать."""

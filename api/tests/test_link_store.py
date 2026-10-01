@@ -210,6 +210,16 @@ class FakeGateway:
     def search_user_by_dn(self, dn):
         return None
 
+    def search_users(self, query):
+        needle = query.strip().lower()
+        if not needle:
+            return []
+        return [
+            dict(e)
+            for e in self._by_sam.values()
+            if needle in e["displayName"].lower()
+        ]
+
 
 def _reader():
     settings = AdReaderSettings(

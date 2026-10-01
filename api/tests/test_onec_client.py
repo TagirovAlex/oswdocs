@@ -228,6 +228,35 @@ def test_search_returns_cards():
     assert cards[0].ref_key == "ref-200"
 
 
+def test_list_employees_paginated_url_and_org_filter():
+    """Выгрузка страницами: $top/$skip + фильтр предприятия (для автосвязки)."""
+    from urllib.parse import parse_qs, unquote, urlparse
+
+    seen = []
+
+    def h(url, headers, timeout):
+        seen.append(url)
+        return HttpResult(
+            200,
+            json.dumps(
+                {"value": [{"Ref_Key": "ref-1", "Code": "1", "Description": FIOS["a100"]}]},
+                ensure_ascii=False,
+            ),
+        )
+
+    c = OneCClient({"zup_a": _bases()["zup_a"]}, transport=FakeTransport(h))
+    cards = c.list_employees("zup_a", ENT, skip=100, top=500)
+    assert [card.fio for card in cards] == [FIOS["a100"]]
+    q = parse_qs(urlparse(seen[0]).query)
+    assert q["$top"] == ["500"]
+    assert q["$skip"] == ["100"]
+    assert "ГоловнаяОрганизация_Key eq guid'%s'" % ENT in unquote(q["$filter"][0])
+    # Без предприятия — фильтра по организации нет.
+    c.list_employees("zup_a", skip=0, top=50)
+    q = parse_qs(urlparse(seen[1]).query)
+    assert "$filter" not in q
+
+
 def test_load_bases_from_env_parses_documented_format(monkeypatch):
     # Формат из .env.example: {enterprise: {base: {url, user, secret}}}.
     monkeypatch.setenv(

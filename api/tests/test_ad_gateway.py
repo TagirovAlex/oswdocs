@@ -131,6 +131,10 @@ class _FakeLdap3Module:
         wanted_sam = None
         if "(sAMAccountName=" in search_filter:
             wanted_sam = search_filter.split("(sAMAccountName=", 1)[1].rsplit(")", 1)[0].lower()
+        wanted_name = None
+        if "(displayName=*" in search_filter:
+            # Фильтр (displayName=*<подстрока>*) — подстрока без звездочек.
+            wanted_name = search_filter.split("(displayName=*", 1)[1].rsplit("*)", 1)[0].lower()
         results = []
         for raw in self._entries:
             if search_scope == self.BASE:
@@ -139,6 +143,8 @@ class _FakeLdap3Module:
                 ok = raw["dn"].lower().endswith(search_base.lower())
                 if ok and wanted_sam is not None:
                     ok = raw["sAMAccountName"].lower() == wanted_sam
+                if ok and wanted_name is not None:
+                    ok = wanted_name in raw["displayName"].lower()
             if ok:
                 results.append(self._to_ldap3_entry(raw))
         return results
@@ -260,6 +266,24 @@ def test_search_missing_returns_none():
     gw.bind()
     assert gw.search_user_by_sam("net.takogo") is None
     assert gw.search_user_by_dn("CN=Nobody,DC=FIDELIO,DC=LOCAL") is None
+
+
+def test_search_users_by_display_name():
+    fake = _fake()
+    gw = _gateway(fake)
+    gw.bind()
+    raw = gw.search_users("Тестов Тест")
+    assert len(raw) == 1
+    assert raw[0]["sAMAccountName"] == "t.testov"
+    assert raw[0]["displayName"] == "Тестов Тест Тестович"
+    # Фильтр: displayName=*<q>*, SUBTREE по BASE_DN, атрибуты — SEARCH_ATTRS.
+    search = fake.searches[-1]
+    assert search["filter"] == "(displayName=*Тестов Тест*)"
+    assert search["base"] == BASE_DN
+    assert search["scope"] == _FakeLdap3Module.SUBTREE
+    assert set(search["attributes"]) == set(Ldap3Gateway.SEARCH_ATTRS)
+    # Несколько совпадений по подстроке.
+    assert len(gw.search_users("Тест")) == 2
 
 
 def test_search_requires_prior_bind():
