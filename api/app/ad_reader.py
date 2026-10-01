@@ -507,7 +507,9 @@ class AdReader:
         """Кандидаты AD по подстроке ФИО (displayName) для стыковки 1С↔AD.
 
         Только чтение; пустой запрос — пустой список; сбой каталога — AdUnavailable
-        (API падать не должен). Список сырых записей сортируется по sAMAccountName."""
+        (API падать не должен). Возвращаются только активные учётные записи —
+        отключённые (userAccountControl) исключаются во всех местах поиска.
+        Список сортируется по sAMAccountName."""
         q = (query or "").strip()
         if not q:
             return []
@@ -516,6 +518,7 @@ class AdReader:
         except Exception as exc:
             raise AdUnavailable(f"AD недоступен (поиск по имени): {exc}") from exc
         users = [parse_ldap_entry(row) for row in rows]
+        users = [u for u in users if u.enabled]  # только активные (userAccountControl)
         users.sort(key=lambda u: u.sam.strip().lower())
         return users
 

@@ -43,6 +43,10 @@ class RequestsStore(Protocol):
         """Записать изменения заявки и её шагов."""
         ...
 
+    def delete(self, request_id: str) -> None:
+        """Удалить заявку (id). Отсутствующей — исключение (как у get)."""
+        ...
+
     def next_id(self) -> str:
         """Новый номер заявки вида REQ-XXXX."""
         ...
@@ -178,6 +182,11 @@ class InMemoryRequestsStore:
     def update(self, request: _Request) -> None:
         self._requests[request.id] = request
 
+    def delete(self, request_id: str) -> None:
+        """Удалить заявку; отсутствующей нет — исключение (на роутере до
+        удаления идёт _get_request_or_404, поэтому сюда попадают только живые)."""
+        del self._requests[request_id]
+
     def next_id(self) -> str:
         """Номер по внутреннему счетчику (как в прежней offline-заглушке)."""
         self._seq += 1
@@ -288,6 +297,9 @@ class DbRequestsStore:
     )
     _DELETE_STEPS = text(
         "DELETE FROM request_steps WHERE request_id = :request_id"
+    )
+    _DELETE_REQUEST_BY_CODE = text(
+        "DELETE FROM dismissal_requests WHERE code = :code"
     )
 
     def __init__(self, database_url: str) -> None:
@@ -447,6 +459,24 @@ class DbRequestsStore:
                         self._INSERT_STEP, self._step_params(internal.id, step)
                     )
                 session.commit()
+        except SQLAlchemyError as exc:
+            raise RequestsUnavailable(f"Хранилище заявок недоступно: {exc}") from exc
+
+    def delete(self, request_id: str) -> None:
+        """Удалить заявку по бизнес-номеру (code), как ищет get().
+
+        Шаги и документы заявки удаляются каскадом ON DELETE CASCADE.
+        Отсутствующей заявки нет — исключение RequestsUnavailable (как update)."""
+        try:
+            with self._session_factory() as session:
+                result = session.execute(
+                    self._DELETE_REQUEST_BY_CODE, {"code": request_id}
+                )
+                session.commit()
+                if result.rowcount == 0:
+                    raise RequestsUnavailable(
+                        f"Заявка {request_id} не найдена в хранилище"
+                    )
         except SQLAlchemyError as exc:
             raise RequestsUnavailable(f"Хранилище заявок недоступно: {exc}") from exc
 

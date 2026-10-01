@@ -272,6 +272,13 @@ export async function finishRequest(id: string): Promise<RequestOut> {
   });
 }
 
+// DELETE /api/requests/{id}: удаление заявки (только админ; для тестового периода).
+export async function deleteRequest(id: string): Promise<Record<string, unknown>> {
+  return requestJson<Record<string, unknown>>(`/api/requests/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
 // POST /api/requests: создание заявки от ОК/админа (201 → созданная заявка).
 export async function createRequest(body: CreateRequestBody): Promise<RequestOut> {
   return requestJson<RequestOut>("/api/requests", {

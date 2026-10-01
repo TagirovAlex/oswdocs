@@ -689,6 +689,31 @@ def get_request(
     return _public_view(request, user)
 
 
+@router.delete("/requests/{request_id}")
+def delete_request(
+    request_id: str,
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+    store: RequestsStore = Depends(get_requests_store),
+) -> dict:
+    """Удалить заявку (только админ; для тестового периода). Удаление необратимо."""
+    settings.ensure_read_only()
+    if user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Удаление заявок — только админ",
+        )
+    try:
+        _get_request_or_404(store, request_id)
+        store.delete(request_id)
+    except RequestsUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    _audit(user.sam, "request.delete", request_id)
+    return {"deleted": request_id}
+
+
 @router.post("/requests/{request_id}/submit", response_model=RequestOut)
 def submit_request(
     request_id: str,

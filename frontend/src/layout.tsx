@@ -52,6 +52,8 @@ export function SedLayout(props: SedLayoutProps) {
   const [error, setError] = useState<string>("");
   // Версия списка: перезагрузка после правок в окне-попе (возврат фокуса).
   const [listVersion, setListVersion] = useState<number>(0);
+  // Версия папок: при возврате фокуса перезагружаются и счётчики папок.
+  const [foldersVersion, setFoldersVersion] = useState<number>(0);
 
   // Видимые вкладки по роли: «Настройки» — админу и руководителю ОК (контент),
   // «Создание» и «Справочник» — ОК, руководителю ОК и админу.
@@ -64,7 +66,8 @@ export function SedLayout(props: SedLayoutProps) {
     return tabs;
   }, [role]);
 
-  // Загрузка папок при смене роли; активная папка — первая доступная.
+  // Загрузка папок при смене роли и при возврате фокуса (закрыт попап — счётчики
+  // актуальны); активная папка — первая доступная.
   useEffect(() => {
     let alive = true;
     getFolders()
@@ -80,7 +83,7 @@ export function SedLayout(props: SedLayoutProps) {
     return () => {
       alive = false;
     };
-  }, [role]);
+  }, [role, foldersVersion]);
 
   // Загрузка предприятий для фильтра таблицы (без хардкод-массивов).
   useEffect(() => {
@@ -119,9 +122,12 @@ export function SedLayout(props: SedLayoutProps) {
     };
   }, [folder, filters, role, tab, listVersion]);
 
-  // Возврат фокуса в основное окно (закрыт попап карточки) — обновить список.
+  // Возврат фокуса в основное окно (закрыт попап) — обновить список и папки.
   useEffect(() => {
-    const onFocus = () => setListVersion((v) => v + 1);
+    const onFocus = () => {
+      setListVersion((v) => v + 1);
+      setFoldersVersion((v) => v + 1);
+    };
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
   }, []);

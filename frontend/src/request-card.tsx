@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import type { ChangeEvent } from "react";
 import {
   decideStep,
+  deleteRequest,
   finishRequest,
   getAttachments,
   getDocuments,
@@ -39,6 +40,8 @@ export function RequestCard(props: RequestCardProps) {
   const [decisionError, setDecisionError] = useState<string>("");
   const [cardActionStatus, setCardActionStatus] = useState<string>("");
   const [cardActionError, setCardActionError] = useState<string>("");
+  const [deleteBusy, setDeleteBusy] = useState<boolean>(false);
+  const [deleteError, setDeleteError] = useState<string>("");
   const [attachments, setAttachments] = useState<AttachmentMeta[]>([]);
   const [attachmentsError, setAttachmentsError] = useState<string>("");
   const [uploadError, setUploadError] = useState<string>("");
@@ -74,6 +77,8 @@ export function RequestCard(props: RequestCardProps) {
     setDecisionComment("");
     setPrintStatus("");
     setPrintError("");
+    setDeleteError("");
+    setDeleteBusy(false);
     getRequest(requestId)
       .then((data) => {
         if (alive) {
@@ -183,6 +188,22 @@ export function RequestCard(props: RequestCardProps) {
   }
   async function handleFinish(): Promise<void> {
     await runAction(() => finishRequest(requestId), "Заявка завершена");
+  }
+
+  // Удаление заявки (только админ; для тестового периода). Подтверждение —
+  // удаление необратимо; при успехе попап закрывается (список обновится по
+  // фокусу в родителе), при ошибке — текст ошибки, попап остаётся.
+  async function handleDelete(): Promise<void> {
+    setDeleteError("");
+    if (!window.confirm(`Удалить заявку ${requestId}? Действие необратимо.`)) return;
+    setDeleteBusy(true);
+    try {
+      await deleteRequest(requestId);
+      window.close();
+    } catch (e: unknown) {
+      setDeleteError(e instanceof Error ? e.message : "Ошибка удаления");
+      setDeleteBusy(false);
+    }
   }
 
   async function refreshAttachments(): Promise<void> {
@@ -337,11 +358,22 @@ export function RequestCard(props: RequestCardProps) {
                   Завершить
                 </button>
               )}
+              {role === "admin" && (
+                <button
+                  type="button"
+                  className="sed-btn sed-btn--ghost"
+                  onClick={handleDelete}
+                  disabled={deleteBusy}
+                >
+                  Удалить заявку
+                </button>
+              )}
             </div>
           )}
 
           {cardActionStatus && <div role="status">{cardActionStatus}</div>}
           {cardActionError && <div role="alert">{cardActionError}</div>}
+          {deleteError && <div role="alert">{deleteError}</div>}
 
           {/* Скан-вложения: список мета + загрузка файла. */}
           <section aria-label="Вложения">

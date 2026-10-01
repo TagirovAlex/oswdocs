@@ -210,4 +210,23 @@ describe("SedLayout", () => {
     expect(open).toHaveBeenCalledWith("?view=create", "_blank", expect.stringContaining("popup"));
     open.mockRestore();
   });
+
+  // Возврат фокуса в основное окно (закрыт попап) — папки и список
+  // перезагружаются (счётчики и новые заявки актуальны без жёсткой перезагрузки).
+  it("после возврата фокуса папки и список перезагружаются", async () => {
+    vi.mocked(getFolders).mockResolvedValue(folders);
+    vi.mocked(getRequests).mockResolvedValue([requestWith("Громов Игорь Олегович", "На согласовании")]);
+
+    renderWithTheme("hr");
+    await waitFor(() => expect(screen.getByText("REQ-0001")).toBeInTheDocument());
+    const foldersCalls = vi.mocked(getFolders).mock.calls.length;
+    const requestsCalls = vi.mocked(getRequests).mock.calls.length;
+
+    fireEvent(window, new Event("focus"));
+
+    await waitFor(() =>
+      expect(vi.mocked(getFolders).mock.calls.length).toBeGreaterThan(foldersCalls),
+    );
+    expect(vi.mocked(getRequests).mock.calls.length).toBeGreaterThan(requestsCalls);
+  });
 });

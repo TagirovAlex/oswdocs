@@ -7,6 +7,7 @@ import { ApiHttpError } from "./auth-client";
 import { RequestCard } from "./request-card";
 import {
   decideStep,
+  deleteRequest,
   finishRequest,
   getAttachments,
   getDocuments,
@@ -29,6 +30,7 @@ vi.mock("./requests-client", async (importOriginal) => {
     submitRequest: vi.fn(),
     toExecution: vi.fn(),
     finishRequest: vi.fn(),
+    deleteRequest: vi.fn(),
     getAttachments: vi.fn(),
     uploadAttachment: vi.fn(),
     printRequest: vi.fn(),
@@ -58,18 +60,22 @@ function renderCard(requestId: string = "REQ-0001", role: Role = "hr") {
 }
 
 beforeEach(() => {
+  // Снимаем спаи window.confirm/window.close между тестами (jsdom-заглушки).
+  vi.restoreAllMocks();
   vi.mocked(getDocuments).mockReset();
   vi.mocked(getRequest).mockReset();
   vi.mocked(decideStep).mockReset();
   vi.mocked(submitRequest).mockReset();
   vi.mocked(toExecution).mockReset();
   vi.mocked(finishRequest).mockReset();
+  vi.mocked(deleteRequest).mockReset();
   vi.mocked(getAttachments).mockReset();
   vi.mocked(uploadAttachment).mockReset();
   vi.mocked(printRequest).mockReset();
   vi.mocked(getDocuments).mockResolvedValue([]);
   vi.mocked(getRequest).mockResolvedValue(requestWith("Громов Игорь Олегович", "На согласовании"));
   vi.mocked(getAttachments).mockResolvedValue([]);
+  vi.mocked(deleteRequest).mockResolvedValue({ deleted: "REQ-0001" });
 });
 
 describe("RequestCard", () => {
@@ -231,5 +237,63 @@ describe("RequestCard", () => {
     fireEvent.change(screen.getByLabelText("Файл скана"), { target: { files: [file] } });
     await waitFor(() => expect(screen.getByText("Файл больше лимита")).toBeInTheDocument());
     expect(vi.mocked(uploadAttachment)).toHaveBeenCalledWith("REQ-0001", file);
+  });
+
+  // Удаление заявки (только админ; для тестового периода): кнопка видна,
+  // подтверждение, при успехе — deleteRequest + закрытие попапа.
+  it("admin: кнопка «Удалить заявку» видна и удаляет с подтверждением", async () => {
+    vi.mocked(getRequest).mockResolvedValue(requestWith("Громов Игорь Олегович", "На согласовании"));
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const close = vi.spyOn(window, "close").mockImplementation(() => undefined);
+
+    renderCard("REQ-0001", "admin");
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Удалить заявку" })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Удалить заявку" }));
+    expect(confirm).toHaveBeenCalledWith("Удалить заявку REQ-0001? Действие необратимо.");
+    await waitFor(() => expect(vi.mocked(deleteRequest)).toHaveBeenCalledWith("REQ-0001"));
+    await waitFor(() => expect(close).toHaveBeenCalled());
+  });
+
+  // Отмена подтверждения — заявка не удаляется, попап не закрывается.
+  it("admin: при отмене подтверждения deleteRequest не вызывается", async () => {
+    vi.mocked(getRequest).mockResolvedValue(requestWith("Громов Игорь Олегович", "На согласовании"));
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const close = vi.spyOn(window, "close").mockImplementation(() => undefined);
+
+    renderCard("REQ-0001", "admin");
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Удалить заявку" })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Удалить заявку" }));
+    expect(confirm).toHaveBeenCalled();
+    expect(vi.mocked(deleteRequest)).not.toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
+  });
+
+  // Ошибка удаления — текст ошибки, попап остаётся открытым.
+  it("admin: ошибка удаления показывает текст и не закрывает попап", async () => {
+    vi.mocked(getRequest).mockResolvedValue(requestWith("Громов Игорь Олегович", "На согласовании"));
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const close = vi.spyOn(window, "close").mockImplementation(() => undefined);
+    vi.mocked(deleteRequest).mockRejectedValue(new ApiHttpError(403, "Удаление заявок — только админ"));
+
+    renderCard("REQ-0001", "admin");
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Удалить заявку" })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Удалить заявку" }));
+    await waitFor(() =>
+      expect(screen.getByText("Удаление заявок — только админ")).toBeInTheDocument(),
+    );
+    expect(close).not.toHaveBeenCalled();
+  });
+
+  // Матрица ролей: не-админу кнопка удаления не показывается.
+  it("hr: кнопка «Удалить заявку» не показывается", async () => {
+    renderCard("REQ-0001", "hr");
+    await waitFor(() => expect(screen.getByLabelText("Шаги заявки")).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Удалить заявку" })).not.toBeInTheDocument();
   });
 });

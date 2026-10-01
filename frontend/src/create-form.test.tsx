@@ -7,7 +7,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiHttpError } from "./auth-client";
 import { CreateForm } from "./create-form";
-import { createRequest, getEmployeeCard, getEnterprises, searchAd, searchEmployees } from "./requests-client";
+import { createRequest, getEmployeeCard, getEnterprises, searchAd, searchEmployees, submitRequest } from "./requests-client";
 
 // Мок клиента заявок; чистые функции — реальные.
 vi.mock("./requests-client", async (importOriginal) => {
@@ -19,6 +19,7 @@ vi.mock("./requests-client", async (importOriginal) => {
     getEmployeeCard: vi.fn(),
     searchAd: vi.fn(),
     createRequest: vi.fn(),
+    submitRequest: vi.fn(),
   };
 });
 
@@ -39,6 +40,7 @@ beforeEach(() => {
   vi.mocked(getEmployeeCard).mockReset();
   vi.mocked(searchAd).mockReset();
   vi.mocked(createRequest).mockReset();
+  vi.mocked(submitRequest).mockReset();
   vi.mocked(getEnterprises).mockResolvedValue(enterprises);
 });
 
@@ -337,6 +339,97 @@ describe("CreateForm", () => {
     await addAdExecutor();
     fireEvent.click(screen.getByText("Создать"));
     await waitFor(() => expect(close).toHaveBeenCalled());
+    close.mockRestore();
+  });
+
+  // «Отправить на согласование»: создаёт заявку, сразу отправляет её
+  // (submitRequest(result.id)) и в окне-попе закрывает окно.
+  it("«Отправить на согласование» создаёт, отправляет и закрывает окно", async () => {
+    vi.mocked(searchEmployees).mockRejectedValue(new ApiHttpError(503, "Клиент 1С не настроен"));
+    vi.mocked(searchAd).mockResolvedValue([adCandidate]);
+    vi.mocked(createRequest).mockResolvedValue({
+      id: "REQ-0001",
+      status: "Черновик",
+      route_origin: "custom",
+      department: "Цех № 1",
+      position: "Слесарь",
+      created_by: "petrov.pp",
+      steps: [],
+    });
+    vi.mocked(submitRequest).mockResolvedValue({
+      id: "REQ-0001",
+      status: "На согласовании",
+      route_origin: "custom",
+      department: "Цех № 1",
+      position: "Слесарь",
+      created_by: "petrov.pp",
+      steps: [],
+    });
+    const close = vi.spyOn(window, "close").mockImplementation(() => {});
+
+    render(<CreateForm role="hr" closeOnCreate />);
+    await fillEmployeeManually();
+    await addAdExecutor();
+    fireEvent.click(screen.getByText("Отправить на согласование"));
+
+    await waitFor(() => expect(submitRequest).toHaveBeenCalledWith("REQ-0001"));
+    expect(createRequest).toHaveBeenCalledWith(
+      expect.objectContaining({ enterprise: "ENT_PRIMER_1", fio: "Громов Игорь Олегович" }),
+    );
+    await waitFor(() => expect(close).toHaveBeenCalled());
+    close.mockRestore();
+  });
+
+  // «Создать» (черновик): заявка создаётся, на согласование НЕ отправляется.
+  it("«Создать» создаёт черновик без отправки на согласование", async () => {
+    vi.mocked(searchEmployees).mockRejectedValue(new ApiHttpError(503, "Клиент 1С не настроен"));
+    vi.mocked(searchAd).mockResolvedValue([adCandidate]);
+    vi.mocked(createRequest).mockResolvedValue({
+      id: "REQ-0004",
+      status: "Черновик",
+      route_origin: "custom",
+      department: "Цех № 1",
+      position: "Слесарь",
+      created_by: "petrov.pp",
+      steps: [],
+    });
+
+    render(<CreateForm role="hr" />);
+    await fillEmployeeManually();
+    await addAdExecutor();
+    fireEvent.click(screen.getByText("Создать"));
+
+    await waitFor(() => expect(createRequest).toHaveBeenCalled());
+    expect(submitRequest).not.toHaveBeenCalled();
+  });
+
+  // Ошибка submit: текст ошибки виден, окно не закрывается.
+  it("при ошибке «Отправить на согласование» окно не закрывается, показан текст", async () => {
+    vi.mocked(searchEmployees).mockRejectedValue(new ApiHttpError(503, "Клиент 1С не настроен"));
+    vi.mocked(searchAd).mockResolvedValue([adCandidate]);
+    vi.mocked(createRequest).mockResolvedValue({
+      id: "REQ-0005",
+      status: "Черновик",
+      route_origin: "custom",
+      department: "Цех № 1",
+      position: "Слесарь",
+      created_by: "petrov.pp",
+      steps: [],
+    });
+    vi.mocked(submitRequest).mockRejectedValue(
+      new ApiHttpError(422, "Маршрут не согласован"),
+    );
+    const close = vi.spyOn(window, "close").mockImplementation(() => {});
+
+    render(<CreateForm role="hr" closeOnCreate />);
+    await fillEmployeeManually();
+    await addAdExecutor();
+    fireEvent.click(screen.getByText("Отправить на согласование"));
+
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent(/Маршрут не согласован/),
+    );
+    expect(close).not.toHaveBeenCalled();
     close.mockRestore();
   });
 });

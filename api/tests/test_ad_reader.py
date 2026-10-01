@@ -332,6 +332,21 @@ def test_disabled_account_visible_as_disabled():
     assert reader.get_user("p.postoronny").enabled is False
 
 
+def test_search_users_filters_disabled_accounts():
+    """Поиск кандидатов возвращает только активные учётные записи."""
+    entries = _directory()
+    for e in entries:
+        if e["sAMAccountName"] == "p.postoronny":
+            e["userAccountControl"] = 514  # бит ACCOUNTDISABLE
+    reader = _reader(entries)
+    # Отключенная запись в результаты поиска не попадает.
+    assert reader.search_users("Посторонний") == []
+    # Активная — попадает.
+    hits = reader.search_users("Тестов Тест")
+    assert [u.sam for u in hits] == ["t.testov"]
+    assert hits[0].enabled is True
+
+
 def test_ad_user_model_defaults():
     user = AdUser(dn="dn", sam="s", display_name="ФИО Вымышленное")
     assert user.manager_dn == ""

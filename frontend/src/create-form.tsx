@@ -7,7 +7,7 @@
 // из AD (GET /api/ad/search); телом создания идут blocks, не группы (steps).
 import { useEffect, useRef, useState } from "react";
 import { ApiHttpError } from "./auth-client";
-import { createRequest, getEmployeeCard, getEnterprises, searchAd, searchEmployees } from "./requests-client";
+import { createRequest, getEmployeeCard, getEnterprises, searchAd, searchEmployees, submitRequest } from "./requests-client";
 import type { AdCandidate, EmployeeHit, Enterprise } from "./requests-client";
 import type { Role } from "./api-mock";
 
@@ -277,8 +277,10 @@ export function CreateForm(props: CreateFormProps) {
     closeAdPanel();
   }
 
-  // Создание заявки: POST /api/requests; при 201 — статус и сброс формы.
-  async function handleCreate(): Promise<void> {
+  // Создание заявки: POST /api/requests; при submit=true — сразу POST /{id}/submit
+  // («Отправить на согласование»). При успехе — статус и сброс формы; при
+  // ошибке (в т.ч. submit) — текст ошибки, окно не закрывается.
+  async function handleCreate(submit: boolean): Promise<void> {
     if (busy) return;
     setCreateError("");
     setCreated("");
@@ -295,6 +297,7 @@ export function CreateForm(props: CreateFormProps) {
           steps: b.steps.map((s) => ({ sam: s.sam })),
         })),
       });
+      if (submit) await submitRequest(result.id);
       setCreated(`Заявка ${result.id} создана`);
       setEnterprise("");
       setTabNum("");
@@ -378,8 +381,9 @@ export function CreateForm(props: CreateFormProps) {
                   margin: 0,
                   padding: 0,
                   listStyle: "none",
-                  border: "1px solid var(--sed-border, #999)",
-                  background: "var(--sed-surface, #fff)",
+                  border: "1px solid var(--sed-border)",
+                  background: "var(--sed-surface)",
+                  color: "var(--sed-text)",
                   maxHeight: 220,
                   overflowY: "auto",
                 }}
@@ -389,12 +393,15 @@ export function CreateForm(props: CreateFormProps) {
                     <button
                       type="button"
                       onClick={() => pickEmployee(h)}
+                      onMouseEnter={(e) => (e.currentTarget as HTMLButtonElement).style.background = "var(--sed-primary-soft)"}
+                      onMouseLeave={(e) => (e.currentTarget as HTMLButtonElement).style.background = ""}
                       style={{
                         display: "block",
                         width: "100%",
                         textAlign: "left",
                         border: "none",
                         background: "transparent",
+                        color: "var(--sed-text)",
                         padding: 4,
                         cursor: "pointer",
                       }}
@@ -471,8 +478,8 @@ export function CreateForm(props: CreateFormProps) {
             <div
               key={bi}
               style={{
-                border: "1px solid var(--sed-border, #ccc)",
-                borderRadius: "var(--sed-radius, 4px)",
+                border: "1px solid var(--sed-border)",
+                borderRadius: "var(--sed-radius)",
                 padding: 8,
                 marginTop: 8,
               }}
@@ -532,8 +539,9 @@ export function CreateForm(props: CreateFormProps) {
                         margin: 0,
                         padding: 0,
                         listStyle: "none",
-                        border: "1px solid var(--sed-border, #999)",
-                        background: "var(--sed-surface, #fff)",
+                        border: "1px solid var(--sed-border)",
+                        background: "var(--sed-surface)",
+                        color: "var(--sed-text)",
                         maxHeight: 220,
                         overflowY: "auto",
                       }}
@@ -543,12 +551,15 @@ export function CreateForm(props: CreateFormProps) {
                           <button
                             type="button"
                             onClick={() => addStepToBlock(bi, c)}
+                            onMouseEnter={(e) => (e.currentTarget as HTMLButtonElement).style.background = "var(--sed-primary-soft)"}
+                            onMouseLeave={(e) => (e.currentTarget as HTMLButtonElement).style.background = ""}
                             style={{
                               display: "block",
                               width: "100%",
                               textAlign: "left",
                               border: "none",
                               background: "transparent",
+                              color: "var(--sed-text)",
                               padding: 4,
                               cursor: "pointer",
                             }}
@@ -577,8 +588,21 @@ export function CreateForm(props: CreateFormProps) {
       )}
 
       <div className="sed-toolbar" style={{ marginTop: 12 }}>
-        <button type="button" className="sed-btn" disabled={!canCreate} onClick={handleCreate}>
+        <button
+          type="button"
+          className="sed-btn sed-btn--ghost"
+          disabled={!canCreate}
+          onClick={() => handleCreate(false)}
+        >
           {busy ? "Создание…" : "Создать"}
+        </button>
+        <button
+          type="button"
+          className="sed-btn"
+          disabled={!canCreate}
+          onClick={() => handleCreate(true)}
+        >
+          {busy ? "Отправка…" : "Отправить на согласование"}
         </button>
       </div>
       {createError && <div role="alert">{createError}</div>}
