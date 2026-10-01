@@ -23,7 +23,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from app.ad_reader import AdReader, AdReaderSettings, InMemoryCache  # noqa: E402
+from app.ad_reader import AdReader, AdReaderSettings, AdUnavailable, InMemoryCache  # noqa: E402
 from app.audit import AuditLogger, audit_log  # noqa: E402
 from app.config import Settings, get_settings  # noqa: E402
 from app.employees import get_ad_reader, get_onec_client  # noqa: E402
@@ -263,6 +263,27 @@ def _create_request(client, hr_headers, steps=None) -> dict:
     return response.json()
 
 
+class BrokenAdReader:
+    """Ридер AD, который всегда падает (AD недоступен в момент чтения)."""
+
+    def get_user(self, sam):
+        raise AdUnavailable("AD недоступен (тест)")
+
+
+@pytest.fixture
+def neg_settings_store(neg_settings):
+    """Пустое хранилище настроек (резолв enterprise_name не ходит в БД)."""
+    from app.settings_routes import SettingsUnavailable, get_settings_store
+
+    class EmptyStore:
+        def get(self, key):
+            raise SettingsUnavailable("Хранилище настроек недоступно (тест)")
+
+    app.dependency_overrides[get_settings_store] = lambda: EmptyStore()
+    yield
+    app.dependency_overrides.pop(get_settings_store, None)
+
+
 # --- 403: нет группы / нет логина ---
 
 def test_nogroup_403_everywhere(client, nogroup_headers, neg_mocks, route_single):
@@ -356,6 +377,46 @@ def test_personal_assignee_only_himself(client, hr_headers, neg_mocks, route_sin
         f"/requests/{rid}/steps/1/decision", json={"decision": "approve"}, headers=colleague,
     )
     assert denied.status_code == 403
+
+
+# --- Резолв ФИО согласующего (owner_name): AD только читается, сбой не валит выдачу ---
+
+def _request_with_assignee(client, hr_headers, sam: str) -> str:
+    """Заявка с одним шагом и персональным исполнителем (замена руководителя)."""
+    rid = _create_request(client, hr_headers)["id"]
+    patched = client.patch(
+        f"/requests/{rid}/steps",
+        json={"steps": [{"owner_group": BUH_GROUP, "resolver": "ad_direct_manager"}],
+              "manager": sam, "reason": "Замена руководителя (вымышленная)"},
+        headers=hr_headers,
+    )
+    assert patched.status_code == 200
+    return rid
+
+
+def test_owner_name_resolved_from_ad(client, hr_headers, neg_mocks, route_single, neg_settings_store):
+    """owner_name — ФИО согласующего из AD по assignee (только чтение)."""
+    rid = _request_with_assignee(client, hr_headers, "t.ivan")
+    assert client.post(f"/requests/{rid}/submit", headers=hr_headers).status_code == 200
+    response = client.get(f"/requests/{rid}", headers=hr_headers)
+    assert response.status_code == 200
+    assert response.json()["steps"][0]["owner_name"] == FIO_IVAN
+
+
+def test_owner_name_none_when_ad_unavailable(
+    client, hr_headers, neg_mocks, route_single, neg_settings_store
+):
+    """AD недоступен при резолве ФИО: owner_name=None, ответ 200 (fail-soft)."""
+    rid = _request_with_assignee(client, hr_headers, "t.ivan")
+    assert client.post(f"/requests/{rid}/submit", headers=hr_headers).status_code == 200
+    app.dependency_overrides[get_ad_reader] = lambda: BrokenAdReader()
+    try:
+        response = client.get(f"/requests/{rid}", headers=hr_headers)
+    finally:
+        app.dependency_overrides.pop(get_ad_reader, None)
+    assert response.status_code == 200
+    assert response.json()["steps"][0]["assignee"] == "t.ivan"
+    assert response.json()["steps"][0]["owner_name"] is None
 
 
 # --- Дубли ФИО: без автосклейки, флаг ручной сверки ---

@@ -389,6 +389,66 @@ def ad_search(
 
 
 # ---------------------------------------------------------------------------
+# Состав группы AD (конструктор маршрута, ОК/админы)
+# ---------------------------------------------------------------------------
+
+@router.get("/ad/groups/{group}/members")
+def ad_group_members(
+    group: str,
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+    reader: AdReader | None = Depends(get_ad_reader),
+) -> dict:
+    """Активные участники группы AD для конструктора маршрута: только ОК,
+    руководитель ОК и админ.
+
+    Группа обязана быть разрешённой настройками (is_group_allowed: список
+    разрешённых групп либо префикс владельцев шагов) — иначе 403. Ридер AD не
+    настроен/сбой каталога — 503 (не 500), группа не найдена — 404. Набор
+    полей тот же, что в /ad/search (sam/ФИО/депт/должность/mail). Только
+    чтение AD."""
+    settings.ensure_read_only()
+    if not is_privileged(user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Состав группы AD доступен ОК и админу",
+        )
+    name = (group or "").strip()
+    if not settings.is_group_allowed(name):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Группа не разрешена настройками (allowed_ad_groups)",
+        )
+    if reader is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Ридер AD не настроен (в offline — подмена фейковым шлюзом)",
+        )
+    try:
+        members = reader.group_members(name)
+    except AdNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+        ) from exc
+    except AdUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    return {
+        "items": [
+            {
+                "sam": u.sam,
+                "display_name": u.display_name,
+                "department": u.department,
+                "title": u.title,
+                "mail": u.mail,
+            }
+            for u in members
+        ]
+    }
+
+
+# ---------------------------------------------------------------------------
 # Объединенная карточка со снапшотами (истина — 1С)
 # ---------------------------------------------------------------------------
 

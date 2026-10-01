@@ -4,24 +4,42 @@
 // Данные — из реального API (requests-client), тема — из theme.tsx.
 import { useEffect, useMemo, useState } from "react";
 import {
+  DEFAULT_REQUEST_SORT,
   EMPTY_FILTERS,
   filterRequests,
   getEnterprises,
   getFolders,
   getRequests,
+  REQUESTS_CHANGED_KEY,
+  sortRequests,
   toRequestRow,
 } from "./requests-client";
-import type { Enterprise, Folder, FolderId, RequestFilters, RequestRow } from "./requests-client";
+import type {
+  Enterprise,
+  Folder,
+  FolderId,
+  RequestFilters,
+  RequestRow,
+  RequestSort,
+  RequestSortKey,
+} from "./requests-client";
 import type { Role } from "./api-mock";
 import { useTheme } from "./theme";
 import { AdminSettings } from "./admin-settings";
-import { CreateForm } from "./create-form";
 import { Directory } from "./directory";
 import { createUrl, openPopup, requestUrl } from "./windows";
 
-// Вкладки скелета.
-const TABS = ["Заявки", "Создание", "Справочник", "Настройки"] as const;
+// Вкладки скелета. «Создание» убрана: создание заявки — кнопка «Создать
+// заявку» (окно ?view=create), приватный маршрут создания сохранён.
+const TABS = ["Заявки", "Справочник", "Настройки"] as const;
 type Tab = (typeof TABS)[number];
+
+// Заголовки сортируемых колонок: подпись → ключ сортировки (§3.8 хендоффа).
+const SORTABLE_COLUMNS: { label: string; key: RequestSortKey }[] = [
+  { label: "№", key: "id" },
+  { label: "Статус", key: "status" },
+  { label: "Срок", key: "dueDate" },
+];
 
 // Подписи ролей в шапке (матрица README п.1).
 const ROLE_LABELS: Record<Role, string> = {
@@ -49,6 +67,8 @@ export function SedLayout(props: SedLayoutProps) {
   const [enterprises, setEnterprises] = useState<Enterprise[]>([]);
   const [rows, setRows] = useState<RequestRow[]>([]);
   const [filters, setFilters] = useState<RequestFilters>(EMPTY_FILTERS);
+  // Сортировка списка: по умолчанию новые сверху (по id вида REQ-XXXX).
+  const [sort, setSort] = useState<RequestSort>(DEFAULT_REQUEST_SORT);
   const [error, setError] = useState<string>("");
   // Версия списка: перезагрузка после правок в окне-попе (возврат фокуса).
   const [listVersion, setListVersion] = useState<number>(0);
@@ -56,11 +76,11 @@ export function SedLayout(props: SedLayoutProps) {
   const [foldersVersion, setFoldersVersion] = useState<number>(0);
 
   // Видимые вкладки по роли: «Настройки» — админу и руководителю ОК (контент),
-  // «Создание» и «Справочник» — ОК, руководителю ОК и админу.
+  // «Справочник» — ОК, руководителю ОК и админу.
   const visibleTabs = useMemo(() => {
     const tabs: Tab[] = ["Заявки"];
     if (role === "hr" || role === "hr_admin" || role === "admin") {
-      tabs.push("Создание", "Справочник");
+      tabs.push("Справочник");
     }
     if (role === "admin" || role === "hr_admin") tabs.push("Настройки");
     return tabs;
@@ -100,8 +120,10 @@ export function SedLayout(props: SedLayoutProps) {
     };
   }, [role]);
 
-  // Загрузка таблицы: GET /api/requests, папка и фильтры — на клиенте.
+  // Загрузка таблицы: GET /api/requests; папка, фильтры и сортировка — на клиенте.
   // Переход на вкладку «Заявки» обновляет список (новая заявка видна сразу).
+  // Сортировка здесь не участвует: клик по заголовку не должен перезапрашивать
+  // список (сортировка применяется при отрисовке — см. sortedRows).
   useEffect(() => {
     let alive = true;
     getRequests()
@@ -122,6 +144,10 @@ export function SedLayout(props: SedLayoutProps) {
     };
   }, [folder, filters, role, tab, listVersion]);
 
+  // Порядок строк для отрисовки: сортировка чисто клиентская, перезагрузки списка
+  // не требует.
+  const sortedRows = useMemo(() => sortRequests(rows, sort), [rows, sort]);
+
   // Возврат фокуса в основное окно (закрыт попап) — обновить список и папки.
   useEffect(() => {
     const onFocus = () => {
@@ -132,10 +158,34 @@ export function SedLayout(props: SedLayoutProps) {
     return () => window.removeEventListener("focus", onFocus);
   }, []);
 
-  // Заголовок таблицы зависит от роли (владельцу — без колонки ПДн).
+  // Оповещение из другого окна/вкладки (удаление заявки в попапе):
+  // localStorage → событие storage. Список и счётчики папок обновляются сразу,
+  // не дожидаясь фокуса (создание заявки обновляет список по возврату фокуса).
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key !== null && e.key !== REQUESTS_CHANGED_KEY) return;
+      setListVersion((v) => v + 1);
+      setFoldersVersion((v) => v + 1);
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
+
+  // Клик по заголовку сортируемой колонки: та же колонка — сменить знак,
+  // новая колонка — сортировка по ней в порядке по умолчанию (возр./убыв.).
+  function toggleSort(key: RequestSortKey): void {
+    setSort((prev) =>
+      prev.key === key
+        ? { key, dir: prev.dir === "asc" ? "desc" : "asc" }
+        : { key, dir: key === "id" ? "desc" : "asc" },
+    );
+  }
+
+  // Заголовок таблицы зависит от роли (владельцу — без колонок ПДн и без
+  // текущего согласующего).
   const columns = useMemo(() => {
     if (role === "owner") return ["№", "Сотрудник (маска)", "Шаг", "Срок"];
-    return ["№", "Сотрудник", "Предприятие", "Статус", "Шаг", "Срок"];
+    return ["№", "Сотрудник", "Предприятие", "Статус", "Текущий согласующий", "Шаг", "Срок"];
   }, [role]);
 
   return (
@@ -194,9 +244,8 @@ export function SedLayout(props: SedLayoutProps) {
           ))}
         </aside>
 
-        {/* Контент: вкладка создания/настроек — экраны B4, иначе таблица. */}
+        {/* Контент: справочник/настройки — экраны B4, иначе таблица. */}
         <main className="sed-content">
-          {tab === "Создание" && <CreateForm role={role} />}
           {tab === "Справочник" && <Directory role={role} />}
           {tab === "Настройки" && <AdminSettings role={role} />}
           {tab === "Заявки" && (
@@ -253,17 +302,43 @@ export function SedLayout(props: SedLayoutProps) {
 
           {error && <div role="alert">Ошибка: {error}</div>}
 
-          {/* Таблица заявок: клик по строке — окно карточки заявки (вместо «под списком»). */}
+          {/* Таблица заявок: клик по строке — окно карточки заявки (вместо «под списком»),
+              клик по заголовку сортируемой колонки — сортировка. */}
           <table className="sed-table" aria-label="Заявки">
             <thead>
               <tr>
-                {columns.map((col) => (
-                  <th key={col}>{col}</th>
-                ))}
+                {columns.map((col) => {
+                  const sortable = SORTABLE_COLUMNS.find((item) => item.label === col);
+                  if (!sortable) return <th key={col}>{col}</th>;
+                  const active = sort.key === sortable.key;
+                  return (
+                    <th
+                      key={col}
+                      aria-sort={active ? (sort.dir === "asc" ? "ascending" : "descending") : "none"}
+                    >
+                      <button
+                        type="button"
+                        aria-label={`Сортировать по «${col}»`}
+                        onClick={() => toggleSort(sortable.key)}
+                        style={{
+                          border: "none",
+                          background: "transparent",
+                          color: "inherit",
+                          font: "inherit",
+                          padding: 0,
+                          cursor: "pointer",
+                        }}
+                      >
+                        {col}
+                        {active ? (sort.dir === "asc" ? " ↑" : " ↓") : ""}
+                      </button>
+                    </th>
+                  );
+                })}
               </tr>
             </thead>
             <tbody>
-              {rows.map((row) => (
+              {sortedRows.map((row) => (
                 <tr
                   key={row.id}
                   onClick={() => openPopup(requestUrl(row.id))}
@@ -275,6 +350,7 @@ export function SedLayout(props: SedLayoutProps) {
                     <>
                       <td>{row.enterprise}</td>
                       <td>{row.status}</td>
+                      <td>{row.ownerName}</td>
                     </>
                   )}
                   <td>{row.step}</td>

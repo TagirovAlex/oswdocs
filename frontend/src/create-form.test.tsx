@@ -7,7 +7,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiHttpError } from "./auth-client";
 import { CreateForm } from "./create-form";
-import { createRequest, getEmployeeCard, getEnterprises, searchAd, searchEmployees, submitRequest } from "./requests-client";
+import { createRequest, getAdGroupMembers, getEmployeeCard, getEnterprises, getStepGroups, searchAd, searchEmployees, submitRequest } from "./requests-client";
 
 // Мок клиента заявок; чистые функции — реальные.
 vi.mock("./requests-client", async (importOriginal) => {
@@ -18,6 +18,8 @@ vi.mock("./requests-client", async (importOriginal) => {
     searchEmployees: vi.fn(),
     getEmployeeCard: vi.fn(),
     searchAd: vi.fn(),
+    getStepGroups: vi.fn(),
+    getAdGroupMembers: vi.fn(),
     createRequest: vi.fn(),
     submitRequest: vi.fn(),
   };
@@ -33,15 +35,28 @@ const adCandidate = {
   title: "Бухгалтер",
   mail: "petrov.pp@example.test",
 };
+// Группы-владельцы шагов из settings (GET /api/step-groups) и их состав из AD.
+const stepGroups = ["SED_STEP_BUH", "SED_STEP_OK"];
+const groupMember = {
+  sam: "sidorova.as",
+  display_name: "Сидорова Анна Сергеевна",
+  mail: "sidorova.as@example.test",
+  department: "Бухгалтерия",
+  title: "Главный бухгалтер",
+};
 
 beforeEach(() => {
   vi.mocked(getEnterprises).mockReset();
   vi.mocked(searchEmployees).mockReset();
   vi.mocked(getEmployeeCard).mockReset();
   vi.mocked(searchAd).mockReset();
+  vi.mocked(getStepGroups).mockReset();
+  vi.mocked(getAdGroupMembers).mockReset();
   vi.mocked(createRequest).mockReset();
   vi.mocked(submitRequest).mockReset();
   vi.mocked(getEnterprises).mockResolvedValue(enterprises);
+  vi.mocked(getStepGroups).mockResolvedValue(stepGroups);
+  vi.mocked(getAdGroupMembers).mockResolvedValue([groupMember]);
 });
 
 // Заполнение формы до маршрута: предприятие → поиск 1С (503) → ручной ввод.
@@ -431,5 +446,143 @@ describe("CreateForm", () => {
     );
     expect(close).not.toHaveBeenCalled();
     close.mockRestore();
+  });
+
+  // Тип исполнителя шага — «Группа»: список групп из settings, состав из AD
+  // (счётчик + раскрытый список), в теле создания owner_group + by_group.
+  it("тип исполнителя «Группа»: список групп, состав и owner_group в теле", async () => {
+    vi.mocked(searchEmployees).mockRejectedValue(new ApiHttpError(503, "Клиент 1С не настроен"));
+    vi.mocked(createRequest).mockResolvedValue({
+      id: "REQ-0001",
+      status: "Черновик",
+      route_origin: "custom",
+      department: "Цех № 1",
+      position: "Слесарь",
+      created_by: "petrov.pp",
+      steps: [],
+    });
+
+    render(<CreateForm role="hr" />);
+    await fillEmployeeManually();
+    fireEvent.click(screen.getByText("Добавить блок"));
+
+    // Тип исполнителя блока: по умолчанию сотрудник, есть вариант «Группа».
+    const kind = screen.getByLabelText("Тип исполнителя блока 1");
+    expect(kind).toHaveValue("user");
+    fireEvent.change(kind, { target: { value: "group" } });
+
+    // Группы — из /api/step-groups (settings), без хардкода.
+    await waitFor(() => expect(screen.getByLabelText("Группа блока 1")).toBeInTheDocument());
+    expect(screen.getAllByRole("option", { name: "SED_STEP_BUH" }).length).toBeGreaterThan(0);
+
+    // Выбор группы подгружает состав из AD.
+    fireEvent.change(screen.getByLabelText("Группа блока 1"), {
+      target: { value: "SED_STEP_BUH" },
+    });
+    await waitFor(() => expect(vi.mocked(getAdGroupMembers)).toHaveBeenCalledWith("SED_STEP_BUH"));
+    await waitFor(() => expect(screen.getByText("Состав группы: 1")).toBeInTheDocument());
+
+    // Состав раскрывается по кнопке: ФИО и почта членов группы.
+    expect(screen.queryByText("Сидорова Анна Сергеевна")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Показать состав" }));
+    expect(screen.getByText(/Сидорова Анна Сергеевна/)).toBeInTheDocument();
+    expect(screen.getByText(/sidorova\.as@example\.test/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("Добавить группу"));
+    fireEvent.click(screen.getByText("Создать"));
+
+    await waitFor(() =>
+      expect(vi.mocked(createRequest)).toHaveBeenCalledWith(
+        expect.objectContaining({
+          blocks: [
+            { mode: "sequential", steps: [{ owner_group: "SED_STEP_BUH", resolver: "by_group" }] },
+          ],
+        }),
+      ),
+    );
+  });
+
+  // Регресс п. 3 ревью: состав групп не общий — у каждого блока своя группа
+  // и свой состав (раньше второй блок показывал членов первой группы).
+  it("два групповых блока держат свои составы независимо", async () => {
+    vi.mocked(searchEmployees).mockRejectedValue(new ApiHttpError(503, "Клиент 1С не настроен"));
+    vi.mocked(getAdGroupMembers).mockImplementation(async (group: string) =>
+      group === "SED_STEP_BUH"
+        ? [groupMember]
+        : [
+            {
+              sam: "ivanov.ii",
+              display_name: "Иванов Иван Иванович",
+              mail: "ivanov.ii@example.test",
+              department: "Отдел кадров",
+              title: "Начальник",
+            },
+          ],
+    );
+
+    render(<CreateForm role="hr" />);
+    await fillEmployeeManually();
+
+    // Блок 1 — группа SED_STEP_BUH.
+    fireEvent.click(screen.getByText("Добавить блок"));
+    fireEvent.change(screen.getByLabelText("Тип исполнителя блока 1"), { target: { value: "group" } });
+    await waitFor(() => expect(screen.getByLabelText("Группа блока 1")).toBeInTheDocument());
+    fireEvent.change(screen.getByLabelText("Группа блока 1"), { target: { value: "SED_STEP_BUH" } });
+    await waitFor(() => expect(vi.mocked(getAdGroupMembers)).toHaveBeenCalledWith("SED_STEP_BUH"));
+    fireEvent.click(screen.getByRole("button", { name: "Показать состав" }));
+    expect(screen.getByText(/Сидорова Анна Сергеевна/)).toBeInTheDocument();
+
+    // Блок 2 — группа SED_STEP_OK со своим составом.
+    fireEvent.click(screen.getByText("Добавить блок"));
+    const groupKind2 = screen.getByLabelText("Тип исполнителя блока 2");
+    fireEvent.change(groupKind2, { target: { value: "group" } });
+    await waitFor(() => expect(screen.getByLabelText("Группа блока 2")).toBeInTheDocument());
+    fireEvent.change(screen.getByLabelText("Группа блока 2"), { target: { value: "SED_STEP_OK" } });
+    await waitFor(() => expect(vi.mocked(getAdGroupMembers)).toHaveBeenCalledWith("SED_STEP_OK"));
+
+    // Обе кнопки «Показать состав» раскрывают свои списки; ФИО не перепутаны.
+    const showButtons = screen.getAllByRole("button", { name: "Показать состав" });
+    fireEvent.click(showButtons[showButtons.length - 1]);
+    await waitFor(() => expect(screen.getByText(/Иванов Иван Иванович/)).toBeInTheDocument());
+    expect(screen.getByText(/Сидорова Анна Сергеевна/)).toBeInTheDocument();
+    // Второй блок не показывает члена первой группы.
+    expect(screen.getByLabelText("Состав группы SED_STEP_OK")).toHaveTextContent("Иванов Иван Иванович");
+    expect(screen.getByLabelText("Состав группы SED_STEP_BUH")).not.toHaveTextContent("Иванов Иван Иванович");
+  });
+
+  // Недоступность состава группы — понятный текст, форма не падает.
+  it("недоступность состава группы показывает текст и не ломает форму", async () => {
+    vi.mocked(searchEmployees).mockRejectedValue(new ApiHttpError(503, "Клиент 1С не настроен"));
+    vi.mocked(getAdGroupMembers).mockRejectedValue(new ApiHttpError(503, "AD недоступен"));
+
+    render(<CreateForm role="hr" />);
+    await fillEmployeeManually();
+    fireEvent.click(screen.getByText("Добавить блок"));
+    fireEvent.change(screen.getByLabelText("Тип исполнителя блока 1"), {
+      target: { value: "group" },
+    });
+    await waitFor(() => expect(screen.getByLabelText("Группа блока 1")).toBeInTheDocument());
+    fireEvent.change(screen.getByLabelText("Группа блока 1"), {
+      target: { value: "SED_STEP_OK" },
+    });
+
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("AD недоступен"));
+    // Форма жива: можно добавить группу и создать заявку.
+    fireEvent.click(screen.getByText("Добавить группу"));
+    expect(screen.getByText("Создать")).toBeEnabled();
+  });
+
+  // Недоступность списка групп (403 у не-ОК) — текст без падения формы.
+  it("ошибка загрузки групп показывает текст", async () => {
+    vi.mocked(searchEmployees).mockRejectedValue(new ApiHttpError(503, "Клиент 1С не настроен"));
+    vi.mocked(getStepGroups).mockRejectedValue(new ApiHttpError(403, "Доступ запрещён"));
+
+    render(<CreateForm role="hr" />);
+    await fillEmployeeManually();
+    await waitFor(() => expect(screen.getByText(/Доступ запрещён/)).toBeInTheDocument());
+    // Персональный сценарий конструктора продолжает работать.
+    fireEvent.click(screen.getByText("Добавить блок"));
+    fireEvent.click(screen.getByText("Добавить исполнителя"));
+    expect(screen.getByLabelText("Поиск в AD")).toBeInTheDocument();
   });
 });

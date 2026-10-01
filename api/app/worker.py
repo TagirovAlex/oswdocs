@@ -26,7 +26,7 @@ from .mailer import (
     enqueue_event,
     manager_mail,
     recipient_mail,
-    step_owner_mail,
+    step_owner_mails,
 )
 from .requests import (
     IN_APPROVAL,
@@ -124,17 +124,19 @@ def run_once(
                 now >= step.expires_at - reminder_before
                 and not mail_queue.has(request.id, EVENT_REMINDER)
             ):
-                to = step_owner_mail(step, ad_reader)
-                if to and enqueue_event(
-                    mail_queue,
-                    to,
-                    request.id,
-                    EVENT_REMINDER,
-                    mail_templates,
-                    _mail_context(request, base_url),
-                    subject_prefix=smtp_from,
-                ):
-                    result.reminders += 1
+                # Напоминание адресатам шага: персональному — один, групповому —
+                # все активные участники (очередь хранит по письму на строку).
+                for to in step_owner_mails(step, ad_reader):
+                    if to and enqueue_event(
+                        mail_queue,
+                        to,
+                        request.id,
+                        EVENT_REMINDER,
+                        mail_templates,
+                        _mail_context(request, base_url),
+                        subject_prefix=smtp_from,
+                    ):
+                        result.reminders += 1
         if request.status != IN_APPROVAL:
             continue
         # Эскалация по должности увольняемого (position_escalation, часы).

@@ -121,6 +121,10 @@ class LdapGateway(Protocol):
         """Сырые записи по подстроке displayName либо []. Живой поиск — на стенде."""
         ...  # pragma: no cover
 
+    def search_group_by_cn(self, cn: str) -> Optional[Dict]:
+        """Сырая запись группы по CN (cn + member) либо None. Только чтение."""
+        ...  # pragma: no cover
+
 
 class Ldap3Gateway:
     """Живой LDAP-шлюз на ldap3 (LDAPS, только чтение).
@@ -144,6 +148,8 @@ class Ldap3Gateway:
         "mail",
         "userAccountControl",
     )
+    #: Атрибуты группы: состав (member) — только чтение, для уведомлений.
+    GROUP_SEARCH_ATTRS = ("cn", "member")
 
     def __init__(
         self,
@@ -230,6 +236,23 @@ class Ldap3Gateway:
             self._ldap3.SUBTREE,
         )
 
+    def search_group_by_cn(self, cn: str) -> Optional[Dict]:
+        """Сырая запись группы по CN (SUBTREE по BASE_DN) либо None.
+
+        Возвращает {"dn": ..., "members": [DN, ...]}; группа без участников —
+        тоже запись (пустой список member), это не «не найдена»."""
+        if self._conn is None:
+            self.bind()
+        self._conn.search(
+            search_base=self._settings.base_dn,
+            search_filter="(&(objectClass=group)(cn={}))".format(self._escape_filter(cn)),
+            search_scope=self._ldap3.SUBTREE,
+            attributes=list(self.GROUP_SEARCH_ATTRS),
+        )
+        for entry in self._conn.entries:
+            return self._group_to_raw(entry)
+        return None
+
     def _search(self, base_dn: str, filter_str: str, scope: object) -> Optional[Dict]:
         rows = self._search_many(base_dn, filter_str, scope)
         return rows[0] if rows else None
@@ -281,6 +304,26 @@ class Ldap3Gateway:
             members = [members]
         raw["memberOf"] = list(members)
         return raw
+
+    @staticmethod
+    def _group_to_raw(entry: object) -> Dict:
+        """Перевод ldap3-Entry группы в {"dn", "members"} (список DN участников).
+
+        Аналог _to_raw для групп: member — список (не схлопываем), варианты
+        атрибутов фейка/настоящего ldap3 поддержаны так же, как в _to_raw.
+        """
+        attrs = getattr(entry, "entry_attributes_as_dict", None)
+        if not isinstance(attrs, dict):
+            attrs = getattr(entry, "entry_attributes", {}) or {}
+        if not isinstance(attrs, dict):
+            attrs = {}
+        members = attrs.get("member", []) or []
+        if isinstance(members, str):
+            members = [members]
+        return {
+            "dn": str(getattr(entry, "entry_dn", "")),
+            "members": [str(dn) for dn in members],
+        }
 
     @staticmethod
     def _escape_filter(value: str) -> str:
@@ -435,6 +478,9 @@ def group_cn(group_dn: str) -> str:
 # ---------------------------------------------------------------------------
 
 _CACHE_PREFIX = "ad:user:"
+# Карточки по DN лежат под отдельным префиксом, чтобы ключ sam никогда не
+# совпал с ключом DN (в group_members резолвится много DN за один проход).
+_DN_CACHE_PREFIX = "ad:user-dn:"
 _MAX_MANAGER_DEPTH = 10
 
 
@@ -494,14 +540,24 @@ class AdReader:
         return user
 
     def get_user_by_dn(self, dn: str) -> AdUser:
-        """Карточка по DN (для резолва manager-цепочки)."""
+        """Карточка по DN (резолв manager-цепочки и участников группы).
+
+        Успешный ответ кэшируется с тем же TTL, что и поиск по sAMAccountName:
+        group_members зовёт метод на каждого участника, без кэша это
+        O(участников) живых LDAPS-запросов. Не найденный DN не кэшируется."""
+        key = f"{_DN_CACHE_PREFIX}{dn.strip().lower()}"
+        cached = self._cache.get(key)
+        if isinstance(cached, AdUser):
+            return cached
         try:
             raw = self._gateway.search_user_by_dn(dn)
         except Exception as exc:
             raise AdUnavailable(f"AD недоступен (поиск по DN): {exc}") from exc
         if not raw:
             raise AdNotFound("Запись DN не найдена.")
-        return parse_ldap_entry(raw)
+        user = parse_ldap_entry(raw)
+        self._cache.set(key, user, self._settings.cache_ttl_seconds)
+        return user
 
     def search_users(self, query: str) -> List[AdUser]:
         """Кандидаты AD по подстроке ФИО (displayName) для стыковки 1С↔AD.
@@ -547,6 +603,41 @@ class AdReader:
         return chain
 
     # -- группы -----------------------------------------------------------------
+    def group_members(self, group: str) -> List[AdUser]:
+        """Активные участники группы (только чтение) — адресаты уведомлений.
+
+        Группа ищется по CN под BASE_DN (принимается и полный DN группы);
+        пустое имя — [], группа не найдена — AdNotFound, сбой каталога —
+        AdUnavailable. Отключённые учётные записи (userAccountControl)
+        исключаются, как в search_users; порядок — по sAMAccountName."""
+        name = (group or "").strip()
+        if not name:
+            return []
+        if "," in name:
+            name = group_cn(name).strip()
+        try:
+            raw = self._gateway.search_group_by_cn(name)
+        except Exception as exc:
+            raise AdUnavailable(
+                f"AD недоступен (поиск группы {name!r}): {exc}"
+            ) from exc
+        if not raw:
+            raise AdNotFound(f"Группа {name!r} не найдена (база: настройки BASE_DN).")
+        members = raw.get("members") or []
+        if isinstance(members, str):
+            members = [members]
+        users: List[AdUser] = []
+        for dn in members:
+            try:
+                user = self.get_user_by_dn(str(dn))
+            except AdNotFound:
+                continue  # участник удалён из каталога — молча пропускаем
+            if not user.enabled:
+                continue  # только активные (userAccountControl)
+            users.append(user)
+        users.sort(key=lambda u: u.sam.strip().lower())
+        return users
+
     def member_of(self, sam: str) -> Tuple[str, ...]:
         """Полные DN групп пользователя (фильтр групп — снаружи, из настроек)."""
         return self.get_user(sam).member_of

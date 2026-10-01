@@ -25,7 +25,14 @@ export interface RequestStep {
   order: number;
   owner_group: string;
   resolver: string;
+  // Персональный исполнитель (sAMAccountName); может быть null. В UI НЕ
+  // выводится — вместо него ФИО согласующего (owner_name).
   assignee?: string | null;
+  // ФИО согласующего шага (резолв бэкенда); для владельца приходит всегда.
+  owner_name?: string | null;
+  // Единственный источник истины для кнопок согласования: может ли ТЕКУЩИЙ
+  // пользователь поставить отметку по этому шагу.
+  can_act?: boolean;
   status: string;
   require_comment?: boolean;
   expires_at: string;
@@ -40,6 +47,9 @@ export interface RequestOut {
   status: string;
   route_origin: string;
   enterprise?: string | null;
+  // Название предприятия (из settings); приходит вместе с enterprise
+  // привилегированным, при отсутствии — откат на код предприятия.
+  enterprise_name?: string | null;
   tab_num?: string | null;
   department: string;
   position: string;
@@ -57,6 +67,8 @@ export interface RequestRow {
   enterprise: string;
   status: string;
   step: string;
+  // Текущий согласующий: ФИО шага с can_act, иначе группа, иначе прочерк.
+  ownerName: string;
   dueDate: string;
   department: string;
   position: string;
@@ -74,9 +86,22 @@ export interface CreateRequestBody {
   // Маршрут блоками: последовательный/параллельный (приоритетнее steps).
   blocks?: Array<{
     mode: "sequential" | "parallel";
-    steps: Array<{ sam: string }>;
+    // Шаг блока: персональный исполнитель (sam) либо группа (owner_group).
+    steps: Array<{ sam?: string; owner_group?: string; resolver?: string }>;
   }>;
 }
+
+// Ключ сортировки списка заявок (клик по заголовку колонки переключает знак).
+export type RequestSortKey = "id" | "status" | "dueDate";
+
+export interface RequestSort {
+  key: RequestSortKey;
+  dir: "asc" | "desc";
+}
+
+// Сортировка по умолчанию: новые сверху (id вида REQ-XXXX, строковое убывание
+// корректно из-за дополнения нулями).
+export const DEFAULT_REQUEST_SORT: RequestSort = { key: "id", dir: "desc" };
 
 // Метка шага в UI: в step_order закодирован блок и режим (см. backend requests.py):
 // order = блок*1000 + (100 если параллельный) + позиция. Без кода — обычный порядок.
@@ -408,6 +433,36 @@ export async function searchAd(q: string): Promise<AdCandidate[]> {
   return res.items;
 }
 
+// Член группы AD (GET /api/ad/groups/{group}/members; ОК/админ) — состав группы
+// для показа в конструкторе маршрута. Значения — из AD, хардкода нет.
+export interface AdGroupMember {
+  sam: string;
+  display_name: string;
+  mail: string;
+  department: string;
+  title: string;
+}
+
+export async function getAdGroupMembers(group: string): Promise<AdGroupMember[]> {
+  const res = await requestJson<{ items: AdGroupMember[] }>(
+    `/api/ad/groups/${encodeURIComponent(group)}/members`,
+  );
+  return res.items;
+}
+
+// Ключ localStorage для оповещения открытого списка заявок об изменениях
+// (событие storage в соседнем окне: удаление/создание заявки в попапе).
+export const REQUESTS_CHANGED_KEY = "sed:requests-changed";
+
+// Оповестить другие окна/вкладки: список заявок изменился.
+export function notifyRequestsChanged(): void {
+  try {
+    localStorage.setItem(REQUESTS_CHANGED_KEY, String(Date.now()));
+  } catch {
+    // localStorage недоступен (приватный режим) — список обновится по focus.
+  }
+}
+
 // Итог автосвязки 1С↔AD (POST /api/link_1c_ad/sync, только админ).
 export interface AdSyncResult {
   synced: boolean;
@@ -425,23 +480,59 @@ export async function syncLinks(): Promise<AdSyncResult> {
   return requestJson<AdSyncResult>("/api/link_1c_ad/sync", { method: "POST" });
 }
 
+// Подпись исполнителя шага. Для персонального шага бэкенд кладёт sam и в
+// owner_group (resolver=by_user), поэтому логин нельзя выводить: показываем ФИО
+// (owner_name), а если его нет — нейтральный текст. Для группового шага —
+// название группы (это не ПДн).
+function stepOwnerLabel(step: RequestStep | undefined): string {
+  if (!step) return "—";
+  if (step.resolver === "by_user") return step.owner_name ?? "Персональный исполнитель";
+  return step.owner_group || "—";
+}
+
 // Маппинг RequestOut → строка таблицы: шаг — первый ожидающий, срок — его expires_at.
+// Предприятие — названием (enterprise_name), при отсутствии — кодом, иначе прочерк.
 // ПДн: у владельца fio=null → маска «Сотрудник № {id}».
 export function toRequestRow(request: RequestOut): RequestRow {
   const pending = request.steps.find((s) => s.status === "ожидает");
   const current = pending ?? request.steps[0];
   const expires = current?.expires_at ?? "";
+  // Текущий согласующий: исполнитель текущего шага — ФИО или группа, но не логин.
+  const ownerName = stepOwnerLabel(current);
   return {
     id: request.id,
     fio: request.fio ?? `Сотрудник № ${request.id}`,
-    enterprise: request.enterprise ?? "",
+    enterprise: request.enterprise_name ?? request.enterprise ?? "—",
     status: request.status,
-    step: current?.owner_group ?? "—",
+    step: stepOwnerLabel(current),
+    ownerName,
     dueDate: expires ? expires.slice(0, 10) : "—",
     department: request.department,
     position: request.position,
     steps: request.steps,
   };
+}
+
+// Сравнение строк по кодам символов (без локали): детерминированный порядок.
+function compareText(left: string, right: string): number {
+  if (left === right) return 0;
+  return left < right ? -1 : 1;
+}
+
+// Сортировка строк списка (чистая функция). id у строки всегда есть (номер REQ-XXXX
+// из API), ветка «без id» оставлена как страховка: такие записи остаются в исходном
+// порядке. Порядок по умолчанию — новые сверху (см. DEFAULT_REQUEST_SORT).
+export function sortRequests(rows: RequestRow[], sort: RequestSort): RequestRow[] {
+  const sign = sort.dir === "asc" ? 1 : -1;
+  return rows
+    .map((row, index) => ({ row, index }))
+    .sort((a, b) => {
+      // Страховка для записей без id: индексный порядок (сравнение несогласовано,
+      // но такие строки в API не появляются).
+      if (!a.row.id || !b.row.id) return a.index - b.index;
+      return sign * compareText(a.row[sort.key], b.row[sort.key]) || a.index - b.index;
+    })
+    .map((item) => item.row);
 }
 
 // Клиентская фильтрация загруженных строк (поиск/предприятие/статус + папка).

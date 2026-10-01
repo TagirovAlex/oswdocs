@@ -135,6 +135,10 @@ class _FakeLdap3Module:
         if "(displayName=*" in search_filter:
             # Фильтр (displayName=*<подстрока>*) — подстрока без звездочек.
             wanted_name = search_filter.split("(displayName=*", 1)[1].rsplit("*)", 1)[0].lower()
+        wanted_cn = None
+        if "(cn=" in search_filter:
+            # Фильтр (&(objectClass=group)(cn=<CN>)) — имя группы до первой скобки.
+            wanted_cn = search_filter.split("(cn=", 1)[1].split(")", 1)[0].lower()
         results = []
         for raw in self._entries:
             if search_scope == self.BASE:
@@ -145,6 +149,8 @@ class _FakeLdap3Module:
                     ok = raw["sAMAccountName"].lower() == wanted_sam
                 if ok and wanted_name is not None:
                     ok = wanted_name in raw["displayName"].lower()
+                if ok and wanted_cn is not None:
+                    ok = raw["dn"].lower().startswith("cn=%s," % wanted_cn)
             if ok:
                 results.append(self._to_ldap3_entry(raw))
         return results
@@ -401,3 +407,49 @@ def test_ldap_filter_is_escaped():
     gw.bind()
     gw.search_user_by_sam("(evil)\\x")
     assert fake.searches[-1]["filter"] == "(sAMAccountName=\\28evil\\29\\5cx)"
+
+
+# --- состав группы: только чтение, фильтр по CN под BASE_DN ---
+
+def _group_raw(cn, members):
+    return {
+        "dn": "CN=%s,OU=OSWDOCS,DC=FIDELIO,DC=LOCAL" % cn,
+        "cn": cn,
+        "member": list(members),
+    }
+
+
+def test_search_group_by_cn_returns_members():
+    """Поиск группы по CN (SUBTREE по BASE_DN) отдаёт состав (member)."""
+    fake = _fake(_directory() + [_group_raw("SED_HR", [USER_DN])])
+    gw = _gateway(fake)
+    gw.bind()
+    raw = gw.search_group_by_cn("SED_HR")
+    assert raw is not None
+    assert raw["dn"] == SED_HR
+    assert raw["members"] == [USER_DN]
+    # Фильтр и запрошенные атрибуты — только чтение, никакой записи.
+    search = fake.searches[-1]
+    assert search["filter"] == "(&(objectClass=group)(cn=SED_HR))"
+    assert search["base"] == BASE_DN
+    assert search["scope"] == _FakeLdap3Module.SUBTREE
+    assert set(search["attributes"]) == set(Ldap3Gateway.GROUP_SEARCH_ATTRS)
+
+
+def test_search_group_empty_and_missing():
+    """Группа без участников — запись с пустым составом; нет группы — None."""
+    fake = _fake(_directory() + [_group_raw("SED_EMPTY", [])])
+    gw = _gateway(fake)
+    gw.bind()
+    empty = gw.search_group_by_cn("SED_EMPTY")
+    assert empty is not None
+    assert empty["members"] == []
+    assert gw.search_group_by_cn("SED_NET_TAKOY") is None
+
+
+def test_search_group_cn_is_escaped():
+    fake = _fake(_directory() + [_group_raw("SED_HR", [USER_DN])])
+    gw = _gateway(fake)
+    gw.bind()
+    gw.search_group_by_cn("(evil)")
+    assert fake.searches[-1]["filter"] == "(&(objectClass=group)(cn=\\28evil\\29))"

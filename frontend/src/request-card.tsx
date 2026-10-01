@@ -11,6 +11,7 @@ import {
   getAttachments,
   getDocuments,
   getRequest,
+  notifyRequestsChanged,
   printRequest,
   stepLabel,
   submitRequest,
@@ -42,6 +43,7 @@ export function RequestCard(props: RequestCardProps) {
   const [cardActionError, setCardActionError] = useState<string>("");
   const [deleteBusy, setDeleteBusy] = useState<boolean>(false);
   const [deleteError, setDeleteError] = useState<string>("");
+  const [deleted, setDeleted] = useState<boolean>(false);
   const [attachments, setAttachments] = useState<AttachmentMeta[]>([]);
   const [attachmentsError, setAttachmentsError] = useState<string>("");
   const [uploadError, setUploadError] = useState<string>("");
@@ -140,8 +142,9 @@ export function RequestCard(props: RequestCardProps) {
     }
   }
 
-  // Первый ожидающий шаг (отметку ставит владелец строго по порядку).
-  const pendingStep = card?.steps.find((s) => s.status === "ожидает") ?? null;
+  // Шаг, который может отметить ТЕКУЩИЙ пользователь: ожидает И can_act
+  // (единственный источник истины от бэкенда, без эвристики по роли).
+  const actStep = card?.steps.find((s) => s.status === "ожидает" && s.can_act === true) ?? null;
 
   async function refreshRequest(): Promise<void> {
     try {
@@ -191,15 +194,23 @@ export function RequestCard(props: RequestCardProps) {
   }
 
   // Удаление заявки (только админ; для тестового периода). Подтверждение —
-  // удаление необратимо; при успехе попап закрывается (список обновится по
-  // фокусу в родителе), при ошибке — текст ошибки, попап остаётся.
+  // удаление необратимо. Список заявок уведомляется через localStorage
+  // (событие storage в основном окне); при открытой вкладке (?view=request&
+  // key= в той же вкладке) window.close() не работает — показываем подтверждение
+  // удаления и ссылку «К списку заявок».
   async function handleDelete(): Promise<void> {
     setDeleteError("");
     if (!window.confirm(`Удалить заявку ${requestId}? Действие необратимо.`)) return;
     setDeleteBusy(true);
     try {
       await deleteRequest(requestId);
-      window.close();
+      notifyRequestsChanged();
+      setDeleteBusy(false);
+      if (window.opener) {
+        window.close();
+        return;
+      }
+      setDeleted(true);
     } catch (e: unknown) {
       setDeleteError(e instanceof Error ? e.message : "Ошибка удаления");
       setDeleteBusy(false);
@@ -232,8 +243,19 @@ export function RequestCard(props: RequestCardProps) {
     <section aria-label="Карточка заявки">
       <h3>Карточка заявки {requestId}</h3>
       {cardError && <div role="alert">{cardError}</div>}
-      {!card && !cardError && <div className="sed-note">Загрузка карточки…</div>}
-      {card && (
+      {!card && !cardError && !deleted && <div className="sed-note">Загрузка карточки…</div>}
+      {/* Заявка удалена в этой же вкладке: закрыть окно нельзя — возврат к списку. */}
+      {deleted && (
+        <div>
+          <div role="status">Заявка удалена</div>
+          <div className="sed-toolbar" style={{ marginTop: 8 }}>
+            <a className="sed-btn" href="?">
+              К списку заявок
+            </a>
+          </div>
+        </div>
+      )}
+      {card && !deleted && (
         <>
           {/* ПДн: владельцу fio/tab_num не приходят — маска «Сотрудник № id». */}
           <div className="sed-note">
@@ -244,7 +266,7 @@ export function RequestCard(props: RequestCardProps) {
               <>
                 {card.fio ?? `Сотрудник № ${card.id}`}
                 {card.tab_num ? ` · Таб.№ ${card.tab_num}` : ""} · {card.department} · {card.position}
-                {card.enterprise ? ` · ${card.enterprise}` : ""}
+                {card.enterprise ? ` · ${card.enterprise_name ?? card.enterprise}` : ""}
               </>
             )}
           </div>
@@ -279,12 +301,14 @@ export function RequestCard(props: RequestCardProps) {
             </ul>
           </section>
 
-          {/* Шаги маршрута: группа/статус/срок/комментарий. */}
+          {/* Шаги маршрута: исполнитель/статус/срок/комментарий. Логин AD
+              согласующего (assignee) в UI не выводится — только ФИО (owner_name)
+              для персональных шагов либо название группы. */}
           <table className="sed-table" aria-label="Шаги заявки">
             <thead>
               <tr>
                 <th>№</th>
-                <th>Группа</th>
+                <th>Исполнитель</th>
                 <th>Статус</th>
                 <th>Срок</th>
                 <th>Комментарий</th>
@@ -294,7 +318,11 @@ export function RequestCard(props: RequestCardProps) {
               {card.steps.map((step) => (
                 <tr key={step.order}>
                   <td>{stepLabel(step.order)}</td>
-                  <td>{step.assignee ? `персонально: ${step.assignee}` : step.owner_group}</td>
+                  <td>
+                    {step.resolver === "by_user"
+                      ? (step.owner_name ?? "Персональный исполнитель")
+                      : (step.owner_group || "—")}
+                  </td>
                   <td>{step.status}</td>
                   <td>{step.expires_at.slice(0, 10)}</td>
                   <td>{step.comment ?? "—"}</td>
@@ -303,10 +331,11 @@ export function RequestCard(props: RequestCardProps) {
             </tbody>
           </table>
 
-          {/* Отметка владельца своего ожидающего шага. */}
-          {role === "owner" && pendingStep && (
+          {/* Отметка своего шага — строго по can_act от бэкенда (у согласованных и
+              закрытых шагов can_act=false, кнопок нет). */}
+          {actStep && (
             <div aria-label="Решение владельца">
-              <h4>Моё решение · Шаг {stepLabel(pendingStep.order)}</h4>
+              <h4>Моё решение · Шаг {stepLabel(actStep.order)}</h4>
               <input
                 aria-label="Комментарий к решению"
                 placeholder="Комментарий (обязателен при отказе/возврате)"
@@ -318,21 +347,21 @@ export function RequestCard(props: RequestCardProps) {
                 <button
                   type="button"
                   className="sed-btn"
-                  onClick={() => handleDecision(pendingStep.order, "approve")}
+                  onClick={() => handleDecision(actStep.order, "approve")}
                 >
                   Согласовать
                 </button>
                 <button
                   type="button"
                   className="sed-btn sed-btn--ghost"
-                  onClick={() => handleDecision(pendingStep.order, "reject")}
+                  onClick={() => handleDecision(actStep.order, "reject")}
                 >
                   Отказать
                 </button>
                 <button
                   type="button"
                   className="sed-btn sed-btn--ghost"
-                  onClick={() => handleDecision(pendingStep.order, "return")}
+                  onClick={() => handleDecision(actStep.order, "return")}
                 >
                   Вернуть
                 </button>

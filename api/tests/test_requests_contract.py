@@ -286,6 +286,53 @@ def test_fio_hidden_from_owner(client, hr_headers, owner_headers, settings_overr
     assert mine[0]["tab_num"] is None
 
 
+# --- enterprise_name: название предприятия из settings.enterprises (§3 handoff 3.2) ---
+
+def test_enterprise_name_from_settings_privileged(
+    client, hr_headers, settings_store, settings_override, route_override
+):
+    """Привилегированному название предприятия по коду из settings.enterprises."""
+    body = _create(client, hr_headers).json()
+    assert body["enterprise"] == FAKE_ENTERPRISE
+    assert body["enterprise_name"] == "Предприятие Пример-1"
+
+
+def test_enterprise_name_hidden_from_owner(
+    client, hr_headers, owner_headers, settings_store, settings_override, route_override
+):
+    """Непривилегированному enterprise_name не отдается (ПДн уровня enterprise)."""
+    rid = _create(client, hr_headers).json()["id"]
+    assert client.post(f"/requests/{rid}/submit", headers=hr_headers).status_code == 200
+    listing = client.get("/requests", headers=owner_headers)
+    mine = [r for r in listing.json() if r["id"] == rid]
+    assert len(mine) == 1
+    assert mine[0]["enterprise"] is None
+    assert mine[0]["enterprise_name"] is None
+
+
+def test_enterprise_name_none_when_key_missing(
+    client, hr_headers, settings_override, route_override
+):
+    """Ключа enterprises нет в настройках — enterprise_name=None, без 500."""
+    app.dependency_overrides[get_settings_store] = lambda: InMemorySettingsStore(initial={})
+    try:
+        response = _create(client, hr_headers)
+    finally:
+        app.dependency_overrides.pop(get_settings_store, None)
+    assert response.status_code == 201
+    assert response.json()["enterprise_name"] is None
+
+
+def test_enterprise_name_none_when_store_down(
+    client, hr_headers, settings_store, settings_override, route_override
+):
+    """Хранилище настроек недоступно — enterprise_name=None и 201, не 500."""
+    settings_store.broken = True
+    response = _create(client, hr_headers)
+    assert response.status_code == 201
+    assert response.json()["enterprise_name"] is None
+
+
 # --- GET /folders (Волна 1, п.4) ---
 
 def test_folders_empty_counts(client, hr_headers, settings_override):

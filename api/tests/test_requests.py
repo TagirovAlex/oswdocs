@@ -7,21 +7,29 @@ import base64
 import os
 import sys
 from datetime import timedelta
+from types import SimpleNamespace
 
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from app.ad_reader import AdNotFound, AdUnavailable  # noqa: E402
+from app import settings_routes  # noqa: E402
 from app.audit import audit_log  # noqa: E402
 from app.config import Settings, get_settings  # noqa: E402
+from app.deps import CurrentUser  # noqa: E402
+from app.employees import get_ad_reader  # noqa: E402
 from app.main import app  # noqa: E402
 from app.requests import (  # noqa: E402
+    _enterprise_names_map,
+    _public_view,
     _utcnow,
     get_memory_requests_store,
     get_route_settings,
 )
 from app.requests import RouteSettings, RouteStepTemplate, RouteTemplate  # noqa: E402
 from app.requests_store import get_requests_store  # noqa: E402
+from app.settings_routes import SettingsUnavailable, get_settings_store  # noqa: E402
 
 TEST_ALLOWED = "SED_HR,SED_ADMINS"
 TEST_ADMINS = "SED_ADMINS"
@@ -34,6 +42,14 @@ FAKE_SERVICE = "Служба вымышленного учета"
 FAKE_POSITION_LINE = "Старший вымышленный кассир"
 FAKE_POSITION_OTHER = "Вымышленный архивариус"
 FAKE_ENTERPRISE = "Вымышленное предприятие"
+
+# Вымышленные предприятие/персоналии для резолва имён (§3 handoff 3.2).
+ENT_CODE = "ENT_TEST_1"
+ENT_NAME = "Вымышленное предприятие (наименование)"
+SEED_ENTERPRISES = '[{"code": "%s", "name": "%s"}]' % (ENT_CODE, ENT_NAME)
+BUH_SAM = "step.buhgalter"
+COLLEAGUE_SAM = "step.kollega"
+FAKE_OWNER_FIO = "Вымышленный Согласующий Полный"
 
 
 def _b64(value: str) -> str:
@@ -132,6 +148,69 @@ def buh_owner() -> dict:
 def other_owner() -> dict:
     """Заголовки чужой группы (не владелец первого шага)."""
     return _headers_for("step.chuzhoi", ["SED_STEP_OTHER"])
+
+
+@pytest.fixture
+def hr_step_owner() -> dict:
+    """Заголовки владельца второго шага шаблона (группы SED_STEP_HR)."""
+    return _headers_for("step.kadrovik", ["SED_STEP_HR"])
+
+
+class FakeAdReader:
+    """Мок AdReader (только чтение): ФИО по sAMAccountName из вымышленных записей.
+
+    raise_exc=True — AD недоступен (любой вызов get_user падает)."""
+
+    def __init__(self, entries: dict, raise_exc: bool = False):
+        self._entries = entries
+        self._raise = raise_exc
+
+    def get_user(self, sam: str):
+        if self._raise:
+            raise AdUnavailable("AD недоступен (тест)")
+        if sam not in self._entries:
+            raise AdNotFound("Пользователь не найден (тест)")
+        return SimpleNamespace(
+            sam=sam,
+            display_name=self._entries[sam],
+            mail="%s@example.local" % sam,
+        )
+
+
+class InMemorySettingsStore:
+    """Мок DbSettingsStore: значения ключей в сид-формате (как в test_requests_contract)."""
+
+    def __init__(self, values: dict | None = None, broken: bool = False):
+        self._values = dict(values or {})
+        self.broken = broken
+
+    def get(self, key: str):
+        if self.broken:
+            raise SettingsUnavailable("Хранилище настроек недоступно (тест)")
+        return self._values.get(key)
+
+    def get_many(self, keys):
+        if self.broken:
+            raise SettingsUnavailable("Хранилище настроек недоступно (тест)")
+        return {k: v for k, v in self._values.items() if k in keys}
+
+
+@pytest.fixture
+def settings_store():
+    """Хранилище настроек с одним предприятием (сид-формат settings.enterprises)."""
+    store = InMemorySettingsStore({"enterprises": SEED_ENTERPRISES})
+    app.dependency_overrides[get_settings_store] = lambda: store
+    yield store
+    app.dependency_overrides.pop(get_settings_store, None)
+
+
+@pytest.fixture
+def ad_reader():
+    """Фейк-ридер AD: ФИО согласующего резолвится по sAMAccountName."""
+    reader = FakeAdReader({BUH_SAM: FAKE_OWNER_FIO, COLLEAGUE_SAM: "Вымышленный Коллега Полный"})
+    app.dependency_overrides[get_ad_reader] = lambda: reader
+    yield reader
+    app.dependency_overrides.pop(get_ad_reader, None)
 
 
 def _create(client, headers, **kw) -> dict:
@@ -292,3 +371,229 @@ def test_manual_and_patch_only_allowed_group(
     step = ok.json()["steps"][0]
     assert step["assignee"] == "step.buhgalter"
     assert any(e.action == "steps.patch" for e in audit_log.all())
+
+
+# --- can_act: кнопка есть ровно там, где API примет отметку (§3 handoff 3.1) ---
+
+def _step_of(body: dict, order: int) -> dict:
+    """Шаг заявки из ответа по номеру (order)."""
+    return next(s for s in body["steps"] if s["order"] == order)
+
+
+def _create_and_submit(client, headers, **kw) -> str:
+    """Заявка по шаблону, поданная (статус «На согласовании»): возвращает id."""
+    rid = _create(client, headers, **kw).json()["id"]
+    assert client.post(f"/requests/{rid}/submit", headers=headers).status_code == 200
+    return rid
+
+
+def test_can_act_true_for_owner_of_current_step(
+    client, hr, buh_owner, test_settings_override, route_override, settings_store
+):
+    """can_act=True у владельца текущего ожидающего шага; следующий шаг — False."""
+    rid = _create_and_submit(client, hr)
+    body = client.get(f"/requests/{rid}", headers=buh_owner).json()
+    assert _step_of(body, 1)["can_act"] is True
+    assert _step_of(body, 2)["can_act"] is False
+
+
+def test_can_act_false_for_owner_of_another_step(
+    client, hr, hr_step_owner, test_settings_override, route_override, settings_store
+):
+    """Сотрудник-не-владелец текущего шага (владелец другого): can_act=False везде."""
+    rid = _create_and_submit(client, hr)
+    body = client.get(f"/requests/{rid}", headers=hr_step_owner).json()
+    assert all(s["can_act"] is False for s in body["steps"])
+
+
+def test_can_act_false_for_stranger(
+    client, hr, requests_store, test_settings_override, route_override, settings_store
+):
+    """Посторонний (не в группе шага и не assignee): карточка ему не отдается (403),
+    а в сборке представления can_act=False."""
+    rid = _create_and_submit(client, hr)
+    stranger = _headers_for("user.postoronny", ["SED_STEP_OTHER"])
+    assert client.get(f"/requests/{rid}", headers=stranger).status_code == 403
+    view = _public_view(
+        requests_store.get(rid), CurrentUser(sam="user.postoronny", groups=[], role="owner")
+    )
+    assert all(s.can_act is False for s in view.steps)
+
+
+def test_can_act_false_on_approved_step(
+    client, hr, buh_owner, test_settings_override, route_override, settings_store
+):
+    """Завершённый шаг: can_act=False (отметка уже стоит, второй шаг — чужая группа)."""
+    rid = _create_and_submit(client, hr)
+    approved = client.post(
+        f"/requests/{rid}/steps/1/decision", json={"decision": "approve"}, headers=buh_owner
+    )
+    assert approved.status_code == 200
+    body = client.get(f"/requests/{rid}", headers=buh_owner).json()
+    assert _step_of(body, 1)["status"] == "согласован"
+    assert all(s["can_act"] is False for s in body["steps"])
+
+
+def test_can_act_false_outside_approval_status(
+    client, hr, test_settings_override, route_override, settings_store
+):
+    """Черновик (не «На согласовании»): can_act=False даже у привилегированного."""
+    body = _create(client, hr).json()
+    assert body["status"] == "Черновик"
+    assert all(s["can_act"] is False for s in body["steps"])
+
+
+def test_can_act_false_on_expired_step(
+    client, hr, buh_owner, requests_store, test_settings_override, route_override, settings_store
+):
+    """Просроченный шаг (expires_at в прошлом): can_act=False (иначе кнопка, а API даст 410)."""
+    rid = _create_and_submit(client, hr)
+    requests_store.get(rid).steps[0].expires_at = _utcnow() - timedelta(days=1)
+    body = client.get(f"/requests/{rid}", headers=buh_owner).json()
+    assert _step_of(body, 1)["can_act"] is False
+
+
+def test_can_act_false_for_admin_not_owner(
+    client, hr, test_settings_override, route_override, settings_store
+):
+    """Роль не даёт обход: админ-не-владелец шага видит can_act=False."""
+    rid = _create_and_submit(client, hr)
+    admin = _headers_for("adm.vymyshlenny", [TEST_ADMINS])
+    body = client.get(f"/requests/{rid}", headers=admin).json()
+    assert all(s["can_act"] is False for s in body["steps"])
+
+
+# --- owner_name: ФИО согласующего из AD (fail-soft) ---
+
+def _with_assignee(client, hr, sam: str) -> str:
+    """Заявка с одним шагом, персональный исполнитель — sam (замена руководителя)."""
+    rid = _create(client, hr).json()["id"]
+    patched = client.patch(
+        f"/requests/{rid}/steps",
+        json={
+            "steps": [{"owner_group": "SED_STEP_BUH", "resolver": "ad_direct_manager"}],
+            "manager": sam,
+            "reason": "Замена руководителя (вымышленная)",
+        },
+        headers=hr,
+    )
+    assert patched.status_code == 200
+    assert client.post(f"/requests/{rid}/submit", headers=hr).status_code == 200
+    return rid
+
+
+def test_owner_name_resolved_from_ad_for_assignee(
+    client, hr, buh_owner, ad_reader, test_settings_override, route_override, settings_store
+):
+    """Шаг с персональным исполнителем: owner_name — ФИО из AD, can_act=True."""
+    rid = _with_assignee(client, hr, BUH_SAM)
+    step = client.get(f"/requests/{rid}", headers=buh_owner).json()["steps"][0]
+    assert step["assignee"] == BUH_SAM
+    assert step["owner_name"] == FAKE_OWNER_FIO
+    assert step["can_act"] is True
+
+
+def test_owner_name_group_step_none_can_act_by_group(
+    client, hr, buh_owner, requests_store, test_settings_override, route_override, settings_store
+):
+    """Групповой шаг (без assignee): owner_name=None, у члена группы can_act=True,
+    у постороннего — False."""
+    rid = _create_and_submit(client, hr)
+    step = client.get(f"/requests/{rid}", headers=buh_owner).json()["steps"][0]
+    assert step["assignee"] is None
+    assert step["owner_name"] is None
+    assert step["can_act"] is True
+    stranger = CurrentUser(sam="user.postoronny", groups=["SED_STEP_OTHER"], role="owner")
+    assert all(not s.can_act for s in _public_view(requests_store.get(rid), stranger).steps)
+
+
+def test_owner_name_none_when_no_ad_reader(
+    client, hr, buh_owner, test_settings_override, route_override, settings_store
+):
+    """Ридер AD недоступен (lambda: None): owner_name=None, ответ 200 (fail-soft)."""
+    rid = _with_assignee(client, hr, BUH_SAM)
+    app.dependency_overrides[get_ad_reader] = lambda: None
+    try:
+        response = client.get(f"/requests/{rid}", headers=buh_owner)
+    finally:
+        app.dependency_overrides.pop(get_ad_reader, None)
+    assert response.status_code == 200
+    assert response.json()["steps"][0]["owner_name"] is None
+
+
+def test_owner_name_none_when_ad_raises(
+    client, hr, buh_owner, test_settings_override, route_override, settings_store
+):
+    """Ридер AD падает (AdUnavailable): owner_name=None, ответ 200 — выдача не роняется."""
+    rid = _with_assignee(client, hr, BUH_SAM)
+    app.dependency_overrides[get_ad_reader] = lambda: FakeAdReader({}, raise_exc=True)
+    try:
+        response = client.get(f"/requests/{rid}", headers=buh_owner)
+    finally:
+        app.dependency_overrides.pop(get_ad_reader, None)
+    assert response.status_code == 200
+    assert response.json()["steps"][0]["owner_name"] is None
+
+
+# --- assignee (это sAMAccountName): непривилегированному не-владельцу скрывается ---
+
+def test_assignee_hidden_from_non_owner(
+    client, hr, test_settings_override, route_override, settings_store
+):
+    """Регресс на утечку логина: assignee (это sAMAccountName) не отдается
+    непривилегированному не-владельцу шага; владельцу (это его логин) и
+    привилегированному — отдается."""
+    rid = _with_assignee(client, hr, COLLEAGUE_SAM)
+    assignee_view = client.get(
+        f"/requests/{rid}", headers=_headers_for(COLLEAGUE_SAM, ["SED_STEP_BUH"])
+    )
+    assert assignee_view.json()["steps"][0]["assignee"] == COLLEAGUE_SAM
+    assert assignee_view.json()["steps"][0]["can_act"] is True
+    # Коллега из той же группы, но не исполнитель: логин ему не отдается, кнопки нет.
+    colleague_view = client.get(
+        f"/requests/{rid}", headers=_headers_for("step.ne.avtor", ["SED_STEP_BUH"])
+    )
+    assert colleague_view.status_code == 200
+    assert colleague_view.json()["steps"][0]["assignee"] is None
+    assert colleague_view.json()["steps"][0]["can_act"] is False
+    # Привилегированному (ОК) логин виден.
+    assert client.get(f"/requests/{rid}", headers=hr).json()["steps"][0]["assignee"] == COLLEAGUE_SAM
+
+
+# --- enterprise_name: продакшн-ветка резолва настроек (без dependency_overrides) ---
+
+class _EnterpriseStore:
+    """Хранилище настроек с одним ключом enterprises (как DbSettingsStore)."""
+
+    def __init__(self, raw):
+        self._raw = raw
+
+    def get(self, key):
+        return self._raw
+
+
+def test_enterprise_names_map_reads_real_settings_store(monkeypatch):
+    """Резолв карты предприятий идёт через боевое хранилище настроек.
+
+    Проверяется именно продакшн-ветка (подменён сам _db_store, а не
+    dependency_overrides): раньше сюда попадал объект Depends вместо Settings
+    и карта молча превращалась в {} — enterprise_name был всегда null.
+    """
+    monkeypatch.setattr(
+        settings_routes, "_db_store",
+        _EnterpriseStore('[{"code":"E1","name":"Первое"},{"code":"E2","name":"Второе"}]'),
+    )
+    assert _enterprise_names_map() == {"E1": "Первое", "E2": "Второе"}
+
+
+def test_enterprise_names_map_empty_when_settings_fails(monkeypatch):
+    """Ключа нет или БД недоступна — пустая карта, без исключения (fail-soft)."""
+
+    class BrokenStore:
+        def get(self, key):
+            raise SettingsUnavailable("настройки недоступны")
+
+    monkeypatch.setattr(settings_routes, "_db_store", BrokenStore())
+    assert _enterprise_names_map() == {}
+    monkeypatch.setattr(settings_routes, "_db_store", _EnterpriseStore(None))
+    assert _enterprise_names_map() == {}

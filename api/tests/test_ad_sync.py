@@ -354,6 +354,133 @@ def test_ad_search_no_reader_503(client, admin_headers, sync_mocks):
 
 
 # ---------------------------------------------------------------------------
+# Эндпоинт GET /ad/groups/{group}/members (состав группы, конструктор маршрута)
+# ---------------------------------------------------------------------------
+
+class FakeGroupGateway(FakeGateway):
+    """Фейк шлюза с группами: поиск группы по CN и резолв участников по DN."""
+
+    def __init__(self, entries, groups, fail_with=None):
+        super().__init__(entries)
+        self._groups = {
+            cn.lower(): {
+                "dn": "CN=%s,OU=SED,DC=example,DC=local" % cn,
+                "cn": cn,
+                "members": list(members),
+            }
+            for cn, members in groups.items()
+        }
+        self._fail_with = fail_with
+
+    def search_group_by_cn(self, cn):
+        if self._fail_with is not None:
+            raise self._fail_with
+        found = self._groups.get(cn.strip().lower())
+        return dict(found) if found else None
+
+    def search_user_by_dn(self, dn):
+        if self._fail_with is not None:
+            raise self._fail_with
+        for e in self._entries:
+            if e["dn"].lower() == dn.strip().lower():
+                return dict(e)
+        return None
+
+
+def _dn_of(sam, entries):
+    for e in entries:
+        if e["sAMAccountName"].lower() == sam.lower():
+            return e["dn"]
+    raise AssertionError("нет записи AD: %s" % sam)
+
+
+def _group_reader(groups, entries=None, fail_with=None) -> AdReader:
+    settings = AdReaderSettings(
+        ad_url="ldaps://mock.local:636",
+        base_dn="OU=SED,DC=example,DC=local",
+        reader_dn="CN=sed-reader,OU=SED,DC=example,DC=local",
+        cache_ttl_seconds=300,
+        timeout_seconds=5.0,
+    )
+    return AdReader(
+        settings=settings,
+        gateway=FakeGroupGateway(entries if entries is not None else _ad_entries(),
+                                 groups, fail_with),
+        cache=InMemoryCache(),
+    )
+
+
+def test_ad_group_members_admin_returns_items(client, admin_headers, sync_mocks):
+    entries = _ad_entries()
+    groups = {"SED_STEP_BUH": [_dn_of("t.ivan", entries), _dn_of("t.ad1", entries)]}
+    app.dependency_overrides[get_ad_reader] = lambda: _group_reader(groups, entries)
+    response = client.get("/ad/groups/SED_STEP_BUH/members", headers=admin_headers)
+    assert response.status_code == 200
+    items = response.json()["items"]
+    assert [i["sam"] for i in items] == ["t.ad1", "t.ivan"]  # порядок по sam
+    assert set(items[0]) == {"sam", "display_name", "department", "title", "mail"}
+
+
+def test_ad_group_members_hr_allowed(client, hr_headers, sync_mocks):
+    """Состав группы доступен ОК (конструктор маршрута), не только админу."""
+    entries = _ad_entries()
+    app.dependency_overrides[get_ad_reader] = lambda: _group_reader(
+        {"SED_STEP_BUH": [_dn_of("t.ivan", entries)]}, entries
+    )
+    response = client.get("/ad/groups/SED_STEP_BUH/members", headers=hr_headers)
+    assert response.status_code == 200
+    assert [i["sam"] for i in response.json()["items"]] == ["t.ivan"]
+
+
+def test_ad_group_members_owner_403(client, owner_headers, sync_mocks):
+    """Владельцу состав группы AD закрыт (ПДн)."""
+    response = client.get("/ad/groups/SED_STEP_BUH/members", headers=owner_headers)
+    assert response.status_code == 403
+
+
+def test_ad_group_members_noauth_401(client, noauth_headers, sync_mocks):
+    response = client.get("/ad/groups/SED_STEP_BUH/members", headers=noauth_headers)
+    assert response.status_code == 401
+
+
+def test_ad_group_members_group_not_allowed_403(client, admin_headers, sync_mocks):
+    """Группа вне allowed_ad_groups и без префикса владельцев шагов — 403."""
+    response = client.get("/ad/groups/SED_UNKNOWN/members", headers=admin_headers)
+    assert response.status_code == 403
+
+
+def test_ad_group_members_empty_group_200_empty_items(client, admin_headers, sync_mocks):
+    entries = _ad_entries()
+    app.dependency_overrides[get_ad_reader] = lambda: _group_reader(
+        {"SED_STEP_BUH": []}, entries
+    )
+    response = client.get("/ad/groups/SED_STEP_BUH/members", headers=admin_headers)
+    assert response.status_code == 200
+    assert response.json() == {"items": []}
+
+
+def test_ad_group_members_no_reader_503(client, admin_headers, sync_mocks):
+    app.dependency_overrides[get_ad_reader] = lambda: None
+    response = client.get("/ad/groups/SED_STEP_BUH/members", headers=admin_headers)
+    assert response.status_code == 503
+
+
+def test_ad_group_members_ad_unavailable_503(client, admin_headers, sync_mocks):
+    app.dependency_overrides[get_ad_reader] = lambda: _group_reader(
+        {"SED_STEP_BUH": []}, fail_with=TimeoutError("ldap timeout")
+    )
+    response = client.get("/ad/groups/SED_STEP_BUH/members", headers=admin_headers)
+    assert response.status_code == 503
+
+
+def test_ad_group_members_group_not_found_404(client, admin_headers, sync_mocks):
+    app.dependency_overrides[get_ad_reader] = lambda: _group_reader({"SED_STEP_BUH": []})
+    response = client.get("/ad/groups/SED_STEP_NET_TAKOY/members", headers=admin_headers)
+    assert response.status_code == 404
+    assert "не найдена" in response.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
 # maybe_sync_links_weekly (регламентная автосвязка, расписание из settings)
 # ---------------------------------------------------------------------------
 

@@ -1,11 +1,12 @@
 // Тесты сетки скелета (Задача 3): вкладки, дерево, тулбар, фильтры, таблица,
 // выход; клик по строке и «Создать заявку» — окна-попы (window.open).
 // Данные — из requests-client (мокается), сеть не нужна.
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SedLayout } from "./layout";
 import { ThemeProvider } from "./theme";
 import { getEnterprises, getFolders, getRequests } from "./requests-client";
+import { toRequestRow } from "./requests-client";
 import type { Folder, RequestOut } from "./requests-client";
 import type { Role } from "./api-mock";
 
@@ -32,7 +33,13 @@ const folders: Folder[] = [
 ];
 
 // Заявка из GET /api/requests (RequestOut; для владельца fio=null).
-function requestWith(fio: string | null, status: string, id: string = "REQ-0001"): RequestOut {
+// Шаг по умолчанию — групповой, can_act=false (кнопок согласования нет).
+function requestWith(
+  fio: string | null,
+  status: string,
+  id: string = "REQ-0001",
+  steps?: RequestOut["steps"],
+): RequestOut {
   return {
     id,
     status,
@@ -43,10 +50,40 @@ function requestWith(fio: string | null, status: string, id: string = "REQ-0001"
     position: "Слесарь",
     fio,
     created_by: "petrov.pp",
-    steps: [
-      { order: 1, owner_group: "SED_STEP_BUH", resolver: "by_group", status: "ожидает", expires_at: "2026-10-05T10:00:00+00:00" },
+    steps: steps ?? [
+      {
+        order: 1,
+        owner_group: "SED_STEP_BUH",
+        resolver: "by_group",
+        owner_name: "Сидорова Анна Сергеевна",
+        can_act: false,
+        status: "ожидает",
+        expires_at: "2026-10-05T10:00:00+00:00",
+      },
     ],
   };
+}
+
+// Персональный шаг, который может отметить текущий пользователь (can_act).
+const myStep: RequestOut["steps"] = [
+  {
+    order: 1,
+    owner_group: "petrov.pp",
+    resolver: "by_user",
+    owner_name: "Сидорова Анна Сергеевна",
+    can_act: true,
+    status: "ожидает",
+    expires_at: "2026-10-05T10:00:00+00:00",
+  },
+];
+
+// Идентификаторы строк таблицы в порядке отображения (первая ячейка — «№»).
+function visibleIds(): (string | null)[] {
+  const table = screen.getByLabelText("Заявки");
+  return within(table)
+    .getAllByRole("row")
+    .slice(1)
+    .map((row) => within(row).getAllByRole("cell")[0]?.textContent ?? null);
 }
 
 // Обёртка с темой для рендера каркаса.
@@ -72,9 +109,10 @@ describe("SedLayout", () => {
     vi.mocked(getRequests).mockResolvedValue([requestWith("Громов Игорь Олегович", "На согласовании")]);
 
     renderWithTheme("hr");
-    // Вкладки (ОК: без «Настроек»).
+    // Вкладки (ОК: «Справочник» есть, «Настроек» нет, «Создание» убрана).
     expect(screen.getByText("Заявки")).toBeInTheDocument();
-    expect(screen.getByText("Создание")).toBeInTheDocument();
+    expect(screen.getByText("Справочник")).toBeInTheDocument();
+    expect(screen.queryByText("Создание")).not.toBeInTheDocument();
     expect(screen.queryByText("Настройки")).not.toBeInTheDocument();
     // Тулбар: создание в отдельном окне, печать — в карточке окна.
     expect(screen.getByText("Создать заявку")).toBeInTheDocument();
@@ -148,17 +186,17 @@ describe("SedLayout", () => {
     expect(screen.queryByLabelText("Роль пользователя")).not.toBeInTheDocument();
   });
 
-  // Вкладка «Настройки» — админу.
-  it("вкладка «Настройки» видна админу", () => {
+  // Вкладка «Настройки» — админу; «Создание» в меню больше нет.
+  it("вкладка «Настройки» видна админу, «Создание» убрана", () => {
     vi.mocked(getFolders).mockResolvedValue(folders);
     vi.mocked(getRequests).mockResolvedValue([]);
     renderWithTheme("admin");
     expect(screen.getByText("Настройки")).toBeInTheDocument();
-    expect(screen.getByText("Создание")).toBeInTheDocument();
+    expect(screen.queryByText("Создание")).not.toBeInTheDocument();
   });
 
-  // Вкладка «Создание» — только ОК и админу.
-  it("вкладка «Создание» скрыта у владельца", () => {
+  // «Создание» отсутствует в меню у всех ролей (создание — кнопка «Создать заявку»).
+  it("«Создание» скрыта у владельца", () => {
     vi.mocked(getFolders).mockResolvedValue([{ id: "mine", title: "Мои задачи", count: 0 }]);
     vi.mocked(getRequests).mockResolvedValue([]);
     renderWithTheme("owner");
@@ -166,13 +204,14 @@ describe("SedLayout", () => {
     expect(screen.queryByText("Настройки")).not.toBeInTheDocument();
   });
 
-  // Руководитель ОК видит «Создание» и «Настройки» (контент-настройки, Фаза 2).
-  it("руководитель ОК видит «Создание» и «Настройки»", () => {
+  // Руководитель ОК видит «Справочник» и «Настройки» (контент-настройки, Фаза 2).
+  it("руководитель ОК видит «Справочник» и «Настройки»", () => {
     vi.mocked(getFolders).mockResolvedValue(folders);
     vi.mocked(getRequests).mockResolvedValue([]);
     renderWithTheme("hr_admin");
-    expect(screen.getByText("Создание")).toBeInTheDocument();
+    expect(screen.getByText("Справочник")).toBeInTheDocument();
     expect(screen.getByText("Настройки")).toBeInTheDocument();
+    expect(screen.queryByText("Создание")).not.toBeInTheDocument();
   });
 
   // Кнопка «Выйти» вызывает сброс сессии.
@@ -223,6 +262,140 @@ describe("SedLayout", () => {
     const requestsCalls = vi.mocked(getRequests).mock.calls.length;
 
     fireEvent(window, new Event("focus"));
+
+    await waitFor(() =>
+      expect(vi.mocked(getFolders).mock.calls.length).toBeGreaterThan(foldersCalls),
+    );
+    expect(vi.mocked(getRequests).mock.calls.length).toBeGreaterThan(requestsCalls);
+  });
+
+  // Колонка «Текущий согласующий» — только привилегированным: ФИО исполнителя
+  // текущего шага (у сотрудника колонки нет). Персональный шаг (by_user) несёт
+  // логин в owner_group — в списке он не должен появляться.
+  it("колонка «Текущий согласующий» показывает ФИО шага с can_act", async () => {
+    vi.mocked(getFolders).mockResolvedValue(folders);
+    vi.mocked(getRequests).mockResolvedValue([
+      requestWith("Громов Игорь Олегович", "На согласовании", "REQ-0001", myStep),
+    ]);
+
+    renderWithTheme("hr");
+    await waitFor(() => expect(screen.getByText("Текущий согласующий")).toBeInTheDocument());
+    // ФИО выводится в двух колонках — «Текущий согласующий» и «Шаг».
+    expect(screen.getAllByText("Сидорова Анна Сергеевна").length).toBeGreaterThan(0);
+    // Логин персонального исполнителя не показывается ни в одной колонке.
+    expect(screen.queryByText("petrov.pp")).not.toBeInTheDocument();
+  });
+
+  // Регресс п. 3.2: у персонального шага owner_group = sAMAccountName, поэтому
+  // подпись шага строится по resolver, а не по owner_group.
+  it("персональный шаг: в списке ФИО, а не логин (can_act и без него)", () => {
+    const withoutCanAct = myStep.map((s) => ({ ...s, can_act: false }));
+    const rows = [toRequestRow(requestWith("Громов Игорь Олегович", "На согласовании", "REQ-0001", myStep))];
+    const rowsOther = [
+      toRequestRow(requestWith("Громов Игорь Олегович", "На согласовании", "REQ-0001", withoutCanAct)),
+    ];
+    expect(rows[0].ownerName).toBe("Сидорова Анна Сергеевна");
+    expect(rows[0].step).toBe("Сидорова Анна Сергеевна");
+    expect(rowsOther[0].ownerName).toBe("Сидорова Анна Сергеевна");
+    expect(rowsOther[0].step).toBe("Сидорова Анна Сергеевна");
+  });
+
+  // Персональный шаг без ФИО (AD не отдал displayName) — нейтральный текст, не логин.
+  it("персональный шаг без owner_name: нейтральный текст, не логин", () => {
+    const noName = myStep.map((s) => ({ ...s, owner_name: null }));
+    const row = toRequestRow(requestWith("Громов Игорь Олегович", "На согласовании", "REQ-0001", noName));
+    expect(row.ownerName).toBe("Персональный исполнитель");
+    expect(row.step).toBe("Персональный исполнитель");
+  });
+
+  // Без can_act показывается название группы, а не логин согласующего.
+  it("без can_act в колонке согласующего — название группы", async () => {
+    vi.mocked(getFolders).mockResolvedValue(folders);
+    vi.mocked(getRequests).mockResolvedValue([
+      requestWith("Громов Игорь Олегович", "На согласовании", "REQ-0001"),
+    ]);
+
+    renderWithTheme("hr");
+    await waitFor(() => expect(screen.getByText("Текущий согласующий")).toBeInTheDocument());
+    // Название группы — в колонках «Шаг» и «Текущий согласующий».
+    expect(screen.getAllByText("SED_STEP_BUH").length).toBeGreaterThan(0);
+    expect(screen.queryByText(/petrov\.pp/)).not.toBeInTheDocument();
+  });
+
+  // У сотрудника (роль owner) колонки текущего согласующего нет.
+  it("у сотрудника колонки «Текущий согласующий» нет", async () => {
+    vi.mocked(getFolders).mockResolvedValue([{ id: "mine", title: "Мои задачи", count: 1 }]);
+    vi.mocked(getRequests).mockResolvedValue([
+      requestWith(null, "На согласовании", "REQ-0001", myStep),
+    ]);
+
+    renderWithTheme("owner");
+    await waitFor(() => expect(screen.getByText("Сотрудник № REQ-0001")).toBeInTheDocument());
+    expect(screen.queryByText("Текущий согласующий")).not.toBeInTheDocument();
+  });
+
+  // Сортировка по умолчанию — новые сверху (id REQ-XXXX по убыванию);
+  // клик по заголовку «№» переключает направление.
+  it("по умолчанию новые сверху, клик по «№» переключает направление", async () => {
+    vi.mocked(getFolders).mockResolvedValue(folders);
+    vi.mocked(getRequests).mockResolvedValue([
+      requestWith("Громов Игорь Олегович", "На согласовании", "REQ-0001"),
+      requestWith("Сидорова Анна Сергеевна", "На согласовании", "REQ-0002"),
+    ]);
+
+    renderWithTheme("hr");
+    await waitFor(() => expect(screen.getByText("REQ-0001")).toBeInTheDocument());
+    expect(visibleIds()).toEqual(["REQ-0002", "REQ-0001"]);
+
+    // Регресс п. 4 ревью: смена сортировки — чистая перерисовка, без нового запроса.
+    const requestsCalls = vi.mocked(getRequests).mock.calls.length;
+    fireEvent.click(screen.getByRole("button", { name: "Сортировать по «№»" }));
+    await waitFor(() => expect(visibleIds()).toEqual(["REQ-0001", "REQ-0002"]));
+    expect(vi.mocked(getRequests).mock.calls.length).toBe(requestsCalls);
+  });
+
+  // Сортировка по «Сроку» — по сроку текущего шага (не по id).
+  it("сортировка по «Срок» — по сроку шага", async () => {
+    vi.mocked(getFolders).mockResolvedValue(folders);
+    vi.mocked(getRequests).mockResolvedValue([
+      requestWith("Громов Игорь Олегович", "На согласовании", "REQ-0001"),
+      requestWith("Сидорова Анна Сергеевна", "На согласовании", "REQ-0002", [
+        {
+          order: 1,
+          owner_group: "SED_STEP_BUH",
+          resolver: "by_group",
+          can_act: false,
+          status: "ожидает",
+          expires_at: "2026-10-09T10:00:00+00:00",
+        },
+      ]),
+    ]);
+
+    renderWithTheme("hr");
+    await waitFor(() => expect(screen.getByText("REQ-0001")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Сортировать по «Срок»" }));
+    // REQ-0001 — срок 2026-10-05, REQ-0002 — 2026-10-09 → возрастание по сроку.
+    await waitFor(() => expect(visibleIds()).toEqual(["REQ-0001", "REQ-0002"]));
+  });
+
+  // Оповещение из окна-попа об удалении/создании заявки (localStorage storage):
+  // список и счётчики папок обновляются без возврата фокуса.
+  it("оповещение localStorage обновляет список и папки", async () => {
+    vi.mocked(getFolders).mockResolvedValue(folders);
+    vi.mocked(getRequests).mockResolvedValue([requestWith("Громов Игорь Олегович", "На согласовании")]);
+
+    renderWithTheme("hr");
+    await waitFor(() => expect(screen.getByText("REQ-0001")).toBeInTheDocument());
+    const foldersCalls = vi.mocked(getFolders).mock.calls.length;
+    const requestsCalls = vi.mocked(getRequests).mock.calls.length;
+
+    fireEvent(
+      window,
+      new StorageEvent("storage", {
+        key: "sed:requests-changed",
+        newValue: String(Date.now()),
+      }),
+    );
 
     await waitFor(() =>
       expect(vi.mocked(getFolders).mock.calls.length).toBeGreaterThan(foldersCalls),

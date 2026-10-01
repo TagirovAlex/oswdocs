@@ -26,28 +26,15 @@ export function CreateWindow(props: CreateWindowProps) {
 
   return (
     <div className="sed-shell">
-      {/* Верхняя полоса попапа: закрыть окно с подтверждением при dirty.
-          Полоса — на всю ширину, кнопка справа, при прокрутке остаётся сверху. */}
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "flex-end",
-          gap: 8,
-          padding: "10px 16px",
-          background: "var(--sed-surface)",
-          borderBottom: "1px solid var(--sed-border)",
-          position: "sticky",
-          top: 0,
-          zIndex: 5,
-        }}
-      >
-        <button type="button" className="sed-btn" onClick={handleClose}>
-          Закрыть
-        </button>
-      </div>
       <main className="sed-content" style={{ maxWidth: 940, margin: "0 auto", padding: 16 }}>
         <CreateForm role={role} onDirtyChange={setDirty} closeOnCreate />
+        {/* Кнопка «Закрыть» — внизу содержимого (как в карточке сотрудника),
+            не в верхней липкой полосе; при несохранённых данных — с подтверждением. */}
+        <div className="sed-toolbar" style={{ marginTop: 12 }}>
+          <button type="button" className="sed-btn" onClick={handleClose}>
+            Закрыть
+          </button>
+        </div>
       </main>
     </div>
   );

@@ -7,8 +7,17 @@
 // из AD (GET /api/ad/search); телом создания идут blocks, не группы (steps).
 import { useEffect, useRef, useState } from "react";
 import { ApiHttpError } from "./auth-client";
-import { createRequest, getEmployeeCard, getEnterprises, searchAd, searchEmployees, submitRequest } from "./requests-client";
-import type { AdCandidate, EmployeeHit, Enterprise } from "./requests-client";
+import {
+  createRequest,
+  getAdGroupMembers,
+  getEmployeeCard,
+  getEnterprises,
+  getStepGroups,
+  searchAd,
+  searchEmployees,
+  submitRequest,
+} from "./requests-client";
+import type { AdCandidate, AdGroupMember, EmployeeHit, Enterprise } from "./requests-client";
 import type { Role } from "./api-mock";
 
 interface CreateFormProps {
@@ -21,19 +30,40 @@ interface CreateFormProps {
   closeOnCreate?: boolean;
 }
 
-// Шаг маршрута в конструкторе: исполнитель из AD (sam — контракт API, остальное — справочно).
+// Тип исполнителя шага: конкретный сотрудник AD либо группа-владелец.
+type ExecutorKind = "user" | "group";
+
+// Шаг маршрута в конструкторе: сотрудник (sam — контракт API, остальное —
+// справочно) либо группа (owner_group + резолвер by_group).
 interface RouteStep {
+  kind: ExecutorKind;
   sam: string;
   display_name: string;
-  department?: string;
-  title?: string;
+  owner_group?: string;
+  resolver: string;
 }
 
-// Блок маршрута: последовательный либо параллельный шаги.
+// Блок маршрута: последовательный либо параллельный шаги одного типа исполнителя.
 interface RouteBlock {
   mode: "sequential" | "parallel";
+  kind: ExecutorKind;
   steps: RouteStep[];
 }
+
+// Состав выбранной группы для одного блока маршрута (счётчик/раскрытие/ошибка AD).
+interface GroupMembersState {
+  members: AdGroupMember[];
+  loading: boolean;
+  error: string;
+  open: boolean;
+}
+
+const EMPTY_GROUP_MEMBERS: GroupMembersState = {
+  members: [],
+  loading: false,
+  error: "",
+  open: false,
+};
 
 // Форма создания: единый экран, блоки по зависимостям.
 export function CreateForm(props: CreateFormProps) {
@@ -70,6 +100,17 @@ export function CreateForm(props: CreateFormProps) {
   // Порядковый номер поиска AD: устаревшие ответы отбрасываем.
   const adSeq = useRef(0);
 
+  // Тип исполнителя «Группа»: группы из settings (GET /api/step-groups) и
+  // состав выбранной группы из AD (GET /api/ad/groups/{group}/members).
+  const [groups, setGroups] = useState<string[]>([]);
+  const [groupsError, setGroupsError] = useState<string>("");
+  // Выбранная группа по индексу блока.
+  const [groupPick, setGroupPick] = useState<Record<number, string>>({});
+  // Состав группы хранится ПО ИНДЕКСУ БЛОКА: у каждого группового блока своя
+  // выбранная группа, общее состояние показывало бы состав последней выбранной
+  // группы во всех блоках сразу.
+  const [groupMembers, setGroupMembers] = useState<Record<number, GroupMembersState>>({});
+
   // Флаг «грязности» формы: true после первого ввода пользователя — для
   // подтверждения закрытия окна (create-window). Сбрасывается после создания.
   const [touched, setTouched] = useState<boolean>(false);
@@ -95,6 +136,50 @@ export function CreateForm(props: CreateFormProps) {
       alive = false;
     };
   }, []);
+
+  // Группы-владельцы шагов — из settings (GET /api/step-groups), без хардкода.
+  // Недоступность — понятный текст, форма продолжает работать.
+  useEffect(() => {
+    let alive = true;
+    getStepGroups()
+      .then((items) => {
+        if (alive) {
+          setGroups(items);
+          setGroupsError("");
+        }
+      })
+      .catch((e: unknown) => {
+        if (alive) setGroupsError(e instanceof Error ? e.message : "Ошибка загрузки групп");
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // Состав группы из AD: счётчик + раскрываемый список (ФИО/почта). Состав хранится
+  // по индексу блока. Ошибка или недоступность AD — текст, форма не падает.
+  function patchGroupMembers(blockIndex: number, patch: Partial<GroupMembersState>): void {
+    setGroupMembers((prev) => ({
+      ...prev,
+      [blockIndex]: { ...EMPTY_GROUP_MEMBERS, ...prev[blockIndex], ...patch },
+    }));
+  }
+
+  function loadGroupMembers(blockIndex: number, group: string): void {
+    if (group === "") {
+      patchGroupMembers(blockIndex, { members: [], error: "", loading: false, open: false });
+      return;
+    }
+    patchGroupMembers(blockIndex, { members: [], error: "", loading: true, open: false });
+    getAdGroupMembers(group)
+      .then((items) => patchGroupMembers(blockIndex, { members: items, loading: false }))
+      .catch((e: unknown) => {
+        patchGroupMembers(blockIndex, {
+          loading: false,
+          error: e instanceof Error ? e.message : "Не удалось получить состав группы",
+        });
+      });
+  }
 
   // Живой поиск сотрудника: ввод → debounce 300 мс → searchEmployees; старые
   // ответы отбрасываем по searchSeq. 503 или пустой результат — ручной ввод.
@@ -220,7 +305,7 @@ export function CreateForm(props: CreateFormProps) {
 
   function addBlock(): void {
     markTouched();
-    setBlocks((prev) => [...prev, { mode: "sequential", steps: [] }]);
+    setBlocks((prev) => [...prev, { mode: "sequential", kind: "user", steps: [] }]);
   }
 
   function removeBlock(index: number): void {
@@ -232,6 +317,13 @@ export function CreateForm(props: CreateFormProps) {
   function setBlockMode(index: number, mode: "sequential" | "parallel"): void {
     markTouched();
     setBlocks((prev) => prev.map((b, i) => (i === index ? { ...b, mode } : b)));
+  }
+
+  // Тип исполнителя блока: сотрудник (поиск AD) либо группа (список из settings).
+  function setBlockKind(index: number, kind: ExecutorKind): void {
+    markTouched();
+    setBlocks((prev) => prev.map((b, i) => (i === index ? { ...b, kind } : b)));
+    if (adPanelBlock === index) closeAdPanel();
   }
 
   function removeStep(blockIndex: number, stepIndex: number): void {
@@ -268,13 +360,44 @@ export function CreateForm(props: CreateFormProps) {
               ...b,
               steps: [
                 ...b.steps,
-                { sam: cand.sam, display_name: cand.display_name, department: cand.department, title: cand.title },
+                {
+                  kind: "user",
+                  sam: cand.sam,
+                  display_name: cand.display_name,
+                  resolver: "by_user",
+                },
               ],
             }
           : b,
       ),
     );
     closeAdPanel();
+  }
+
+  // Выбор группы для блока: подгрузка состава из AD.
+  function pickGroup(blockIndex: number, group: string): void {
+    markTouched();
+    setGroupPick((prev) => ({ ...prev, [blockIndex]: group }));
+    loadGroupMembers(blockIndex, group);
+  }
+
+  // Добавление выбранной группы в текущий блок: owner_group + резолвер by_group.
+  function addGroupToBlock(blockIndex: number, group: string): void {
+    if (group === "") return;
+    markTouched();
+    setBlocks((prev) =>
+      prev.map((b, i) =>
+        i === blockIndex
+          ? {
+              ...b,
+              steps: [
+                ...b.steps,
+                { kind: "group", sam: "", display_name: group, owner_group: group, resolver: "by_group" },
+              ],
+            }
+          : b,
+      ),
+    );
   }
 
   // Создание заявки: POST /api/requests; при submit=true — сразу POST /{id}/submit
@@ -294,7 +417,12 @@ export function CreateForm(props: CreateFormProps) {
         fio,
         blocks: blocks.map((b) => ({
           mode: b.mode,
-          steps: b.steps.map((s) => ({ sam: s.sam })),
+          // Шаг-группа уходит owner_group + by_group; шаг-сотрудник — sam.
+          steps: b.steps.map((s) =>
+            s.kind === "group"
+              ? { owner_group: s.owner_group ?? s.display_name, resolver: s.resolver }
+              : { sam: s.sam },
+          ),
         })),
       });
       if (submit) await submitRequest(result.id);
@@ -310,6 +438,8 @@ export function CreateForm(props: CreateFormProps) {
       setManualMode(false);
       setManualNote("");
       setBlocks([]);
+      setGroupPick({});
+      setGroupMembers({});
       closeAdPanel();
       onDirtyChange?.(false);
       // В окне-попе — после создания закрыть окно (список обновится по фокусу).
@@ -468,11 +598,15 @@ export function CreateForm(props: CreateFormProps) {
         </fieldset>
       )}
 
-      {/* Маршрут: конструктор блоков (последовательный/параллельный) из AD. */}
+      {/* Маршрут: конструктор блоков (последовательный/параллельный); исполнители
+          — сотрудник (поиск AD) либо группа (список групп + состав из AD). */}
       {enterprise && employeeReady && (
         <fieldset style={{ marginTop: 12 }}>
           <legend>Маршрут согласования</legend>
-          <div className="sed-note">Конструктор маршрута: блоки с исполнителями из AD.</div>
+          <div className="sed-note">
+            Конструктор маршрута: блоки с исполнителями — сотрудником из AD или группой.
+          </div>
+          {groupsError && <div className="sed-note">Группы: {groupsError}</div>}
           {blocks.length === 0 && <div className="sed-note">Добавьте блок и исполнителей.</div>}
           {blocks.map((block, bi) => (
             <div
@@ -494,6 +628,14 @@ export function CreateForm(props: CreateFormProps) {
                   <option value="sequential">Последовательный</option>
                   <option value="parallel">Параллельный</option>
                 </select>
+                <select
+                  aria-label={`Тип исполнителя блока ${bi + 1}`}
+                  value={block.kind}
+                  onChange={(e) => setBlockKind(bi, e.target.value as ExecutorKind)}
+                >
+                  <option value="user">Сотрудник</option>
+                  <option value="group">Группа</option>
+                </select>
                 <button type="button" className="sed-btn" onClick={() => removeBlock(bi)}>
                   Удалить блок
                 </button>
@@ -501,8 +643,8 @@ export function CreateForm(props: CreateFormProps) {
               {block.steps.length === 0 && <div className="sed-note">Исполнители не добавлены.</div>}
               <ul style={{ margin: "8px 0", paddingLeft: 20 }}>
                 {block.steps.map((s, si) => (
-                  <li key={`${s.sam}-${si}`}>
-                    {s.display_name} ({s.sam})
+                  <li key={`${s.kind}-${s.sam || s.owner_group}-${si}`}>
+                    {s.kind === "group" ? s.display_name : `${s.display_name} (${s.sam})`}
                     <button
                       type="button"
                       aria-label={`Удалить исполнителя ${s.display_name}`}
@@ -514,6 +656,70 @@ export function CreateForm(props: CreateFormProps) {
                   </li>
                 ))}
               </ul>
+              {block.kind === "group" ? (
+                <div style={{ marginTop: 8 }}>
+                  <label>
+                    Группа
+                    <select
+                      aria-label={`Группа блока ${bi + 1}`}
+                      value={groupPick[bi] ?? ""}
+                      onChange={(e) => pickGroup(bi, e.target.value)}
+                    >
+                      <option value="">— выберите —</option>
+                      {groups.map((g) => (
+                        <option key={g} value={g}>
+                          {g}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  {groups.length === 0 && !groupsError && (
+                    <div className="sed-note">Список групп пуст (задаётся в настройках).</div>
+                  )}
+                  {(groupPick[bi] ?? "") !== "" && (() => {
+                    // Состав именно этого блока: у каждого группового блока своя группа.
+                    const gm = groupMembers[bi] ?? EMPTY_GROUP_MEMBERS;
+                    return (
+                      <>
+                        {/* Состав группы: счётчик + раскрываемый список (ФИО/почта). */}
+                        <div className="sed-note">
+                          Состав группы: {gm.loading ? "загрузка…" : gm.members.length}
+                        </div>
+                        {gm.error && <div role="alert">{gm.error}</div>}
+                        {!gm.loading && gm.error === "" && (
+                          <button
+                            type="button"
+                            className="sed-btn sed-btn--ghost"
+                            onClick={() => patchGroupMembers(bi, { open: !gm.open })}
+                          >
+                            {gm.open ? "Скрыть состав" : "Показать состав"}
+                          </button>
+                        )}
+                        {gm.open && gm.members.length > 0 && (
+                          <ul aria-label={`Состав группы ${groupPick[bi]}`} style={{ margin: "6px 0", paddingLeft: 20 }}>
+                            {gm.members.map((m) => (
+                              <li key={m.sam}>
+                                {m.display_name}
+                                {m.mail ? ` · ${m.mail}` : ""}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      <div className="sed-toolbar" style={{ marginTop: 8 }}>
+                        <button
+                          type="button"
+                          className="sed-btn"
+                          onClick={() => addGroupToBlock(bi, groupPick[bi] ?? "")}
+                        >
+                          Добавить группу
+                        </button>
+                      </div>
+                    </>
+                    );
+                  })()}
+                </div>
+              ) : (
+                <>
               <button type="button" className="sed-btn" onClick={() => openAdPanel(bi)}>
                 Добавить исполнителя
               </button>
@@ -576,6 +782,8 @@ export function CreateForm(props: CreateFormProps) {
                     </ul>
                   )}
                 </div>
+              )}
+                </>
               )}
             </div>
           ))}

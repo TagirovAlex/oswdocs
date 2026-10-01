@@ -28,7 +28,7 @@ from .mailer import (
     enqueue_event,
     get_mail_queue,
     resolve_smtp_from,
-    step_owner_mail,
+    step_owner_mails,
 )
 from .requests_store import (
     InMemoryRequestsStore,
@@ -179,18 +179,26 @@ class StepsReplaceIn(BaseModel):
 
 
 class StepOut(BaseModel):
-    """Шаг заявки (исполнители — группы/sam без ФИО)."""
+    """Шаг заявки (исполнители — группы/sam; ФИО согласующего — из AD)."""
 
     order: int
     owner_group: str
     resolver: str
     assignee: str | None = None
+    owner_name: str | None = Field(
+        default=None,
+        description="ФИО согласующего по данным AD; у группового шага — null",
+    )
     status: str
     require_comment: bool = False
     expires_at: str
     done_by: str | None = None
     done_at: str | None = None
     comment: str | None = None
+    can_act: bool = Field(
+        default=False,
+        description="Может ли текущий пользователь поставить отметку прямо сейчас",
+    )
 
 
 class RequestOut(BaseModel):
@@ -200,6 +208,9 @@ class RequestOut(BaseModel):
     status: str
     route_origin: str
     enterprise: str | None = None
+    enterprise_name: str | None = Field(
+        default=None, description="Название предприятия из settings.enterprises"
+    )
     tab_num: str | None = None
     fio: str | None = None
     department: str
@@ -400,20 +411,30 @@ def _current_pending(request: _Request) -> _Step | None:
     return steps[0] if steps else None
 
 
-def _check_step_owner(step: _Step, user: CurrentUser) -> None:
-    """Отметку ставит владелец: персональный assignee — только он, иначе любой из группы."""
+def _owns_step(step: _Step, user: CurrentUser) -> bool:
+    """Владелец шага по действующим правилам: персональный assignee — только он
+    (sam сравнивается ровно как раньше, регистр НЕ нормализуется — ослабление
+    сравнения расширило бы доступ), иначе любой из группы-владельца шага."""
     if step.assignee:
-        if user.sam != step.assignee:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Шаг назначен другому исполнителю",
-            )
+        return user.sam == step.assignee
+    return step.owner_group in user.groups
+
+
+def _check_step_owner(step: _Step, user: CurrentUser) -> None:
+    """Отметку ставит владелец: персональный assignee — только он, иначе любой из группы.
+
+    Правило вынесено в _owns_step (его же использует can_act), тексты 403 и коды
+    ответов прежние."""
+    if _owns_step(step, user):
         return
-    if step.owner_group not in user.groups:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Нет доступа: шаг чужой группы",
-        )
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=(
+            "Шаг назначен другому исполнителю"
+            if step.assignee
+            else "Нет доступа: шаг чужой группы"
+        ),
+    )
 
 
 def _check_comment(step: _Step, decision: str, comment: str | None) -> None:
@@ -429,21 +450,125 @@ def _check_comment(step: _Step, decision: str, comment: str | None) -> None:
         )
 
 
-def _public_view(request: _Request, user: CurrentUser) -> RequestOut:
-    """Ролевая обрезка: ОК/админы — всё, владелец — без tab_num (ПДн)."""
+def _can_act(
+    request: _Request,
+    step: _Step,
+    user: CurrentUser,
+    pending_orders: set[int],
+    now: datetime,
+) -> bool:
+    """Может ли пользователь поставить отметку по шагу прямо сейчас.
+
+    Условия те же, что проверяет decide_step: заявка «На согласовании», шаг
+    ожидает, шаг в текущем блоке маршрута (_current_pending_steps), TTL не истек,
+    пользователь — владелец шага (_owns_step). Послаблений по роли нет: админ/
+    ОК не «могут всё» — иначе фронт покажет кнопку, которую API отклонит
+    (403/409/410). Считается для всех ролей, у не-владельца просто False.
+    """
+    if request.status != IN_APPROVAL or step.status != STEP_PENDING:
+        return False
+    if step.order not in pending_orders:
+        return False
+    if step.expires_at <= now:
+        return False
+    return _owns_step(step, user)
+
+
+def _resolve_dependency(factory, *args):
+    """Зависимость вне эндпоинта: подмена из dependency_overrides (тесты/офлайн),
+    иначе боевая фабрика (как _current_store в link.py)."""
+    from .main import app  # локально против циклического импорта
+
+    override = app.dependency_overrides.get(factory)
+    if override is not None:
+        return override()
+    return factory(*args)
+
+
+def _owner_display_name(ad_reader: object | None, assignee: str | None) -> str | None:
+    """ФИО согласующего по данным AD (только чтение, get_user по sAMAccountName).
+
+    Пустой assignee (групповой шаг) — None: персонального исполнителя нет,
+    группа уже отдается в owner_group. AdNotFound/AD недоступен/любая ошибка —
+    None (fail-soft): падение AD не должно ронять выдачу заявки.
+    """
+    if not assignee or ad_reader is None:
+        return None
+    try:
+        card = ad_reader.get_user(assignee)
+    except Exception:
+        return None
+    return (getattr(card, "display_name", None) or "").strip() or None
+
+
+def _enterprise_names_map() -> dict[str, str]:
+    """Карта «код предприятия → название» из ключа настроек enterprises.
+
+    Формат — список пар code/name (EnterpriseItem в settings_routes). Дефолтов
+    в коде нет: ключа нет, хранилище недоступно (SettingsUnavailable, офлайн)
+    или формат неожиданный — пустая карта, тогда enterprise_name в ответе None
+    (без 500).
+    """
+    try:
+        store = _resolve_dependency(get_settings_store, get_settings())
+        raw = read_setting_value(store, "enterprises")
+    except Exception:
+        return {}
+    if not isinstance(raw, list):
+        return {}
+    names: dict[str, str] = {}
+    for item in raw:
+        if isinstance(item, dict):
+            code = str(item.get("code") or "").strip()
+            name = str(item.get("name") or "").strip()
+            if code and name:
+                names[code] = name
+    return names
+
+
+def _public_view(
+    request: _Request,
+    user: CurrentUser,
+    *,
+    ad_reader: object | None = None,
+    enterprise_names: dict[str, str] | None = None,
+) -> RequestOut:
+    """Ролевая обрезка: ОК/админы — всё, владелец — без tab_num (ПДн).
+
+    ad_reader и enterprise_names резолвятся ОДИН раз на вызов и переиспользуются
+    для всех шагов (list_requests поднимает их над циклом по заявкам, чтобы на
+    списке не было ни одного лишнего обращения к AD/БД на шаг).
+
+    ПДн по ролям: enterprise_name (как enterprise/tab_num/fio) — только
+    привилегированным, остальным None; owner_name (ФИО согласующего) — всем
+    авторизованным, сотруднику полезно видеть, кто согласует; assignee — это
+    sAMAccountName, поэтому непривилегированному скрывается (None), а
+    владельцу шага остаётся (это его собственный логин); can_act считается
+    всегда и для всех ролей.
+    """
     privileged = user.role in ("hr", "hr_admin", "admin")
+    reader = ad_reader if ad_reader is not None else _resolve_dependency(get_ad_reader)
+    # Карта предприятий нужна только привилегированным (остальным enterprise_name
+    # не отдается) — при непривилегированном запросе БД настроек не трогаем.
+    names = enterprise_names if enterprise_names is not None else (
+        _enterprise_names_map() if privileged else {}
+    )
+    now = _utcnow()
+    pending_orders = {s.order for s in _current_pending_steps(request)}
     steps = [
         StepOut(
             order=s.order,
             owner_group=s.owner_group,
             resolver=s.resolver,
-            assignee=s.assignee,
+            assignee=s.assignee if privileged or _owns_step(s, user) else None,
+            owner_name=_owner_display_name(reader, s.assignee),
             status=s.status,
             require_comment=s.require_comment,
             expires_at=s.expires_at.isoformat(),
             done_by=s.done_by,
             done_at=s.done_at.isoformat() if s.done_at else None,
             comment=s.comment,
+            can_act=_can_act(request, s, user, pending_orders, now),
         )
         for s in sorted(request.steps, key=lambda x: x.order)
     ]
@@ -452,6 +577,7 @@ def _public_view(request: _Request, user: CurrentUser) -> RequestOut:
         status=request.status,
         route_origin=request.route_origin,
         enterprise=request.enterprise if privileged else None,
+        enterprise_name=names.get(request.enterprise) if privileged else None,
         tab_num=request.tab_num if privileged else None,
         fio=request.fio if privileged else None,
         department=request.department,
@@ -477,33 +603,33 @@ def _notify_assigned(
     ad_reader: object | None,
     settings: Settings,
 ) -> None:
-    """Письмо «назначена» владельцу первого шага при submit (W3a).
+    """Письмо «назначена» владельцам первого шага при submit (W3a).
 
-    Получатель — mail из AD (только чтение); шаблон — из mail_templates/settings.
-    Любой сбой (офлайн без AD/БД, нет шаблона) тихо пропускается: уведомление
-    не должно валить подачу заявки.
+    Получатели — mail из AD (только чтение): у персонального шага один адресат,
+    у группового — все активные участники группы (очередь mail_queue хранит по
+    одному письму на строку, поэтому рассылка разворачивается здесь). Шаблон — из
+    mail_templates/settings. Любой сбой (офлайн без AD/БД, нет шаблона) тихо
+    пропускается: уведомление не должно валить подачу заявки.
     """
     try:
         # Всем исполнителям активного блока (в параллельном — все шаги блока).
         for step in _current_pending_steps(request):
             templates = read_setting_value(settings_store, "mail_templates")
             smtp_from = read_setting_value(settings_store, "smtp_from")
-            to = step_owner_mail(step, ad_reader)
-            if not to:
-                continue
-            enqueue_event(
-                queue,
-                to,
-                request.id,
-                EVENT_ASSIGNED,
-                templates or [],
-                {
-                    "fio": request.fio,
-                    "request_id": request.id,
-                    "url": request_url(settings.APP_BASE_URL, request.id),
-                },
-                subject_prefix=resolve_smtp_from(smtp_from, settings.SMTP_FROM),
-            )
+            for to in step_owner_mails(step, ad_reader):
+                enqueue_event(
+                    queue,
+                    to,
+                    request.id,
+                    EVENT_ASSIGNED,
+                    templates or [],
+                    {
+                        "fio": request.fio,
+                        "request_id": request.id,
+                        "url": request_url(settings.APP_BASE_URL, request.id),
+                    },
+                    subject_prefix=resolve_smtp_from(smtp_from, settings.SMTP_FROM),
+                )
     except Exception:
         return
 
@@ -587,8 +713,14 @@ def list_requests(
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
+    # Резолв AD/предприятий — один раз над циклом (иначе запрос на каждый шаг).
+    ad_reader = _resolve_dependency(get_ad_reader)
+    enterprise_names = _enterprise_names_map() if _is_hr(user) else {}
     if _is_hr(user):
-        return [_public_view(r, user) for r in requests]
+        return [
+            _public_view(r, user, ad_reader=ad_reader, enterprise_names=enterprise_names)
+            for r in requests
+        ]
     mine = [
         r
         for r in requests
@@ -597,7 +729,10 @@ def list_requests(
             for s in r.steps
         )
     ]
-    return [_public_view(r, user) for r in mine]
+    return [
+        _public_view(r, user, ad_reader=ad_reader, enterprise_names=enterprise_names)
+        for r in mine
+    ]
 
 
 class FolderOut(BaseModel):

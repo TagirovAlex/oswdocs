@@ -200,21 +200,37 @@ def manager_mail(ad_reader: object | None, sam: str | None) -> str | None:
     return getattr(manager, "mail", "") or None
 
 
-def step_owner_mail(step: object, ad_reader: object | None) -> str | None:
-    """Почта владельца шага: персональный assignee — по sam; группа — через
-    групповой резолвер AD (get_user_mail_for_group на стенде), иначе None."""
+def step_owner_mails(step: object, ad_reader: object | None) -> List[str]:
+    """Адресаты шага (список) для уведомлений.
+
+    Персональный шаг (assignee) — почта исполнителя; иначе групповой шаг —
+    почта всех активных участников owner_group (AD, только чтение, без дублей
+    и пустых). Нет ридера/адресатов/сбоя AD — пустой список, без исключений:
+    письмо тихо не ставится (офлайн). Рассылка — по строке на адресата
+    (в очереди одно письмо = одна строка)."""
     if ad_reader is None:
-        return None
+        return []
     if getattr(step, "assignee", None):
-        return recipient_mail(ad_reader, step.assignee)
+        mail = recipient_mail(ad_reader, step.assignee)
+        return [mail] if mail else []
     group = getattr(step, "owner_group", None)
-    resolver = getattr(ad_reader, "get_user_mail_for_group", None)
-    if group and callable(resolver):
-        try:
-            return resolver(group) or None
-        except Exception:
-            return None
-    return None
+    if not group:
+        return []
+    resolver = getattr(ad_reader, "group_members", None)
+    if not callable(resolver):
+        return []
+    try:
+        members = resolver(group) or []
+    except Exception:
+        return []
+    mails: List[str] = []
+    for user in members:
+        if not getattr(user, "enabled", True):
+            continue
+        mail = (getattr(user, "mail", "") or "").strip()
+        if mail and mail not in mails:
+            mails.append(mail)
+    return mails
 
 
 def enqueue_event(

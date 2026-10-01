@@ -55,9 +55,10 @@ def _entry(sam, fio, manager="", groups=(), dept="", title="", mail="", uac=512)
 class FakeLdapGateway:
     """Фейк границы LDAP: цепочки manager + группы SED_*."""
 
-    def __init__(self, entries, fail_with=None):
+    def __init__(self, entries, fail_with=None, groups=None):
         self._by_sam = {e["sAMAccountName"].lower(): dict(e) for e in entries}
         self._by_dn = {e["dn"].lower(): dict(e) for e in entries}
+        self._groups = {cn.lower(): dict(g) for cn, g in (groups or {}).items()}
         self._fail_with = fail_with
         self.bind_calls = 0
         self.search_calls = 0
@@ -93,6 +94,13 @@ class FakeLdapGateway:
             for e in self._by_sam.values()
             if needle in e["displayName"].lower()
         ]
+
+    def search_group_by_cn(self, cn):
+        self.search_calls += 1
+        if self._fail_with is not None:
+            raise self._fail_with
+        found = self._groups.get(cn.strip().lower())
+        return dict(found) if found else None
 
     def mutate(self, sam, **kwargs):
         key = sam.strip().lower()
@@ -144,6 +152,16 @@ def _directory():
     ]
 
 
+def _group(cn, entries, *sams):
+    """Запись группы AD: member — DN участников из каталога (по логинам)."""
+    by_sam = {e["sAMAccountName"].lower(): e for e in entries}
+    return {
+        "dn": "CN=%s,%s" % (cn, BASE_DN),
+        "cn": cn,
+        "members": [by_sam[s.lower()]["dn"] for s in sams],
+    }
+
+
 def _settings(**over):
     params = {
         "ad_url": "ldaps://ad.example.local:636",
@@ -156,8 +174,12 @@ def _settings(**over):
     return AdReaderSettings(**params)
 
 
-def _reader(entries=None, **over):
-    return AdReader(_settings(), FakeLdapGateway(entries or _directory()), InMemoryCache())
+def _reader(entries=None, groups=None, **over):
+    return AdReader(
+        _settings(),
+        FakeLdapGateway(entries or _directory(), groups=groups),
+        InMemoryCache(),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -352,3 +374,102 @@ def test_ad_user_model_defaults():
     assert user.manager_dn == ""
     assert user.member_of == ()
     assert user.enabled is True
+
+
+# ---------------------------------------------------------------------------
+# Состав группы (group_members) — адресаты уведомлений
+# ---------------------------------------------------------------------------
+
+def test_group_members_returns_active_sorted():
+    """Участники группы по member: только активные, порядок по sAMAccountName."""
+    entries = _directory()
+    groups = {"SED_STEP_BUH": _group("SED_STEP_BUH", entries, "t.testov", "a.primerova")}
+    reader = _reader(entries, groups=groups)
+    members = reader.group_members("SED_STEP_BUH")
+    assert [u.sam for u in members] == ["a.primerova", "t.testov"]
+    assert members[0].mail == "a.primerova@example.local"
+    assert members[0].enabled is True
+
+
+def test_group_members_filters_disabled_and_deleted():
+    """Отключённые учётные записи и удалённые из каталога в рассылку не попадают."""
+    entries = _directory()
+    for e in entries:
+        if e["sAMAccountName"] == "p.postoronny":
+            e["userAccountControl"] = 514  # бит ACCOUNTDISABLE
+    gone_dn = "CN=Удален Удалёнович,OU=SED,DC=example,DC=local"
+    groups = {
+        "SED_STEP_BUH": _group("SED_STEP_BUH", entries, "p.postoronny", "t.testov"),
+        "SED_STEP_OTHER": {
+            "dn": "CN=SED_STEP_OTHER,%s" % BASE_DN,
+            "cn": "SED_STEP_OTHER",
+            "members": [gone_dn, entries[0]["dn"]],
+        },
+    }
+    reader = _reader(entries, groups=groups)
+    assert [u.sam for u in reader.group_members("SED_STEP_BUH")] == ["t.testov"]
+    # Несуществующий участник пропускается молча, ошибки не поднимает.
+    assert [u.sam for u in reader.group_members("SED_STEP_OTHER")] == ["t.testov"]
+
+
+def test_group_members_empty_group_and_empty_name():
+    """Группа без участников и пустое имя — пустой список, не ошибка."""
+    entries = _directory()
+    groups = {"SED_STEP_EMPTY": _group("SED_STEP_EMPTY", entries)}
+    reader = _reader(entries, groups=groups)
+    assert reader.group_members("SED_STEP_EMPTY") == []
+    assert reader.group_members("") == []
+    assert reader.group_members("   ") == []
+
+
+def test_group_members_unknown_group_raises_not_found():
+    reader = _reader(groups={"SED_STEP_BUH": _group("SED_STEP_BUH", _directory())})
+    with pytest.raises(AdNotFound, match="не найдена"):
+        reader.group_members("SED_STEP_NET_TAKOY")
+
+
+def test_group_members_accepts_full_group_dn():
+    """Полный DN группы тоже принимается: берётся CN из настройки шага."""
+    entries = _directory()
+    groups = {"SED_STEP_BUH": _group("SED_STEP_BUH", entries, "t.testov")}
+    reader = _reader(entries, groups=groups)
+    members = reader.group_members("CN=SED_STEP_BUH,%s" % BASE_DN)
+    assert [u.sam for u in members] == ["t.testov"]
+
+
+def test_group_members_ad_unavailable():
+    gateway = FakeLdapGateway(
+        _directory(), fail_with=TimeoutError("ldap timeout"), groups={"SED_STEP_BUH": {"dn": "", "members": []}}
+    )
+    reader = AdReader(_settings(), gateway, InMemoryCache())
+    with pytest.raises(AdUnavailable, match="AD недоступен"):
+        reader.group_members("SED_STEP_BUH")
+
+
+def test_get_user_by_dn_cached_between_calls():
+    """Карточка по DN кэшируется: повторный резолв не идёт в LDAP.
+
+    Без кэша group_members делал бы живой LDAPS-запрос на каждого участника
+    (O(участников) на вызов, в том числе из worker-напоминаний).
+    """
+    entries = _directory()
+    gateway = FakeLdapGateway(entries)
+    reader = AdReader(_settings(), gateway, InMemoryCache())
+    dn = entries[0]["dn"]
+    first = reader.get_user_by_dn(dn)
+    assert gateway.search_calls == 1
+    second = reader.get_user_by_dn(dn)
+    assert gateway.search_calls == 1, "повторный резолв должен брать кэш"
+    assert second.sam == first.sam
+
+
+def test_get_user_by_dn_does_not_cache_missing():
+    """Не найденный по DN не кэшируется: поиск повторяется (запись могла появиться)."""
+    entries = _directory()
+    gateway = FakeLdapGateway(entries)
+    reader = AdReader(_settings(), gateway, InMemoryCache())
+    with pytest.raises(AdNotFound):
+        reader.get_user_by_dn("CN=Нет Такого,OU=SED,DC=example,DC=local")
+    with pytest.raises(AdNotFound):
+        reader.get_user_by_dn("CN=Нет Такого,OU=SED,DC=example,DC=local")
+    assert gateway.search_calls == 2

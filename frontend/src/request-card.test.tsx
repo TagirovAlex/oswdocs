@@ -38,7 +38,12 @@ vi.mock("./requests-client", async (importOriginal) => {
 });
 
 // Заявка из GET /api/requests (RequestOut; для владельца fio=null).
-function requestWith(fio: string | null, status: string, id: string = "REQ-0001"): RequestOut {
+function requestWith(
+  fio: string | null,
+  status: string,
+  id: string = "REQ-0001",
+  steps?: RequestOut["steps"],
+): RequestOut {
   return {
     id,
     status,
@@ -49,19 +54,53 @@ function requestWith(fio: string | null, status: string, id: string = "REQ-0001"
     position: "Слесарь",
     fio,
     created_by: "petrov.pp",
-    steps: [
-      { order: 1, owner_group: "SED_STEP_BUH", resolver: "by_group", status: "ожидает", expires_at: "2026-10-05T10:00:00+00:00" },
+    steps: steps ?? [
+      {
+        order: 1,
+        owner_group: "SED_STEP_BUH",
+        resolver: "by_group",
+        owner_name: "Сидорова Анна Сергеевна",
+        can_act: false,
+        status: "ожидает",
+        expires_at: "2026-10-05T10:00:00+00:00",
+      },
     ],
   };
+}
+
+// Заявка с шагом, который может отметить текущий пользователь (can_act=true).
+function requestForAction(fio: string | null): RequestOut {
+  return requestWith(fio, "На согласовании", "REQ-0001", [
+    {
+      order: 1,
+      owner_group: "petrov.pp",
+      resolver: "by_user",
+      assignee: "petrov.pp",
+      owner_name: "Петров Пётр Петрович",
+      can_act: true,
+      status: "ожидает",
+      expires_at: "2026-10-05T10:00:00+00:00",
+    },
+  ]);
 }
 
 function renderCard(requestId: string = "REQ-0001", role: Role = "hr") {
   return render(<RequestCard requestId={requestId} role={role} />);
 }
 
+// Имитация окна-попа (есть opener) и его отсутствия (та же вкладка).
+function setOpener(value: unknown): void {
+  Object.defineProperty(window, "opener", { value, writable: true, configurable: true });
+}
+function clearOpener(): void {
+  setOpener(null);
+}
+
 beforeEach(() => {
   // Снимаем спаи window.confirm/window.close между тестами (jsdom-заглушки).
   vi.restoreAllMocks();
+  window.localStorage.clear();
+  clearOpener();
   vi.mocked(getDocuments).mockReset();
   vi.mocked(getRequest).mockReset();
   vi.mocked(decideStep).mockReset();
@@ -138,8 +177,8 @@ describe("RequestCard", () => {
     vi.mocked(getRequest).mockResolvedValue({
       ...requestWith("Громов Игорь Олегович", "На согласовании"),
       steps: [
-        { order: 1, owner_group: "SED_STEP_BUH", resolver: "by_group", status: "ожидает", expires_at: "2026-10-05T10:00:00+00:00" },
-        { order: 2, owner_group: "SED_STEP_OK", resolver: "by_group", status: "ожидает", expires_at: "2026-10-08T10:00:00+00:00" },
+        { order: 1, owner_group: "SED_STEP_BUH", resolver: "by_group", can_act: false, status: "ожидает", expires_at: "2026-10-05T10:00:00+00:00" },
+        { order: 2, owner_group: "SED_STEP_OK", resolver: "by_group", can_act: false, status: "ожидает", expires_at: "2026-10-08T10:00:00+00:00" },
       ],
     });
 
@@ -150,14 +189,15 @@ describe("RequestCard", () => {
     expect(steps.getByText("SED_STEP_OK")).toBeInTheDocument();
   });
 
-  // Шаги с блоками: order кодирует блок/режим — «№» через stepLabel,
-  // персональный исполнитель AD — подпись «персонально: …».
-  it("шаги с блоками: «№» через stepLabel, assignee — «персонально: …»", async () => {
+  // Шаги с блоками: order кодирует блок/режим — «№» через stepLabel;
+  // персональный исполнитель — ФИО (owner_name), логин AD не выводится.
+  it("шаги с блоками: «№» через stepLabel, персональный исполнитель — ФИО без логина", async () => {
     vi.mocked(getRequest).mockResolvedValue({
       ...requestWith("Громов Игорь Олегович", "На согласовании"),
+      enterprise_name: "Предприятие «Пример-1» (вымышленное)",
       steps: [
-        { order: 1101, owner_group: "SED_STEP_BUH", resolver: "by_group", assignee: "buh.ivanov", status: "ожидает", expires_at: "2026-10-05T10:00:00+00:00" },
-        { order: 1102, owner_group: "SED_STEP_OK", resolver: "by_group", status: "ожидает", expires_at: "2026-10-08T10:00:00+00:00" },
+        { order: 1101, owner_group: "petrov.pp", resolver: "by_user", assignee: "petrov.pp", owner_name: "Петров Пётр Петрович", can_act: false, status: "ожидает", expires_at: "2026-10-05T10:00:00+00:00" },
+        { order: 1102, owner_group: "SED_STEP_OK", resolver: "by_group", can_act: false, status: "ожидает", expires_at: "2026-10-08T10:00:00+00:00" },
       ],
     });
 
@@ -166,13 +206,84 @@ describe("RequestCard", () => {
     const steps = within(screen.getByLabelText("Шаги заявки"));
     expect(steps.getByText("2.1 ‖")).toBeInTheDocument();
     expect(steps.getByText("2.2 ‖")).toBeInTheDocument();
-    expect(steps.getByText("персонально: buh.ivanov")).toBeInTheDocument();
+    expect(steps.getByText("Петров Пётр Петрович")).toBeInTheDocument();
     expect(steps.getByText("SED_STEP_OK")).toBeInTheDocument();
+    // Логин AD согласующего в карточке не выводится.
+    expect(screen.queryByText(/petrov\.pp/)).not.toBeInTheDocument();
+    // Предприятие — названием, а не кодом.
+    expect(screen.getByText(/Предприятие «Пример-1»/)).toBeInTheDocument();
+    expect(screen.queryByText(/ENT_PRIMER_1/)).not.toBeInTheDocument();
+  });
+
+  // Действия по шагу — строго по can_act: при can_act=false кнопок нет даже у владельца.
+  it("can_act=false — кнопок согласования нет даже у владельца", async () => {
+    vi.mocked(getRequest).mockResolvedValue(requestWith(null, "На согласовании"));
+
+    renderCard("REQ-0001", "owner");
+    await waitFor(() => expect(screen.getByLabelText("Шаги заявки")).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Согласовать" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Отказать" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Вернуть" })).not.toBeInTheDocument();
+  });
+
+  // can_act=true — кнопки есть; согласованный шаг кнопок не даёт.
+  it("согласованный шаг (can_act=false) кнопок согласования не даёт", async () => {
+    vi.mocked(getRequest).mockResolvedValue(
+      requestWith(null, "Завершено", "REQ-0001", [
+        {
+          order: 1,
+          owner_group: "petrov.pp",
+          resolver: "by_user",
+          owner_name: "Петров Пётр Петрович",
+          can_act: false,
+          status: "согласован",
+          expires_at: "2026-10-05T10:00:00+00:00",
+        },
+      ]),
+    );
+
+    renderCard("REQ-0001", "owner");
+    await waitFor(() => expect(screen.getByLabelText("Шаги заявки")).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Согласовать" })).not.toBeInTheDocument();
+  });
+
+  // can_act=true — кнопки согласования появляются (по can_act, а не по роли).
+  it("can_act=true — кнопки согласования появляются у владельца шага", async () => {
+    vi.mocked(getRequest).mockResolvedValue(requestForAction(null));
+
+    renderCard("REQ-0001", "owner");
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Согласовать" })).toBeInTheDocument(),
+    );
+    expect(screen.getByRole("button", { name: "Отказать" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Вернуть" })).toBeInTheDocument();
+  });
+
+  // can_act=false — кнопок нет даже у сотрудника.
+  it("can_act=false у сотрудника — кнопок нет", async () => {
+    vi.mocked(getRequest).mockResolvedValue(requestWith(null, "На согласовании"));
+
+    renderCard("REQ-0001", "owner");
+    await waitFor(() => expect(screen.getByLabelText("Шаги заявки")).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Согласовать" })).not.toBeInTheDocument();
+  });
+
+  // ОК, не владеющий шагом (can_act=false), кнопок согласования не видит;
+  // его собственные действия ОК остаются.
+  it("hr, не владеющий шагом, кнопок согласования не видит", async () => {
+    vi.mocked(getRequest).mockResolvedValue(requestWith("Громов Игорь Олегович", "Черновик"));
+
+    renderCard("REQ-0001", "hr");
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Отправить на согласование" })).toBeInTheDocument(),
+    );
+    expect(screen.queryByRole("button", { name: "Согласовать" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Отказать" })).not.toBeInTheDocument();
   });
 
   // Отметка владельца: при отказе без комментария отметка не отправляется.
   it("владелец: при отказе без комментария отметка не отправляется", async () => {
-    vi.mocked(getRequest).mockResolvedValue(requestWith(null, "На согласовании"));
+    vi.mocked(getRequest).mockResolvedValue(requestForAction(null));
 
     renderCard("REQ-0001", "owner");
     await waitFor(() => expect(screen.getByRole("button", { name: "Отказать" })).toBeInTheDocument());
@@ -183,8 +294,8 @@ describe("RequestCard", () => {
 
   // Отметка владельца: согласование с комментарием уходит в API, карточка обновляется.
   it("владелец согласовывает свой шаг с комментарием", async () => {
-    vi.mocked(getRequest).mockResolvedValue(requestWith(null, "На согласовании"));
-    vi.mocked(decideStep).mockResolvedValue(requestWith(null, "На согласовании"));
+    vi.mocked(getRequest).mockResolvedValue(requestForAction(null));
+    vi.mocked(decideStep).mockResolvedValue(requestForAction(null));
 
     renderCard("REQ-0001", "owner");
     await waitFor(() => expect(screen.getByRole("button", { name: "Согласовать" })).toBeInTheDocument());
@@ -240,11 +351,13 @@ describe("RequestCard", () => {
   });
 
   // Удаление заявки (только админ; для тестового периода): кнопка видна,
-  // подтверждение, при успехе — deleteRequest + закрытие попапа.
-  it("admin: кнопка «Удалить заявку» видна и удаляет с подтверждением", async () => {
+  // подтверждение; при успехе в окне-попе — оповещение списка через
+  // localStorage (sed:requests-changed) и закрытие окна.
+  it("admin: успешное удаление в попапе оповещает список и закрывает окно", async () => {
     vi.mocked(getRequest).mockResolvedValue(requestWith("Громов Игорь Олегович", "На согласовании"));
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
     const close = vi.spyOn(window, "close").mockImplementation(() => undefined);
+    setOpener({});
 
     renderCard("REQ-0001", "admin");
     await waitFor(() =>
@@ -254,6 +367,28 @@ describe("RequestCard", () => {
     expect(confirm).toHaveBeenCalledWith("Удалить заявку REQ-0001? Действие необратимо.");
     await waitFor(() => expect(vi.mocked(deleteRequest)).toHaveBeenCalledWith("REQ-0001"));
     await waitFor(() => expect(close).toHaveBeenCalled());
+    expect(window.localStorage.getItem("sed:requests-changed")).not.toBeNull();
+    clearOpener();
+  });
+
+  // Та же вкладка (?view=request в основном окне): window.close() не закрывает —
+  // показываем «Заявка удалена» и ссылку «К списку заявок».
+  it("admin: удаление в той же вкладке показывает «Заявка удалена» и ссылку к списку", async () => {
+    vi.mocked(getRequest).mockResolvedValue(requestWith("Громов Игорь Олегович", "На согласовании"));
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const close = vi.spyOn(window, "close").mockImplementation(() => undefined);
+    clearOpener();
+
+    renderCard("REQ-0001", "admin");
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Удалить заявку" })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Удалить заявку" }));
+
+    await waitFor(() => expect(screen.getByText("Заявка удалена")).toBeInTheDocument());
+    expect(screen.getByRole("link", { name: "К списку заявок" })).toBeInTheDocument();
+    expect(close).not.toHaveBeenCalled();
+    expect(window.localStorage.getItem("sed:requests-changed")).not.toBeNull();
   });
 
   // Отмена подтверждения — заявка не удаляется, попап не закрывается.
