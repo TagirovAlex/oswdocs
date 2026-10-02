@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import base64
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
@@ -289,11 +290,14 @@ def print_bypass(
     user: CurrentUser = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
     store: RequestsStore = Depends(get_requests_store),
-    doc_store: DocumentsStore = Depends(get_documents_store),
     settings_store: DbSettingsStore = Depends(get_settings_store),
 ) -> dict:
-    """Печать бегунка (ОК/админ): DOCX->PDF+QR по doc_templates или ручному
-    маршруту; офлайн/нет LibreOffice — {"generated": false, "reason": ...} (не 500)."""
+    """Печать бегунка (ОК/админ): печатная форма ТЕКУЩЕГО состояния заявки.
+
+    Вариант 1 (решение пользователя): версии не накапливаются и документы в БД
+    НЕ пишутся. PDF отдаётся base64 в ответе, временные файлы (docx/pdf/qr)
+    удаляются. Офлайн/нет LibreOffice — {"generated": false, "reason": ...} (не 500).
+    """
     settings.ensure_read_only()
     _require_hr(user)
     try:
@@ -309,55 +313,45 @@ def print_bypass(
             status_code=422,
             detail="Нет шаблона бегунка и нет шагов: задайте doc_templates или маршрут",
         )
-    try:
-        existing = doc_store.list_by_request(request.id)
-    except DocumentsUnavailable as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    version = next_version_label(existing)
+    # Фиксированная метка временных файлов — не версия документа.
     result = generate_bypass(
         request_id=request.id,
-        version=version,
+        version="current",
         template_body=body,
         context=build_bypass_context(request),
         base_url=settings.APP_BASE_URL,
         files_dir=settings.FILES_DIR,
     )
     if not result.generated:
-        return {
-            "version": version,
-            "pdf_path": None,
-            "qr_payload": None,
-            "generated": False,
-            "reason": result.reason,
-        }
+        return {"generated": False, "reason": result.reason, "pdf_b64": None}
     try:
-        doc_store.create(
-            DocumentRecord(
-                request_id=request.id,
-                version=version,
-                docx_path=result.docx_path,
-                pdf_path=result.pdf_path,
-                qr_payload=result.qr_payload,
-                created_by=user.sam,
-                created_at=datetime.now(timezone.utc),
-            )
-        )
-    except DocumentsUnavailable as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        pdf_bytes = Path(result.pdf_path).read_bytes()
+    except OSError as exc:
+        return {"generated": False, "reason": f"PDF не найден после генерации: {exc}", "pdf_b64": None}
+    # Временные файлы не оставляем (печатная форма не хранится).
+    for path in (result.docx_path, result.pdf_path):
+        try:
+            Path(path).unlink(missing_ok=True)
+        except OSError:
+            pass
+    qr_path = Path(settings.FILES_DIR) / f"bypass_{request.id}_vcurrent_qr.png"
+    try:
+        qr_path.unlink(missing_ok=True)
+    except OSError:
+        pass
     audit_log.append(
         AuditEvent(
             actor=user.sam,
             action="document.print",
-            entity="document",
+            entity="request",
             entity_id=request.id,
-            detail=f"version={version}",
+            detail="печать бегунка (вариант 1, без сохранения версии)",
         )
     )
     return {
-        "version": version,
-        "pdf_path": result.pdf_path,
-        "qr_payload": result.qr_payload,
         "generated": True,
+        "reason": None,
+        "pdf_b64": base64.b64encode(pdf_bytes).decode("ascii"),
     }
 
 

@@ -105,7 +105,7 @@ async function fillEmployeeManually(): Promise<void> {
 // Добавление исполнителя из AD в первый блок конструктора маршрута.
 async function addAdExecutor(): Promise<void> {
   fireEvent.click(screen.getByText("Добавить последовательный блок"));
-  fireEvent.click(screen.getByText("Добавить исполнителя"));
+  fireEvent.click(screen.getByRole("button", { name: "Добавить исполнителя" }));
   fireEvent.change(screen.getByLabelText("Поиск в AD"), { target: { value: "Петров" } });
   await waitFor(() => expect(screen.getByText("Петров Пётр Петрович")).toBeInTheDocument());
   fireEvent.click(screen.getByText("Петров Пётр Петрович"));
@@ -288,7 +288,7 @@ describe("CreateForm", () => {
     expect(screen.getByText("Создать")).toBeDisabled();
 
     // Панель AD: живой поиск → кандидат → клик добавляет исполнителя.
-    fireEvent.click(screen.getByText("Добавить исполнителя"));
+    fireEvent.click(screen.getByRole("button", { name: "Добавить исполнителя" }));
     fireEvent.change(screen.getByLabelText("Поиск в AD"), { target: { value: "Петров" } });
     await waitFor(() => expect(searchAd).toHaveBeenCalled());
     await waitFor(() => expect(screen.getByText("Петров Пётр Петрович")).toBeInTheDocument());
@@ -829,7 +829,7 @@ describe("CreateForm", () => {
     await waitFor(() => expect(screen.getByText(/Доступ запрещён/)).toBeInTheDocument());
     // Персональный сценарий конструктора продолжает работать.
     fireEvent.click(screen.getByText("Добавить последовательный блок"));
-    fireEvent.click(screen.getByText("Добавить исполнителя"));
+    fireEvent.click(screen.getByRole("button", { name: "Добавить исполнителя" }));
     expect(screen.getByLabelText("Поиск в AD")).toBeInTheDocument();
   });
 });

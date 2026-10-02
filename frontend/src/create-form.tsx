@@ -910,18 +910,25 @@ export function CreateForm(props: CreateFormProps) {
                             <button
                               type="button"
                               aria-label={`Удалить исполнителя ${s.display_name}`}
+                              title="Удалить исполнителя"
                               onClick={() => removeStep(block.id, si)}
-                              className="sed-ml-8"
+                              className="sed-btn sed-btn--ghost sed-ml-8"
                             >
-                              Удалить
+                              ✕
                             </button>
                           </li>
                         ))}
                       </ul>
                       {block.kind === "user" && (
                         <>
-                          <button type="button" className="sed-btn" onClick={() => openAdPanel(block.id)}>
-                            Добавить исполнителя
+                          <button
+                            type="button"
+                            className="sed-btn"
+                            aria-label="Добавить исполнителя"
+                            title="Добавить исполнителя"
+                            onClick={() => openAdPanel(block.id)}
+                          >
+                            ＋
                           </button>
                           {adPanelBlock === block.id && (
                             <div className="sed-mt-8 sed-rel">

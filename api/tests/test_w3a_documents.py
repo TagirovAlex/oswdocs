@@ -242,20 +242,35 @@ def test_version_number_and_next_label():
 
 # --- POST /requests/{id}/print ---
 
-def test_print_v1_then_v2(client, hr, documents_store, monkeypatch):
+def test_print_returns_pdf_and_does_not_store_versions(
+    client, hr, documents_store, monkeypatch, tmp_path
+):
+    """Вариант 1: печать = форма текущего состояния. PDF в ответе (base64),
+    версии не накапливаются, документы в БД не пишутся, повтор печати не даёт v2."""
     rid = _create(client, hr, category="линейный",
                   steps=[{"owner_group": "SED_STEP_BUH"}])["id"]
-    monkeypatch.setattr("app.documents.generate_bypass", lambda **kw: _fake_result())
+    pdf = tmp_path / "bypass.pdf"
+    pdf.write_bytes(b"%PDF-1.4 fake")
+    docx = tmp_path / "bypass.docx"
+    docx.write_bytes(b"docx")
+
+    def fake(**kw):
+        # Каждый вызов «генерирует» файл заново (в проде так и делает generate_bypass;
+        # print_bypass после чтения удаляет временные файлы — повтор не находит старого).
+        pdf.write_bytes(b"%PDF-1.4 fake")
+        return _fake_result(pdf_path=str(pdf), docx_path=str(docx))
+
+    monkeypatch.setattr("app.documents.generate_bypass", fake)
     first = client.post(f"/requests/{rid}/print", headers=hr)
     assert first.status_code == 200
-    assert first.json()["version"] == "v1"
-    assert first.json()["generated"] is True
-    assert first.json()["pdf_path"] == "/app/files/bypass.pdf"
-    assert first.json()["qr_payload"]
+    body = first.json()
+    assert body["generated"] is True
+    assert base64.b64decode(body["pdf_b64"]) == b"%PDF-1.4 fake"
+    assert "version" not in body
+    assert documents_store.list_by_request(rid) == []
     second = client.post(f"/requests/{rid}/print", headers=hr)
-    assert second.status_code == 200
-    assert second.json()["version"] == "v2"
-    assert [d.version for d in documents_store.list_by_request(rid)] == ["v1", "v2"]
+    assert second.json()["pdf_b64"] == body["pdf_b64"]
+    assert documents_store.list_by_request(rid) == []
 
 
 def test_print_uses_doc_template_body(client, hr, monkeypatch):
@@ -273,7 +288,7 @@ def test_print_uses_doc_template_body(client, hr, monkeypatch):
     assert response.status_code == 200
     assert captured["template_body"] == FAKE_BODY
     assert captured["request_id"] == rid
-    assert captured["version"] == "v1"
+    assert captured["version"] == "current"
 
 
 def test_print_without_template_manual_constructor(client, hr, monkeypatch, settings_store):
