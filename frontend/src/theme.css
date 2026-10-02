@@ -640,13 +640,16 @@ a {
   padding: 10px;
 }
 
-/* Панель внутри сетки (как .panel макета); в карточке — блок оболочки без своих отступов. */
+/* Панель внутри сетки (как .panel макета); в карточке — блок оболочки без своих отступов.
+   min-width: 0 — <fieldset> по умолчанию имеет min-width: min-content и не даёт
+   панели сжиматься/разъезжаться по содержимому (длинные значения). */
 .sed-panel {
   background: var(--sed-panel);
   border: 1px solid var(--sed-border);
   border-radius: 4px;
   padding: 10px;
   margin: 0;
+  min-width: 0;
 }
 
 /* Секция на <fieldset>: рамка и отступы как у панели. */
@@ -805,13 +808,19 @@ fieldset textarea {
 /* Колонка блоков карточки: по вертикали с промежутком. */
 .sed-stack { display: flex; flex-direction: column; gap: 20px; margin-top: 20px; }
 
-/* Строка «поле — значение» в блоке карточки. */
+/* Строка «поле — значение» в блоке карточки. min-width: 0 + перенос длинных
+   значений (DN, e-mail и т.п.) — чтобы строка не раздвигала контейнер. */
 .sed-datarow {
   display: flex;
   justify-content: space-between;
   gap: 16px;
   padding: 6px 0;
   border-bottom: 1px solid var(--sed-border);
+  min-width: 0;
+}
+.sed-datarow > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 /* Подпись строки «поле — значение»: приглушённая, без переносов. */
@@ -826,11 +835,16 @@ fieldset textarea {
   font-weight: 600;
 }
 
-/* Две колонки контактных данных (1С и AD). */
+/* Две колонки контактных данных (1С и AD). min-width: 0 у колонок — длинный
+   контент (DN руководителя) не раздвигает колонку/панель (иначе у сотрудников
+   без контактов карточка выглядит уже). */
 .sed-colgrid {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 24px;
+}
+.sed-colgrid > div {
+  min-width: 0;
 }
 
 /* Заголовок колонки контактов. */
