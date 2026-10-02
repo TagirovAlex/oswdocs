@@ -33,6 +33,12 @@ DEFAULT_RECOVERY_TIMEOUT = 30.0
 # Имя переменной окружения с настройками баз.
 ONEC_BASES_ENV = "ONEC_BASES_JSON"
 
+# Размер страницы поиска 1С по умолчанию (одна страница OData $top).
+# Вызывающий эндпоинт передаёт свой page_size (из settings directory_page_size,
+# PLAN E) — см. employees.search_employees; здесь дефолт для совместимости
+# с прежним жёстким $top=50 живого поиска.
+SEARCH_DEFAULT_TOP = 50
+
 
 class OneCError(Exception):
     """Базовая ошибка клиента 1С."""
@@ -151,6 +157,18 @@ class HttpResult:
     body: str
 
 
+@dataclass
+class OneCSearchPage:
+    """Страница поиска 1С: карточки + общее число совпадений (odata.count).
+
+    total — из $inlinecount=allpages (живая 1С поддерживает его; $count=true
+    не поддерживает — 501). Нужен пагинации живого поиска (/employees фолбэк
+    до первого синка локального справочника)."""
+
+    cards: List[EmployeeCard]
+    total: int = 0
+
+
 class HttpTransport(Protocol):
     """Интерфейс HTTP-транспорта (граница для mock-HTTP в тестах и на стенде)."""
 
@@ -263,6 +281,23 @@ def parse_collection(body: str) -> List[Dict[str, object]]:
     raise OneCError("неожиданный формат OData-ответа (ожидался список)")
 
 
+def _parse_odata_count(body: str) -> int:
+    """Общее число совпадений из OData-ответа с $inlinecount ({"odata.count": "N"}).
+
+    Поле отсутствует/не число — 0 (счётчик не строг: это подсказка total)."""
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError:
+        return 0
+    if not isinstance(data, dict):
+        return 0
+    raw = data.get("odata.count")
+    try:
+        return int(raw) if raw not in (None, "") else 0
+    except (TypeError, ValueError):
+        return 0
+
+
 class OneCClient:
     """Per-base клиент чтения 1С: только GET, таймаут 5с, circuit-breaker на базу."""
 
@@ -346,15 +381,45 @@ class OneCClient:
         return self._enrich_hr(cfg, card)
 
     def search(
-        self, base_code: str, query: str, enterprise: Optional[str] = None
+        self,
+        base_code: str,
+        query: str,
+        enterprise: Optional[str] = None,
+        skip: int = 0,
+        top: int = SEARCH_DEFAULT_TOP,
+        with_count: bool = False,
     ) -> List[EmployeeCard]:
         """Поиск сотрудников базы по подстроке ФИО (GET одной базы).
 
         enterprise — фильтр предприятия (код = Ref_Key организации); результаты
-        справочника лёгкие (без кадровых данных — они в карточке get_employee)."""
+        справочника лёгкие (без кадровых данных — они в карточке get_employee).
+        Пагинация — skip/top ($skip/$top OData); with_count добавляет
+        $inlinecount, а total читается методом search_page."""
+        return self._search_page(base_code, query, enterprise, skip, top, with_count).cards
+
+    def search_page(
+        self,
+        base_code: str,
+        query: str,
+        enterprise: Optional[str] = None,
+        skip: int = 0,
+        top: int = SEARCH_DEFAULT_TOP,
+    ) -> OneCSearchPage:
+        """Страница поиска: карточки + total (odata.count через $inlinecount)."""
+        return self._search_page(base_code, query, enterprise, skip, top, with_count=True)
+
+    def _search_page(
+        self,
+        base_code: str,
+        query: str,
+        enterprise: Optional[str],
+        skip: int,
+        top: int,
+        with_count: bool,
+    ) -> OneCSearchPage:
         cfg = self._require_base(base_code)
         self._ensure_allowed(base_code)
-        url = self._build_search_url(cfg, query, enterprise)
+        url = self._build_search_url(cfg, query, enterprise, skip, top, with_count)
         try:
             result = self._transport.get(url, self._auth_headers(cfg), self._timeout)
         except OneCTimeoutError:
@@ -374,7 +439,9 @@ class OneCClient:
         if result.status != 200:
             raise OneCError("база %r ответила %s" % (base_code, result.status))
         self._on_success(base_code)
-        return self._parse_cards(cfg, result.body, enterprise)
+        cards = self._parse_cards(cfg, result.body, enterprise)
+        total = _parse_odata_count(result.body) if with_count else 0
+        return OneCSearchPage(cards=cards, total=total)
 
     def list_employees(
         self,
@@ -559,20 +626,34 @@ class OneCClient:
 
     @classmethod
     def _build_search_url(
-        cls, cfg: OneCBaseConfig, query: str, enterprise: Optional[str] = None
+        cls,
+        cfg: OneCBaseConfig,
+        query: str,
+        enterprise: Optional[str] = None,
+        skip: int = 0,
+        top: int = SEARCH_DEFAULT_TOP,
+        with_count: bool = False,
     ) -> str:
-        """OData-URL поиска: подстрока ФИО (substringof) по полю схемы (+предприятие)."""
+        """OData-URL поиска: подстрока ФИО (substringof) по полю схемы (+предприятие).
+
+        Пагинация — $skip/$top; общее число совпадений — $inlinecount=allpages
+        (живая 1С поддерживает его; $count=true не поддерживает — 501)."""
         select = urllib.parse.quote(cls._employee_select_fields(cfg), safe=",;/")
         flt = urllib.parse.quote(
             "substringof('%s', %s) eq true%s"
             % (query, cfg.fio_field, cls._org_filter(cfg, enterprise)),
             safe="",
         )
-        url = "%s/%s?$format=json&$top=50&$select=%s&$filter=%s" % (
+        skip_part = "&$skip=%d" % int(skip) if skip else ""
+        count = "&$inlinecount=allpages" if with_count else ""
+        url = "%s/%s?$format=json&$top=%d%s&$select=%s&$filter=%s%s" % (
             normalize_odata_base_url(cfg.url),
             urllib.parse.quote(cfg.employee_entity),  # кириллица в имени сущности
+            int(top),
+            skip_part,
             select,
             flt,
+            count,
         )
         return url
 

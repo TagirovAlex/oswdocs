@@ -477,6 +477,53 @@ def test_employees_base_down_isolated(client, hr_headers, b1_settings):
         assert any("zup_t1" in e for e in body["errors"])
     finally:
         app.dependency_overrides.pop(get_onec_client, None)
+
+
+def test_employees_fallback_1c_paginated(client, hr_headers, b1_settings):
+    """Фолбэк (локальная таблица пуста): page/page_size → $skip/$top в 1С,
+    total — из odata.count ($inlinecount), пагинация по страницам."""
+    seen = []
+
+    class PagedTransport:
+        def get(self, url, headers, timeout):
+            seen.append(url)
+            return HttpResult(
+                200,
+                json.dumps(
+                    {
+                        "odata.count": "12",
+                        "value": [_card_row("005", "Иванова Надежда Тестовна")],
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+
+    client_mock = OneCClient(_bases(), transport=PagedTransport(), failure_threshold=100)
+    app.dependency_overrides[get_onec_client] = lambda: client_mock
+    app.dependency_overrides[get_ad_reader] = lambda: None
+    app.dependency_overrides[get_links_store] = lambda: get_memory_links_store()
+    clear_for_tests()
+    try:
+        response = client.get(
+            "/employees",
+            params={"enterprise": ENT, "q": "Иванов", "page": 2, "page_size": 5},
+            headers=hr_headers,
+        )
+        assert response.status_code == 200
+        body = response.json()
+        # Две базы предприятия: total = сумма odata.count живых баз (12+12).
+        assert body["total"] == 24
+        assert body["page"] == 2
+        assert body["page_size"] == 5
+        # В 1С ушли $skip/$top страницы и запрос счётчика (по каждой базе).
+        assert len(seen) == 2
+        for url in seen:
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+            assert query["$skip"] == ["5"]
+            assert query["$top"] == ["5"]
+            assert query["$inlinecount"] == ["allpages"]
+    finally:
+        app.dependency_overrides.pop(get_onec_client, None)
         app.dependency_overrides.pop(get_ad_reader, None)
         app.dependency_overrides.pop(get_links_store, None)
         clear_for_tests()

@@ -13,7 +13,13 @@ import datetime as _dt
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from .onec_client import EmployeeCard, OneCClient, OneCNotFound, OneCUnknownBase
+from .onec_client import (
+    EmployeeCard,
+    OneCClient,
+    OneCNotFound,
+    OneCUnknownBase,
+    SEARCH_DEFAULT_TOP,
+)
 
 
 class UnknownEnterpriseError(Exception):
@@ -41,6 +47,9 @@ class ResolveResult:
     errors: List[str] = field(default_factory=list)
     # Все совпадения поиска (для search_enterprise); у resolve_employee — пусто.
     cards: List[EmployeeCard] = field(default_factory=list)
+    # Общее число совпадений поиска (сумма odata.count по живым базам; для
+    # search_enterprise_page); у остальных путей — 0.
+    total: int = 0
 
     @property
     def found(self) -> bool:
@@ -100,6 +109,39 @@ def search_enterprise(enterprise: str, query: str, client: OneCClient) -> Resolv
     first = found[0] if found else None
     # Список всех совпадений — штатным полем результата.
     return ResolveResult(card=first, errors=errors, cards=found)
+
+
+def search_enterprise_page(
+    enterprise: str,
+    query: str,
+    client: OneCClient,
+    skip: int = 0,
+    top: int = SEARCH_DEFAULT_TOP,
+) -> ResolveResult:
+    """Поиск по ФИО страницей ($skip/$top на каждую базу) + общее число.
+
+    Для пагинации живого поиска (/employees фолбэк до первого синка локального
+    справочника): страница совпадений (cards) и total (сумма odata.count живых
+    баз через $inlinecount). Мультибаза: страница запрашивается с каждой базы
+    и складывается (total — сумма); при одной базе пагинация точная. Падение
+    базы — в errors, остальные опрашиваются (как search_enterprise).
+    """
+    codes = enterprise_bases(enterprise, client)
+    if not codes:
+        raise UnknownEnterpriseError("предприятие %r не привязано ни к одной базе" % enterprise)
+    errors: List[str] = []
+    found: List[EmployeeCard] = []
+    total = 0
+    for code in codes:
+        try:
+            page = client.search_page(code, query, enterprise, skip=skip, top=top)
+            found.extend(page.cards)
+            total += page.total
+        except Exception as exc:  # падение базы: изолируем, опрос продолжаем
+            errors.append("%s: %s: %s" % (code, type(exc).__name__, exc))
+            continue
+    first = found[0] if found else None
+    return ResolveResult(card=first, errors=errors, cards=found, total=total)
 
 
 # Снапшот карточки 1С в заявке: истина — 1С, протухший (>24 ч) помечать.

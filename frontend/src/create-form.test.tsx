@@ -196,6 +196,89 @@ describe("CreateForm", () => {
     expect(screen.queryByRole("textbox", { name: "Табельный №" })).not.toBeInTheDocument();
   });
 
+  // Пагинация живого поиска: больше одной страницы → пейджер, навигация по total.
+  it("живой поиск: пагинация результатов (Первая/Последняя и номера страниц)", async () => {
+    const hit = (tab: string, fio: string) => ({
+      key: `ENT_PRIMER_1|zup_t1|${tab}`,
+      tab_num: tab,
+      fio,
+      dept: "Цех № 1",
+      position: "Слесарь",
+      needs_manual_review: false,
+    });
+    // Ответ зависит от запрошенной страницы (как серверная пагинация).
+    const byPage: Record<number, { tab: string; fio: string }> = {
+      1: { tab: "Т-000201", fio: "Громов Игорь Олегович" },
+      2: { tab: "Т-000202", fio: "Громова Анна Петровна" },
+      3: { tab: "Т-000203", fio: "Громовой Вера Ивановна" },
+    };
+    vi.mocked(searchEmployees).mockImplementation(async (_ent, _q, page) => {
+      const d = byPage[page ?? 1] ?? byPage[1];
+      return { items: [hit(d.tab, d.fio)], total: 120, page: page ?? 1, page_size: 50 };
+    });
+
+    render(<CreateForm role="hr" />);
+    await waitFor(() => expect(screen.getByLabelText("Предприятие")).toBeInTheDocument());
+    fireEvent.change(screen.getByLabelText("Предприятие"), { target: { value: "ENT_PRIMER_1" } });
+    fireEvent.change(screen.getByLabelText("Поиск сотрудника"), { target: { value: "Громов" } });
+
+    // Первая страница: запрос page=1, размер 50, пейджер «стр 1 из 3», все номера.
+    await waitFor(() => expect(screen.getByText("Громов Игорь Олегович")).toBeInTheDocument());
+    expect(searchEmployees).toHaveBeenLastCalledWith("ENT_PRIMER_1", "Громов", 1, 50);
+    expect(screen.getByText("стр 1 из 3")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Страница 2" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Страница 3" })).toBeInTheDocument();
+    // На первой странице «Первая» недоступна.
+    expect(screen.getByRole("button", { name: "Первая страница" })).toBeDisabled();
+
+    // Клик по номеру 3 → страница 3 («Последняя» становится недоступной).
+    fireEvent.click(screen.getByRole("button", { name: "Страница 3" }));
+    await waitFor(() => expect(screen.getByText("Громовой Вера Ивановна")).toBeInTheDocument());
+    expect(searchEmployees).toHaveBeenLastCalledWith("ENT_PRIMER_1", "Громов", 3, 50);
+    expect(screen.getByText("стр 3 из 3")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Последняя страница" })).toBeDisabled();
+
+    // «Первая» → возврат на первую страницу.
+    fireEvent.click(screen.getByRole("button", { name: "Первая страница" }));
+    await waitFor(() => expect(searchEmployees).toHaveBeenLastCalledWith("ENT_PRIMER_1", "Громов", 1, 50));
+    expect(screen.getByText("стр 1 из 3")).toBeInTheDocument();
+  });
+
+  // Окно страниц пейджера при большом числе страниц: 1, пять вокруг текущей,
+  // пять с конца и разрывы «…».
+  it("живой поиск: пейджер с большим числом страниц (окно + «…», Первая/Последняя)", async () => {
+    const hit = (tab: string, fio: string) => ({
+      key: `ENT_PRIMER_1|zup_t1|${tab}`,
+      tab_num: tab,
+      fio,
+      dept: "Цех № 1",
+      position: "Слесарь",
+      needs_manual_review: false,
+    });
+    // 1200 совпадений / 50 на страницу = 24 страницы; эмпирически на 1-й.
+    vi.mocked(searchEmployees).mockResolvedValue({
+      items: [hit("Т-000201", "Громов Игорь Олегович")],
+      total: 1200,
+      page: 1,
+      page_size: 50,
+    });
+
+    render(<CreateForm role="hr" />);
+    await waitFor(() => expect(screen.getByLabelText("Предприятие")).toBeInTheDocument());
+    fireEvent.change(screen.getByLabelText("Предприятие"), { target: { value: "ENT_PRIMER_1" } });
+    fireEvent.change(screen.getByLabelText("Поиск сотрудника"), { target: { value: "Громов" } });
+
+    await waitFor(() => expect(screen.getByText("стр 1 из 24")).toBeInTheDocument());
+    // Окно: всегда 1 + пять вокруг текущей (1..3) + пять с конца (20..24); разрывы «…».
+    for (const page of [1, 2, 3, 20, 21, 22, 23, 24]) {
+      expect(screen.getByRole("button", { name: `Страница ${page}` })).toBeInTheDocument();
+    }
+    expect(screen.getByRole("button", { name: "Страница 1" })).toBeDisabled(); // текущая
+    expect(screen.getAllByText("…").length).toBeGreaterThan(0); // разрывы
+    expect(screen.getByRole("button", { name: "Первая страница" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Последняя страница" })).not.toBeDisabled();
+  });
+
   // Данные сотрудника из 1С — справочные (не input), подразделение/должность — текст.
   it("данные сотрудника из 1С показываются как текст, не input", async () => {
     vi.mocked(searchEmployees).mockResolvedValue({

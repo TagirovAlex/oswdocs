@@ -70,6 +70,10 @@ const EMPTY_GROUP_MEMBERS: GroupMembersState = {
   open: false,
 };
 
+// Размер страницы живого поиска сотрудника в форме создания: совпадает с
+// дефолтом сервера (page_size /api/employees); пагинация — по total ответа.
+const EMP_SEARCH_PAGE_SIZE = 50;
+
 // Состояние блока без указанного ключа: удалённый блок не должен оставлять в
 // состоянии формы свою группу и её состав.
 function omitKey<T>(state: Record<string, T>, key: string): Record<string, T> {
@@ -77,6 +81,32 @@ function omitKey<T>(state: Record<string, T>, key: string): Record<string, T> {
   const next = { ...state };
   delete next[key];
   return next;
+}
+
+// Номера страниц пейджера для перехода: всегда 1, пять вокруг текущей
+// (current-2..current+2) и пять с конца (total-4..total); «…» — разрыв.
+// При малом числе страниц (<=10) — все подряд без разрывов.
+function pagerPages(current: number, total: number): Array<number | "…"> {
+  if (total <= 1) return [1];
+  const set = new Set<number>();
+  if (total <= 10) {
+    for (let i = 1; i <= total; i++) set.add(i);
+  } else {
+    set.add(1);
+    for (let i = current - 2; i <= current + 2; i++) {
+      if (i >= 1 && i <= total) set.add(i);
+    }
+    for (let i = Math.max(1, total - 4); i <= total; i++) set.add(i);
+  }
+  const sorted = [...set].sort((a, b) => a - b);
+  const out: Array<number | "…"> = [];
+  let prev = 0;
+  for (const page of sorted) {
+    if (prev !== 0 && page - prev > 1) out.push("…");
+    out.push(page);
+    prev = page;
+  }
+  return out;
 }
 
 // Маленькие графические иконки формы (крест очистки/удаления, плюс
@@ -139,6 +169,10 @@ export function CreateForm(props: CreateFormProps) {
   const [empHits, setEmpHits] = useState<EmployeeHit[]>([]);
   const [empListOpen, setEmpListOpen] = useState<boolean>(false);
   const [empSearching, setEmpSearching] = useState<boolean>(false);
+  // Пагинация поиска: empTotal — всего совпадений (из ответа; нет — по длине
+  // выдачи), empPage — текущая страница (новая строка запроса сбрасывает на 1).
+  const [empTotal, setEmpTotal] = useState<number>(0);
+  const [empPage, setEmpPage] = useState<number>(1);
   // Сотрудник уже выбран из списка (клик по кандидату): поле показывает ФИО,
   // повторный поиск по empQuery не запускается (иначе список открывался бы заново).
   const [empPicked, setEmpPicked] = useState<boolean>(false);
@@ -327,12 +361,15 @@ export function CreateForm(props: CreateFormProps) {
     const seq = ++searchSeq.current;
     setEmpSearching(true);
     const timer = setTimeout(() => {
-      searchEmployees(enterprise, q)
+      searchEmployees(enterprise, q, empPage, EMP_SEARCH_PAGE_SIZE)
         .then((data) => {
           if (seq !== searchSeq.current) return;
           const hits = data.items ?? [];
           setEmpHits(hits);
-          if (hits.length === 0) {
+          // total от серверной пагинации; нет (прежний ответ) — по длине выдачи.
+          const total = typeof data.total === "number" ? data.total : hits.length;
+          setEmpTotal(total);
+          if (hits.length === 0 && total === 0) {
             setManualMode(true);
             setManualNote("ничего не найдено — введите данные вручную");
             setEmpListOpen(false);
@@ -357,7 +394,7 @@ export function CreateForm(props: CreateFormProps) {
         });
     }, 150);
     return () => clearTimeout(timer);
-  }, [empQuery, enterprise, empPicked]);
+  }, [empQuery, enterprise, empPicked, empPage]);
 
   // Живой поиск в AD для панели конструктора: debounce 150 мс → searchAd.
   useEffect(() => {
@@ -397,6 +434,7 @@ export function CreateForm(props: CreateFormProps) {
   // Готовность формы: предприятие → сотрудник → тема/содержание → маршрут.
   // Подразделение/должность в 1С могут быть пустыми (уволен/нет кадровых
   // данных) — для создания они необязательны.
+  const empTotalPages = empTotal > 0 ? Math.max(1, Math.ceil(empTotal / EMP_SEARCH_PAGE_SIZE)) : 0;
   const employeeReady = fio.trim() !== "" && tabNum.trim() !== "";
   const canCreate =
     enterprise !== "" &&
@@ -446,6 +484,8 @@ export function CreateForm(props: CreateFormProps) {
     setEmpHits([]);
     setEmpListOpen(false);
     setEmpSearching(false);
+    setEmpTotal(0);
+    setEmpPage(1);
     setManualMode(false);
     setManualNote("");
     setFio("");
@@ -707,6 +747,8 @@ export function CreateForm(props: CreateFormProps) {
                         markTouched();
                         // Редактирование после выбора — новый поиск: сбрасываем выбор.
                         if (empPicked) clearEmployeePick();
+                        // Новая строка запроса — возврат к первой странице.
+                        setEmpPage(1);
                         setEmpQuery(e.target.value);
                       }}
                       onKeyDown={(e) => {
@@ -744,6 +786,65 @@ export function CreateForm(props: CreateFormProps) {
                       </li>
                     ))}
                   </ul>
+                )}
+                {/* Пагинация поиска сотрудника: больше одной страницы совпадений. */}
+                {empListOpen && empTotalPages > 1 && (
+                  <div className="sed-pager" aria-label="Пагинация поиска сотрудника">
+                    <button
+                      type="button"
+                      className="sed-btn"
+                      aria-label="Первая страница"
+                      disabled={empPage <= 1}
+                      onClick={() => setEmpPage(1)}
+                    >
+                      Первая
+                    </button>
+                    <button
+                      type="button"
+                      className="sed-btn"
+                      aria-label="Предыдущая страница сотрудников"
+                      disabled={empPage <= 1}
+                      onClick={() => setEmpPage(empPage - 1)}
+                    >
+                      ← Назад
+                    </button>
+                    {pagerPages(empPage, empTotalPages).map((page, index) =>
+                      page === "…" ? (
+                        <span key={`ell-${index}`} aria-hidden="true">…</span>
+                      ) : (
+                        <button
+                          key={page}
+                          type="button"
+                          className="sed-btn"
+                          aria-label={`Страница ${page}`}
+                          aria-current={page === empPage ? "page" : undefined}
+                          disabled={page === empPage}
+                          onClick={() => setEmpPage(page)}
+                        >
+                          {page}
+                        </button>
+                      ),
+                    )}
+                    <button
+                      type="button"
+                      className="sed-btn"
+                      aria-label="Следующая страница сотрудников"
+                      disabled={empPage >= empTotalPages}
+                      onClick={() => setEmpPage(empPage + 1)}
+                    >
+                      Вперёд →
+                    </button>
+                    <button
+                      type="button"
+                      className="sed-btn"
+                      aria-label="Последняя страница"
+                      disabled={empPage >= empTotalPages}
+                      onClick={() => setEmpPage(empTotalPages)}
+                    >
+                      Последняя
+                    </button>
+                    <span role="status">стр {empPage} из {empTotalPages}</span>
+                  </div>
                 )}
               </div>
               {empSearching && <div className="sed-note">Поиск в 1С…</div>}

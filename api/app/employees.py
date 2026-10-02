@@ -39,6 +39,7 @@ from .resolver import (
     is_snapshot_stale,
     make_snapshot_1c,
     search_enterprise,
+    search_enterprise_page,
 )
 from .settings_routes import (
     DbSettingsStore,
@@ -366,9 +367,12 @@ def search_employees(
             "errors": [],
             "needs_manual_review": bool(duplicates),
         }
-    # Фолбэк: прежний живой поиск 1С (до первого синка).
+    # Фолбэк: прежний живой поиск 1С (до первого синка). Страница — skip/top
+    # (page/page_size запроса), total — сумма odata.count живых баз.
     try:
-        found = search_enterprise(enterprise, q, client)
+        found = search_enterprise_page(
+            enterprise, q, client, skip=(page - 1) * page_size, top=page_size
+        )
     except UnknownEnterpriseError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
@@ -428,12 +432,12 @@ def search_employees(
             action="employees.search",
             entity="employee",
             entity_id=enterprise,
-            detail="найдено: %d" % len(items),
+            detail="найдено: %d (живой поиск 1С, total=%d)" % (len(items), found.total),
         )
     )
     return {
         "items": items,
-        "total": len(items),
+        "total": found.total,
         "page": page,
         "page_size": page_size,
         "errors": found.errors,

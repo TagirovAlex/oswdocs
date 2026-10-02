@@ -346,6 +346,44 @@ def test_search_url_has_org_filter():
     assert "ГоловнаяОрганизация_Key eq guid'%s'" % ENT in flt
 
 
+def test_search_paginated_url_and_total():
+    """Поиск с пагинацией: $skip/$top + total из $inlinecount (odata.count)."""
+    from urllib.parse import parse_qs, urlparse
+
+    from app.onec_client import OneCClient, OneCSearchPage
+
+    seen = []
+
+    def h(url, headers, timeout):
+        seen.append(url)
+        return HttpResult(
+            200,
+            json.dumps(
+                {
+                    "odata.count": "7",
+                    "value": [{"Ref_Key": "ref-1", "Code": "1", "Description": FIOS["b200"]}],
+                },
+                ensure_ascii=False,
+            ),
+        )
+
+    c = OneCClient({"zup_b": _bases()["zup_b"]}, transport=FakeTransport(h))
+    page = c.search_page("zup_b", "Выдуманова", ENT, skip=50, top=50)
+    assert isinstance(page, OneCSearchPage)
+    assert [card.fio for card in page.cards] == [FIOS["b200"]]
+    assert page.total == 7
+    q = parse_qs(urlparse(seen[0]).query)
+    assert q["$top"] == ["50"]
+    assert q["$skip"] == ["50"]
+    assert q["$inlinecount"] == ["allpages"]
+    # search без запроса счётчика: $inlinecount/$skip в URL не добавляются.
+    c.search("zup_b", "Выдуманова")
+    q = parse_qs(urlparse(seen[1]).query)
+    assert "$inlinecount" not in q
+    assert "$skip" not in q
+    assert q["$top"] == ["50"]
+
+
 def test_get_employee_enriches_from_hr_register():
     """Карточка: после справочника второй запрос к регистру кадровых данных
     ($expand подразделения/должности) заполняет депт/должность/дату приёма."""

@@ -26,6 +26,7 @@ from app.resolver import (  # noqa: E402
     make_snapshot_1c,
     resolve_employee,
     search_enterprise,
+    search_enterprise_page,
 )
 
 ENT = "Предприятие-Север-Тест"  # вымышленное
@@ -104,6 +105,36 @@ def test_failing_base_also_isolated_on_search():
     result = search_enterprise(ENT, "Выдуманова", client)
     assert result.card is not None and result.card.fio == FIO_B
     assert any("zup_a" in e for e in result.errors)
+
+
+def test_search_enterprise_page_passes_skip_top_and_sums_total():
+    """Страница поиска: $skip/$top на каждую базу + total = сумма odata.count."""
+    import urllib.parse
+
+    seen = []
+
+    def router(url, headers, timeout):
+        seen.append(url)
+        count = {"odata.count": "3", "value": []}
+        if "/a/" in url:
+            count["value"] = [{"Ref_Key": "ref-100", "Code": "100", "Description": FIO_A}]
+            count["odata.count"] = "3"
+        else:
+            count["value"] = [{"Ref_Key": "ref-200", "Code": "200", "Description": FIO_B}]
+            count["odata.count"] = "5"
+        return HttpResult(200, json.dumps(count, ensure_ascii=False))
+
+    client = OneCClient(_bases(), transport=FakeTransport(router), failure_threshold=10)
+    result = search_enterprise_page(ENT, "Выдуманова", client, skip=50, top=50)
+    assert [card.fio for card in result.cards] == [FIO_A, FIO_B]
+    assert result.total == 8  # 3 (база A) + 5 (база B)
+    assert result.errors == []
+    # Обе базы опрошены с $skip/$top и запросом счётчика.
+    for url in seen:
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+        assert query["$skip"] == ["50"]
+        assert query["$top"] == ["50"]
+        assert query["$inlinecount"] == ["allpages"]
 
 
 def test_all_bases_down_raises_not_found_with_errors():

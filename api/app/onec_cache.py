@@ -18,7 +18,12 @@ from typing import List, Optional, Protocol
 
 import redis
 
-from .onec_client import EmployeeCard, OneCClient
+from .onec_client import (
+    EmployeeCard,
+    OneCClient,
+    OneCSearchPage,
+    SEARCH_DEFAULT_TOP,
+)
 
 # Префикс ключей кэша карточек 1С (единый namespace в Redis).
 CARD_CACHE_PREFIX = "sed:onec:card:"
@@ -151,10 +156,30 @@ class CachingOneCClient:
         return card
 
     def search(
-        self, base_code: str, query: str, enterprise: Optional[str] = None
+        self,
+        base_code: str,
+        query: str,
+        enterprise: Optional[str] = None,
+        skip: int = 0,
+        top: int = SEARCH_DEFAULT_TOP,
     ) -> List[EmployeeCard]:
         """Поиск сотрудников базы: не кэшируется (живые данные)."""
-        return self._client.search(base_code, query, enterprise)
+        return self._client.search(
+            base_code, query, enterprise, skip=skip, top=top
+        )
+
+    def search_page(
+        self,
+        base_code: str,
+        query: str,
+        enterprise: Optional[str] = None,
+        skip: int = 0,
+        top: int = SEARCH_DEFAULT_TOP,
+    ) -> OneCSearchPage:
+        """Страница поиска: карточки + total (не кэшируется, живые данные)."""
+        return self._client.search_page(
+            base_code, query, enterprise, skip=skip, top=top
+        )
 
     def list_employees(
         self,
