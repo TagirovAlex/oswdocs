@@ -19,6 +19,7 @@ if str(API_DIR) not in sys.path:
     sys.path.insert(0, str(API_DIR))
 
 from app.audit import audit_log  # noqa: E402
+from app.employee_sync import InMemoryEmployeeSyncStore, get_employee_sync_store  # noqa: E402
 from app.employees import get_ad_reader  # noqa: E402
 from app.main import app  # noqa: E402
 from app.settings_routes import get_settings_store  # noqa: E402
@@ -114,18 +115,24 @@ class OfflineSettingsStore:
 # привилегированные эндпоинты заявок резолвят карту предприятий
 # (_enterprise_names_map -> get_settings_store) и ридер AD, поэтому без подмен
 # весь набор pytest зависал на несуществующем Postgres.
-OFFLINE_BOUNDARIES = (get_settings_store, get_ad_reader)
+OFFLINE_BOUNDARIES = (
+    get_settings_store,
+    get_ad_reader,
+    get_employee_sync_store,
+)
 
 
 @pytest.fixture(autouse=True)
 def offline_boundaries():
-    """Подменить живые границы офлайн-прогонов: настройки — пусто, AD — None.
+    """Подменить живые границы офлайн-прогонов: настройки — пусто, AD — None,
+    локальный справочник — пустой (фолбэк поиска на живой 1С).
 
     Тесты со своими override'ами перебивают эти значения своими (override ставится
     после autouse-фикстуры); для юнит-тестов ветки боевого кода без подмен —
     фикстура real_boundaries. Только чтение: AD/1С/Postgres не трогаются."""
     app.dependency_overrides[get_settings_store] = lambda: OfflineSettingsStore()
     app.dependency_overrides[get_ad_reader] = lambda: None
+    app.dependency_overrides[get_employee_sync_store] = lambda: InMemoryEmployeeSyncStore()
     yield
     for factory in OFFLINE_BOUNDARIES:
         app.dependency_overrides.pop(factory, None)

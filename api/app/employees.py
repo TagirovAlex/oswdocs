@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from .ad_reader import AdNotFound, AdReader, AdUnavailable, build_snapshot
@@ -16,6 +18,13 @@ from .ad_sync import compute_ad_status, find_unique_ad_match
 from .audit import AuditEvent, audit_log
 from .config import Settings, get_settings
 from .deps import CurrentUser, get_current_user, is_privileged
+from .employee_sync import (
+    EmployeeSyncUnavailable,
+    EmployeeSyncStore,
+    get_employee_sync_store,
+    sync_employees,
+)
+from .link_store import LinksStore, get_links_store
 from .onec_client import (
     EmployeeCard,
     OneCBaseConfig,
@@ -247,6 +256,43 @@ def _link_sam_for(card: EmployeeCard) -> str | None:
     return found.sam if found is not None else None
 
 
+def _local_duplicated_fios(rows: list[dict]) -> set[str]:
+    """Нормализованные ФИО из локального справочника, встретившиеся более раза."""
+    counts: dict[str, int] = {}
+    for row in rows:
+        key = _norm(row["fio"])
+        counts[key] = counts.get(key, 0) + 1
+    return {fio for fio, count in counts.items() if count > 1}
+
+
+def _local_item(row: dict, duplicate: bool, privileged: bool) -> dict:
+    """Запись локального справочника -> элемент поиска (контракт как у живого пути).
+
+    ad_sam/ad_status — из таблицы (NULL трактуется как 'no_match'); полей, которых
+    в таблице нет (вид занятости/дата приёма), нет и в выдаче — как в _full_item."""
+    ad_status = row.get("ad_status") or "no_match"
+    item = {
+        "enterprise": row["enterprise"],
+        "base_code": row["base_code"],
+        "key": "%s|%s|%s" % (row["enterprise"], row["base_code"], row["tab_num"]),
+        "dept": row.get("department") or "",
+        "position": row.get("position") or "",
+        "ad_sam": row.get("ad_sam"),
+        "ad_status": ad_status,
+        "needs_manual_review": duplicate,
+    }
+    if privileged:
+        item.update(
+            {
+                "tab_num": row["tab_num"],
+                "fio": row["fio"],
+                "employment_type": "",
+                "hire_date": "",
+            }
+        )
+    return item
+
+
 # ---------------------------------------------------------------------------
 # Поиск по предприятию
 # ---------------------------------------------------------------------------
@@ -260,15 +306,50 @@ def search_employees(
     settings: Settings = Depends(get_settings),
     client: OneCClient = Depends(get_onec_client),
     reader: AdReader | None = Depends(get_ad_reader),
+    emp_store: EmployeeSyncStore = Depends(get_employee_sync_store),
 ) -> dict:
     """Справочник/поиск сотрудников предприятия с ролевой обрезкой.
 
-    q пустой — вернуть список (до limit), для справочника. Падение одной базы
-    1С не валит остальные: ошибки баз возвращаются списком, живые базы — обычным
-    результатом. Дубли одного ФИО не склеиваются — помечаются флагом на ручную
-    сверку ОК.
+    Источник — ЛОКАЛЬНАЯ таблица employees (синк из 1С + связка AD): фильтр по
+    предприятию (точное) + подстрока ФИО/таб.№/должности/логина (без регистра),
+    тот же контракт выдачи. Пока таблица пуста (первый запуск, синк не прошёл)
+    или БД справочника недоступна — фолбэк на живой поиск 1С (прежний путь),
+    чтобы форма не ломалась до первого синка. q пустой — вернуть список (до limit),
+    для справочника.
     """
     settings.ensure_read_only()
+    # Локальный справочник: если синк прошёл (в таблице есть строки) — читаем из
+    # неё; пустая таблица и падение БД справочника — фолбэк на живой 1С.
+    table_has_data = False
+    local_rows: list[dict] = []
+    try:
+        table_has_data = emp_store.count() > 0
+        if table_has_data:
+            local_rows = emp_store.search(enterprise, q, limit)
+    except Exception:
+        table_has_data = False  # БД справочника недоступна — живой поиск не ломаем
+    if table_has_data:
+        duplicates = _local_duplicated_fios(local_rows)
+        privileged = is_privileged(user)
+        items = [
+            _local_item(row, duplicate=_norm(row["fio"]) in duplicates, privileged=privileged)
+            for row in local_rows
+        ]
+        audit_log.append(
+            AuditEvent(
+                actor=user.sam,
+                action="employees.search",
+                entity="employee",
+                entity_id=enterprise,
+                detail="найдено: %d (локальный справочник)" % len(items),
+            )
+        )
+        return {
+            "items": items,
+            "errors": [],
+            "needs_manual_review": bool(duplicates),
+        }
+    # Фолбэк: прежний живой поиск 1С (до первого синка).
     try:
         found = search_enterprise(enterprise, q, client)
     except UnknownEnterpriseError as exc:
@@ -335,6 +416,46 @@ def search_employees(
         "items": items,
         "errors": found.errors,
         "needs_manual_review": bool(duplicates),
+    }
+
+
+@router.post("/employees/sync")
+def sync_employees_endpoint(
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+    settings_store: DbSettingsStore = Depends(get_settings_store),
+    links_store: LinksStore = Depends(get_links_store),
+) -> dict:
+    """Принудительная синхронизация локального справочника сотрудников из 1С: только admin.
+
+    Источник не настроен/недоступен — 503 (не 500); успех —
+    {"synced": N, "errors": [...], "at": ISO}. Запись — только в нашу таблицу
+    employees, 1С — только чтение."""
+    settings.ensure_read_only()
+    if user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Синхронизацию справочника запускает только админ",
+        )
+    try:
+        result = sync_employees(settings_store, links_store)
+    except EmployeeSyncUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    audit_log.append(
+        AuditEvent(
+            actor=user.sam,
+            action="employees.sync",
+            entity="employee",
+            entity_id="employees",
+            detail="synced=%d" % result["synced"],
+        )
+    )
+    return {
+        "synced": result["synced"],
+        "errors": result["errors"],
+        "at": datetime.now(timezone.utc).isoformat(),
     }
 
 

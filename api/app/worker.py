@@ -250,6 +250,20 @@ def main() -> None:
     except Exception:
         pass
 
+    # Регламентная синхронизация локального справочника сотрудников из 1С: тихо
+    # (сбой не валит проход), как синк предприятий; метка employees_synced_at
+    # пишется внутри при успехе. Запись — только в нашу таблицу employees.
+    try:
+        from .employee_sync import maybe_sync_employees_weekly
+        from .link_store import DbLinksStore
+
+        if maybe_sync_employees_weekly(
+            settings_store, DbLinksStore(settings.DATABASE_URL)
+        ):
+            print("sync: справочник сотрудников синхронизирован")
+    except Exception:
+        pass
+
     # Регламентная автосвязка 1С↔AD по точному ФИО: тихо, толерантность как у
     # maybe_sync_weekly; запись — только связки у нас; при реальном проходе —
     # уведомление по расписанию schedule_ad_links_sync.
