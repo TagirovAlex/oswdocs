@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from .audit import AuditEvent, audit_log
@@ -420,3 +421,86 @@ def list_archive_files(
         )
     )
     return list_backups(backup_dir)
+
+
+def _backup_path(backup_dir: Path, name: str) -> Path | None:
+    """Путь к бэкапу внутри каталога: только basename, без ухода за пределы.
+
+    Если имя уводит за пределы каталога (или resolve недоступен) — None,
+    вызывающий отвечает 404."""
+    candidate = backup_dir / Path(name).name
+    try:
+        inside = candidate.resolve().is_relative_to(backup_dir.resolve())
+    except OSError:
+        inside = False
+    return candidate if inside else None
+
+
+@router.get("/archive/files/{name}/download")
+def download_archive_file(
+    name: str,
+    user: CurrentUser = Depends(get_current_user),
+    store: DbSettingsStore = Depends(get_settings_store),
+    settings: Settings = Depends(get_settings),
+) -> FileResponse:
+    """Скачать файл бэкапа (только admin): attachment, имя — basename.
+
+    Имя за пределами каталога или файл отсутствует — 404; БД недоступна — 503."""
+    _require_admin(user)
+    try:
+        backup_dir = _backup_dir(store, settings.FILES_DIR)
+    except SettingsUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    target = _backup_path(backup_dir, name)
+    if target is None or not target.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Файл бэкапа не найден",
+        )
+    audit_log.append(
+        AuditEvent(
+            actor=user.sam,
+            action="archive.download",
+            entity="archive",
+            entity_id=target.name,
+        )
+    )
+    return FileResponse(
+        str(target), media_type="application/octet-stream", filename=target.name
+    )
+
+
+@router.delete("/archive/files/{name}")
+def delete_archive_file(
+    name: str,
+    user: CurrentUser = Depends(get_current_user),
+    store: DbSettingsStore = Depends(get_settings_store),
+    settings: Settings = Depends(get_settings),
+) -> dict:
+    """Удалить файл бэкапа (только admin): имя за пределами каталога или файла
+    нет — 404; успех — {ok: true}. БД недоступна — 503."""
+    _require_admin(user)
+    try:
+        backup_dir = _backup_dir(store, settings.FILES_DIR)
+    except SettingsUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    target = _backup_path(backup_dir, name)
+    if target is None or not target.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Файл бэкапа не найден",
+        )
+    target.unlink()
+    audit_log.append(
+        AuditEvent(
+            actor=user.sam,
+            action="archive.delete",
+            entity="archive",
+            entity_id=target.name,
+        )
+    )
+    return {"ok": True}

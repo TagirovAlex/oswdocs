@@ -7,7 +7,9 @@ import { getDocTypes } from "./requests-client";
 import type { DocType } from "./requests-client";
 import {
   createDocType,
+  deleteBackup,
   deleteDocType,
+  downloadBackup,
   getArchiveSettings,
   getSettings,
   getSettingsContent,
@@ -764,6 +766,13 @@ function DocTypesEditor() {
   );
 }
 
+// Формат размера бэкапа: в мегабайтах «X.X МБ» (1 знак после запятой);
+// меньше 1 КБ — в килобайтах («X.X КБ»).
+function formatBackupSize(sizeBytes: number): string {
+  if (sizeBytes < 1024) return `${(sizeBytes / 1024).toFixed(1)} КБ`;
+  return `${(sizeBytes / (1024 * 1024)).toFixed(1)} МБ`;
+}
+
 // Вкладка «Архивация» (только админ): настройки бэкапов (место хранения,
 // шаблон имени, количество копий, расписание — как у регламентов), ручной
 // запуск бэкапа и список сохранённых файлов. Значения — из GET/PUT /api/archive
@@ -830,6 +839,19 @@ function ArchiveTab() {
       setBackupError(e instanceof Error ? e.message : "Ошибка создания бэкапа");
     } finally {
       setBackupBusy(false);
+    }
+  }
+
+  // Удаление файла бэкапа (DELETE /api/archive/files/{name}) с подтверждением;
+  // после успеха список перечитываем.
+  async function handleDeleteBackup(name: string): Promise<void> {
+    if (!window.confirm(`Удалить бэкап ${name}? Действие необратимо.`)) return;
+    setLoadError("");
+    try {
+      await deleteBackup(name);
+      setBackups(await listBackups());
+    } catch (e: unknown) {
+      setLoadError(e instanceof Error ? e.message : "Ошибка удаления бэкапа");
     }
   }
 
@@ -906,14 +928,35 @@ function ArchiveTab() {
               <th>Имя</th>
               <th>Размер</th>
               <th>Дата</th>
+              <th>Действия</th>
             </tr>
           </thead>
           <tbody>
             {backups.map((file) => (
               <tr key={file.name}>
                 <td>{file.name}</td>
-                <td>{file.size} Б</td>
+                <td>{formatBackupSize(file.size)}</td>
                 <td>{file.created_at.slice(0, 10)}</td>
+                <td>
+                  <div className="sed-toolbar" style={{ marginTop: 0 }}>
+                    <button
+                      type="button"
+                      className="sed-btn sed-btn--ghost"
+                      aria-label={`Скачать бэкап ${file.name}`}
+                      onClick={() => void downloadBackup(file.name).catch(() => undefined)}
+                    >
+                      Скачать
+                    </button>
+                    <button
+                      type="button"
+                      className="sed-btn sed-btn--ghost"
+                      aria-label={`Удалить бэкап ${file.name}`}
+                      onClick={() => void handleDeleteBackup(file.name)}
+                    >
+                      Удалить
+                    </button>
+                  </div>
+                </td>
               </tr>
             ))}
           </tbody>

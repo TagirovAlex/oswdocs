@@ -6,7 +6,19 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AdminSettings } from "./admin-settings";
 import { ApiHttpError } from "./auth-client";
-import { getSettings, getSettingsContent, saveSettings, saveSettingsContent, syncEnterprises } from "./settings-client";
+import {
+  deleteBackup,
+  downloadBackup,
+  getArchiveSettings,
+  getSettings,
+  getSettingsContent,
+  listBackups,
+  runBackup,
+  saveArchiveSettings,
+  saveSettings,
+  saveSettingsContent,
+  syncEnterprises,
+} from "./settings-client";
 import type { SettingsData } from "./settings-client";
 
 // Мок клиента настроек (fetch не вызывается).
@@ -16,6 +28,12 @@ vi.mock("./settings-client", () => ({
   getSettingsContent: vi.fn(),
   saveSettingsContent: vi.fn(),
   syncEnterprises: vi.fn(),
+  getArchiveSettings: vi.fn(),
+  saveArchiveSettings: vi.fn(),
+  listBackups: vi.fn(),
+  runBackup: vi.fn(),
+  deleteBackup: vi.fn(),
+  downloadBackup: vi.fn(),
 }));
 
 // Настройки, как их отдаёт GET /api/settings (полный объект по контракту B2).
@@ -99,6 +117,12 @@ beforeEach(() => {
   vi.mocked(getSettingsContent).mockReset();
   vi.mocked(saveSettingsContent).mockReset();
   vi.mocked(syncEnterprises).mockReset();
+  vi.mocked(getArchiveSettings).mockReset();
+  vi.mocked(saveArchiveSettings).mockReset();
+  vi.mocked(listBackups).mockReset();
+  vi.mocked(runBackup).mockReset();
+  vi.mocked(deleteBackup).mockReset();
+  vi.mocked(downloadBackup).mockReset();
 });
 
 describe("AdminSettings", () => {
@@ -491,5 +515,44 @@ describe("AdminSettings", () => {
     await waitFor(() => expect(screen.getByLabelText("TTL отметок")).toBeInTheDocument());
 
     expect(screen.queryByRole("button", { name: "Доступ и роли" })).not.toBeInTheDocument();
+  });
+
+  // Админ: вкладка «Архивация» — размер в МБ (меньше 1 КБ — в КБ), кнопки
+  // «Скачать» (новая вкладка) и «Удалить» (подтверждение + перечитать список).
+  it("вкладка Архивация: размер в МБ, скачивание и удаление бэкапа", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+    vi.mocked(getArchiveSettings).mockResolvedValue({
+      storage_path: "/backups",
+      file_pattern: "sed_{ts}.dump",
+      keep_copies: 10,
+      schedule: null,
+    });
+    vi.mocked(listBackups).mockResolvedValue([
+      { name: "sed_2026-10-01.dump", size: 5242880, created_at: "2026-10-01T12:00:00+00:00" },
+      { name: "small.dump", size: 500, created_at: "2026-10-01T12:00:00+00:00" },
+    ]);
+    vi.mocked(downloadBackup).mockResolvedValue(undefined);
+    vi.mocked(deleteBackup).mockResolvedValue({ ok: true });
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Архивация" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Архивация" }));
+    await waitFor(() => expect(screen.getByText("sed_2026-10-01.dump")).toBeInTheDocument());
+
+    // Размер — в мегабайтах (1 знак после запятой); меньше 1 КБ — в килобайтах.
+    expect(screen.getByText("5.0 МБ")).toBeInTheDocument();
+    expect(screen.getByText("0.5 КБ")).toBeInTheDocument();
+
+    // «Скачать» — blob-скачивание с токеном.
+    fireEvent.click(screen.getByRole("button", { name: "Скачать бэкап sed_2026-10-01.dump" }));
+    expect(downloadBackup).toHaveBeenCalledWith("sed_2026-10-01.dump");
+
+    // «Удалить»: подтверждение, DELETE и перечитывание списка (после удаления пусто).
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    vi.mocked(listBackups).mockResolvedValueOnce([]);
+    fireEvent.click(screen.getByRole("button", { name: "Удалить бэкап sed_2026-10-01.dump" }));
+    await waitFor(() => expect(screen.getByText("Бэкапов нет")).toBeInTheDocument());
+    expect(deleteBackup).toHaveBeenCalledWith("sed_2026-10-01.dump");
+    confirm.mockRestore();
   });
 });

@@ -75,4 +75,26 @@ describe("Directory", () => {
     );
     expect(syncLinks).toHaveBeenCalledTimes(1);
   });
+
+  // Поиск с запросом идёт большим размером страницы (500), чтобы показывать все
+  // совпадения, а не дефолтные 50; без запроса — дефолтный размер.
+  it("поиск с запросом использует page_size=500, без запроса — дефолтный", async () => {
+    vi.mocked(getEnterprises).mockResolvedValue(enterprises);
+    vi.mocked(searchEmployees).mockResolvedValue({ items: hits });
+
+    render(<Directory role="hr" />);
+    await waitFor(() => expect(screen.getByLabelText("Предприятие справочника")).toBeInTheDocument());
+
+    // Пустой запрос (весь список справочника) — дефолтный размер страницы.
+    fireEvent.click(screen.getByText("Найти"));
+    await waitFor(() => expect(screen.getByText("Сказочников Тест Тестович")).toBeInTheDocument());
+    expect(searchEmployees).toHaveBeenLastCalledWith("A", "", 1, 50);
+
+    // Запрос введён — большой размер страницы, чтобы были видны все совпадения.
+    fireEvent.change(screen.getByLabelText("Поиск по справочнику"), { target: { value: "Сказочников" } });
+    fireEvent.click(screen.getByText("Найти"));
+    await waitFor(() =>
+      expect(searchEmployees).toHaveBeenLastCalledWith("A", "Сказочников", 1, 500),
+    );
+  });
 });

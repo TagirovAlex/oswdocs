@@ -189,7 +189,7 @@ export interface ContentSettingsData {
 
 // Запрос к /api/settings* с Bearer-токеном; ответ — настройки.
 // Ошибки: 401 — нет сессии, 403 — доступ закрыт, 422 — неверные типы, 503 — сервис недоступен.
-async function requestSettings<T>(path: string, method: "GET" | "PUT" | "POST", data?: T): Promise<T> {
+async function requestSettings<T>(path: string, method: "GET" | "PUT" | "POST" | "DELETE", data?: T): Promise<T> {
   const token = getToken();
   if (!token) {
     throw new ApiHttpError(401, "Нет токена");
@@ -210,7 +210,7 @@ async function requestSettings<T>(path: string, method: "GET" | "PUT" | "POST", 
   if (res.status === 422) throw new ApiHttpError(422, "Неверные значения настроек");
   if (res.status === 503) throw new ApiHttpError(503, "Сервис настроек недоступен");
   if (!res.ok) {
-    const verb = method === "PUT" ? "сохранения" : "загрузки";
+    const verb = method === "PUT" ? "сохранения" : method === "DELETE" ? "удаления" : "загрузки";
     throw new ApiHttpError(res.status, `Ошибка ${verb} настроек`);
   }
   return (await res.json()) as T;
@@ -394,4 +394,29 @@ export async function runBackup(): Promise<RunBackupResult> {
 export async function listBackups(): Promise<BackupFile[]> {
   const raw = await requestSettings<{ name: string; size: number; date: string }[]>("/api/archive/files", "GET");
   return (raw ?? []).map((f) => ({ name: f.name, size: f.size, created_at: f.date }));
+}
+
+// Скачивание файла бэкапа (GET /api/archive/files/{name}/download, только админ).
+// Качаем blob-ом с Bearer-токеном и запускаем скачивание: прямая навигация по
+// URL дала бы 401 (навигация браузера заголовок не передаёт).
+export async function downloadBackup(name: string): Promise<void> {
+  const token = getToken();
+  const res = await fetch(`/api/archive/files/${encodeURIComponent(name)}/download`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (!res.ok) throw new ApiHttpError(res.status, "Не удалось скачать бэкап");
+  const url = URL.createObjectURL(await res.blob());
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body?.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
+}
+
+// DELETE /api/archive/files/{name}: удалить файл бэкапа (только админ);
+// ответ — {ok: true}; при отсутствии файла бэкенд отвечает 404.
+export async function deleteBackup(name: string): Promise<{ ok: boolean }> {
+  return requestSettings<{ ok: boolean }>(`/api/archive/files/${encodeURIComponent(name)}`, "DELETE");
 }
