@@ -220,7 +220,8 @@ class StdlibDocxRenderer:
 # Зависимости стенда (python-docx-template/qrcode/Pillow/LibreOffice)
 # импортируются лениво: офлайн их нет — generate_bypass вернет generated=False
 # с причиной (не 500); прочие сбои не глотаются. Тексты шаблонов — только из
-# doc_templates/settings, хардкода нет.
+# doc_templates/settings, хардкода нет. Профиль soffice — в /tmp (см.
+# _convert_to_pdf_report): HOME контейнера не существует, софт без профиля RC=77.
 # ---------------------------------------------------------------------------
 
 
@@ -319,22 +320,58 @@ def _soffice_binary() -> str | None:
     return shutil.which("soffice")
 
 
-def _convert_to_pdf(docx_path: str, out_dir: str, soffice: str | None) -> str | None:
-    """soffice --convert-to pdf; путь к PDF либо None при сбое."""
+# Сколько последних строк stderr soffice показываем в причине отказа.
+_SOFFICE_STDERR_LINES = 3
+
+
+@dataclass(frozen=True)
+class SofficeReport:
+    """Итог конвертации: путь к PDF (либо None) + служебная диагностика."""
+
+    pdf_path: str | None = None
+    detail: str = ""
+
+
+def _soffice_detail(returncode: int, stderr: str) -> str:
+    """Код возврата soffice и хвост stderr — только служебный вывод конвертера
+    (пути файлов, коды), ПДн заявки туда не попадают. Хвост ограничен, чтобы
+    ответ API не раздувался шумом вроде сообщений dconf/fontconfig."""
+    tail = [line for line in (stderr or "").splitlines() if line.strip()]
+    detail = f"код возврата {returncode}"
+    if tail:
+        detail += ": " + " | ".join(line.strip()[:200] for line in tail[-_SOFFICE_STDERR_LINES:])
+    return detail
+
+
+def _convert_to_pdf_report(docx_path: str, out_dir: str, soffice: str | None) -> SofficeReport:
+    """soffice --convert-to pdf с профилем в /tmp; PDF либо None + диагностика."""
     if soffice is None:
-        return None
+        return SofficeReport(detail="soffice не найден в PATH (LibreOffice не установлен)")
+    import os
     import subprocess
 
+    # Профиль LibreOffice — отдельный каталог в /tmp с суффиксом pid: HOME
+    # контейнера (/home/appuser) не существует, и soffice без профиля падает с
+    # RC=77 («application cannot be started»); общий профиль на все процессы
+    # при параллельной печати даёт «another instance running».
+    profile = f"-env:UserInstallation=file:///tmp/soffice-profile-{os.getpid()}"
     result = subprocess.run(
-        [soffice, "--headless", "--convert-to", "pdf", "--outdir", out_dir, docx_path],
+        [soffice, profile, "--headless", "--convert-to", "pdf", "--outdir", out_dir, docx_path],
         capture_output=True,
         text=True,
         timeout=60,
     )
     if result.returncode != 0:
-        return None
+        return SofficeReport(detail=_soffice_detail(result.returncode, result.stderr))
     pdf = str(Path(docx_path).with_suffix(".pdf"))
-    return pdf if Path(pdf).exists() else None
+    if not Path(pdf).exists():
+        return SofficeReport(detail=_soffice_detail(result.returncode, "PDF-файл не появился"))
+    return SofficeReport(pdf_path=pdf)
+
+
+def _convert_to_pdf(docx_path: str, out_dir: str, soffice: str | None) -> str | None:
+    """soffice --convert-to pdf; путь к PDF либо None при сбое (без диагностики)."""
+    return _convert_to_pdf_report(docx_path, out_dir, soffice).pdf_path
 
 
 # Текст «No module named '...'» в ImportError/ModuleNotFoundError (у вручную
@@ -366,6 +403,7 @@ def generate_bypass(
     Офлайн (нет python-docx-template/qrcode/PIL) или нет soffice —
     BypassResult(generated=False, reason=...): файлы не записываются в документы
     (в БД только мета успешной генерации). QR payload — URL заявки.
+    Причина сбоя конвертации — код возврата soffice и хвост его stderr.
     Прочие сбои не глотаются: пишем в лог и пробрасываем наружу.
     """
     safe = sanitize_context(dict(context, request_id=request_id))
@@ -391,7 +429,8 @@ def generate_bypass(
     out_dir.mkdir(parents=True, exist_ok=True)
     docx_path = out_dir / f"bypass_{request_id}_v{version}.docx"
     docx_path.write_bytes(docx_bytes)
-    pdf_path = _convert_to_pdf(str(docx_path), str(out_dir), _soffice_binary())
+    report = _convert_to_pdf_report(str(docx_path), str(out_dir), _soffice_binary())
+    pdf_path = report.pdf_path
     if pdf_path is None:
         # PDF не создан: бегунок не состоялся, файл не оставляем.
         try:
@@ -399,7 +438,8 @@ def generate_bypass(
         except OSError:
             pass
         return BypassResult(
-            generated=False, reason="нет LibreOffice (soffice): PDF не создан"
+            generated=False,
+            reason=f"LibreOffice: PDF не создан ({report.detail})",
         )
     qr_path = out_dir / f"bypass_{request_id}_v{version}_qr.png"
     qr_path.write_bytes(qr_bytes)

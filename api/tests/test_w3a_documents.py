@@ -8,6 +8,7 @@ import base64
 import json
 import os
 import re
+import subprocess
 import sys
 import types
 from datetime import timedelta
@@ -700,3 +701,79 @@ def test_print_offline_missing_module_is_not_500(client, hr, monkeypatch):
     body = response.json()
     assert body["generated"] is False
     assert "PIL" in body["reason"]
+
+
+# --- W3a: конвертация LibreOffice (профиль в /tmp) и диагностика в reason ---
+# Локально LibreOffice нет — подменяем subprocess.run, сам soffice не запускаем
+# (иначе тесты зависели бы от наличия софта на машине).
+
+def test_convert_to_pdf_uses_tmp_profile_and_ignores_home(tmp_path, monkeypatch):
+    """Профиль soffice — в /tmp с суффиксом pid, HOME не используется.
+
+    В контейнере /home/appuser не существует, и soffice без профиля падает с
+    RC=77; общий профиль на все процессы конфликтует при параллельной печати.
+    """
+    docx = tmp_path / "bypass.docx"
+    docx.write_bytes(b"docx-bytes")
+    calls = []
+
+    def fake_run(argv, **kw):
+        calls.append(argv)
+        (tmp_path / "bypass.pdf").write_bytes(b"%PDF-1.4")  # конвертер положил PDF
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setenv("HOME", "/home/does-not-exist")
+    pdf = docs_module._convert_to_pdf(str(docx), str(tmp_path), "/usr/bin/soffice")
+    assert pdf == str(tmp_path / "bypass.pdf")
+    argv = calls[0]
+    profiles = [a for a in argv if a.startswith("-env:UserInstallation=")]
+    assert len(profiles) == 1, f"в argv нет профиля LibreOffice: {argv}"
+    assert profiles[0].startswith("-env:UserInstallation=file:///tmp/")
+    assert f"-{os.getpid()}" in profiles[0], "профиль должен быть уникален на процесс"
+    assert "/home/does-not-exist" not in " ".join(argv)
+    assert "--headless" in argv
+
+
+def test_generate_bypass_reason_has_soffice_returncode_and_stderr(tmp_path, monkeypatch):
+    """Сбой конвертации: в причине код возврата soffice и хвост его stderr."""
+    monkeypatch.setattr(docs_module, "_render_docx_stand", _ok_docx)
+    monkeypatch.setattr(docs_module, "_render_qr_png", lambda url: b"qr-bytes")
+    monkeypatch.setattr(docs_module, "_soffice_binary", lambda: "/usr/bin/soffice")
+    stderr = "\n".join([
+        "dconf-CRITICAL: unable to create directory '/home/appuser/.cache/dconf'",
+        "Fontconfig error: No writable cache directories",
+        "строка перед хвостом",
+        "convert ... -> ... using filter : writer_pdf_Export",
+        "LibreOffice 25.2 - Fatal Error: The application cannot be started.",
+    ])
+
+    def fake_run(argv, **kw):
+        return types.SimpleNamespace(returncode=77, stdout="", stderr=stderr)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = generate_bypass(**_bypass_kwargs(tmp_path))
+    assert result.generated is False
+    assert "LibreOffice" in result.reason
+    assert "77" in result.reason
+    assert "The application cannot be started" in result.reason
+    # В причину идёт только хвост stderr, без раннего шума конвертера.
+    assert "dconf" not in result.reason
+    assert "Fontconfig" not in result.reason
+    # Неуспешный бегунок файлов не оставляет (поведение прежнее).
+    assert not (tmp_path / "bypass_REQ-0001_v1.docx").exists()
+
+
+def test_generate_bypass_reason_without_soffice(tmp_path, monkeypatch):
+    """Нет soffice в PATH — причина называет LibreOffice, конвертер не запускается."""
+    monkeypatch.setattr(docs_module, "_render_docx_stand", _ok_docx)
+    monkeypatch.setattr(docs_module, "_render_qr_png", lambda url: b"qr-bytes")
+    monkeypatch.setattr(docs_module, "_soffice_binary", lambda: None)
+
+    def forbidden_run(argv, **kw):
+        raise AssertionError("без soffice конвертер запускаться не должен")
+
+    monkeypatch.setattr(subprocess, "run", forbidden_run)
+    result = generate_bypass(**_bypass_kwargs(tmp_path))
+    assert result.generated is False
+    assert "LibreOffice" in result.reason
