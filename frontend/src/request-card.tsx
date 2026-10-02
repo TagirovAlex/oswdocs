@@ -90,6 +90,9 @@ export function RequestCard(props: RequestCardProps) {
   const [commentsError, setCommentsError] = useState<string>("");
   const [newComment, setNewComment] = useState<string>("");
   const [commentError, setCommentError] = useState<string>("");
+  // Вкладка карточки по образцу (doc.html): «Лист рассмотрения» (панели +
+  // таблица шагов) либо «История» (история + комментарии). Только вид.
+  const [cardTab, setCardTab] = useState<"sheet" | "history">("sheet");
   // Панель администратора СЭД (роль sed_admin от бэкенда): правка полей и откат.
   const isSedAdmin = (role as string) === "sed_admin";
   const [sedDocTypes, setSedDocTypes] = useState<DocType[]>([]);
@@ -454,6 +457,23 @@ export function RequestCard(props: RequestCardProps) {
   return (
     <section aria-label="Карточка заявки">
       <h3>Карточка заявки {requestId}</h3>
+      {/* Вкладки образца: лист рассмотрения либо история (только вид). */}
+      <nav className="sed-tabs sed-tabs--inner" aria-label="Вкладки карточки">
+        <button
+          type="button"
+          className={cardTab === "sheet" ? "sed-tab sed-tab--active" : "sed-tab"}
+          onClick={() => setCardTab("sheet")}
+        >
+          Лист рассмотрения
+        </button>
+        <button
+          type="button"
+          className={cardTab === "history" ? "sed-tab sed-tab--active" : "sed-tab"}
+          onClick={() => setCardTab("history")}
+        >
+          История
+        </button>
+      </nav>
       {cardError && <div role="alert">{cardError}</div>}
       {!card && !cardError && !deleted && <div className="sed-note">Загрузка карточки…</div>}
       {/* Заявка удалена в этой же вкладке: закрыть окно нельзя — возврат к списку. */}
@@ -467,23 +487,97 @@ export function RequestCard(props: RequestCardProps) {
           </div>
         </div>
       )}
-      {card && !deleted && (
+      {card && !deleted && cardTab === "sheet" && (
         <>
           {/* Этап/Статус — пояснением (.sed-note), данные заявки — данными (.sed-meta). */}
           <div className="sed-note">
             Этап: карточка заявки · Статус: {card.status}
           </div>
-          {/* ПДн: владельцу fio/tab_num не приходят — маска «Сотрудник № id». */}
-          <div className="sed-meta">
-            {role === "owner" ? (
-              <>Сотрудник № {card.id}</>
-            ) : (
-              <>
-                {employeeCell(card.fio ?? `Сотрудник № ${card.id}`)}
-                {card.tab_num ? ` · Таб.№ ${card.tab_num}` : ""} · {card.department} · {card.position}
-                {card.enterprise ? ` · ${card.enterprise_name ?? card.enterprise}` : ""}
-              </>
-            )}
+          {/* Две панели образца (doc.html): слева — тема/содержание и вложения,
+              справа — инициатор (read-only) и решение по шагу. */}
+          <div className="sed-panels">
+            <div className="sed-panel">
+              <b>Документ</b>
+              <div className="sed-block">
+                Тема: <strong>{card.subject ?? "—"}</strong>
+              </div>
+              <div className="sed-block">
+                Содержание: <strong>{card.content ?? "—"}</strong>
+              </div>
+              {/* Скан-вложения: список мета + загрузка файла. */}
+              <section aria-label="Вложения" className="sed-mt-8">
+                <b>Вложения</b>
+                {attachmentsError && <div role="alert">{attachmentsError}</div>}
+                {uploadError && <div role="alert">{uploadError}</div>}
+                {attachments.length === 0 && !attachmentsError && (
+                  <div className="sed-note">Вложений нет</div>
+                )}
+                <ul className="sed-list">
+                  {attachments.map((att) => (
+                    <li key={att.id}>
+                      {att.filename} · {att.size} Б · {att.created_at.slice(0, 10)} ·{" "}
+                      <a href={`/api/attachments/${encodeURIComponent(att.id)}/file`}>Скачать</a>
+                    </li>
+                  ))}
+                </ul>
+                <label className="sed-field">
+                  Загрузить скан
+                  <input type="file" aria-label="Файл скана" onChange={handleUploadFile} />
+                </label>
+              </section>
+            </div>
+            <div className="sed-panel">
+              <b>Инициатор и решение</b>
+              {/* ПДн: владельцу fio/tab_num не приходят — маска «Сотрудник № id».
+                  Класс .sed-meta — метаданные (контракт теста), .sed-block — отступ. */}
+              <div className="sed-block sed-meta">
+                {role === "owner" ? (
+                  <>Сотрудник № {card.id}</>
+                ) : (
+                  <>
+                    {employeeCell(card.fio ?? `Сотрудник № ${card.id}`)}
+                    {card.tab_num ? ` · Таб.№ ${card.tab_num}` : ""} · {card.department} · {card.position}
+                    {card.enterprise ? ` · ${card.enterprise_name ?? card.enterprise}` : ""}
+                  </>
+                )}
+              </div>
+              {/* Отметка своего шага — строго по can_act от бэкенда. */}
+              {actStep && (
+                <div aria-label="Решение владельца" className="sed-mt-8">
+                  <h4>Моё решение · Шаг {stepLabel(actStep.order)}</h4>
+                  <input
+                    aria-label="Комментарий к решению"
+                    placeholder="Комментарий (обязателен при отказе/возврате)"
+                    value={decisionComment}
+                    onChange={(e) => setDecisionComment(e.target.value)}
+                  />
+                  {decisionError && <div role="alert">{decisionError}</div>}
+                  <div className="sed-toolbar sed-mt-8">
+                    <button
+                      type="button"
+                      className="sed-btn"
+                      onClick={() => handleDecision(actStep.order, "approve")}
+                    >
+                      Согласовать
+                    </button>
+                    <button
+                      type="button"
+                      className="sed-btn sed-btn--ghost"
+                      onClick={() => handleDecision(actStep.order, "reject")}
+                    >
+                      Отказать
+                    </button>
+                    <button
+                      type="button"
+                      className="sed-btn sed-btn--ghost"
+                      onClick={() => handleDecision(actStep.order, "return")}
+                    >
+                      Вернуть
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Печать бегунка (ОК/админ) — в карточке, не в списке. */}
@@ -502,75 +596,40 @@ export function RequestCard(props: RequestCardProps) {
             </div>
           )}
 
-          {/* Шаги маршрута: исполнитель/статус/срок/комментарий. Логин AD
+          {/* Рассмотрение (низ образца): шаги маршрута таблицей. Логин AD
               согласующего (assignee) в UI не выводится — только ФИО (owner_name)
               для персональных шагов либо название группы. */}
-          <table className="sed-table" aria-label="Шаги заявки">
-            <thead>
-              <tr>
-                <th>№</th>
-                <th>Исполнитель</th>
-                <th>Статус</th>
-                <th>Срок</th>
-                <th>Комментарий</th>
-              </tr>
-            </thead>
-            <tbody>
-              {card.steps.map((step) => (
-                <tr key={step.order}>
-                  <td>{stepLabel(step.order)}</td>
-                  <td>
-                    {stepOwnerCell(step)}
-                  </td>
-                  <td>{step.status}</td>
-                  <td>{step.expires_at.slice(0, 10)}</td>
-                  <td>{step.comment ?? "—"}</td>
+          <div className="sed-review">
+            <b>Рассмотрение</b>
+            <table className="sed-table sed-mt-8" aria-label="Шаги заявки">
+              <thead>
+                <tr>
+                  <th>№</th>
+                  <th>Исполнитель</th>
+                  <th>Статус</th>
+                  <th>Срок</th>
+                  <th>Комментарий</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-
-          {/* Отметка своего шага — строго по can_act от бэкенда (у согласованных и
-              закрытых шагов can_act=false, кнопок нет). */}
-          {actStep && (
-            <div aria-label="Решение владельца">
-              <h4>Моё решение · Шаг {stepLabel(actStep.order)}</h4>
-              <input
-                aria-label="Комментарий к решению"
-                placeholder="Комментарий (обязателен при отказе/возврате)"
-                value={decisionComment}
-                onChange={(e) => setDecisionComment(e.target.value)}
-              />
-              {decisionError && <div role="alert">{decisionError}</div>}
-              <div className="sed-toolbar sed-mt-8">
-                <button
-                  type="button"
-                  className="sed-btn"
-                  onClick={() => handleDecision(actStep.order, "approve")}
-                >
-                  Согласовать
-                </button>
-                <button
-                  type="button"
-                  className="sed-btn sed-btn--ghost"
-                  onClick={() => handleDecision(actStep.order, "reject")}
-                >
-                  Отказать
-                </button>
-                <button
-                  type="button"
-                  className="sed-btn sed-btn--ghost"
-                  onClick={() => handleDecision(actStep.order, "return")}
-                >
-                  Вернуть
-                </button>
-              </div>
-            </div>
-          )}
+              </thead>
+              <tbody>
+                {card.steps.map((step) => (
+                  <tr key={step.order}>
+                    <td>{stepLabel(step.order)}</td>
+                    <td>
+                      {stepOwnerCell(step)}
+                    </td>
+                    <td>{step.status}</td>
+                    <td>{step.expires_at.slice(0, 10)}</td>
+                    <td>{step.comment ?? "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
 
           {/* Действия ОК/админа по статусу заявки. */}
           {role !== "owner" && (
-            <div className="sed-toolbar" aria-label="Действия по заявке">
+            <div className="sed-toolbar sed-mt-8" aria-label="Действия по заявке">
               {(card.status === "Черновик" || card.status === "На доработке") && (
                 <button type="button" className="sed-btn" onClick={handleSubmit}>
                   Отправить на согласование
@@ -602,7 +661,65 @@ export function RequestCard(props: RequestCardProps) {
           {cardActionStatus && <div role="status">{cardActionStatus}</div>}
           {cardActionError && <div role="alert">{cardActionError}</div>}
           {deleteError && <div role="alert">{deleteError}</div>}
+        </>
+      )}
+      {card && !deleted && cardTab === "history" && (
+        <>
+          {/* История заявки: кто / когда / действие / детали (audit_log). */}
+          <section aria-label="История">
+            <h4>История</h4>
+            {historyError && <div className="sed-note">История недоступна: {historyError}</div>}
+            {history.length === 0 && !historyError && (
+              <div className="sed-note">Записей истории нет</div>
+            )}
+            {history.length > 0 && (
+              <ul>
+                {history.map((item, i) => (
+                  <li key={i}>
+                    <strong>{item.actor}</strong> · {historyWhen(item.at)} · {item.action}
+                    {item.details && <div className="sed-sub">{JSON.stringify(item.details)}</div>}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
 
+          {/* Комментарии к заявке: список + поле добавления. */}
+          <section aria-label="Комментарии">
+            <h4>Комментарии</h4>
+            {commentsError && <div className="sed-note">Комментарии недоступны: {commentsError}</div>}
+            {comments.length === 0 && !commentsError && (
+              <div className="sed-note">Комментариев нет</div>
+            )}
+            {comments.length > 0 && (
+              <ul>
+                {comments.map((c) => (
+                  <li key={c.id}>
+                    <strong>{c.author}</strong> · {c.at.slice(0, 16).replace("T", " ")}: {c.body}
+                  </li>
+                ))}
+              </ul>
+            )}
+            <input
+              aria-label="Новый комментарий"
+              placeholder="Комментарий к заявке"
+              value={newComment}
+              onChange={(e) => setNewComment(e.target.value)}
+            />
+            <button
+              type="button"
+              className="sed-btn"
+              onClick={handleAddComment}
+              disabled={newComment.trim() === ""}
+            >
+              Добавить комментарий
+            </button>
+            {commentError && <div role="alert">{commentError}</div>}
+          </section>
+        </>
+      )}
+      {card && !deleted && (
+        <>
           {/* Панель администратора СЭД (роль sed_admin): правка Тема/Содержание/Вид
               и откат к шагу. ПДн в макете не встраиваются — только поля карточки. */}
           {isSedAdmin && (
@@ -674,80 +791,6 @@ export function RequestCard(props: RequestCardProps) {
               {sedError && <div role="alert">{sedError}</div>}
             </section>
           )}
-
-          {/* История заявки: кто / когда / действие / детали (audit_log). */}
-          <section aria-label="История">
-            <h4>История</h4>
-            {historyError && <div className="sed-note">История недоступна: {historyError}</div>}
-            {history.length === 0 && !historyError && (
-              <div className="sed-note">Записей истории нет</div>
-            )}
-            {history.length > 0 && (
-              <ul>
-                {history.map((item, i) => (
-                  <li key={i}>
-                    <strong>{item.actor}</strong> · {historyWhen(item.at)} · {item.action}
-                    {item.details && <div className="sed-sub">{JSON.stringify(item.details)}</div>}
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
-
-          {/* Комментарии к заявке: список + поле добавления. */}
-          <section aria-label="Комментарии">
-            <h4>Комментарии</h4>
-            {commentsError && <div className="sed-note">Комментарии недоступны: {commentsError}</div>}
-            {comments.length === 0 && !commentsError && (
-              <div className="sed-note">Комментариев нет</div>
-            )}
-            {comments.length > 0 && (
-              <ul>
-                {comments.map((c) => (
-                  <li key={c.id}>
-                    <strong>{c.author}</strong> · {c.at.slice(0, 16).replace("T", " ")}: {c.body}
-                  </li>
-                ))}
-              </ul>
-            )}
-            <input
-              aria-label="Новый комментарий"
-              placeholder="Комментарий к заявке"
-              value={newComment}
-              onChange={(e) => setNewComment(e.target.value)}
-            />
-            <button
-              type="button"
-              className="sed-btn"
-              onClick={handleAddComment}
-              disabled={newComment.trim() === ""}
-            >
-              Добавить комментарий
-            </button>
-            {commentError && <div role="alert">{commentError}</div>}
-          </section>
-
-          {/* Скан-вложения: список мета + загрузка файла. */}
-          <section aria-label="Вложения">
-            <h4>Вложения</h4>
-            {attachmentsError && <div role="alert">{attachmentsError}</div>}
-            {uploadError && <div role="alert">{uploadError}</div>}
-            {attachments.length === 0 && !attachmentsError && (
-              <div className="sed-note">Вложений нет</div>
-            )}
-            <ul>
-              {attachments.map((att) => (
-                <li key={att.id}>
-                  {att.filename} · {att.size} Б · {att.created_at.slice(0, 10)} ·{" "}
-                  <a href={`/api/attachments/${encodeURIComponent(att.id)}/file`}>Скачать</a>
-                </li>
-              ))}
-            </ul>
-            <label>
-              Загрузить скан
-              <input type="file" aria-label="Файл скана" onChange={handleUploadFile} />
-            </label>
-          </section>
         </>
       )}
     </section>
