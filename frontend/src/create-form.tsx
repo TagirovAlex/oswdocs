@@ -917,7 +917,14 @@ export function CreateForm(props: CreateFormProps) {
                 </thead>
               <tbody>
                 {blocks.map((block, bi) => (
-                  <tr key={block.id}>
+                  <tr
+                    key={block.id}
+                    className={
+                      block.mode === "parallel"
+                        ? "sed-row--parallel"
+                        : "sed-row--sequential"
+                    }
+                  >
                     {/* Удаление блока и его номер. */}
                     <td>
                       <button
@@ -930,6 +937,9 @@ export function CreateForm(props: CreateFormProps) {
                         Удалить
                       </button>
                       <div className="sed-note">Блок {bi + 1}</div>
+                      <span className="sed-blocktag">
+                        {block.mode === "parallel" ? "Параллельный" : "Последовательный"}
+                      </span>
                     </td>
                     {/* Вид рассмотрения: последовательный или параллельный. */}
                     <td>

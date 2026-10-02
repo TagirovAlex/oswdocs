@@ -546,6 +546,32 @@ a {
   cursor: pointer;
 }
 
+/* Блоки согласования: последовательный — левая полоса primary,
+   параллельный — левая полоса accent + метка. Только токены темы. */
+.sed-row--sequential td:first-child {
+  border-left: 3px solid var(--sed-primary);
+}
+
+.sed-row--parallel td:first-child {
+  border-left: 3px solid var(--sed-accent);
+}
+
+.sed-blocktag {
+  display: inline-block;
+  margin-top: 4px;
+  padding: 1px 8px;
+  border: 1px solid var(--sed-border);
+  border-radius: 10px;
+  font-size: 11px;
+  color: var(--sed-text-muted);
+  white-space: nowrap;
+}
+
+.sed-row--parallel .sed-blocktag {
+  border-color: var(--sed-accent);
+  color: var(--sed-accent);
+}
+
 /* Иконка в заголовке таблицы (крест удаления блока): по центру ячейки. */
 .sed-th-icon {
   display: inline-grid;
