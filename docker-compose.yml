@@ -15,6 +15,7 @@ services:
       - "443:443"
     environment:
       SERVER_NAME: ${SERVER_NAME:-sed.company.local}
+      TZ: ${TZ:-Europe/Moscow}
     volumes:
       - ./proxy/nginx.conf:/etc/nginx/templates/default.conf.template:ro
       - ${CERT_PATH:-/srv/sed/certs}:/etc/nginx/certs:ro
@@ -33,6 +34,7 @@ services:
     env_file:
       - .env
     environment:
+      TZ: ${TZ:-Europe/Moscow}
       DATABASE_URL: ${DATABASE_URL}
       REDIS_URL: ${REDIS_URL}
       AD_URL: ${AD_URL}
@@ -72,6 +74,7 @@ services:
     env_file:
       - .env
     environment:
+      TZ: ${TZ:-Europe/Moscow}
       DATABASE_URL: ${DATABASE_URL}
       REDIS_URL: ${REDIS_URL}
       AD_URL: ${AD_URL}
@@ -106,6 +109,8 @@ services:
   redis:
     image: redis:7-alpine
     command: ["redis-server", "--appendonly", "yes"]
+    environment:
+      TZ: ${TZ:-Europe/Moscow}
     # Внешнего порта нет: брокер + кэш только внутри сети sednet.
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
@@ -121,6 +126,7 @@ services:
     env_file:
       - .env
     environment:
+      TZ: ${TZ:-Europe/Moscow}
       POSTGRES_DB: ${POSTGRES_DB:-sed}
       POSTGRES_USER: ${POSTGRES_USER:-sed}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}

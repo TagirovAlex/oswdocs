@@ -116,11 +116,14 @@ def dump_database(database_url: str, target: Path, moment: datetime | None = Non
                 )
                 tables = [row[0] for row in cursor.fetchall()]
             with open(target, "w", encoding="utf-8", newline="") as out:
-                out.write("-- SED backup %s\n" % moment.isoformat())
+                # Метка в заголовке — в локальном времени контейнера (TZ),
+                # как и имя файла, чтобы дата бэкапа совпадала с хостом.
+                local = moment.astimezone()
+                out.write("-- SED backup %s\n" % local.isoformat())
                 with connection.cursor() as cursor:
                     for table in tables:
                         out.write(
-                            "\n-- таблица: %s (%s)\n" % (table, moment.isoformat())
+                            "\n-- таблица: %s (%s)\n" % (table, local.isoformat())
                         )
                         # Кавычки в имени таблицы удваиваем (защита от инъекций).
                         quoted = table.replace('"', '""')
@@ -169,8 +172,12 @@ def create_backup(
     except OSError as exc:
         raise ArchiveUnavailable("Каталог бэкапов недоступен: %s" % exc) from exc
     # Только имя файла (basename): шаблон не должен уводить за пределы каталога.
+    # Метка {ts} — в локальном времени контейнера (TZ), чтобы имя файла
+    # совпадало с локальной датой хоста (бэкапы в MSK, а не в UTC).
     name = Path(
-        _name_template(store).replace("{ts}", moment.strftime("%Y%m%d_%H%M%S"))
+        _name_template(store).replace(
+            "{ts}", moment.astimezone().strftime("%Y%m%d_%H%M%S")
+        )
     ).name
     target = backup_dir / name
     dump_database(database_url, target, moment)
@@ -183,7 +190,8 @@ def create_backup(
 
 
 def list_backups(backup_dir: Path) -> list[dict]:
-    """Список бэкапов каталога: имя, размер (байт), дата (mtime, ISO UTC).
+    """Список бэкапов каталога: имя, размер (байт), дата (mtime, локальное
+    время контейнера — как имя файла, чтобы совпадало с локальной датой).
 
     Файлами бэкапов считаются все регулярные файлы каталога (каталог выделен
     настройкой archive_backup_dir под хранение бэкапов)."""
@@ -198,9 +206,7 @@ def list_backups(backup_dir: Path) -> list[dict]:
             {
                 "name": path.name,
                 "size": stat.st_size,
-                "date": datetime.fromtimestamp(
-                    stat.st_mtime, tz=timezone.utc
-                ).isoformat(),
+                "date": datetime.fromtimestamp(stat.st_mtime).astimezone().isoformat(),
             }
         )
     items.sort(key=lambda item: item["name"])
