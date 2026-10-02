@@ -457,6 +457,99 @@ describe("CreateForm", () => {
     close.mockRestore();
   });
 
+  // Повтор «Отправить» после сбоя submit: черновик не создаётся заново,
+  // повторно отправляется тот же id (защита от дублей Черновиков).
+  it("повтор «Отправить» после сбоя не создаёт второй черновик", async () => {
+    vi.mocked(searchEmployees).mockRejectedValue(new ApiHttpError(503, "Клиент 1С не настроен"));
+    vi.mocked(searchAd).mockResolvedValue([adCandidate]);
+    vi.mocked(createRequest).mockResolvedValue({
+      id: "REQ-0006",
+      status: "Черновик",
+      route_origin: "custom",
+      department: "Цех № 1",
+      position: "Слесарь",
+      created_by: "petrov.pp",
+      steps: [],
+    });
+    vi.mocked(submitRequest)
+      .mockRejectedValueOnce(new ApiHttpError(422, "Маршрут не согласован"))
+      .mockResolvedValueOnce({
+        id: "REQ-0006",
+        status: "На согласовании",
+        route_origin: "custom",
+        department: "Цех № 1",
+        position: "Слесарь",
+        created_by: "petrov.pp",
+        steps: [],
+      });
+    const close = vi.spyOn(window, "close").mockImplementation(() => {});
+
+    render(<CreateForm role="hr" closeOnCreate />);
+    await fillEmployeeManually();
+    await addAdExecutor();
+    fireEvent.click(screen.getByText("Отправить на согласование"));
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent(/Маршрут не согласован/),
+    );
+
+    fireEvent.click(screen.getByText("Отправить на согласование"));
+    await waitFor(() => expect(submitRequest).toHaveBeenCalledTimes(2));
+    // Оба раза — по одному и тому же черновику; создание было одно.
+    expect(vi.mocked(submitRequest).mock.calls).toEqual([["REQ-0006"], ["REQ-0006"]]);
+    expect(createRequest).toHaveBeenCalledTimes(1);
+    close.mockRestore();
+  });
+
+  // Повтор «Отправить» после сбоя с ИЗМЕНЁННЫМИ полями: создаётся новый
+  // черновик с новыми данными (правки не теряются молча).
+  it("повтор «Отправить» после сбоя с правками создаёт новый черновик", async () => {
+    vi.mocked(searchEmployees).mockRejectedValue(new ApiHttpError(503, "Клиент 1С не настроен"));
+    vi.mocked(searchAd).mockResolvedValue([adCandidate]);
+    vi.mocked(createRequest)
+      .mockResolvedValueOnce({
+        id: "REQ-0006",
+        status: "Черновик",
+        route_origin: "custom",
+        department: "Цех № 1",
+        position: "Слесарь",
+        created_by: "petrov.pp",
+        steps: [],
+      })
+      .mockResolvedValueOnce({
+        id: "REQ-0007",
+        status: "Черновик",
+        route_origin: "custom",
+        department: "Цех № 1",
+        position: "Слесарь",
+        created_by: "petrov.pp",
+        steps: [],
+      });
+    vi.mocked(submitRequest)
+      .mockRejectedValueOnce(new ApiHttpError(422, "Маршрут не согласован"))
+      .mockResolvedValueOnce({
+        id: "REQ-0007",
+        status: "На согласовании",
+        route_origin: "custom",
+        department: "Цех № 1",
+        position: "Слесарь",
+        created_by: "petrov.pp",
+        steps: [],
+      });
+
+    render(<CreateForm role="hr" />);
+    await fillEmployeeManually();
+    await addAdExecutor();
+    fireEvent.click(screen.getByText("Отправить на согласование"));
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent(/Маршрут не согласован/),
+    );
+
+    fireEvent.change(screen.getByLabelText("ФИО"), { target: { value: "Громов Игорь Петрович" } });
+    fireEvent.click(screen.getByText("Отправить на согласование"));
+    await waitFor(() => expect(createRequest).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(submitRequest)).toHaveBeenLastCalledWith("REQ-0007");
+  });
+
   // Тип исполнителя шага — «Группа»: список групп из settings, состав из AD
   // (счётчик + раскрытый список), в теле создания owner_group + by_group.
   it("тип исполнителя «Группа»: список групп, состав и owner_group в теле", async () => {

@@ -105,6 +105,10 @@ export function CreateForm(props: CreateFormProps) {
   const [blocks, setBlocks] = useState<RouteBlock[]>([]);
   // Счётчик идентификаторов блоков (index нестабилен — сдвигается при удалении).
   const blockSeq = useRef(0);
+  // Черновик, созданный неудачной попыткой «Отправить на согласование»:
+  // {id, signature данных}. Повторная отправка переиспользует его только при
+  // неизменных данных; при правках создаётся новый черновик (без потери правок).
+  const pendingDraft = useRef<{ id: string; signature: string } | null>(null);
   // id блока, для которого открыта панель выбора исполнителя (null — закрыта).
   const [adPanelBlock, setAdPanelBlock] = useState<string | null>(null);
   const [adQuery, setAdQuery] = useState<string>("");
@@ -433,14 +437,15 @@ export function CreateForm(props: CreateFormProps) {
 
   // Создание заявки: POST /api/requests; при submit=true — сразу POST /{id}/submit
   // («Отправить на согласование»). При успехе — статус и сброс формы; при
-  // ошибке (в т.ч. submit) — текст ошибки, окно не закрывается.
+  // ошибке (в т.ч. submit) — текст ошибки, окно не закрывается, а созданный
+  // черновик запоминается: повторная отправка шлёт тот же id, без дубля.
   async function handleCreate(submit: boolean): Promise<void> {
     if (busy) return;
     setCreateError("");
     setCreated("");
     setBusy(true);
     try {
-      const result = await createRequest({
+      const payload = {
         enterprise,
         tab_num: tabNum,
         department,
@@ -455,9 +460,24 @@ export function CreateForm(props: CreateFormProps) {
               : { sam: s.sam },
           ),
         })),
-      });
-      if (submit) await submitRequest(result.id);
-      setCreated(`Заявка ${result.id} создана`);
+      };
+      // Повтор «Отправить» после сбоя submit переиспользует тот же черновик,
+      // ТОЛЬКО если данные формы не изменились. При правках создаём новый
+      // черновик: иначе изменения не применились бы и молча потерялись.
+      const signature = JSON.stringify(payload);
+      let id =
+        submit && pendingDraft.current?.signature === signature
+          ? pendingDraft.current.id
+          : null;
+      if (id === null) {
+        const result = await createRequest(payload);
+        id = result.id;
+        // Запоминаем черновик только для отправки — повтор сбоя переиспользует.
+        pendingDraft.current = submit ? { id, signature } : null;
+      }
+      if (submit) await submitRequest(id);
+      pendingDraft.current = null;
+      setCreated(`Заявка ${id} создана`);
       setEnterprise("");
       setTabNum("");
       setFio("");

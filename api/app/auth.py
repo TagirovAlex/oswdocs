@@ -301,10 +301,26 @@ class LdapAuthService:
         self._sessions.delete(token)
 
     def _has_allowed_group(self, ad_user: AdUser) -> bool:
-        """Есть ли хоть одна разрешенная группа (явные + админы + ОК + префикс шагов)."""
-        return any(
-            self._settings.is_group_allowed(group_cn(dn)) for dn in ad_user.member_of
-        )
+        """Есть ли хоть одна разрешённая группа: env + список allowed_ad_groups
+        из настроек БД + префикс групп владельцев шагов. Набор считаем один раз
+        (одно чтение настроек), БД недоступна — фолбэк на env (вход не валим)."""
+        from .settings_routes import DbSettingsStore, resolve_allowed_groups
+
+        store = None
+        try:
+            store = DbSettingsStore(self._settings.DATABASE_URL)
+        except Exception:
+            store = None
+        allowed = resolve_allowed_groups(self._settings, store)
+        prefix = self._settings.STEP_GROUP_PREFIX
+
+        def _ok(name: str) -> bool:
+            name = (name or "").strip()
+            if not name:
+                return False
+            return name in allowed or (bool(prefix) and name.startswith(prefix))
+
+        return any(_ok(group_cn(dn)) for dn in ad_user.member_of)
 
     def _session_ttl_seconds(self) -> int:
         """TTL новой сессии: из settings БД (session_ttl_minutes, правит админ),

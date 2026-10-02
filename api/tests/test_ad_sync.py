@@ -449,6 +449,17 @@ def test_ad_group_members_group_not_allowed_403(client, admin_headers, sync_mock
     assert response.status_code == 403
 
 
+def test_ad_group_members_group_from_settings_db_200(client, admin_headers, sync_mocks):
+    """Группа только из настроек БД (нет в env, без префикса) — доступна (#9)."""
+    entries = _ad_entries()
+    groups = {"SED_DB_ONLY": [_dn_of("t.ivan", entries)]}
+    sync_mocks["settings_store"]._data["allowed_ad_groups"] = json.dumps(["SED_DB_ONLY"])
+    app.dependency_overrides[get_ad_reader] = lambda: _group_reader(groups, entries)
+    response = client.get("/ad/groups/SED_DB_ONLY/members", headers=admin_headers)
+    assert response.status_code == 200
+    assert [i["sam"] for i in response.json()["items"]] == ["t.ivan"]
+
+
 def test_ad_group_members_empty_group_200_empty_items(client, admin_headers, sync_mocks):
     entries = _ad_entries()
     app.dependency_overrides[get_ad_reader] = lambda: _group_reader(

@@ -195,8 +195,7 @@ export function SedLayout(props: SedLayoutProps) {
         СЭД — Увольнение (скелет) · роль: {ROLE_LABELS[role]}
         <button
           type="button"
-          className="sed-btn sed-btn--ghost"
-          style={{ marginLeft: 8, borderColor: "#fff", color: "#fff" }}
+          className="sed-btn sed-btn--ghost sed-btn--on-surface"
           onClick={() => setTheme(theme === "light" ? "dark" : "light")}
           title="Задел тёмной темы"
         >
@@ -204,8 +203,7 @@ export function SedLayout(props: SedLayoutProps) {
         </button>
         <button
           type="button"
-          className="sed-btn sed-btn--ghost"
-          style={{ marginLeft: 8, borderColor: "#fff", color: "#fff" }}
+          className="sed-btn sed-btn--ghost sed-btn--on-surface"
           onClick={onLogout}
           title="Выход из системы"
         >
@@ -228,7 +226,7 @@ export function SedLayout(props: SedLayoutProps) {
       </nav>
 
       <div className="sed-body">
-        {/* Дерево папок со счётчиками. */}
+        {/* Список папок со счётчиками (плоский; depth — задел под дерево). */}
         <aside className="sed-folders" aria-label="Папки заявок">
           {folders.length === 0 && <div className="sed-note">Папок нет (гость)</div>}
           {folders.map((item) => (
@@ -236,10 +234,11 @@ export function SedLayout(props: SedLayoutProps) {
               key={item.id}
               type="button"
               className={folder === item.id ? "sed-folder sed-folder--active" : "sed-folder"}
+              style={{ paddingLeft: 10 + (item.depth ?? 0) * 14 }}
               onClick={() => setFolder(item.id)}
             >
               <span>{item.title}</span>
-              <span className="sed-folder__count">{item.count}</span>
+              <span className="sed-folder__count">({item.count})</span>
             </button>
           ))}
         </aside>
@@ -250,21 +249,8 @@ export function SedLayout(props: SedLayoutProps) {
           {tab === "Настройки" && <AdminSettings role={role} />}
           {tab === "Заявки" && (
           <>
-          <div className="sed-toolbar" aria-label="Панель действий">
-            <button type="button" className="sed-btn" onClick={() => openPopup(createUrl())}>
-              Создать заявку
-            </button>
-            <button
-              type="button"
-              className="sed-btn sed-btn--ghost"
-              onClick={() => setFilters(EMPTY_FILTERS)}
-            >
-              Сбросить фильтры
-            </button>
-          </div>
-
-          {/* Фильтры таблицы (предприятия — из API). */}
-          <div className="sed-filters" aria-label="Фильтры">
+          {/* Фильтры одним блоком во всю ширину правой колонки, выше тулбара. */}
+          <div className="sed-filterbar" aria-label="Фильтры">
             <input
               aria-label="Поиск"
               placeholder="Поиск по ФИО/логину"
@@ -298,6 +284,19 @@ export function SedLayout(props: SedLayoutProps) {
               <option value="Отклонено">Отклонено</option>
               <option value="Отозвано">Отозвано</option>
             </select>
+            <button
+              type="button"
+              className="sed-btn sed-btn--ghost"
+              onClick={() => setFilters(EMPTY_FILTERS)}
+            >
+              Сбросить фильтры
+            </button>
+          </div>
+
+          <div className="sed-toolbar" aria-label="Панель действий">
+            <button type="button" className="sed-btn" onClick={() => openPopup(createUrl())}>
+              Создать заявку
+            </button>
           </div>
 
           {error && <div role="alert">Ошибка: {error}</div>}

@@ -13,11 +13,12 @@ export interface Enterprise {
 // Идентификатор папки дерева (контракт GET /api/folders).
 export type FolderId = "agreement" | "revision" | "done" | "draft" | "mine";
 
-// Папка дерева со счётчиком.
+// Папка дерева со счётчиком. depth — уровень вложенности (задел под дерево).
 export interface Folder {
   id: FolderId;
   title: string;
   count: number;
+  depth?: number;
 }
 
 // Шаг маршрута (RequestOut.steps).

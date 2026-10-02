@@ -24,6 +24,7 @@ from app.main import app  # noqa: E402
 from app.mailer import EVENT_ASSIGNED, FileMailQueue  # noqa: E402
 from app.requests import (  # noqa: E402
     IN_APPROVAL,
+    STEP_APPROVED,
     _enterprise_names_map,
     _notify_assigned,
     _public_view,
@@ -372,6 +373,102 @@ def test_hr_admin_can_patch_steps(client, hr_admin, test_settings_override, rout
         headers=hr_admin,
     )
     assert response.status_code == 200
+
+
+def test_patch_block_route_steps(client, hr, test_settings_override, route_override):
+    """Правка блочного маршрута: с blocks — 200, ожидающие заменяются, order
+    продолжается после существующих блоков (кодировка блоков цела)."""
+    rid = _create(
+        client,
+        hr,
+        blocks=[
+            {"mode": "sequential", "steps": [{"owner_group": "SED_STEP_BUH"}]},
+            {"mode": "sequential", "steps": [{"owner_group": "SED_STEP_BUH"}]},
+        ],
+    ).json()["id"]
+    response = client.patch(
+        f"/requests/{rid}/steps",
+        json={
+            "blocks": [{"mode": "parallel", "steps": [{"owner_group": "SED_STEP_BUH"}]}],
+            "reason": "Вымышленная правка блоков",
+        },
+        headers=hr,
+    )
+    assert response.status_code == 200
+    steps = response.json()["steps"]
+    assert len(steps) == 1
+    # Все прежние шаги были ожидающими (отброшены) — нумерация с блока 0,
+    # параллельный шаг блока 0 = 100 + 1.
+    assert steps[0]["order"] == 101
+    assert any(e.action == "steps.patch" for e in audit_log.all())
+
+
+def test_patch_block_route_keeps_closed_step_order(
+    client, hr, requests_store, test_settings_override, route_override
+):
+    """Правка блоками при закрытом шаге: order не дублируется (регресс B1).
+
+    Одиночный последовательный блок 0 кодируется как order 1..N — так же, как
+    плоский список. Если закрытый шаг (order=1) сохранён, новый блок обязан
+    получить order >= 1001, иначе decide_step будет попадать в закрытый шаг."""
+    rid = _create(
+        client,
+        hr,
+        blocks=[{"mode": "sequential", "steps": [{"owner_group": "SED_STEP_BUH"}]}],
+    ).json()["id"]
+    requests_store.get(rid).steps[0].status = STEP_APPROVED
+    response = client.patch(
+        f"/requests/{rid}/steps",
+        json={
+            "blocks": [
+                {"mode": "sequential", "steps": [{"owner_group": "SED_STEP_BUH"}]}
+            ]
+        },
+        headers=hr,
+    )
+    assert response.status_code == 200
+    orders = [s["order"] for s in response.json()["steps"]]
+    assert len(orders) == len(set(orders))  # нет дублей order
+    assert min(orders) == 1  # закрытый шаг сохранён в блоке 0
+    assert max(orders) >= 1001  # новый блок — после закрытого
+
+
+def test_patch_block_route_flat_steps_409(client, hr, test_settings_override, route_override):
+    """Блочную заявку нельзя переписать плоским steps — 409 (нужен blocks)."""
+    rid = _create(
+        client,
+        hr,
+        blocks=[{"mode": "parallel", "steps": [{"owner_group": "SED_STEP_BUH"}]}],
+    ).json()["id"]
+    response = client.patch(
+        f"/requests/{rid}/steps",
+        json={"steps": [{"owner_group": "SED_STEP_BUH"}]},
+        headers=hr,
+    )
+    assert response.status_code == 409
+
+
+def test_patch_flat_route_with_blocks_upgrades(client, hr, test_settings_override, route_override):
+    """Плоскую заявку можно перевести на блочный маршрут (blocks) — 200."""
+    rid = _create(client, hr).json()["id"]
+    response = client.patch(
+        f"/requests/{rid}/steps",
+        json={"blocks": [{"mode": "sequential", "steps": [{"owner_group": "SED_STEP_BUH"}]}]},
+        headers=hr,
+    )
+    assert response.status_code == 200
+    assert len(response.json()["steps"]) == 1
+
+
+def test_patch_empty_blocks_422(client, hr, test_settings_override, route_override):
+    """Пустой блочный payload — 422, как и при создании."""
+    rid = _create(client, hr).json()["id"]
+    response = client.patch(
+        f"/requests/{rid}/steps",
+        json={"blocks": [{"mode": "sequential", "steps": []}]},
+        headers=hr,
+    )
+    assert response.status_code == 422
 
 
 def test_reject_without_comment_422(client, hr, buh_owner, test_settings_override, route_override):

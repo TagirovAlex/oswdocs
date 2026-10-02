@@ -142,6 +142,50 @@ def read_setting_value(store: DbSettingsStore, key: str) -> object:
     return _from_stored(store.get(key))
 
 
+def resolve_allowed_groups(
+    settings: Settings, store: DbSettingsStore | None = None
+) -> set[str]:
+    """Разрешённые AD-группы: объединение env-набора (settings.allowed_groups)
+    и списка allowed_ad_groups из настроек БД (его правит админ).
+
+    Источник прикладного списка — настройки; env остаётся фолбэком. БД
+    недоступна — только env: вход/доступ не валим (как session_ttl в auth).
+    """
+    allowed = set(settings.allowed_groups)
+    if store is None:
+        return allowed
+    try:
+        raw = read_setting_value(store, "allowed_ad_groups")
+    except SettingsUnavailable:
+        return allowed
+    if isinstance(raw, list):
+        allowed |= {
+            item.strip()
+            for item in raw
+            if isinstance(item, str) and item.strip()
+        }
+    return allowed
+
+
+def is_group_allowed_with_settings(
+    settings: Settings, store: DbSettingsStore | None, group: str
+) -> bool:
+    """Группа разрешена: в объединённом списке (env + settings БД) либо по
+    префиксу групп владельцев шагов STEP_GROUP_PREFIX.
+
+    Один вызов — одно чтение настроек; в цикле (auth) считай набор заранее
+    через resolve_allowed_groups.
+    """
+    name = (group or "").strip()
+    if not name:
+        return False
+    if name in resolve_allowed_groups(settings, store):
+        return True
+    return bool(settings.STEP_GROUP_PREFIX) and name.startswith(
+        settings.STEP_GROUP_PREFIX
+    )
+
+
 class DbSettingsStore:
     """Хранилище прикладных настроек в Postgres (таблица settings: key/value).
 

@@ -1,6 +1,7 @@
-# Тесты A2 auth-сервиса: POST /auth/login (мок AuthService in-memory),
-# GET /auth/me (обрезка владельца). Живых LDAP/Redis нет: сервис подменяется
-# через dependency_overrides, /auth/me в мок-пути — заголовки X-Mock-* из conftest.
+# Тесты A2 auth-сервиса: POST /auth/login (мок AuthService in-memory + мок
+# лимитера входа), GET /auth/me (обрезка владельца). Живых LDAP/Redis нет:
+# сервис и лимитер подменяются через dependency_overrides, /auth/me в мок-пути —
+# заголовки X-Mock-* из conftest. Логику самого лимитера проверяет test_w5a_rate_limit.py.
 # ПДн вымышленные. Тестовые группы повторяют conftest (продовые — через env/БД).
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app.ad_reader import AdUnavailable  # noqa: E402
-from app.auth import AuthFailed, AuthResult, get_auth_service  # noqa: E402
+from app.auth import AuthFailed, AuthResult, get_auth_service, get_login_limiter  # noqa: E402
 from app.config import Settings, get_settings  # noqa: E402
 from app.deps import CurrentUser  # noqa: E402
 from app.main import app  # noqa: E402
@@ -62,6 +63,23 @@ class InMemoryAuthService:
         self.logged_out.append(token)
 
 
+class AlwaysAllowLoginRateLimiter:
+    """Мок LoginRateLimiter: всегда пропускает вход, без Redis и сетевых таймаутов.
+
+    Проверку порога лимита и 429 делает test_w5a_rate_limit.py на своем фейке;
+    здесь нужен лишь заход без задержки на connect к живому Redis.
+    """
+
+    def __init__(self):
+        self.reset_calls = []
+
+    def allowed(self, ip, login):
+        return True
+
+    def reset(self, ip, login):
+        self.reset_calls.append((ip, login))
+
+
 # --- Вымышленные доменные учетки ---
 HR_USER = {
     "sam": "ok.ivnova",
@@ -101,9 +119,12 @@ def test_settings_override():
 def mock_auth_service():
     """Мок AuthService вместо LdapAuthService (никакой сети/Redis)."""
     service = InMemoryAuthService(users=[HR_USER, NOGROUP_USER])
+    limiter = AlwaysAllowLoginRateLimiter()
     app.dependency_overrides[get_auth_service] = lambda: service
+    app.dependency_overrides[get_login_limiter] = lambda: limiter
     yield service
     app.dependency_overrides.pop(get_auth_service, None)
+    app.dependency_overrides.pop(get_login_limiter, None)
 
 
 # --- POST /auth/login ---

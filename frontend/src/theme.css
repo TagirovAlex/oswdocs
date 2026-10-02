@@ -13,7 +13,21 @@
   --sed-primary-soft: #dbe8fb;
   --sed-accent: #2f80ed;
   --sed-danger: #b3261e;
-  --sed-radius: 8px;
+  --sed-radius: 6px;
+  /* Панель (синоним surface-2): зебра таблицы, вложенные блоки. */
+  --sed-panel: #eaf1fa;
+  /* Шапка модулей: синий градиент макета (в тёмной теме градиенты запрещены). */
+  --sed-head-grad: linear-gradient(180deg, #3a78c2, #1a56ac);
+  /* Заголовок таблицы: тёмный градиент макета. */
+  --sed-table-head: linear-gradient(180deg, #4a4a4a, #222);
+  --sed-table-head-fallback: #2b2b2b;
+  --sed-table-head-text: #ffffff;
+  /* Контрастный к поверхности верхней полосы: подписи её кнопок. */
+  --sed-on-primary: #1a56ac;
+  /* Подписи вкладок: на синем градиенте — светлые. Активная — затемняющая
+     подложка, иначе белый текст на осветлённом синем нечитаем. */
+  --sed-tab-text: #ffffff;
+  --sed-tab-active-bg: rgba(0, 0, 0, 0.18);
 }
 
 /* Задел под тёмную тему: те же имена переменных, другие значения. */
@@ -29,6 +43,15 @@
   --sed-primary-soft: #24466f;
   --sed-accent: #7aa9ee;
   --sed-danger: #f2a5a0;
+  /* Тёмная тема: те же места, что плоскости (градиенты запрещены). */
+  --sed-panel: #1e3350;
+  --sed-head-grad: none;
+  --sed-table-head: none;
+  --sed-table-head-fallback: #1e3350;
+  --sed-table-head-text: #9db1cc;
+  --sed-on-primary: #e3ecf8;
+  --sed-tab-text: #9db1cc;
+  --sed-tab-active-bg: #24466f;
 }
 
 * {
@@ -40,51 +63,69 @@ body {
   background: var(--sed-bg);
   color: var(--sed-text);
   font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
-  font-size: 14px;
+  font-size: 13px;
 }
 
-/* Сетка скелета: шапка, вкладки, боковое дерево, контент (тулбар+фильтры+таблица). */
+a {
+  color: var(--sed-accent);
+}
+
+/* Сетка скелета: шапка, вкладки, боковое дерево, контент (фильтры+тулбар+таблица). */
 .sed-shell {
   min-height: 100vh;
   display: flex;
   flex-direction: column;
 }
 
+/* Верхняя полоса — как .top макета: поверхность и нижняя граница (не заливка primary). */
 .sed-header {
-  background: var(--sed-primary);
-  color: #fff;
-  padding: 10px 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--sed-surface);
+  color: var(--sed-text);
+  border-bottom: 1px solid var(--sed-border);
+  padding: 6px 12px;
   font-weight: 600;
 }
 
+/* Навигация-модули: светлая тема — синий градиент, тёмная — плоская панель. */
 .sed-tabs {
   display: flex;
   gap: 4px;
-  background: var(--sed-surface);
+  background: var(--sed-head-grad);
+  background-color: var(--sed-primary);
   border-bottom: 1px solid var(--sed-border);
-  padding: 0 16px;
+  padding: 6px 10px;
+  overflow-x: auto;
+}
+
+[data-theme="dark"] .sed-tabs {
+  background: none;
+  background-color: var(--sed-surface-2);
+  border: 1px solid var(--sed-border);
 }
 
 .sed-tab {
   border: none;
   background: transparent;
-  color: var(--sed-text-muted);
-  padding: 10px 14px;
+  color: var(--sed-tab-text);
+  padding: 8px 10px;
   cursor: pointer;
-  border-bottom: 2px solid transparent;
+  border-radius: 6px;
+  white-space: nowrap;
 }
 
 .sed-tab--active {
-  color: var(--sed-primary);
-  border-bottom-color: var(--sed-primary);
-  font-weight: 600;
+  background: var(--sed-tab-active-bg);
+  font-weight: 700;
 }
 
 .sed-body {
   display: grid;
-  grid-template-columns: 260px 1fr;
-  gap: 12px;
-  padding: 12px 16px;
+  grid-template-columns: 250px 1fr;
+  gap: 10px;
+  padding: 0 12px 12px;
   flex: 1;
 }
 
@@ -98,7 +139,7 @@ body {
 
 .sed-folder {
   display: flex;
-  justify-content: space-between;
+  align-items: center;
   width: 100%;
   border: none;
   background: transparent;
@@ -109,15 +150,26 @@ body {
   text-align: left;
 }
 
+/* Иконка папки — только CSS, вне текста названия (текст остаётся для поиска/тестов). */
+.sed-folder::before {
+  content: "";
+  display: inline-block;
+  width: 12px;
+  height: 9px;
+  margin-right: 6px;
+  border: 1px solid var(--sed-border);
+  border-radius: 2px;
+  background: var(--sed-primary-soft);
+}
+
 .sed-folder--active {
   background: var(--sed-primary-soft);
 }
 
 .sed-folder__count {
-  background: var(--sed-surface-2);
-  border: 1px solid var(--sed-border);
-  border-radius: 999px;
-  padding: 0 8px;
+  margin-left: auto;
+  padding-left: 8px;
+  font-size: 12px;
   color: var(--sed-text-muted);
 }
 
@@ -131,15 +183,15 @@ body {
 
 .sed-toolbar {
   display: flex;
-  gap: 8px;
-  margin-bottom: 12px;
+  gap: 6px;
+  margin-bottom: 6px;
 }
 
 .sed-btn {
   border: 1px solid var(--sed-primary);
   background: var(--sed-primary);
   color: #fff;
-  border-radius: 6px;
+  border-radius: 4px;
   padding: 6px 12px;
   cursor: pointer;
 }
@@ -149,14 +201,22 @@ body {
   color: var(--sed-primary);
 }
 
+/* Кнопки верхней полосы: обводка и подпись контрастом к поверхности. */
+.sed-btn--on-surface {
+  border-color: var(--sed-on-primary);
+  color: var(--sed-on-primary);
+}
+
 .sed-btn:hover {
   background: var(--sed-primary-hover);
 }
 
-.sed-btn--ghost:hover {
+.sed-btn--ghost:hover,
+.sed-btn--on-surface:hover {
   background: var(--sed-primary-soft);
 }
 
+/* Фильтры справочника и списка заявок (сами блоки — вне этого модуля). */
 .sed-filters {
   display: flex;
   gap: 8px;
@@ -173,6 +233,37 @@ body {
   color: var(--sed-text);
 }
 
+/* Фильтры — один блок на всю ширину правой колонки, в одну строку (как .filterbar макета). */
+.sed-filterbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: nowrap;
+  background: var(--sed-surface);
+  border: 1px solid var(--sed-border);
+  border-radius: var(--sed-radius);
+  padding: 8px 10px;
+  margin-bottom: 8px;
+}
+
+.sed-filterbar input,
+.sed-filterbar select {
+  border: 1px solid var(--sed-border);
+  border-radius: 4px;
+  padding: 5px 8px;
+  background: var(--sed-surface);
+  color: var(--sed-text);
+  min-width: 0;
+}
+
+.sed-filterbar input {
+  flex: 1;
+}
+
+.sed-filterbar select {
+  flex: 0 1 180px;
+}
+
 .sed-table {
   width: 100%;
   border-collapse: collapse;
@@ -187,9 +278,14 @@ body {
 }
 
 .sed-table th {
-  color: var(--sed-text-muted);
+  background: var(--sed-table-head);
+  background-color: var(--sed-table-head-fallback);
+  color: var(--sed-table-head-text);
   font-weight: 600;
-  background: var(--sed-surface-2);
+}
+
+.sed-table tbody tr:nth-child(even) td {
+  background: var(--sed-panel);
 }
 
 .sed-note {

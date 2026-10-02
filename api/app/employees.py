@@ -34,6 +34,7 @@ from .resolver import (
 from .settings_routes import (
     DbSettingsStore,
     get_settings_store,
+    is_group_allowed_with_settings,
     read_setting_value,
 )
 
@@ -397,6 +398,7 @@ def ad_group_members(
     group: str,
     user: CurrentUser = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
+    store: DbSettingsStore | None = Depends(get_settings_store),
     reader: AdReader | None = Depends(get_ad_reader),
 ) -> dict:
     """Активные участники группы AD для конструктора маршрута: только ОК,
@@ -414,7 +416,7 @@ def ad_group_members(
             detail="Состав группы AD доступен ОК и админу",
         )
     name = (group or "").strip()
-    if not settings.is_group_allowed(name):
+    if not is_group_allowed_with_settings(settings, store, name):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Группа не разрешена настройками (allowed_ad_groups)",

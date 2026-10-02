@@ -187,7 +187,10 @@ class DecisionIn(BaseModel):
 class StepsReplaceIn(BaseModel):
     """Правка маршрута по ходу (только разрешенная группа, все — в audit_log)."""
 
-    steps: list[StepSpec]
+    steps: list[StepSpec] = Field(default_factory=list)
+    blocks: list[RouteBlockSpec] | None = Field(
+        default=None, description="Правка блочного маршрута (приоритетнее steps)"
+    )
     reason: str | None = Field(default=None, description="Причина правки (без ПДн)")
     manager: str | None = Field(
         default=None, description="Замена руководителя для шагов ad_direct_manager"
@@ -1106,22 +1109,49 @@ def replace_steps(
         request = _get_request_or_404(store, request_id)
         if request.status in (DONE, REJECTED, REVOKED):
             raise HTTPException(status_code=409, detail="Закрытая заявка не правится")
-        if any(s.order >= BLOCK_ORDER_BASE for s in request.steps):
-            # Плоская перенумерация шагов разрушила бы блоки (последовательный/
-            # параллельный). Правка блочного маршрута — отдельная задача.
+        # Блочный маршрут: блок >= 1 (order >= 1000) или параллельный блок 0
+        # (order 101..199). Одиночный последовательный блок неотличим от плоского
+        # списка, поэтому его правка плоскими шагами структуру не разрушает.
+        if body.blocks is None and any(s.order > PARALLEL_MARK for s in request.steps):
+            # Блочный маршрут нельзя переписать плоским списком: перенумерация
+            # разрушила бы блоки. Нужен payload blocks (см. ветку ниже).
             raise HTTPException(
                 status_code=409,
-                detail="Правка маршрута с блоками не поддерживается (создайте заново)",
+                detail="Правка блочного маршрута — передайте blocks (плоские steps не подходят)",
             )
-        if not body.steps:
-            raise HTTPException(status_code=422, detail="Список шагов не может быть пустым")
         now = _utcnow()
         # Закрытые шаги сохраняем, ожидающие — заменяем новым набором.
         kept = [s for s in request.steps if s.status != STEP_PENDING]
-        fresh = _build_steps(body.steps, route.approval_ttl_days, body.manager, now)
-        base = len(kept)
-        for index, step in enumerate(fresh):
-            step.order = base + index + 1
+        if body.blocks is not None:
+            # Блочная правка: новые блоки продолжают нумерацию после уже
+            # существующих, чтобы order не столкнулся с сохранёнными шагами.
+            for block in body.blocks:
+                if len(block.steps) > 99:
+                    raise HTTPException(
+                        status_code=422,
+                        detail="Блок маршрута больше 99 шагов — разбейте на несколько блоков",
+                    )
+            if not body.blocks or all(not b.steps for b in body.blocks):
+                raise HTTPException(
+                    status_code=422, detail="Маршрут пуст: добавьте блок с исполнителями"
+                )
+            # Нумерацию продолжаем после РЕАЛЬНО сохранённых (закрытых) шагов:
+            # плоский order 1..N неотличим от блока 0, и без этого новый order
+            # совпал бы с закрытым, а decide_step всегда попадал бы в закрытый.
+            existing = [s.order // BLOCK_ORDER_BASE for s in kept]
+            fresh = _build_steps(
+                [], route.approval_ttl_days, body.manager, now, blocks=body.blocks
+            )
+            shift = (max(existing) + 1 if existing else 0) * BLOCK_ORDER_BASE
+            for step in fresh:
+                step.order += shift
+        else:
+            if not body.steps:
+                raise HTTPException(status_code=422, detail="Список шагов не может быть пустым")
+            fresh = _build_steps(body.steps, route.approval_ttl_days, body.manager, now)
+            base = len(kept)
+            for index, step in enumerate(fresh):
+                step.order = base + index + 1
         request.steps = sorted(kept + fresh, key=lambda s: s.order)
         request.route_origin = "custom"
         if request.status == REWORK:
