@@ -38,6 +38,9 @@ vi.mock("./requests-client", async (importOriginal) => {
 });
 
 // Заявка из GET /api/requests (RequestOut; для владельца fio=null).
+// Шаг по умолчанию — групповой, can_act=false (кнопок согласования нет).
+// owner_name бэкенд резолвит из assignee, поэтому у группового шага его нет —
+// подпись шага строится по названию группы.
 function requestWith(
   fio: string | null,
   status: string,
@@ -59,7 +62,6 @@ function requestWith(
         order: 1,
         owner_group: "SED_STEP_BUH",
         resolver: "by_group",
-        owner_name: "Сидорова Анна Сергеевна",
         can_act: false,
         status: "ожидает",
         expires_at: "2026-10-05T10:00:00+00:00",

@@ -345,9 +345,9 @@ export function CreateForm(props: CreateFormProps) {
     if (adPanelBlock === blockId) closeAdPanel();
   }
 
-  function setBlockMode(index: number, mode: "sequential" | "parallel"): void {
+  function setBlockMode(blockId: string, mode: "sequential" | "parallel"): void {
     markTouched();
-    setBlocks((prev) => prev.map((b, i) => (i === index ? { ...b, mode } : b)));
+    setBlocks((prev) => prev.map((b) => (b.id === blockId ? { ...b, mode } : b)));
   }
 
   // Тип исполнителя блока: сотрудник (поиск AD) либо группа (список из settings).
@@ -357,11 +357,11 @@ export function CreateForm(props: CreateFormProps) {
     if (adPanelBlock === blockId) closeAdPanel();
   }
 
-  function removeStep(blockIndex: number, stepIndex: number): void {
+  function removeStep(blockId: string, stepIndex: number): void {
     markTouched();
     setBlocks((prev) =>
-      prev.map((b, i) =>
-        i === blockIndex ? { ...b, steps: b.steps.filter((_, s) => s !== stepIndex) } : b,
+      prev.map((b) =>
+        b.id === blockId ? { ...b, steps: b.steps.filter((_, s) => s !== stepIndex) } : b,
       ),
     );
   }
@@ -469,7 +469,11 @@ export function CreateForm(props: CreateFormProps) {
       setManualMode(false);
       setManualNote("");
       setBlocks([]);
-      blockSeq.current = 0;
+      // blockSeq НЕ обнуляем: счётчик монотонно растёт, поэтому id блоков
+      // уникальны в пределах жизненного цикла формы. Иначе первый блок новой
+      // формы получил бы тот же blk-N, счётчик groupSeq (обнуляемый ниже) сбился
+      // бы в ту же единицу, и устаревший in-flight ответ getAdGroupMembers по
+      // прежнему блоку прошёл бы guard и записал состав новому блоку.
       groupSeq.current = {};
       setGroupPick({});
       setGroupMembers({});
@@ -656,7 +660,7 @@ export function CreateForm(props: CreateFormProps) {
                 <select
                   aria-label={`Режим блока ${bi + 1}`}
                   value={block.mode}
-                  onChange={(e) => setBlockMode(bi, e.target.value as "sequential" | "parallel")}
+                  onChange={(e) => setBlockMode(block.id, e.target.value as "sequential" | "parallel")}
                 >
                   <option value="sequential">Последовательный</option>
                   <option value="parallel">Параллельный</option>
@@ -681,7 +685,7 @@ export function CreateForm(props: CreateFormProps) {
                     <button
                       type="button"
                       aria-label={`Удалить исполнителя ${s.display_name}`}
-                      onClick={() => removeStep(bi, si)}
+                      onClick={() => removeStep(block.id, si)}
                       style={{ marginLeft: 8 }}
                     >
                       Удалить

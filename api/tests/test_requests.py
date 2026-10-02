@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
 import sys
 from datetime import timedelta
@@ -20,13 +21,17 @@ from app.config import Settings, get_settings  # noqa: E402
 from app.deps import CurrentUser  # noqa: E402
 from app.employees import get_ad_reader  # noqa: E402
 from app.main import app  # noqa: E402
+from app.mailer import EVENT_ASSIGNED, FileMailQueue  # noqa: E402
 from app.requests import (  # noqa: E402
+    IN_APPROVAL,
     _enterprise_names_map,
+    _notify_assigned,
     _public_view,
     _utcnow,
     get_memory_requests_store,
     get_route_settings,
 )
+from app.requests import _Request, _Step  # noqa: E402
 from app.requests import RouteSettings, RouteStepTemplate, RouteTemplate  # noqa: E402
 from app.requests_store import get_requests_store  # noqa: E402
 from app.settings_routes import SettingsUnavailable, get_settings_store  # noqa: E402
@@ -280,6 +285,58 @@ def test_block_step_without_executor_422(client, hr, test_settings_override, rou
     personal = _create(client, hr, blocks=[{"mode": "parallel", "steps": [{"sam": BUH_SAM}]}])
     assert personal.status_code == 201
     step = personal.json()["steps"][0]
+    assert step["owner_group"] == BUH_SAM
+    assert step["resolver"] == "by_user"
+    assert step["assignee"] == BUH_SAM
+
+
+def test_step_assignee_is_valid_executor(client, hr, test_settings_override, route_override):
+    """assignee (замена руководителя) — валидный исполнитель наравне с sam.
+
+    Раньше такой шаг получал 422 с текстом про sam при уже указанном исполнителе.
+    owner_group шага = assignee (иначе обязательный _Step.owner_group пустеет),
+    резолвер ad_direct_manager не ломается."""
+    personal = _create(
+        client,
+        hr,
+        blocks=[
+            {
+                "mode": "sequential",
+                "steps": [{"assignee": BUH_SAM, "resolver": "ad_direct_manager"}],
+            }
+        ],
+    )
+    assert personal.status_code == 201
+    step = personal.json()["steps"][0]
+    assert step["owner_group"] == BUH_SAM
+    assert step["assignee"] == BUH_SAM
+    assert step["resolver"] == "ad_direct_manager"
+    # Плоский steps — тот же контракт.
+    flat = _create(
+        client,
+        hr,
+        position=FAKE_POSITION_OTHER,
+        steps=[{"assignee": BUH_SAM, "resolver": "ad_direct_manager"}],
+    )
+    assert flat.status_code == 201
+    assert flat.json()["steps"][0]["assignee"] == BUH_SAM
+    # Пустой assignee без группы — по-прежнему 422.
+    blank = _create(
+        client,
+        hr,
+        position=FAKE_POSITION_OTHER,
+        steps=[{"assignee": "  ", "resolver": "ad_direct_manager"}],
+    )
+    assert blank.status_code == 422
+
+
+def test_flat_step_sam_is_personal_executor(client, hr, test_settings_override, route_override):
+    """sam в плоском steps работает как в блоках: by_user, owner_group = sam.
+
+    Раньше owner_group оставался пустым и POST падал в 500 на _Step."""
+    response = _create(client, hr, position=FAKE_POSITION_OTHER, steps=[{"sam": BUH_SAM}])
+    assert response.status_code == 201
+    step = response.json()["steps"][0]
     assert step["owner_group"] == BUH_SAM
     assert step["resolver"] == "by_user"
     assert step["assignee"] == BUH_SAM
@@ -662,3 +719,66 @@ def test_enterprise_names_map_empty_when_settings_fails(monkeypatch, real_bounda
     assert _enterprise_names_map() == {}
     monkeypatch.setattr(settings_routes, "_db_store", _EnterpriseStore(None))
     assert _enterprise_names_map() == {}
+
+
+# --- Уведомление «назначена»: настройки письма читаются лениво (только при адресатах) ---
+
+class _CountingMailSettingsStore:
+    """Хранилище настроек, считающее прочитанные ключи (для проверки ленивости)."""
+
+    def __init__(self):
+        self.reads: list[str] = []
+
+    def get(self, key):
+        self.reads.append(key)
+        if key == "mail_templates":
+            return json.dumps(
+                [
+                    {
+                        "code": EVENT_ASSIGNED,
+                        "subject": "Заявка {{ request_id }} назначена",
+                        "body_html": "<html>{{ fio }} {{ url }}</html>",
+                    }
+                ]
+            )
+        if key == "smtp_from":
+            return json.dumps("sed@example.local")
+        return None
+
+
+def _request_for_notify(assignee: str | None = BUH_SAM) -> _Request:
+    """Заявка на согласовании с одним персональным шагом (адресат — из AD)."""
+    return _Request(
+        id="REQ-9001",
+        status=IN_APPROVAL,
+        enterprise=FAKE_ENTERPRISE,
+        fio="Вымышленный Сотрудник Полный",
+        tab_num="В-0001",
+        department=FAKE_SERVICE,
+        position=FAKE_POSITION_LINE,
+        created_by="ok.vymyshlennaya",
+        steps=[
+            _Step(
+                order=1,
+                owner_group=assignee or "SED_STEP_BUH",
+                assignee=assignee,
+                expires_at=_utcnow() + timedelta(days=1),
+            )
+        ],
+    )
+
+
+def test_notify_assigned_lazy_settings_read(tmp_path, ad_reader):
+    """Без адресатов mail_templates/smtp_from не читаются вовсе, с адресатами —
+    по одному чтению каждого ключа на заявку (регресс на лишний SELECT к настройкам)."""
+    queue = FileMailQueue(tmp_path / "mail_queue.json")
+    store = _CountingMailSettingsStore()
+    settings = Settings(APP_BASE_URL="https://sed.example.local")
+    # Ридера AD нет — адресатов нет, письмо не ставится и настройки не читаются.
+    _notify_assigned(_request_for_notify(), queue, store, None, settings)
+    assert store.reads == []
+    assert queue.pending_count() == 0
+    # С ридером AD — по одному чтению на заявку и письмо в очередь.
+    _notify_assigned(_request_for_notify(), queue, store, ad_reader, settings)
+    assert store.reads == ["mail_templates", "smtp_from"]
+    assert queue.pending_count() == 1

@@ -150,6 +150,26 @@ def test_build_steps_sam_overrides_manager():
     assert step.owner_group == "t.ivan"
 
 
+def test_build_steps_manager_wins_over_assignee():
+    # Подстановка manager (замена руководителя) важнее assignee шага, а группа-владелец
+    # шага сохраняется — иначе члены группы потеряли бы видимость заявки.
+    request = _build_steps(
+        [],
+        3,
+        "t.zam",
+        NOW,
+        blocks=[
+            RouteBlockSpec(
+                mode="sequential",
+                steps=[_spec("SED_STEP_BUH", assignee="t.ivan", resolver="ad_direct_manager")],
+            )
+        ],
+    )
+    step = request[0]
+    assert step.assignee == "t.zam"
+    assert step.owner_group == "SED_STEP_BUH"
+
+
 def test_build_steps_without_blocks_flat_orders():
     request = _build_steps(
         [_spec("A"), _spec("B"), _spec("C", resolver="ad_direct_manager")],

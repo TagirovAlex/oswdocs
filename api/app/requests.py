@@ -123,25 +123,26 @@ class StepSpec(BaseModel):
         default=None, description="Персональный исполнитель (замена руководителя)"
     )
     sam: str | None = Field(
-        default=None,
-        description="Исполнитель AD (по выбору ОК): резолвер by_user, owner_group = sam",
-    )
-    sam: str | None = Field(
         default=None, description="Исполнитель AD (по выбору ОК): резолвер by_user, owner_group = sam"
     )
 
     @model_validator(mode="after")
     def _check_executor(self) -> "StepSpec":
-        """Шаг обязан иметь исполнителя: sam (персональный) либо owner_group
-        (групповой, resolver=by_group).
+        """Шаг обязан иметь исполнителя: sam или assignee (персональный) либо
+        owner_group (групповой, resolver=by_group).
 
         Проверка в схеме, а не в _build_steps: без неё шаг без исполнителя доходил
         до _Step.owner_group (обязателен) и ронял POST /requests с 500 вместо 422.
-        Пустая группа считается отсутствующей — такой шаг некому отметить."""
-        if not (self.sam or (self.owner_group or "").strip()):
+        assignee — равнозначный персональный исполнитель (замена руководителя по
+        шагу). Пустые значения (пробелы) приравниваются к отсутствующим, поэтому
+        нормализуются в None — _build_steps работает с ними как с отсутствующими."""
+        self.owner_group = (self.owner_group or "").strip() or None
+        self.sam = (self.sam or "").strip() or None
+        self.assignee = (self.assignee or "").strip() or None
+        if not (self.sam or self.assignee or self.owner_group):
             raise ValueError(
                 "Шаг маршрута: укажите группу-владельца (owner_group)"
-                " или персонального исполнителя (sam)"
+                " или персонального исполнителя (sam/assignee)"
             )
         return self
 
@@ -349,8 +350,11 @@ def _build_steps(
     """Сборка шагов с expires_at = now + TTL (замена руководителя — в assignee).
 
     blocks — маршрут блоками (последовательный/параллельный); приоритетнее
-    плоского списка specs. spec.sam (исполнитель AD по выбору ОК) — резолвер
-    by_user, владелец группы = sam.
+    плоского списка specs. Персональный исполнитель шага — sam (исполнитель AD по
+    выбору ОК): резолвер by_user, владелец группы = sam. assignee (замена
+    руководителя) резолвер не меняет, а подстановка manager для ad_direct_manager
+    важнее assignee. owner_group шага обязателен в _Step: это sam, иначе группа
+    шага, иначе assignee (персональный шаг без группы).
     """
     steps: list[_Step] = []
     if blocks:
@@ -366,7 +370,7 @@ def _build_steps(
                 steps.append(
                     _Step(
                         order=_order_for(block_index, pos, block.mode == "parallel"),
-                        owner_group=spec.sam or spec.owner_group,
+                        owner_group=spec.sam or spec.owner_group or spec.assignee,
                         resolver=resolver,
                         assignee=assignee,
                         status=STEP_PENDING,
@@ -376,14 +380,21 @@ def _build_steps(
                 )
         return steps
     for index, spec in enumerate(specs):
+        # sam/assignee есть только у ручного шага (у RouteStepTemplate из шаблона
+        # маршрута таких полей нет) — поэтому getattr.
+        personal = getattr(spec, "sam", None)
+        spec_assignee = getattr(spec, "assignee", None)
         resolver = spec.resolver if spec.resolver in RESOLVERS else "by_group"
-        assignee = getattr(spec, "assignee", None)
-        if resolver == "ad_direct_manager" and manager:
+        assignee = spec_assignee
+        if personal:
+            resolver = "by_user"
+            assignee = personal
+        elif resolver == "ad_direct_manager" and manager:
             assignee = manager
         steps.append(
             _Step(
                 order=index + 1,
-                owner_group=spec.owner_group,
+                owner_group=personal or spec.owner_group or spec_assignee,
                 resolver=resolver,
                 assignee=assignee,
                 status=STEP_PENDING,
@@ -630,26 +641,33 @@ def _notify_assigned(
     пропускается: уведомление не должно валить подачу заявки.
     """
     try:
+        # Всем исполнителям активного блока (в параллельном — все шаги блока).
+        recipients = [
+            to
+            for step in _current_pending_steps(request)
+            for to in step_owner_mails(step, ad_reader)
+        ]
+        if not recipients:
+            return
         # Шаблон письма и адрес отправителя не зависят от шага — читаем один раз
-        # на заявку (иначе SELECT на каждый шаг активного блока).
+        # на заявку (иначе SELECT на каждый шаг активного блока); без адресатов
+        # настройки не читаем вовсе.
         templates = read_setting_value(settings_store, "mail_templates")
         smtp_from = read_setting_value(settings_store, "smtp_from")
-        # Всем исполнителям активного блока (в параллельном — все шаги блока).
-        for step in _current_pending_steps(request):
-            for to in step_owner_mails(step, ad_reader):
-                enqueue_event(
-                    queue,
-                    to,
-                    request.id,
-                    EVENT_ASSIGNED,
-                    templates or [],
-                    {
-                        "fio": request.fio,
-                        "request_id": request.id,
-                        "url": request_url(settings.APP_BASE_URL, request.id),
-                    },
-                    subject_prefix=resolve_smtp_from(smtp_from, settings.SMTP_FROM),
-                )
+        for to in recipients:
+            enqueue_event(
+                queue,
+                to,
+                request.id,
+                EVENT_ASSIGNED,
+                templates or [],
+                {
+                    "fio": request.fio,
+                    "request_id": request.id,
+                    "url": request_url(settings.APP_BASE_URL, request.id),
+                },
+                subject_prefix=resolve_smtp_from(smtp_from, settings.SMTP_FROM),
+            )
     except Exception:
         return
 
@@ -900,7 +918,8 @@ def submit_request(
         ) from exc
     _audit(user.sam, "request.submit", request.id, "")
     _notify_assigned(request, mail_queue, settings_store, ad_reader, settings)
-    # Ридер AD уже разрешён зависимостью — второй раз не резолвим.
+    # Ридер AD передан зависимостью; при ad_reader=None (AD недоступен) _public_view
+    # резолвит его повторно (fail-soft) — без ФИО согласующего, но ответ 200.
     return _public_view(request, user, ad_reader=ad_reader)
 
 
