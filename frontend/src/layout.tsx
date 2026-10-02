@@ -198,18 +198,9 @@ export function SedLayout(props: SedLayoutProps) {
 
   return (
     <div className="sed-shell">
-      {/* Шапка: роль из сессии (без выбора), тема и выход. */}
+      {/* Шапка: только выход (роль и тема переехали: роль убрана, тема — к вкладкам). */}
       <header className="sed-header">
-        <span className="sed-note">· роль: {ROLE_LABELS[role]}</span>
         <span className="sed-header__spacer" />
-        <button
-          type="button"
-          className="sed-btn sed-btn--neutral"
-          onClick={() => setTheme(theme === "light" ? "dark" : "light")}
-          title="Задел тёмной темы"
-        >
-          Тема: {theme === "light" ? "светлая" : "тёмная"}
-        </button>
         <button
           type="button"
           className="sed-btn sed-btn--neutral"
@@ -220,14 +211,8 @@ export function SedLayout(props: SedLayoutProps) {
         </button>
       </header>
 
-      {/* Логотип и вкладки — в одном ряду (по макету). */}
+      {/* Вкладки слева, переключение темы в их стиле, логотип справа. */}
       <nav className="sed-tabs" aria-label="Вкладки">
-        <span className="sed-logo">
-          <img
-            src={theme === "dark" ? "/logo-oswdocs-dark.svg" : "/logo-oswdocs.svg"}
-            alt="СЭД — Увольнение"
-          />
-        </span>
         {visibleTabs.map((name) => (
           <button
             key={name}
@@ -241,6 +226,20 @@ export function SedLayout(props: SedLayoutProps) {
             {name}
           </button>
         ))}
+        <button
+          type="button"
+          className="sed-tab"
+          onClick={() => setTheme(theme === "light" ? "dark" : "light")}
+          title="Светлая/тёмная тема"
+        >
+          {theme === "light" ? "🌙" : "☀️"}
+        </button>
+        <span className="sed-logo">
+          <img
+            src={theme === "dark" ? "/logo-oswdocs-dark.svg" : "/logo-oswdocs.svg"}
+            alt="СЭД — Увольнение"
+          />
+        </span>
       </nav>
 
       <div className={tab === "Заявки" ? "sed-body" : "sed-body sed-body--wide"}>
