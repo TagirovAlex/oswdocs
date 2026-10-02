@@ -9,11 +9,19 @@
 
 from __future__ import annotations
 
+import base64
+import io
 import json
 import os
+import shutil
+import tempfile
+import zipfile
 from collections.abc import Mapping, Sequence
+from pathlib import Path
+from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import bindparam, create_engine, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -22,6 +30,12 @@ from sqlalchemy.orm import sessionmaker
 from .audit import AuditEvent, audit_log
 from .config import Settings, get_settings
 from .deps import CurrentUser, get_current_user
+from .docs import (
+    _convert_to_pdf_report,
+    _render_docx_from_file,
+    _soffice_binary,
+    request_url,
+)
 
 router = APIRouter(tags=["настройки"])
 
@@ -522,11 +536,17 @@ class TemplateItem(BaseModel):
 
 
 class DocTemplateItem(BaseModel):
-    """Шаблон бегунка (W3a): служба + категория → текст-шаблон DOCX (Jinja)."""
+    """Шаблон бегунка (W3a): служба + категория → текст-шаблон DOCX (Jinja)
+    и/или имя .docx-файла (H): при наличии file печать рендерит вёрстку файла,
+    иначе — текстовый body фолбэком (старые бланки не ломаются)."""
 
     service: str = Field(description="Служба увольняемого (поле 1С)")
     category: str = Field(description="Категория (МОЛ/линейный/руководитель)")
     body: str = Field(description="Тело бегунка с плейсхолдерами {{ fio }} и др.")
+    file: str | None = Field(
+        default=None,
+        description="Имя .docx-файла шаблона в FILES_DIR/templates/ (необязательно)",
+    )
 
 
 class MailTemplateItem(BaseModel):
@@ -1185,3 +1205,246 @@ def delete_doc_type(
         )
     )
     return {"deleted": code}
+
+
+# --- Файлы .docx-шаблонов бегунков (H): импорт/скачивание/замена/предпросмотр.
+# Хранение — FILES_DIR/templates/ (права контейнера api/worker), в settings —
+# только имя файла (поле file шаблона doc_templates). Доступ — как у контент-
+# настроек (doc_templates — контент-ключ): админ + руководитель ОК.
+
+# Фиктивный контекст тест-рендера (валидация импорта/предпросмотра): вымышленные
+# значения, не настройки и не ПДн реальных сотрудников. В контекст — только
+# поля TEMPLATES.md + steps + qr (qr добавляет _render_docx_from_file).
+_DUMMY_TEMPLATE_URL = request_url("https://sed.example.local", "REQ-0000")
+_DUMMY_TEMPLATE_CONTEXT = {
+    "request_id": "REQ-0000",
+    "fio": "Иванов Иван Иванович",
+    "department": "Служба",
+    "position": "Должность",
+    "category": "линейный",
+    "enterprise": "Предприятие",
+    "steps": [{"order": 1, "owner": "Группа", "status": "На согласовании"}],
+}
+
+
+def _templates_dir(files_dir: str) -> Path:
+    """Каталог файлов шаблонов бегунков: FILES_DIR/templates (volume files)."""
+    return Path(files_dir) / "templates"
+
+
+def _template_path(files_dir: str, name: str) -> Path | None:
+    """Путь к файлу шаблона внутри FILES_DIR/templates/: только basename
+    (защита от path traversal); None — имя уводит за пределы каталога."""
+    templates_dir = _templates_dir(files_dir)
+    candidate = templates_dir / Path(name).name
+    try:
+        inside = candidate.resolve().is_relative_to(templates_dir.resolve())
+    except OSError:
+        inside = False
+    return candidate if inside else None
+
+
+def _docxtpl_available() -> bool:
+    """Есть ли docxtpl на машине (стенд): тест-рендер и предпросмотр возможны
+    только с ним; офлайн — структурной проверки достаточно."""
+    import importlib.util
+
+    return importlib.util.find_spec("docxtpl") is not None
+
+
+def _validate_docx_structure(content: bytes) -> None:
+    """Проверка zip-структуры .docx: [Content_Types].xml + word/document.xml.
+    Не zip / нет обязательных частей — HTTPException(400) с понятным текстом."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            names = set(archive.namelist())
+    except zipfile.BadZipFile as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Файл не является .docx: не zip-архив",
+        ) from exc
+    if "[Content_Types].xml" not in names:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Файл не является .docx: отсутствует [Content_Types].xml",
+        )
+    if "word/document.xml" not in names:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Файл не является .docx: отсутствует word/document.xml",
+        )
+
+
+def _save_template_file(files_dir: str, content: bytes) -> str:
+    """Сохранить .docx-шаблон в FILES_DIR/templates/ и проверить его.
+
+    Структурная проверка (zip) — всегда; тест-рендер фиктивным контекстом —
+    только если docxtpl есть (офлайн структурной проверки достаточно).
+    Имя — уникальное (uuid4 + .docx). Ошибка валидации/рендера —
+    HTTPException(400), файл при этом не остаётся."""
+    _validate_docx_structure(content)
+    templates_dir = _templates_dir(files_dir)
+    templates_dir.mkdir(parents=True, exist_ok=True)
+    stored_name = uuid4().hex + ".docx"
+    target = templates_dir / stored_name
+    target.write_bytes(content)
+    if not _docxtpl_available():
+        return stored_name
+    try:
+        _render_docx_from_file(target, _DUMMY_TEMPLATE_CONTEXT, _DUMMY_TEMPLATE_URL)
+    except Exception as exc:
+        target.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Шаблон не рендерится фиктивным контекстом: {exc}",
+        ) from exc
+    return stored_name
+
+
+@router.post("/settings/doc-templates/files/upload")
+def upload_doc_template_file(
+    file: UploadFile = File(..., description="Файл .docx шаблона бегунка (multipart)"),
+    previous: str | None = Form(
+        default=None,
+        description="Имя старого файла для замены (удаляется после сохранения нового)",
+    ),
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+) -> dict:
+    """Импорт .docx-шаблона бегунка (контент: админ + руководитель ОК).
+
+    Валидация: расширение .docx, zip-структура, тест-рендер фиктивным
+    контекстом (если docxtpl есть). Файл — в FILES_DIR/templates/ с уникальным
+    именем (uuid4 + .docx); опциональный previous удаляется после успешного
+    сохранения нового. Ответ — имя файла для поля file шаблона doc_templates."""
+    _require_content_admin(user)
+    if not (file.filename or "").lower().endswith(".docx"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Файл шаблона должен иметь расширение .docx",
+        )
+    content = file.file.read()
+    name = _save_template_file(settings.FILES_DIR, content)
+    if previous:
+        old = _template_path(settings.FILES_DIR, previous)
+        if old is not None and old.is_file():
+            try:
+                old.unlink()
+            except OSError:
+                pass  # старый файл не удалили — новый уже сохранён
+    audit_log.append(
+        AuditEvent(
+            actor=user.sam,
+            action="settings.update",
+            entity="settings",
+            entity_id="doc_templates.files",
+            detail=f"upload:{name}",
+        )
+    )
+    return {"name": name}
+
+
+@router.get("/settings/doc-templates/files/{name}/download")
+def download_doc_template_file(
+    name: str,
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+) -> FileResponse:
+    """Скачать .docx-файл шаблона (контент: админ + руководитель ОК).
+
+    Имя — только basename (внутри FILES_DIR/templates/); файла нет — 404."""
+    _require_content_admin(user)
+    target = _template_path(settings.FILES_DIR, name)
+    if target is None or not target.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Файл шаблона не найден",
+        )
+    audit_log.append(
+        AuditEvent(
+            actor=user.sam,
+            action="settings.read",
+            entity="settings",
+            entity_id=f"doc_templates.files.{target.name}",
+        )
+    )
+    return FileResponse(
+        str(target),
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        filename=target.name,
+    )
+
+
+@router.delete("/settings/doc-templates/files/{name}")
+def delete_doc_template_file(
+    name: str,
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+) -> dict:
+    """Удалить .docx-файл шаблона (контент: админ + руководитель ОК).
+
+    Имя — только basename; файла нет — 404; успех — {"ok": true}."""
+    _require_content_admin(user)
+    target = _template_path(settings.FILES_DIR, name)
+    if target is None or not target.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Файл шаблона не найден",
+        )
+    target.unlink()
+    audit_log.append(
+        AuditEvent(
+            actor=user.sam,
+            action="settings.update",
+            entity="settings",
+            entity_id=f"doc_templates.files.{target.name}",
+        )
+    )
+    return {"ok": True}
+
+
+@router.post("/settings/doc-templates/files/{name}/preview")
+def preview_doc_template_file(
+    name: str,
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+) -> dict:
+    """Предпросмотр шаблона: рендер фиктивным контекстом → PDF (LibreOffice).
+
+    Файлы — во временном каталоге (подчищается); ответ — base64 PDF либо
+    {"generated": false, "reason": ...} (не 500): офлайн без docxtpl/soffice —
+    причина, а не ошибка."""
+    _require_content_admin(user)
+    target = _template_path(settings.FILES_DIR, name)
+    if target is None or not target.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Файл шаблона не найден",
+        )
+    if not _docxtpl_available():
+        return {"generated": False, "reason": "офлайн: нет библиотеки docxtpl"}
+    workdir = Path(tempfile.mkdtemp(prefix="sed_tpl_preview_"))
+    try:
+        docx_bytes = _render_docx_from_file(
+            target, _DUMMY_TEMPLATE_CONTEXT, _DUMMY_TEMPLATE_URL
+        )
+        docx_path = workdir / (target.stem + "_preview.docx")
+        docx_path.write_bytes(docx_bytes)
+        report = _convert_to_pdf_report(str(docx_path), str(workdir), _soffice_binary())
+        if report.pdf_path is None:
+            return {"generated": False, "reason": report.detail or "PDF не создан"}
+        pdf_bytes = Path(report.pdf_path).read_bytes()
+    except Exception as exc:
+        return {"generated": False, "reason": str(exc)}
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+    audit_log.append(
+        AuditEvent(
+            actor=user.sam,
+            action="settings.read",
+            entity="settings",
+            entity_id=f"doc_templates.files.{target.name}",
+            detail="preview",
+        )
+    )
+    return {"generated": True, "pdf_b64": base64.b64encode(pdf_bytes).decode("ascii")}

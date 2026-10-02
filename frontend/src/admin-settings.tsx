@@ -2,24 +2,28 @@
 // Значения — из settings БД (GET/PUT /api/settings для админа, /settings/content
 // для руководителя ОК), в коде не хардкодятся. Вкладки: Процесс / Справочники /
 // Шаблоны (контент) и Инфра / Регламенты / Доступ и роли (только админ).
-import { useEffect, useState } from "react";
-import { getDocTypes } from "./requests-client";
+import { useEffect, useRef, useState } from "react";
+import { base64ToBlob, getDocTypes } from "./requests-client";
 import type { DocType } from "./requests-client";
 import {
   createDocType,
   deleteBackup,
+  deleteDocTemplateFile,
   deleteDocType,
   downloadBackup,
+  downloadDocTemplateFile,
   getArchiveSettings,
   getSettings,
   getSettingsContent,
   listBackups,
+  previewDocTemplateFile,
   runBackup,
   saveArchiveSettings,
   saveSettings,
   saveSettingsContent,
   syncEnterprises,
   updateDocType,
+  uploadDocTemplateFile,
 } from "./settings-client";
 import type {
   ArchiveSettingsData,
@@ -387,54 +391,194 @@ function TemplatesEditor(props: { value: SettingsTemplate[]; onChange: (v: Setti
   );
 }
 
-// Редактор бланков бегунков (doc_templates): служба + категория + тело DOCX (Jinja).
+// Редактор бланков бегунков (doc_templates): служба + категория + либо тело DOCX
+// (Jinja, текстовый фолбэк, когда file не задан), либо .docx-файл (загрузка/
+// скачивание/замена/удаление + предпросмотр рендера на тестовых данных).
+// Файл — в FILES_DIR/templates/, в settings хранится только имя (file).
 function DocTemplatesEditor(props: { value: SettingsDocTemplate[]; onChange: (v: SettingsDocTemplate[]) => void }) {
   const { value, onChange } = props;
+  // Скрытые input-ы загрузки .docx (по индексу карточки): общие для «Загрузить
+  // .docx» и «Заменить» (в один момент в карточке видна одна из кнопок).
+  const fileInputs = useRef<(HTMLInputElement | null)[]>([]);
+  const [fileError, setFileError] = useState<string>("");
+
   function update(index: number, patch: Partial<SettingsDocTemplate>): void {
     onChange(value.map((doc, i) => (i === index ? { ...doc, ...patch } : doc)));
   }
+
+  // Загрузка .docx: новая (previous нет) либо замена (previous=текущий file).
+  // При успехе — имя файла в карточку; текстовый body остаётся фолбэком.
+  async function handleUpload(index: number, file: File | null): Promise<void> {
+    if (!file) return;
+    setFileError("");
+    try {
+      const previous = value[index]?.file ?? undefined;
+      const result = await uploadDocTemplateFile(file, previous);
+      update(index, { file: result.name });
+    } catch (e: unknown) {
+      setFileError(e instanceof Error ? e.message : "Ошибка загрузки файла бланка");
+    } finally {
+      // Сброс значения input, чтобы повторный выбор того же файла сработал.
+      const input = fileInputs.current[index];
+      if (input) input.value = "";
+    }
+  }
+
+  // Скачивание файла бланка (GET .../download).
+  async function handleDownload(name: string): Promise<void> {
+    setFileError("");
+    try {
+      await downloadDocTemplateFile(name);
+    } catch (e: unknown) {
+      setFileError(e instanceof Error ? e.message : "Ошибка скачивания файла бланка");
+    }
+  }
+
+  // Удаление файла бланка (DELETE) с подтверждением; при успехе file=null —
+  // бланк снова редактируется текстом (фолбэк).
+  async function handleDelete(index: number, name: string): Promise<void> {
+    if (!window.confirm(`Удалить файл бланка ${name}? Действие необратимо.`)) return;
+    setFileError("");
+    try {
+      await deleteDocTemplateFile(name);
+      update(index, { file: null });
+    } catch (e: unknown) {
+      setFileError(e instanceof Error ? e.message : "Ошибка удаления файла бланка");
+    }
+  }
+
+  // Предпросмотр рендера файла на тестовых данных: PDF открываем в новом окне
+  // (base64 → blob), generated=false с reason — текст в редакторе.
+  async function handlePreview(name: string): Promise<void> {
+    setFileError("");
+    try {
+      const result = await previewDocTemplateFile(name);
+      if (result.generated && result.pdf_b64) {
+        const pdfUrl = URL.createObjectURL(base64ToBlob(result.pdf_b64, "application/pdf"));
+        window.open(pdfUrl, "_blank");
+        setTimeout(() => URL.revokeObjectURL(pdfUrl), 60_000);
+      } else {
+        setFileError(result.reason ?? "Бланк не сгенерирован");
+      }
+    } catch (e: unknown) {
+      setFileError(e instanceof Error ? e.message : "Ошибка предпросмотра бланка");
+    }
+  }
+
   return (
     <fieldset>
       <legend>Бланки бегунков (doc_templates)</legend>
       {value.length === 0 && <div className="sed-note">не задано</div>}
-      {value.map((doc, i) => (
-        <div key={i} className="sed-editor-card">
-          <label className="sed-field">
-            Служба
-            <input
-              aria-label={`Служба бланка ${i + 1}`}
-              value={doc.service}
-              onChange={(e) => update(i, { service: e.target.value })}
-            />
-          </label>
-          <label className="sed-field">
-            Категория
-            <input
-              aria-label={`Категория бланка ${i + 1}`}
-              value={doc.category}
-              onChange={(e) => update(i, { category: e.target.value })}
-            />
-          </label>
-          <label className="sed-field">
-            Тело бегунка (Jinja-плейсхолдеры)
-            <textarea
-              aria-label={`Тело бланка ${i + 1}`}
-              rows={4}
-              value={doc.body}
-              onChange={(e) => update(i, { body: e.target.value })}
-            />
-          </label>
-          <div className="sed-toolbar sed-mt-8">
-            <button
-              type="button"
-              className="sed-btn sed-btn--ghost"
-              onClick={() => onChange(value.filter((_, j) => j !== i))}
-            >
-              Удалить бланк
-            </button>
+      {value.map((doc, i) => {
+        // Имя файла бланка (null/отсутствует — текстовый body-фолбэк).
+        const fileName = doc.file ?? null;
+        return (
+          <div key={i} className="sed-editor-card">
+            <label className="sed-field">
+              Служба
+              <input
+                aria-label={`Служба бланка ${i + 1}`}
+                value={doc.service}
+                onChange={(e) => update(i, { service: e.target.value })}
+              />
+            </label>
+            <label className="sed-field">
+              Категория
+              <input
+                aria-label={`Категория бланка ${i + 1}`}
+                value={doc.category}
+                onChange={(e) => update(i, { category: e.target.value })}
+              />
+            </label>
+            {fileName ? (
+              <div className="sed-mt-8">
+                <div className="sed-note sed-mt-0">
+                  Файл бланка: <strong>{fileName}</strong>
+                </div>
+                <div className="sed-toolbar sed-mt-8">
+                  <button
+                    type="button"
+                    className="sed-btn sed-btn--neutral"
+                    aria-label={`Скачать файл бланка ${i + 1}`}
+                    onClick={() => void handleDownload(fileName)}
+                  >
+                    Скачать
+                  </button>
+                  <label className="sed-btn sed-btn--neutral">
+                    Заменить
+                    <input
+                      type="file"
+                      accept=".docx"
+                      aria-label={`Заменить файл бланка ${i + 1}`}
+                      style={{ display: "none" }}
+                      ref={(el) => {
+                        fileInputs.current[i] = el;
+                      }}
+                      onChange={(e) => void handleUpload(i, e.target.files?.[0] ?? null)}
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    className="sed-btn sed-btn--danger"
+                    aria-label={`Удалить файл бланка ${i + 1}`}
+                    onClick={() => void handleDelete(i, fileName)}
+                  >
+                    Удалить
+                  </button>
+                  <button
+                    type="button"
+                    className="sed-btn sed-btn--neutral"
+                    onClick={() => void handlePreview(fileName)}
+                  >
+                    Предпросмотр
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <>
+                <label className="sed-field">
+                  Тело бегунка (Jinja-плейсхолдеры)
+                  <textarea
+                    aria-label={`Тело бланка ${i + 1}`}
+                    rows={4}
+                    value={doc.body}
+                    onChange={(e) => update(i, { body: e.target.value })}
+                  />
+                </label>
+                <div className="sed-toolbar sed-mt-8">
+                  <label className="sed-btn">
+                    Загрузить .docx
+                    <input
+                      type="file"
+                      accept=".docx"
+                      aria-label={`Загрузить файл бланка ${i + 1}`}
+                      style={{ display: "none" }}
+                      ref={(el) => {
+                        fileInputs.current[i] = el;
+                      }}
+                      onChange={(e) => void handleUpload(i, e.target.files?.[0] ?? null)}
+                    />
+                  </label>
+                </div>
+              </>
+            )}
+            <div className="sed-toolbar sed-mt-8">
+              <button
+                type="button"
+                className="sed-btn sed-btn--ghost"
+                onClick={() => onChange(value.filter((_, j) => j !== i))}
+              >
+                Удалить бланк
+              </button>
+            </div>
           </div>
+        );
+      })}
+      {fileError && (
+        <div role="alert" className="sed-mt-8">
+          {fileError}
         </div>
-      ))}
+      )}
       <div className="sed-toolbar sed-mt-12">
         <button
           type="button"

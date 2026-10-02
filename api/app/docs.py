@@ -247,7 +247,7 @@ def find_doc_template(
             isinstance(item, dict)
             and item.get("service") == service
             and item.get("category") == category
-            and (item.get("body") or "").strip()
+            and ((item.get("body") or "").strip() or (item.get("file") or "").strip())
         ):
             return item
     return None
@@ -270,7 +270,16 @@ def manual_bypass_body(request: object) -> str:
 
 
 def build_bypass_context(request: object) -> Dict[str, object]:
-    """Контекст бегунка: поля 1С заявки без ПДн (mail/отпуск — не включаем)."""
+    """Контекст бегунка: поля 1С заявки без ПДн (mail/отпуск — не включаем)
+    + шаги маршрута (владельцы шагов — участники процесса, не ПДн)."""
+    steps = [
+        {
+            "order": step.order,
+            "owner": getattr(step, "assignee", None) or step.owner_group,
+            "status": step.status,
+        }
+        for step in sorted(request.steps, key=lambda s: s.order)
+    ]
     return {
         "request_id": request.id,
         "fio": request.fio,
@@ -278,6 +287,7 @@ def build_bypass_context(request: object) -> Dict[str, object]:
         "position": request.position,
         "category": request.category or "",
         "enterprise": request.enterprise or "",
+        "steps": steps,
     }
 
 
@@ -296,6 +306,28 @@ def _render_docx_stand(template_body: str, context: Dict[str, object]) -> bytes:
     buf.seek(0)
     tpl = DocxTemplate(buf)
     tpl.render(context)
+    out = io.BytesIO()
+    tpl.save(out)
+    return out.getvalue()
+
+
+def _render_docx_from_file(
+    template_path: str | Path, context: Dict[str, object], url: str
+) -> bytes:
+    """DOCX через python-docx-template (docxtpl) из НАСТОЯЩЕГО .docx-файла.
+
+    Шапка/строки/подвал/вёрстка живут в файле; {{ qr }} подменяется
+    сгенерированным QR (InlineImage; размер 30x30 мм — константа вёрстки,
+    не настройка). Ожидает docxtpl/qrcode (стенд), как _render_docx_stand."""
+    from docx.shared import Mm
+    from docxtpl import DocxTemplate, InlineImage
+
+    tpl = DocxTemplate(template_path)
+    render_context = dict(context)
+    render_context["qr"] = InlineImage(
+        tpl, io.BytesIO(_render_qr_png(url)), width=Mm(30), height=Mm(30)
+    )
+    tpl.render(render_context)
     out = io.BytesIO()
     tpl.save(out)
     return out.getvalue()
@@ -397,8 +429,14 @@ def generate_bypass(
     context: Dict[str, object],
     base_url: str,
     files_dir: str,
+    template_file: str | None = None,
 ) -> BypassResult:
     """Собрать бегунок: DOCX (python-docx-template) -> PDF (LibreOffice) + QR.
+
+    template_file — имя .docx-файла шаблона в FILES_DIR/templates/: если задано
+    и файл есть на диске — рендер из файла (вёрстка из .docx), иначе фолбэк
+    на текстовый body (template_body). sanitize_context применяется ДО
+    добавления steps/qr (эти ключи не под фильтр ПДн).
 
     Офлайн (нет python-docx-template/qrcode/PIL) или нет soffice —
     BypassResult(generated=False, reason=...): файлы не записываются в документы
@@ -409,7 +447,14 @@ def generate_bypass(
     safe = sanitize_context(dict(context, request_id=request_id))
     url = request_url(base_url, request_id)
     try:
-        docx_bytes = _render_docx_stand(template_body, safe)
+        if template_file:
+            template_path = Path(files_dir) / "templates" / template_file
+            if template_path.is_file():
+                docx_bytes = _render_docx_from_file(template_path, safe, url)
+            else:
+                docx_bytes = _render_docx_stand(template_body, safe)
+        else:
+            docx_bytes = _render_docx_stand(template_body, safe)
         qr_bytes = _render_qr_png(url)
     except ImportError as exc:
         # Офлайн: нет python-docx-template/qrcode/PIL (в т.ч. вложенный импорт).

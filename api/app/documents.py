@@ -273,15 +273,16 @@ def _can_view(request: object, user: CurrentUser) -> bool:
     )
 
 
-def _bypass_body(request: object, doc_templates: object) -> str | None:
-    """Тело бегунка: шаблон doc_templates по службе+категории, иначе ручной
-    конструктор из шагов; нет шаблона и нет шагов — None (422)."""
+def _bypass_body(request: object, doc_templates: object) -> tuple[str | None, str | None]:
+    """(тело, имя .docx-файла) бегунка: шаблон doc_templates по службе+категории
+    (body — текстовый фолбэк, file — настоящий .docx-шаблон), иначе ручной
+    конструктор из шагов; нет шаблона и нет шагов — (None, None) (422)."""
     template = find_doc_template(doc_templates, request.department, request.category)
     if template is not None:
-        return template["body"]
+        return (template.get("body") or ""), (template.get("file") or None)
     if not request.steps:
-        return None
-    return manual_bypass_body(request)
+        return None, None
+    return manual_bypass_body(request), None
 
 
 @router.post("/requests/{request_id}/print")
@@ -307,8 +308,8 @@ def print_bypass(
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except SettingsUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    body = _bypass_body(request, doc_templates)
-    if body is None:
+    body, template_file = _bypass_body(request, doc_templates)
+    if body is None and template_file is None:
         raise HTTPException(
             status_code=422,
             detail="Нет шаблона бегунка и нет шагов: задайте doc_templates или маршрут",
@@ -317,10 +318,11 @@ def print_bypass(
     result = generate_bypass(
         request_id=request.id,
         version="current",
-        template_body=body,
+        template_body=body or "",
         context=build_bypass_context(request),
         base_url=settings.APP_BASE_URL,
         files_dir=settings.FILES_DIR,
+        template_file=template_file,
     )
     if not result.generated:
         return {"generated": False, "reason": result.reason, "pdf_b64": None}

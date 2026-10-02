@@ -8,16 +8,20 @@ import { AdminSettings } from "./admin-settings";
 import { ApiHttpError } from "./auth-client";
 import {
   deleteBackup,
+  deleteDocTemplateFile,
   downloadBackup,
+  downloadDocTemplateFile,
   getArchiveSettings,
   getSettings,
   getSettingsContent,
   listBackups,
+  previewDocTemplateFile,
   runBackup,
   saveArchiveSettings,
   saveSettings,
   saveSettingsContent,
   syncEnterprises,
+  uploadDocTemplateFile,
 } from "./settings-client";
 import type { SettingsData } from "./settings-client";
 
@@ -34,6 +38,10 @@ vi.mock("./settings-client", () => ({
   runBackup: vi.fn(),
   deleteBackup: vi.fn(),
   downloadBackup: vi.fn(),
+  uploadDocTemplateFile: vi.fn(),
+  downloadDocTemplateFile: vi.fn(),
+  deleteDocTemplateFile: vi.fn(),
+  previewDocTemplateFile: vi.fn(),
 }));
 
 // Настройки, как их отдаёт GET /api/settings (полный объект по контракту B2).
@@ -111,6 +119,12 @@ const contentOnly: SettingsData = {
   hr_admin_groups: null,
 };
 
+// Настройки с бланком на .docx-файле (file задан): редактор в режиме файла.
+const withFileSettings: SettingsData = {
+  ...settings,
+  doc_templates: [{ service: "Бухгалтерия", category: "Увольнение", body: "", file: "bланк_v1.docx" }],
+};
+
 beforeEach(() => {
   vi.mocked(getSettings).mockReset();
   vi.mocked(saveSettings).mockReset();
@@ -123,6 +137,10 @@ beforeEach(() => {
   vi.mocked(runBackup).mockReset();
   vi.mocked(deleteBackup).mockReset();
   vi.mocked(downloadBackup).mockReset();
+  vi.mocked(uploadDocTemplateFile).mockReset();
+  vi.mocked(downloadDocTemplateFile).mockReset();
+  vi.mocked(deleteDocTemplateFile).mockReset();
+  vi.mocked(previewDocTemplateFile).mockReset();
 });
 
 describe("AdminSettings", () => {
@@ -554,5 +572,139 @@ describe("AdminSettings", () => {
     await waitFor(() => expect(screen.getByText("Бэкапов нет")).toBeInTheDocument());
     expect(deleteBackup).toHaveBeenCalledWith("sed_2026-10-01.dump");
     confirm.mockRestore();
+  });
+
+  // Задача H: бланк без file — textarea-фолбэк и кнопка «Загрузить .docx».
+  it("бланк без файла: textarea-фолбэк и кнопка «Загрузить .docx»", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Шаблоны" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Шаблоны" }));
+    await waitFor(() => expect(screen.getByLabelText("Тело бланка 1")).toBeInTheDocument());
+    expect(screen.getByLabelText("Тело бланка 1")).toHaveValue("Бегунок: {{ fio }}");
+    expect(screen.getByText("Загрузить .docx")).toBeInTheDocument();
+  });
+
+  // Задача H: бланк с file — имя файла и файловые операции, textarea скрыта.
+  it("бланк с файлом: имя файла и кнопки операций, textarea скрыта", async () => {
+    vi.mocked(getSettings).mockResolvedValue(withFileSettings);
+    vi.mocked(downloadDocTemplateFile).mockResolvedValue(undefined);
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Шаблоны" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Шаблоны" }));
+    await waitFor(() => expect(screen.getByText("bланк_v1.docx")).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Скачать файл бланка 1" })).toBeInTheDocument();
+    expect(screen.getByText("Заменить")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Удалить файл бланка 1" })).toBeInTheDocument();
+    expect(screen.getByText("Предпросмотр")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Тело бланка 1")).not.toBeInTheDocument();
+
+    // «Скачать» — вызов downloadDocTemplateFile с именем файла.
+    fireEvent.click(screen.getByRole("button", { name: "Скачать файл бланка 1" }));
+    expect(downloadDocTemplateFile).toHaveBeenCalledWith("bланк_v1.docx");
+  });
+
+  // Задача H: новая загрузка .docx без previous → uploadDocTemplateFile(file).
+  it("загрузка .docx: вызов без previous, имя файла появляется в карточке", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+    vi.mocked(uploadDocTemplateFile).mockResolvedValue({ name: "bланк.docx" });
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Шаблоны" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Шаблоны" }));
+    await waitFor(() => expect(screen.getByLabelText("Загрузить файл бланка 1")).toBeInTheDocument());
+
+    const file = new File(["docx"], "bланк.docx", {
+      type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    });
+    fireEvent.change(screen.getByLabelText("Загрузить файл бланка 1"), { target: { files: [file] } });
+
+    await waitFor(() => expect(uploadDocTemplateFile).toHaveBeenCalledWith(file, undefined));
+    // После успеха бланк переключается в режим файла (textarea скрыта).
+    await waitFor(() => expect(screen.getByText("bланк.docx")).toBeInTheDocument());
+    expect(screen.queryByLabelText("Тело бланка 1")).not.toBeInTheDocument();
+  });
+
+  // Задача H: замена файла → uploadDocTemplateFile с previous=текущий file.
+  it("замена файла: uploadDocTemplateFile с previous", async () => {
+    vi.mocked(getSettings).mockResolvedValue(withFileSettings);
+    vi.mocked(uploadDocTemplateFile).mockResolvedValue({ name: "bланк_v2.docx" });
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Шаблоны" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Шаблоны" }));
+    await waitFor(() => expect(screen.getByText("bланк_v1.docx")).toBeInTheDocument());
+
+    const file = new File(["docx"], "bланк_v2.docx", {
+      type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    });
+    fireEvent.change(screen.getByLabelText("Заменить файл бланка 1"), { target: { files: [file] } });
+
+    await waitFor(() => expect(uploadDocTemplateFile).toHaveBeenCalledWith(file, "bланк_v1.docx"));
+    await waitFor(() => expect(screen.getByText("bланк_v2.docx")).toBeInTheDocument());
+  });
+
+  // Задача H: удаление файла с подтверждением → DELETE, file сбрасывается в null.
+  it("удаление файла бланка: подтверждение, DELETE и возврат к textarea", async () => {
+    vi.mocked(getSettings).mockResolvedValue(withFileSettings);
+    vi.mocked(deleteDocTemplateFile).mockResolvedValue(undefined);
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Шаблоны" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Шаблоны" }));
+    await waitFor(() => expect(screen.getByText("bланк_v1.docx")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "Удалить файл бланка 1" }));
+    await waitFor(() => expect(deleteDocTemplateFile).toHaveBeenCalledWith("bланк_v1.docx"));
+    // После удаления file=null — снова текстовый фолбэк.
+    await waitFor(() => expect(screen.getByLabelText("Тело бланка 1")).toBeInTheDocument());
+    expect(screen.queryByText("bланк_v1.docx")).not.toBeInTheDocument();
+    confirm.mockRestore();
+  });
+
+  // Задача H: предпросмотр — при generated=true PDF открывается в новом окне.
+  it("предпросмотр бланка открывает PDF в новом окне", async () => {
+    vi.mocked(getSettings).mockResolvedValue(withFileSettings);
+    vi.mocked(previewDocTemplateFile).mockResolvedValue({ generated: true, pdf_b64: "AAAA", reason: null });
+    // jsdom не реализует URL.createObjectURL — стаб возвращает blob-адрес.
+    const createObjectURL = vi.fn(() => "blob:mock-pdf");
+    Object.defineProperty(URL, "createObjectURL", { value: createObjectURL, configurable: true });
+    const open = vi.spyOn(window, "open").mockReturnValue(null);
+
+    try {
+      render(<AdminSettings role="admin" />);
+      await waitFor(() => expect(screen.getByRole("button", { name: "Шаблоны" })).toBeInTheDocument());
+      fireEvent.click(screen.getByRole("button", { name: "Шаблоны" }));
+      await waitFor(() => expect(screen.getByText("bланк_v1.docx")).toBeInTheDocument());
+
+      fireEvent.click(screen.getByText("Предпросмотр"));
+      await waitFor(() => expect(previewDocTemplateFile).toHaveBeenCalledWith("bланк_v1.docx"));
+      expect(createObjectURL).toHaveBeenCalled();
+      expect(open).toHaveBeenCalledWith("blob:mock-pdf", "_blank");
+    } finally {
+      delete (URL as { createObjectURL?: unknown }).createObjectURL;
+      open.mockRestore();
+    }
+  });
+
+  // Задача H: предпросмотр — generated=false с reason показывает причину.
+  it("предпросмотр при generated=false показывает reason", async () => {
+    vi.mocked(getSettings).mockResolvedValue(withFileSettings);
+    vi.mocked(previewDocTemplateFile).mockResolvedValue({
+      generated: false,
+      pdf_b64: null,
+      reason: "LibreOffice не настроен",
+    });
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Шаблоны" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Шаблоны" }));
+    await waitFor(() => expect(screen.getByText("bланк_v1.docx")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByText("Предпросмотр"));
+    await waitFor(() => expect(screen.getByText("LibreOffice не настроен")).toBeInTheDocument());
   });
 });
