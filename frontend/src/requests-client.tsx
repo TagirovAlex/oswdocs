@@ -131,12 +131,12 @@ export const DEFAULT_REQUEST_SORT: RequestSort = { key: "id", dir: "desc" };
 
 // Метка шага в UI: в step_order закодирован блок и режим (см. backend requests.py):
 // order = блок*1000 + (100 если параллельный) + позиция. Без кода — обычный порядок.
+// Значок параллельности не выводим: режим виден по карточке блока.
 export function stepLabel(order: number): string {
   if (order < 1000) return String(order);
   const block = Math.floor(order / 1000) + 1;
-  const parallel = Math.floor((order % 1000) / 100) === 1;
   const pos = order % 100;
-  return `${block}.${pos}${parallel ? " ‖" : ""}`;
+  return `${block}.${pos}`;
 }
 
 // Найденный сотрудник 1С (GET /api/employees; полная карточка — только ОК/админу).

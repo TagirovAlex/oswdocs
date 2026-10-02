@@ -183,9 +183,9 @@ describe("RequestCard", () => {
 
     renderCard();
     await waitFor(() => expect(screen.getByLabelText("Шаги заявки")).toBeInTheDocument());
-    const steps = within(screen.getByLabelText("Шаги заявки"));
-    expect(steps.getByText("2.1 ‖")).toBeInTheDocument();
-    expect(steps.getByText("2.2 ‖")).toBeInTheDocument();
+    const steps = within(screen.getAllByLabelText("Шаги заявки")[0]);
+    expect(steps.getByText("2.1")).toBeInTheDocument();
+    expect(steps.getByText("2.2")).toBeInTheDocument();
     expect(steps.getByText("Петров Пётр Петрович")).toBeInTheDocument();
     expect(steps.getByText("SED_STEP_OK")).toBeInTheDocument();
     // Логин AD согласующего в карточке не выводится.

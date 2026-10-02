@@ -545,12 +545,16 @@ export function RequestCard(props: RequestCardProps) {
               {actStep && (
                 <div aria-label="Решение владельца" className="sed-mt-8">
                   <h4>Моё решение · Шаг {stepLabel(actStep.order)}</h4>
-                  <input
-                    aria-label="Комментарий к решению"
-                    placeholder="Комментарий (обязателен при отказе/возврате)"
-                    value={decisionComment}
-                    onChange={(e) => setDecisionComment(e.target.value)}
-                  />
+                  <label className="sed-field">
+                    Комментарий к решению
+                    <textarea
+                      aria-label="Комментарий к решению"
+                      rows={4}
+                      placeholder="Комментарий (обязателен при отказе/возврате)"
+                      value={decisionComment}
+                      onChange={(e) => setDecisionComment(e.target.value)}
+                    />
+                  </label>
                   {decisionError && <div role="alert">{decisionError}</div>}
                   <div className="sed-toolbar sed-mt-8">
                     <button
