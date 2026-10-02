@@ -256,6 +256,7 @@ def _create_request(client, hr_headers, steps=None) -> dict:
         "enterprise": ENT, "fio": "Вымышленный Сотрудник Полный",
         "tab_num": "В-0001",
         "department": "Служба вымышленного учета", "position": FAKE_POSITION,
+        "subject": "Вымышленная тема", "content": "Вымышленное содержание",
         "steps": steps or [{"owner_group": BUH_GROUP}],
     }
     response = client.post("/requests", json=body, headers=hr_headers)
@@ -326,7 +327,9 @@ def test_owner_cannot_use_hr_constructor(client, hr_headers, owner_headers, neg_
         "/requests",
         json={"enterprise": ENT, "fio": "Вымышленный Сотрудник Полный",
               "tab_num": "В-9", "department": "С",
-              "position": FAKE_POSITION, "steps": [{"owner_group": BUH_GROUP}]},
+              "position": FAKE_POSITION, "subject": "Вымышленная тема",
+              "content": "Вымышленное содержание",
+              "steps": [{"owner_group": BUH_GROUP}]},
         headers=owner_headers,
     )
     assert manual.status_code == 403

@@ -51,6 +51,33 @@ class RequestsStore(Protocol):
         """Новый номер заявки вида REQ-XXXX."""
         ...
 
+    def get_doc_types(self) -> list[dict]:
+        """Все виды документов (для селекта в форме)."""
+        ...
+
+    def get_doc_type(self, code: str) -> dict | None:
+        """Вид документа по коду либо None (валидация doc_type_code при создании)."""
+        ...
+
+    def list_comments(self, request_id: str) -> list[dict]:
+        """Комментарии заявки по request_id (порядок по времени)."""
+        ...
+
+    def add_comment(
+        self,
+        request_id: str,
+        author: str,
+        body: str,
+        kind: str = "request",
+        step_id: str | None = None,
+    ) -> dict:
+        """Добавить комментарий заявки, вернуть его как dict."""
+        ...
+
+    def get_history(self, entity: str, entity_id: str) -> list[dict]:
+        """Строки audit_log по (entity, entity_id), сортировка по at."""
+        ...
+
 
 # --- Словари маппинга «модель (русский контракт) <-> код БД».
 # Русские ключи — контрактные строки requests.py (README п.1), коды —
@@ -164,11 +191,17 @@ class InMemoryRequestsStore:
     def __init__(self) -> None:
         self._requests: dict[str, _Request] = {}
         self._seq = 0
+        self._doc_types: dict[str, dict] = {}
+        self._comments: dict[str, list[dict]] = {}
+        self._comment_seq = 0
 
     def reset(self) -> None:
         """Сброс состояния. Только для изоляции pytest/локального запуска."""
         self._requests.clear()
         self._seq = 0
+        self._doc_types.clear()
+        self._comments.clear()
+        self._comment_seq = 0
 
     def create(self, request: _Request) -> None:
         self._requests[request.id] = request
@@ -192,6 +225,61 @@ class InMemoryRequestsStore:
         self._seq += 1
         return req_number_to_id(self._seq)
 
+    def get_doc_types(self) -> list[dict]:
+        """Виды документов в порядке sort_order (in-memory: пусто, пока не заданы)."""
+        return list(self._doc_types.values())
+
+    def get_doc_type(self, code: str) -> dict | None:
+        """Вид документа по коду либо None (нет вида — doc_type_code невалиден)."""
+        return self._doc_types.get(code)
+
+    def list_comments(self, request_id: str) -> list[dict]:
+        """Комментарии заявки (порядок добавления; БД — по (at, id))."""
+        return list(self._comments.get(request_id, []))
+
+    def add_comment(
+        self,
+        request_id: str,
+        author: str,
+        body: str,
+        kind: str = "request",
+        step_id: str | None = None,
+    ) -> dict:
+        """Добавить комментарий, вернуть его как dict (id — счетчик процесса)."""
+        self._comment_seq += 1
+        comment = {
+            "id": self._comment_seq,
+            "request_id": request_id,
+            "author": author,
+            "body": body,
+            "at": datetime.now(timezone.utc).isoformat(),
+            "kind": kind,
+            "step_id": step_id,
+        }
+        self._comments.setdefault(request_id, []).append(comment)
+        return comment
+
+    def get_history(self, entity: str, entity_id: str) -> list[dict]:
+        """Строки in-memory журнала аудита по (entity, entity_id), по at."""
+        from .audit import audit_log
+
+        events = [
+            e
+            for e in audit_log.all()
+            if e.entity == entity and e.entity_id == entity_id
+        ]
+        events.sort(key=lambda e: e.at)
+        return [
+            {
+                "at": e.at.isoformat(),
+                "actor": e.actor,
+                "action": e.action,
+                "detail": e.detail,
+                "details": None,
+            }
+            for e in events
+        ]
+
 
 class DbRequestsStore:
     """Хранилище заявок в Postgres (таблицы 0001, дополнены миграцией 0002).
@@ -207,7 +295,8 @@ class DbRequestsStore:
 
     _REQUEST_COLUMNS = (
         "id, code, enterprise, tab_num, initiated_by_hr, route_origin, status, "
-        "fio, department, position, category, escalation_hours"
+        "fio, department, position, category, escalation_hours, "
+        "subject, content, doc_type_code"
     )
 
     _SELECT_REQUESTS = text(
@@ -232,11 +321,13 @@ class DbRequestsStore:
         INSERT INTO dismissal_requests (
           code, enterprise, base_code, tab_num, initiated_by_hr, route_origin,
           status, fio, department, position, category, escalation_hours,
+          subject, content, doc_type_code,
           created_at, updated_at
         )
         VALUES (
           :code, :enterprise, :base_code, :tab_num, :created_by, :route_origin,
           :status, :fio, :department, :position, :category, :escalation_hours,
+          :subject, :content, :doc_type_code,
           :created_at, :updated_at
         )
         RETURNING id
@@ -252,6 +343,9 @@ class DbRequestsStore:
             position = :position,
             category = :category,
             escalation_hours = :escalation_hours,
+            subject = :subject,
+            content = :content,
+            doc_type_code = :doc_type_code,
             updated_at = :updated_at
         WHERE code = :code
         """
@@ -302,6 +396,48 @@ class DbRequestsStore:
         "DELETE FROM dismissal_requests WHERE code = :code"
     )
 
+    _DOC_TYPE_COLUMNS = "code, name, is_active, sort_order"
+    _SELECT_DOC_TYPES = text(
+        f"""
+        SELECT {_DOC_TYPE_COLUMNS}
+        FROM doc_types
+        ORDER BY sort_order, code
+        """
+    )
+    _SELECT_DOC_TYPE = text(
+        f"""
+        SELECT {_DOC_TYPE_COLUMNS}
+        FROM doc_types
+        WHERE code = :code
+        """
+    )
+
+    _COMMENT_COLUMNS = "id, request_id, author, body, at, kind, step_id"
+    _SELECT_COMMENTS = text(
+        f"""
+        SELECT {_COMMENT_COLUMNS}
+        FROM request_comments
+        WHERE request_id = :request_id
+        ORDER BY at, id
+        """
+    )
+    _INSERT_COMMENT = text(
+        """
+        INSERT INTO request_comments (request_id, author, body, at, kind, step_id)
+        VALUES (:request_id, :author, :body, :at, :kind, :step_id)
+        RETURNING id
+        """
+    )
+
+    _SELECT_HISTORY = text(
+        """
+        SELECT at, actor, action, entity, entity_id, details
+        FROM audit_log
+        WHERE entity = :entity AND entity_id = :entity_id
+        ORDER BY at
+        """
+    )
+
     def __init__(self, database_url: str) -> None:
         self._engine = create_engine(database_url, pool_pre_ping=True)
         self._session_factory = sessionmaker(
@@ -341,6 +477,9 @@ class DbRequestsStore:
             position=row.position,
             category=row.category,
             escalation_hours=row.escalation_hours,
+            subject=row.subject,
+            content=row.content,
+            doc_type_code=row.doc_type_code,
             created_by=row.initiated_by_hr,
             steps=[
                 _StepModel(
@@ -381,6 +520,9 @@ class DbRequestsStore:
                         "position": request.position,
                         "category": request.category,
                         "escalation_hours": request.escalation_hours,
+                        "subject": request.subject,
+                        "content": request.content,
+                        "doc_type_code": request.doc_type_code,
                         "created_at": now,
                         "updated_at": now,
                     },
@@ -450,6 +592,9 @@ class DbRequestsStore:
                         "position": request.position,
                         "category": request.category,
                         "escalation_hours": request.escalation_hours,
+                        "subject": request.subject,
+                        "content": request.content,
+                        "doc_type_code": request.doc_type_code,
                         "updated_at": now,
                     },
                 )
@@ -488,6 +633,120 @@ class DbRequestsStore:
         except SQLAlchemyError as exc:
             raise RequestsUnavailable(f"Хранилище заявок недоступно: {exc}") from exc
         return req_number_to_id(max_number + 1)
+
+    def get_doc_types(self) -> list[dict]:
+        """Виды документов (таблица doc_types, порядок sort_order/code)."""
+        try:
+            with self._session_factory() as session:
+                rows = session.execute(self._SELECT_DOC_TYPES).all()
+        except SQLAlchemyError as exc:
+            raise RequestsUnavailable(f"Хранилище заявок недоступно: {exc}") from exc
+        return [
+            {
+                "code": row.code,
+                "name": row.name,
+                "is_active": row.is_active,
+                "sort_order": row.sort_order,
+            }
+            for row in rows
+        ]
+
+    def get_doc_type(self, code: str) -> dict | None:
+        """Вид документа по коду либо None (нет — doc_type_code невалиден)."""
+        try:
+            with self._session_factory() as session:
+                row = session.execute(
+                    self._SELECT_DOC_TYPE, {"code": code}
+                ).first()
+        except SQLAlchemyError as exc:
+            raise RequestsUnavailable(f"Хранилище заявок недоступно: {exc}") from exc
+        if row is None:
+            return None
+        return {
+            "code": row.code,
+            "name": row.name,
+            "is_active": row.is_active,
+            "sort_order": row.sort_order,
+        }
+
+    def list_comments(self, request_id: str) -> list[dict]:
+        """Комментарии заявки (request_id = бизнес-номер REQ-XXXX), по (at, id)."""
+        try:
+            with self._session_factory() as session:
+                rows = session.execute(
+                    self._SELECT_COMMENTS, {"request_id": request_id}
+                ).all()
+        except SQLAlchemyError as exc:
+            raise RequestsUnavailable(f"Хранилище заявок недоступно: {exc}") from exc
+        return [
+            {
+                "id": row.id,
+                "request_id": row.request_id,
+                "author": row.author,
+                "body": row.body,
+                "at": row.at.isoformat(),
+                "kind": row.kind,
+                "step_id": row.step_id,
+            }
+            for row in rows
+        ]
+
+    def add_comment(
+        self,
+        request_id: str,
+        author: str,
+        body: str,
+        kind: str = "request",
+        step_id: str | None = None,
+    ) -> dict:
+        """Добавить комментарий заявки, вернуть его как dict (id — из БД)."""
+        now = datetime.now(timezone.utc)
+        try:
+            with self._session_factory() as session:
+                row = session.execute(
+                    self._INSERT_COMMENT,
+                    {
+                        "request_id": request_id,
+                        "author": author,
+                        "body": body,
+                        "at": now,
+                        "kind": kind,
+                        "step_id": step_id,
+                    },
+                ).first()
+                session.commit()
+        except SQLAlchemyError as exc:
+            raise RequestsUnavailable(f"Хранилище заявок недоступно: {exc}") from exc
+        return {
+            "id": row.id,
+            "request_id": request_id,
+            "author": author,
+            "body": body,
+            "at": now.isoformat(),
+            "kind": kind,
+            "step_id": step_id,
+        }
+
+    def get_history(self, entity: str, entity_id: str) -> list[dict]:
+        """Строки audit_log по (entity, entity_id), сортировка по at (append-only)."""
+        try:
+            with self._session_factory() as session:
+                rows = session.execute(
+                    self._SELECT_HISTORY,
+                    {"entity": entity, "entity_id": entity_id},
+                ).all()
+        except SQLAlchemyError as exc:
+            raise RequestsUnavailable(f"Хранилище заявок недоступно: {exc}") from exc
+        return [
+            {
+                "at": row.at.isoformat(),
+                "actor": row.actor,
+                "action": row.action,
+                "detail": None,
+                "details": row.details,
+            }
+            for row in rows
+        ]
 
 
 _db_requests_store: DbRequestsStore | None = None

@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
@@ -19,7 +20,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from .audit import AuditEvent, audit_log
 from .config import Settings, get_settings
-from .deps import CurrentUser, get_current_user
+from .deps import CurrentUser, SedAdminUser, get_current_user
 from .docs import request_url
 from .employees import get_ad_reader
 from .mailer import (
@@ -168,6 +169,12 @@ class CreateRequestIn(BaseModel):
     category: str | None = Field(
         default=None, description="Категория; пусто — вывести из position_to_category"
     )
+    subject: str = Field(description="Тема заявки (карточка)")
+    content: str = Field(description="Содержание заявки (карточка)")
+    doc_type_code: str | None = Field(
+        default=None,
+        description="Вид документа из doc_types; передан — обязан существовать",
+    )
     manager: str | None = Field(
         default=None, description="Замена руководителя (sam) для шагов ad_direct_manager"
     )
@@ -184,6 +191,42 @@ class DecisionIn(BaseModel):
 
     decision: Literal["approve", "reject", "return"]
     comment: str | None = None
+
+
+class UpdateRequestIn(BaseModel):
+    """Правка полей карточки (тема/содержание/вид документа) — только sed_admin."""
+
+    subject: str | None = None
+    content: str | None = None
+    doc_type_code: str | None = None
+
+
+class RollbackIn(BaseModel):
+    """Откат маршрута на шаг и все последующие — только sed_admin."""
+
+    to_step_id: str = Field(description="order шага, с которого переоткрыть маршрут")
+
+
+class CommentIn(BaseModel):
+    """Новый комментарий по заявке (автор/участники/ОК)."""
+
+    body: str = Field(description="Текст комментария (не пустой)")
+    step_id: str | None = Field(
+        default=None, description="Привязка к шагу (order) либо null — к заявке"
+    )
+    kind: Literal["request", "step"] = "request"
+
+
+class CommentOut(BaseModel):
+    """Комментарий заявки (author — sam-логин, ПДн-обрезка не требуется)."""
+
+    id: int
+    request_id: str
+    author: str | None = None
+    body: str
+    at: str
+    kind: str
+    step_id: str | None = None
 
 
 class StepsReplaceIn(BaseModel):
@@ -237,6 +280,9 @@ class RequestOut(BaseModel):
     department: str
     position: str
     category: str | None = None
+    subject: str | None = None
+    content: str | None = None
+    doc_type_code: str | None = None
     escalation_hours: int | None = None
     created_by: str | None = Field(
         default=None,
@@ -272,6 +318,9 @@ class _Request(BaseModel):
     department: str
     position: str
     category: str | None = None
+    subject: str | None = None
+    content: str | None = None
+    doc_type_code: str | None = None
     escalation_hours: int | None = None
     created_by: str
     steps: list[_Step] = Field(default_factory=list)
@@ -617,16 +666,48 @@ def _public_view(
         department=request.department,
         position=request.position,
         category=request.category,
+        subject=request.subject,
+        content=request.content,
+        doc_type_code=request.doc_type_code,
         escalation_hours=request.escalation_hours,
         created_by=request.created_by if privileged else None,
         steps=steps,
     )
 
 
-def _audit(actor: str, action: str, entity_id: str, detail: str = "") -> None:
-    """Запись в append-only журнал (пояснения без ПДн)."""
+def _audit(
+    actor: str,
+    action: str,
+    entity_id: str,
+    detail: str = "",
+    details: dict | None = None,
+) -> None:
+    """Запись в append-only журнал (пояснения без ПДн).
+
+    details — структурированные сведения («было/стало», id затронутых шагов):
+    в in-memory журнале сохраняются JSON-строкой в detail (табличная колонка
+    audit_log.details JSONB заполнится при персистентности аудита, волна B)."""
+    text = detail
+    if details is not None:
+        text = json.dumps(details, ensure_ascii=False, default=str)
     audit_log.append(
-        AuditEvent(actor=actor, action=action, entity="request", entity_id=entity_id, detail=detail)
+        AuditEvent(actor=actor, action=action, entity="request", entity_id=entity_id, detail=text)
+    )
+
+
+def _is_participant(request: _Request, user: CurrentUser) -> bool:
+    """Участник заявки: ОК/админ/администратор СЭД, инициатор или владелец шага.
+
+    Минимальная проверка доступа к карточке (комментарии/история) по образцу
+    _can_view в documents.py, плюс инициатор заявки (создатель видит свою карточку
+    даже без шагов-владельцев)."""
+    if user.role in ("hr", "hr_admin", "admin", "sed_admin"):
+        return True
+    if request.created_by == user.sam:
+        return True
+    return any(
+        s.owner_group in user.groups or (s.assignee and s.assignee == user.sam)
+        for s in request.steps
     )
 
 
@@ -798,6 +879,18 @@ def create_request(
     """Создание заявки от ОК: шаблон по службе/категории, иначе ручной конструктор."""
     settings.ensure_read_only()
     _require_hr(user)
+    if body.doc_type_code:
+        # Вид документа — из таблицы doc_types: передан — обязан существовать.
+        try:
+            known = store.get_doc_type(body.doc_type_code)
+        except RequestsUnavailable as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+            ) from exc
+        if known is None:
+            raise HTTPException(
+                status_code=422, detail="Неизвестный вид документа (doc_type_code)"
+            )
     now = _utcnow()
     category = _resolve_category(route, body.position, body.category)
     if body.blocks is not None:
@@ -839,6 +932,9 @@ def create_request(
             department=body.department,
             position=body.position,
             category=category,
+            subject=body.subject,
+            content=body.content,
+            doc_type_code=body.doc_type_code,
             escalation_hours=route.position_escalation.get(body.position),
             created_by=user.sam,
             steps=steps,
@@ -1349,4 +1445,192 @@ def replace_steps(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
     _audit(user.sam, "steps.patch", request.id, (body.reason or "")[:200])
+    return _public_view(request, user)
+
+
+# --- Комментарии (таблица request_comments, решения пользователя 2026-10-02) ---
+
+
+@router.get("/requests/{request_id}/comments", response_model=list[CommentOut])
+def list_comments(
+    request_id: str,
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+    store: RequestsStore = Depends(get_requests_store),
+) -> list[CommentOut]:
+    """Комментарии заявки — участникам (ОК/админы, инициатор, владельцы шагов)."""
+    settings.ensure_read_only()
+    try:
+        request = _get_request_or_404(store, request_id)
+        comments = store.list_comments(request.id)
+    except RequestsUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    if not _is_participant(request, user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Нет доступа к заявке")
+    return [CommentOut(**c) for c in comments]
+
+
+@router.post("/requests/{request_id}/comments", response_model=list[CommentOut])
+def add_comment(
+    request_id: str,
+    body: CommentIn,
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+    store: RequestsStore = Depends(get_requests_store),
+) -> list[CommentOut]:
+    """Добавить комментарий (автор/участники/ОК), вернуть полный список."""
+    settings.ensure_read_only()
+    if not body.body.strip():
+        raise HTTPException(status_code=422, detail="Комментарий не может быть пустым")
+    try:
+        request = _get_request_or_404(store, request_id)
+        if not _is_participant(request, user):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail="Нет доступа к заявке"
+            )
+        store.add_comment(request.id, user.sam, body.body, body.kind, body.step_id)
+        comments = store.list_comments(request.id)
+    except RequestsUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    return [CommentOut(**c) for c in comments]
+
+
+# --- История изменений (append-only audit_log) ---
+
+
+@router.get("/requests/{request_id}/history")
+def get_history(
+    request_id: str,
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+    store: RequestsStore = Depends(get_requests_store),
+) -> list[dict]:
+    """История заявки участникам: события request/document/attachment по id, по at."""
+    settings.ensure_read_only()
+    try:
+        request = _get_request_or_404(store, request_id)
+        if not _is_participant(request, user):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail="Нет доступа к заявке"
+            )
+        events: list[dict] = []
+        for entity in ("request", "document", "attachment"):
+            events.extend(store.get_history(entity, request.id))
+    except RequestsUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    events.sort(key=lambda e: e["at"])
+    return events
+
+
+# --- Правка карточки и откат маршрута (только администратор СЭД) ---
+
+
+@router.patch("/requests/{request_id}", response_model=RequestOut)
+def update_request(
+    request_id: str,
+    body: UpdateRequestIn,
+    user: CurrentUser = Depends(SedAdminUser),
+    settings: Settings = Depends(get_settings),
+    store: RequestsStore = Depends(get_requests_store),
+) -> RequestOut:
+    """Правка темы/содержания/вида документа — только sed_admin, в audit_log."""
+    settings.ensure_read_only()
+    try:
+        request = _get_request_or_404(store, request_id)
+        if request.status in (DONE, REJECTED, REVOKED):
+            raise HTTPException(status_code=409, detail="Закрытая заявка не правится")
+        if body.doc_type_code is not None:
+            if store.get_doc_type(body.doc_type_code) is None:
+                raise HTTPException(
+                    status_code=422, detail="Неизвестный вид документа (doc_type_code)"
+                )
+        changes: dict[str, tuple[str | None, str | None]] = {}
+        if body.subject is not None:
+            changes["subject"] = (request.subject, body.subject)
+            request.subject = body.subject
+        if body.content is not None:
+            changes["content"] = (request.content, body.content)
+            request.content = body.content
+        if body.doc_type_code is not None:
+            changes["doc_type_code"] = (request.doc_type_code, body.doc_type_code)
+            request.doc_type_code = body.doc_type_code
+        if not changes:
+            raise HTTPException(status_code=422, detail="Нет полей для обновления")
+        store.update(request)
+    except RequestsUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    _audit(
+        user.sam,
+        "request.update",
+        request.id,
+        "",
+        details={
+            "was": {k: v[0] for k, v in changes.items()},
+            "became": {k: v[1] for k, v in changes.items()},
+        },
+    )
+    return _public_view(request, user)
+
+
+@router.post("/requests/{request_id}/rollback", response_model=RequestOut)
+def rollback_request(
+    request_id: str,
+    body: RollbackIn,
+    user: CurrentUser = Depends(SedAdminUser),
+    settings: Settings = Depends(get_settings),
+    route: RouteSettings = Depends(get_route_settings),
+    store: RequestsStore = Depends(get_requests_store),
+    mail_queue: MailQueue = Depends(get_mail_queue),
+    settings_store: DbSettingsStore = Depends(get_settings_store),
+    ad_reader: object | None = Depends(get_ad_reader),
+) -> RequestOut:
+    """Откат на выбранный шаг и все последующие — только sed_admin.
+
+    Переоткрываются шаги с order >= целевого (status=STEP_PENDING, сброс
+    done_by/done_at/comment, новый TTL по approval_ttl_days), заявка снова
+    «На согласовании», затронутые согласующие уведомляются повторно."""
+    settings.ensure_read_only()
+    try:
+        target_order = int(body.to_step_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=422, detail="to_step_id должен быть числом (order шага)"
+        )
+    try:
+        request = _get_request_or_404(store, request_id)
+        step = next((s for s in request.steps if s.order == target_order), None)
+        if step is None:
+            raise HTTPException(status_code=404, detail="Шаг не найден")
+        now = _utcnow()
+        affected = [s for s in request.steps if s.order >= target_order]
+        for s in affected:
+            s.status = STEP_PENDING
+            s.done_by = None
+            s.done_at = None
+            s.comment = None
+            s.expires_at = now + timedelta(days=route.approval_ttl_days)
+        request.status = IN_APPROVAL
+        store.update(request)
+    except RequestsUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    _audit(
+        user.sam,
+        "request.rollback",
+        request.id,
+        "",
+        details={"steps": [s.order for s in affected]},
+    )
+    _notify_assigned(
+        request, mail_queue, settings_store, ad_reader, settings, steps=affected
+    )
     return _public_view(request, user)

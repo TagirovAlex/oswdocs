@@ -1,6 +1,7 @@
 // Клиент настроек СЭД (волна B4 / B3 Волны 2): GET/PUT /api/settings (только SED_ADMINS).
 // Значения — из settings БД (в коде не хардкодятся); токен — Bearer из localStorage.
 import { ApiHttpError, getToken } from "./auth-client";
+import type { DocType } from "./requests-client";
 
 // Предприятие из настроек (settings.enterprises).
 export interface SettingsEnterprise {
@@ -265,4 +266,48 @@ export async function syncEnterprises(): Promise<EnterprisesSyncResult> {
     throw new ApiHttpError(res.status, "Ошибка синхронизации предприятий");
   }
   return (await res.json()) as EnterprisesSyncResult;
+}
+
+// Запрос к /api/doc-types с Bearer-токеном (POST/PATCH/DELETE — только админ).
+// Ответ может быть пустым (204 при удалении) — отдаём пустой объект.
+async function requestDocType<T>(path: string, method: "POST" | "PATCH" | "DELETE", data?: unknown): Promise<T> {
+  const token = getToken();
+  if (!token) {
+    throw new ApiHttpError(401, "Нет токена");
+  }
+  const init: RequestInit = { method, headers: { Authorization: `Bearer ${token}` } };
+  if (data !== undefined) {
+    init.headers = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
+    init.body = JSON.stringify(data);
+  }
+  let res: Response;
+  try {
+    res = await fetch(path, init);
+  } catch {
+    throw new Error("Сервис недоступен");
+  }
+  if (res.status === 401) throw new ApiHttpError(401, "Сессия истекла");
+  if (res.status === 403) throw new ApiHttpError(403, "Доступ запрещён");
+  if (res.status === 409) throw new ApiHttpError(409, "Вид документа используется в заявках");
+  if (res.status === 422) throw new ApiHttpError(422, "Неверные данные вида документа");
+  if (res.status === 503) throw new ApiHttpError(503, "Сервис недоступен");
+  if (!res.ok) throw new ApiHttpError(res.status, "Ошибка операции с видом документа");
+  if (res.status === 204) return {} as T;
+  return (await res.json()) as T;
+}
+
+// POST /api/doc-types: создать вид документа (только админ).
+export async function createDocType(data: { code: string; name: string }): Promise<DocType> {
+  return requestDocType<DocType>("/api/doc-types", "POST", data);
+}
+
+// PATCH /api/doc-types/{code}: переименовать/деактивировать/изменить порядок (только админ).
+export async function updateDocType(code: string, patch: Partial<DocType>): Promise<DocType> {
+  return requestDocType<DocType>(`/api/doc-types/${encodeURIComponent(code)}`, "PATCH", patch);
+}
+
+// DELETE /api/doc-types/{code}: удалить вид документа (только админ; при ссылках
+// в заявках бэкенд отвечает 409 — остаётся мягкое отключение is_active=false).
+export async function deleteDocType(code: string): Promise<Record<string, unknown>> {
+  return requestDocType<Record<string, unknown>>(`/api/doc-types/${encodeURIComponent(code)}`, "DELETE");
 }

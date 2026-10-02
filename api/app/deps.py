@@ -25,7 +25,9 @@ class CurrentUser(BaseModel):
     department: str | None = Field(default=None, description="Подразделение из AD")
     title: str | None = Field(default=None, description="Должность из AD")
     groups: list[str] = Field(default_factory=list, description="Группы memberOf")
-    role: str = Field(default="owner", description="admin | hr_admin | hr | owner")
+    role: str = Field(
+        default="owner", description="sed_admin | admin | hr_admin | hr | owner"
+    )
 
 
 def _split_groups(raw: str | None) -> list[str]:
@@ -80,8 +82,9 @@ def _detect_role(
     groups: list[str], settings: Settings, store: object | None = None
 ) -> str:
     """Роль по группам: эффективные группы ролей из настроек БД
-    (admin_groups/hr_groups/hr_admin_groups), иначе env. Админ важнее
-    руководителя ОК, тот важнее ОК, а ОК — важнее владельца шага.
+    (sed_admin_groups/admin_groups/hr_groups/hr_admin_groups), иначе env.
+    Администратор СЭД важнее админа, тот важнее руководителя ОК, тот —
+    ОК, а ОК — важнее владельца шага.
 
     store — DbSettingsStore или его подмена (аннотация object, чтобы не тянуть
     settings_routes на уровень модуля: цикл импорта); None/ошибка БД — env.
@@ -90,6 +93,8 @@ def _detect_role(
 
     role_groups = resolve_role_groups(settings, store)
     group_set = set(groups)
+    if group_set & role_groups["sed_admin_groups"]:
+        return "sed_admin"
     if group_set & role_groups["admin_groups"]:
         return "admin"
     if group_set & role_groups["hr_admin_groups"]:
@@ -110,9 +115,14 @@ def _bearer_token(authorization: str | None) -> str | None:
 
 
 def is_privileged(user: CurrentUser) -> bool:
-    """Полная карточка положена только ОК, руководителям ОК и админам
-    (остальным — урезанная)."""
-    return user.role in ("admin", "hr_admin", "hr")
+    """Полная карточка положена только ОК, руководителям ОК, админам
+    и администраторам СЭД (остальным — урезанная)."""
+    return user.role in ("admin", "hr_admin", "hr", "sed_admin")
+
+
+def _is_sed_admin(user: CurrentUser) -> bool:
+    """Признак администратора СЭД: роль sed_admin (правит заявки)."""
+    return user.role == "sed_admin"
 
 
 async def get_current_user(
@@ -177,3 +187,15 @@ async def get_current_user(
         groups=groups,
         role=_detect_role(groups, settings, store),
     )
+
+
+def SedAdminUser(user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
+    """Текущий пользователь с ролью администратора СЭД (sed_admin), иначе 403.
+
+    Импорт для других модулей: from app.deps import SedAdminUser."""
+    if not _is_sed_admin(user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Действие доступно только администратору СЭД",
+        )
+    return user

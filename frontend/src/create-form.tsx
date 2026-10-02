@@ -10,6 +10,7 @@ import { ApiHttpError, me } from "./auth-client";
 import {
   createRequest,
   getAdGroupMembers,
+  getDocTypes,
   getEmployeeCard,
   getEnterprises,
   getStepGroups,
@@ -17,7 +18,7 @@ import {
   searchEmployees,
   submitRequest,
 } from "./requests-client";
-import type { AdCandidate, AdGroupMember, EmployeeHit, Enterprise } from "./requests-client";
+import type { AdCandidate, AdGroupMember, DocType, EmployeeHit, Enterprise } from "./requests-client";
 import type { Role } from "./api-mock";
 
 interface CreateFormProps {
@@ -86,6 +87,15 @@ export function CreateForm(props: CreateFormProps) {
   const [created, setCreated] = useState<string>("");
   const [createError, setCreateError] = useState<string>("");
   const [busy, setBusy] = useState<boolean>(false);
+  // Вид документа (селект из GET /api/doc-types?active_only=true), по умолчанию
+  // — первый активный; недоступность справочника форму не ломает.
+  const [docTypes, setDocTypes] = useState<DocType[]>([]);
+  const [docTypesError, setDocTypesError] = useState<string>("");
+  const [docTypeCode, setDocTypeCode] = useState<string>("");
+  // Тема и содержание заявки (обязательные поля макета) и комментарий (правая панель).
+  const [subject, setSubject] = useState<string>("");
+  const [content, setContent] = useState<string>("");
+  const [comment, setComment] = useState<string>("");
 
   // Сотрудник: живой поиск в 1С (200 — список) либо ручной ввод (503 — базы не настроены).
   const [empQuery, setEmpQuery] = useState<string>("");
@@ -170,6 +180,27 @@ export function CreateForm(props: CreateFormProps) {
       })
       .catch((e: unknown) => {
         if (alive) setLoadError(e instanceof Error ? e.message : "Ошибка загрузки данных формы");
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // Виды документов — из GET /api/doc-types (только активные), по умолчанию первый.
+  // Ошибка загрузки — примечание, форма продолжает работать (doc_type_code не уходит).
+  useEffect(() => {
+    let alive = true;
+    getDocTypes(true)
+      .then((items) => {
+        if (!alive) return;
+        setDocTypes(items);
+        setDocTypesError("");
+        if (items.length > 0) setDocTypeCode(items[0].code);
+      })
+      .catch((e: unknown) => {
+        if (alive) {
+          setDocTypesError(e instanceof Error ? e.message : "Ошибка загрузки видов документов");
+        }
       });
     return () => {
       alive = false;
@@ -311,13 +342,15 @@ export function CreateForm(props: CreateFormProps) {
     return <div role="alert">Создание заявок доступно только ОК.</div>;
   }
 
-  // Готовность формы: предприятие → сотрудник → маршрут (без стадий).
+  // Готовность формы: предприятие → сотрудник → тема/содержание → маршрут.
   // Подразделение/должность в 1С могут быть пустыми (уволен/нет кадровых
   // данных) — для создания они необязательны.
   const employeeReady = fio.trim() !== "" && tabNum.trim() !== "";
   const canCreate =
     enterprise !== "" &&
     employeeReady &&
+    subject.trim() !== "" &&
+    content.trim() !== "" &&
     blocks.length > 0 &&
     blocks.every((b) => b.steps.length > 0) &&
     !busy;
@@ -453,6 +486,47 @@ export function CreateForm(props: CreateFormProps) {
     );
   }
 
+  // Сброс формы: после успешного создания и по кнопке «Отмена». Вид документа
+  // возвращается к первому активному, остальные поля пусты. created НЕ трогаем —
+  // статус «Заявка … создана» остаётся видимым.
+  function resetForm(): void {
+    setEnterprise("");
+    setTabNum("");
+    setFio("");
+    setDepartment("");
+    setPosition("");
+    setEmpQuery("");
+    setEmpHits([]);
+    setEmpListOpen(false);
+    setManualMode(false);
+    setManualNote("");
+    setSubject("");
+    setContent("");
+    setComment("");
+    setDocTypeCode(docTypes.length > 0 ? docTypes[0].code : "");
+    setBlocks([]);
+    // blockSeq НЕ обнуляем: счётчик монотонно растёт, поэтому id блоков
+    // уникальны в пределах жизненного цикла формы. Иначе первый блок новой
+    // формы получил бы тот же blk-N, счётчик groupSeq (обнуляемый ниже) сбился
+    // бы в ту же единицу, и устаревший in-flight ответ getAdGroupMembers по
+    // прежнему блоку прошёл бы guard и записал состав новому блоку.
+    groupSeq.current = {};
+    setGroupPick({});
+    setGroupMembers({});
+    closeAdPanel();
+    setTouched(false);
+    onDirtyChange?.(false);
+  }
+
+  // «Отмена» (кнопка макета, серая): в окне-попе — закрыть окно, иначе сброс формы.
+  function handleCancel(): void {
+    if (closeOnCreate) {
+      window.close();
+      return;
+    }
+    resetForm();
+  }
+
   // Создание заявки: POST /api/requests; при submit=true — сразу POST /{id}/submit
   // («Отправить на согласование»). При успехе — статус и сброс формы; при
   // ошибке (в т.ч. submit) — текст ошибки, окно не закрывается, а созданный
@@ -469,6 +543,9 @@ export function CreateForm(props: CreateFormProps) {
         department,
         position,
         fio,
+        subject,
+        content,
+        ...(docTypeCode !== "" ? { doc_type_code: docTypeCode } : {}),
         blocks: blocks.map((b) => ({
           mode: b.mode,
           // Шаг-группа уходит owner_group + by_group; шаг-сотрудник — sam.
@@ -496,27 +573,7 @@ export function CreateForm(props: CreateFormProps) {
       if (submit) await submitRequest(id);
       pendingDraft.current = null;
       setCreated(`Заявка ${id} создана`);
-      setEnterprise("");
-      setTabNum("");
-      setFio("");
-      setDepartment("");
-      setPosition("");
-      setEmpQuery("");
-      setEmpHits([]);
-      setEmpListOpen(false);
-      setManualMode(false);
-      setManualNote("");
-      setBlocks([]);
-      // blockSeq НЕ обнуляем: счётчик монотонно растёт, поэтому id блоков
-      // уникальны в пределах жизненного цикла формы. Иначе первый блок новой
-      // формы получил бы тот же blk-N, счётчик groupSeq (обнуляемый ниже) сбился
-      // бы в ту же единицу, и устаревший in-flight ответ getAdGroupMembers по
-      // прежнему блоку прошёл бы guard и записал состав новому блоку.
-      groupSeq.current = {};
-      setGroupPick({});
-      setGroupMembers({});
-      closeAdPanel();
-      onDirtyChange?.(false);
+      resetForm();
       // В окне-попе — после создания закрыть окно (список обновится по фокусу).
       if (closeOnCreate) window.close();
     } catch (e: unknown) {
@@ -629,6 +686,52 @@ export function CreateForm(props: CreateFormProps) {
             </fieldset>
           )}
 
+          {/* Вид документа (селект из GET /api/doc-types, только активные),
+              тема и содержание — обязательные поля макета (DESIGN.md п.1.12). */}
+          <label className="sed-field">
+            Вид документа
+            <select
+              aria-label="Вид документа"
+              value={docTypeCode}
+              onChange={(e) => {
+                markTouched();
+                setDocTypeCode(e.target.value);
+              }}
+            >
+              {docTypes.length === 0 && <option value="">— не задан —</option>}
+              {docTypes.map((dt) => (
+                <option key={dt.code} value={dt.code}>
+                  {dt.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          {docTypesError && <div className="sed-note">Виды документов: {docTypesError}</div>}
+          <label className="sed-field">
+            Тема
+            <input
+              aria-label="Тема"
+              required
+              value={subject}
+              onChange={(e) => {
+                markTouched();
+                setSubject(e.target.value);
+              }}
+            />
+          </label>
+          <label className="sed-field">
+            Содержание
+            <textarea
+              aria-label="Содержание"
+              rows={3}
+              value={content}
+              onChange={(e) => {
+                markTouched();
+                setContent(e.target.value);
+              }}
+            />
+          </label>
+
           {/* Файлы: до создания заявки загрузки нет (эндпоинт привязан к id
               заявки) — подсказка вместо неработающих кнопок макета. */}
           <div className="sed-note">
@@ -662,6 +765,20 @@ export function CreateForm(props: CreateFormProps) {
               </div>
             </fieldset>
           )}
+
+          {/* Комментарий к заявке (правая панель макета). */}
+          <label className="sed-field">
+            Комментарий
+            <textarea
+              aria-label="Комментарий"
+              rows={3}
+              value={comment}
+              onChange={(e) => {
+                markTouched();
+                setComment(e.target.value);
+              }}
+            />
+          </label>
         </div>
       </div>
 
@@ -675,21 +792,23 @@ export function CreateForm(props: CreateFormProps) {
           </div>
           {groupsError && <div className="sed-note">Группы: {groupsError}</div>}
           {blocks.length === 0 && <div className="sed-note">Добавьте блок и исполнителей.</div>}
-          {/* Конструктор блоков — таблица «Рассмотрение» макета. */}
+          {/* Конструктор блоков — таблица «Рассмотрение» макета в панели (DESIGN.md п.1.12). */}
           {blocks.length > 0 && (
-            <table className="sed-table">
-              <caption className="sed-note">Рассмотрение</caption>
-              <thead>
-                <tr>
-                  <th scope="col">
-                    <span aria-hidden="true">✕</span>
-                  </th>
-                  <th scope="col">Вид рассмотрения</th>
-                  <th scope="col">Должность</th>
-                  <th scope="col">Сотрудник</th>
-                  <th scope="col">Действия</th>
-                </tr>
-              </thead>
+            <div className="sed-review">
+              <b>Рассмотрение</b>
+              <table className="sed-table">
+                <thead>
+                  <tr>
+                    <th scope="col">
+                      <span aria-hidden="true">✕</span>
+                    </th>
+                    <th scope="col">Вид рассмотрения</th>
+                    <th scope="col">Должность</th>
+                    <th scope="col">Сотрудник</th>
+                    <th scope="col">Комментарий</th>
+                    <th scope="col">Действия</th>
+                  </tr>
+                </thead>
               <tbody>
                 {blocks.map((block, bi) => (
                   <tr key={block.id}>
@@ -841,6 +960,8 @@ export function CreateForm(props: CreateFormProps) {
                         </>
                       )}
                     </td>
+                    {/* Комментарий к блоку: пока не сохраняется в маршруте (пустая ячейка). */}
+                    <td />
                     {/* Действия: добавить выбранную группу-владельца в маршрут. */}
                     <td>
                       {block.kind === "group" && (groupPick[block.id] ?? "") !== "" && (
@@ -856,7 +977,8 @@ export function CreateForm(props: CreateFormProps) {
                   </tr>
                 ))}
               </tbody>
-            </table>
+              </table>
+            </div>
           )}
           <div className="sed-toolbar sed-mt-8">
             <button type="button" className="sed-btn sed-btn--ghost" onClick={() => addBlock("sequential")}>
@@ -885,6 +1007,10 @@ export function CreateForm(props: CreateFormProps) {
           onClick={() => handleCreate(true)}
         >
           {busy ? "Отправка…" : "Отправить на согласование"}
+        </button>
+        {/* Отмена (серая, макет): в попапе — закрыть окно, иначе сброс формы. */}
+        <button type="button" className="sed-btn sed-btn--neutral" onClick={handleCancel}>
+          Отмена
         </button>
       </div>
       {createError && <div role="alert">{createError}</div>}

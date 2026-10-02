@@ -10,12 +10,13 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Mapping, Sequence
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import bindparam, create_engine, text
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import sessionmaker
 
 from .audit import AuditEvent, audit_log
@@ -29,6 +30,10 @@ class SettingsUnavailable(Exception):
     """Хранилище настроек (БД) недоступно — роутер отвечает 503, а не 500."""
 
 
+class DocTypeConflict(Exception):
+    """Код вида документа уже занят (409): вторичный ключ doc_types.code."""
+
+
 # Прикладные ключи админки (состав — контракт B2 GET/PUT /settings, дополнен
 # W3a: doc_templates/mail_templates — бегунки и письма; W5a: scan_allowed_types —
 # MIME-allowlist сканов; SMTP: smtp_host/smtp_port/smtp_from/smtp_user/smtp_password —
@@ -39,8 +44,9 @@ class SettingsUnavailable(Exception):
 # вход в систему (дополняют env ALLOWED_AD_GROUPS); allowed_ad_groups остаётся
 # контент-ключом (правит руководитель ОК) — это группы ручного конструктора
 # шагов (GET /step-groups), входа они НЕ расширяют. Ключи ролей
-# admin_groups/hr_groups/hr_admin_groups (инфра) — группы ролей из БД с
-# фолбэком на env (ADMIN_GROUPS/HR_GROUPS/HR_ADMIN_GROUPS).
+# sed_admin_groups/admin_groups/hr_groups/hr_admin_groups (инфра) — группы ролей
+# из БД с фолбэком на env (SED_ADMIN_GROUPS/ADMIN_GROUPS/HR_GROUPS/
+# HR_ADMIN_GROUPS).
 CONTENT_KEYS: tuple[str, ...] = (
     "approval_ttl_days",
     "require_comment",
@@ -56,6 +62,7 @@ CONTENT_KEYS: tuple[str, ...] = (
 
 INFRA_KEYS: tuple[str, ...] = (
     "access_groups",
+    "sed_admin_groups",
     "admin_groups",
     "hr_groups",
     "hr_admin_groups",
@@ -82,7 +89,12 @@ SETTINGS_KEYS: tuple[str, ...] = CONTENT_KEYS + INFRA_KEYS
 
 # Ключи групп ролей: значение из БД — единственный источник, ключа нет или БД
 # недоступна — env (аддитивно к DbSettingsStore, контракт не меняем).
-ROLE_GROUP_KEYS: tuple[str, ...] = ("admin_groups", "hr_groups", "hr_admin_groups")
+ROLE_GROUP_KEYS: tuple[str, ...] = (
+    "sed_admin_groups",
+    "admin_groups",
+    "hr_groups",
+    "hr_admin_groups",
+)
 
 # Маска пароля SMTP в GET /settings: наружу отдаём только признак «задан/не задан»,
 # само значение — только запись (PUT) при явном вводе нового пароля.
@@ -203,6 +215,19 @@ def resolve_step_groups(
     return groups | _clean_groups(raw)
 
 
+def _env_sed_admin_groups() -> set[str]:
+    """Группы администраторов СЭД из env (SED_ADMIN_GROUPS): запятая-разделитель,
+    без пустых (то же правило, что settings.admin_groups из config.py).
+
+    config.py вне границ правки backend-settings, поэтому фолбэк читаем из
+    os.environ, а не из свойства Settings (контракт фолбэка тот же)."""
+    return {
+        g.strip()
+        for g in os.environ.get("SED_ADMIN_GROUPS", "").split(",")
+        if g.strip()
+    }
+
+
 def resolve_role_groups(
     settings: Settings, store: DbSettingsStore | None = None
 ) -> dict[str, set[str]]:
@@ -210,11 +235,12 @@ def resolve_role_groups(
 
     Правило приоритета: значение ключа в БД есть — используем ТОЛЬКО его (env
     не дополняет, иначе отзыв группы админом в БД не действовал бы); ключа нет
-    либо БД недоступна/не поддерживает чтение — env (ADMIN_GROUPS/HR_GROUPS/
-    HR_ADMIN_GROUPS). Одно чтение БД на все три ключа; значение не-массив
-    считаем отсутствующим (фолбэк на env).
+    либо БД недоступна/не поддерживает чтение — env (SED_ADMIN_GROUPS/
+    ADMIN_GROUPS/HR_GROUPS/HR_ADMIN_GROUPS). Одно чтение БД на все четыре
+    ключа; значение не-массив считаем отсутствующим (фолбэк на env).
     """
     groups: dict[str, set[str]] = {
+        "sed_admin_groups": _env_sed_admin_groups(),
         "admin_groups": set(settings.admin_groups),
         "hr_groups": set(settings.hr_groups),
         "hr_admin_groups": set(settings.hr_admin_groups),
@@ -270,6 +296,36 @@ class DbSettingsStore:
         """
     )
 
+    # Виды документов (таблица doc_types, миграция 0003): единый источник правды,
+    # контентного ключа settings больше нет. Наружу — кортеж полей справочника.
+    _DOC_TYPES_COLUMNS = "code, name, is_active, sort_order"
+    _DOC_TYPES_SELECT = text(
+        f"SELECT {_DOC_TYPES_COLUMNS} FROM doc_types ORDER BY sort_order, code"
+    )
+    _DOC_TYPES_SELECT_BY_CODE = text(
+        f"SELECT {_DOC_TYPES_COLUMNS} FROM doc_types WHERE code = :code"
+    )
+    _DOC_TYPES_INSERT = text(
+        """
+        INSERT INTO doc_types (code, name, is_active, sort_order, created_at, updated_at)
+        VALUES (:code, :name, true, :sort_order, now(), now())
+        """
+    )
+    _DOC_TYPES_UPDATE = text(
+        """
+        UPDATE doc_types
+        SET name = COALESCE(:name, name),
+            is_active = COALESCE(:is_active, is_active),
+            sort_order = COALESCE(:sort_order, sort_order),
+            updated_at = now()
+        WHERE code = :code
+        """
+    )
+    _DOC_TYPES_DELETE = text("DELETE FROM doc_types WHERE code = :code")
+    _DOC_TYPES_REFCOUNT = text(
+        "SELECT count(*) FROM dismissal_requests WHERE doc_type_code = :code"
+    )
+
     def __init__(self, database_url: str) -> None:
         self._engine = create_engine(database_url, pool_pre_ping=True)
         self._session_factory = sessionmaker(
@@ -312,6 +368,94 @@ class DbSettingsStore:
                 session.commit()
         except SQLAlchemyError as exc:
             raise SettingsUnavailable(f"Хранилище настроек недоступно: {exc}") from exc
+
+    @staticmethod
+    def _doc_type_dict(row) -> dict:
+        """Строка doc_types -> словарь контракта (code/name/is_active/sort_order)."""
+        return {
+            "code": row.code,
+            "name": row.name,
+            "is_active": row.is_active,
+            "sort_order": row.sort_order,
+        }
+
+    def list_doc_types(self) -> list[dict]:
+        """Все виды документов (включая отключенные), по sort_order/code."""
+        try:
+            with self._session_factory() as session:
+                rows = session.execute(self._DOC_TYPES_SELECT).all()
+        except SQLAlchemyError as exc:
+            raise SettingsUnavailable(f"Хранилище настроек недоступно: {exc}") from exc
+        return [self._doc_type_dict(row) for row in rows]
+
+    def get_doc_type(self, code: str) -> dict | None:
+        """Вид документа по коду либо None (нет в таблице)."""
+        try:
+            with self._session_factory() as session:
+                row = session.execute(
+                    self._DOC_TYPES_SELECT_BY_CODE, {"code": code}
+                ).first()
+        except SQLAlchemyError as exc:
+            raise SettingsUnavailable(f"Хранилище настроек недоступно: {exc}") from exc
+        return self._doc_type_dict(row) if row is not None else None
+
+    def create_doc_type(self, code: str, name: str, sort_order: int) -> dict:
+        """Создать вид документа (активным по умолчанию). Занятый code — DocTypeConflict."""
+        try:
+            with self._session_factory() as session:
+                session.execute(
+                    self._DOC_TYPES_INSERT,
+                    {"code": code, "name": name, "sort_order": sort_order},
+                )
+                session.commit()
+        except IntegrityError as exc:
+            raise DocTypeConflict(f"Вид документа с кодом {code!r} уже существует") from exc
+        except SQLAlchemyError as exc:
+            raise SettingsUnavailable(f"Хранилище настроек недоступно: {exc}") from exc
+        return self.get_doc_type(code)
+
+    def update_doc_type(
+        self,
+        code: str,
+        name: str | None,
+        is_active: bool | None,
+        sort_order: int | None,
+    ) -> dict | None:
+        """Частичное обновление вида документа (None-поля не меняются);
+        None — кода нет в таблице."""
+        try:
+            with self._session_factory() as session:
+                result = session.execute(
+                    self._DOC_TYPES_UPDATE,
+                    {"code": code, "name": name, "is_active": is_active, "sort_order": sort_order},
+                )
+                session.commit()
+                if result.rowcount == 0:
+                    return None
+        except SQLAlchemyError as exc:
+            raise SettingsUnavailable(f"Хранилище настроек недоступно: {exc}") from exc
+        return self.get_doc_type(code)
+
+    def doc_type_in_use(self, code: str) -> bool:
+        """Есть ли ссылки на вид в заявках (колонка doc_type_code)."""
+        try:
+            with self._session_factory() as session:
+                count = session.execute(
+                    self._DOC_TYPES_REFCOUNT, {"code": code}
+                ).scalar()
+        except SQLAlchemyError as exc:
+            raise SettingsUnavailable(f"Хранилище настроек недоступно: {exc}") from exc
+        return bool(count)
+
+    def delete_doc_type(self, code: str) -> bool:
+        """Физическое удаление вида документа; False — кода нет."""
+        try:
+            with self._session_factory() as session:
+                result = session.execute(self._DOC_TYPES_DELETE, {"code": code})
+                session.commit()
+        except SQLAlchemyError as exc:
+            raise SettingsUnavailable(f"Хранилище настроек недоступно: {exc}") from exc
+        return result.rowcount > 0
 
 
 _db_store: DbSettingsStore | None = None
@@ -369,6 +513,37 @@ class MailTemplateItem(BaseModel):
     code: str = Field(description="Событие v1: assigned/reminder/escalation/closed/returned")
     subject: str = Field(description="Тема письма (Jinja-подобная)")
     body_html: str = Field(description="HTML-тело письма (Jinja-подобное)")
+
+
+class DocTypeItem(BaseModel):
+    """Вид документа: строка таблицы doc_types (миграция 0003).
+
+    Единый источник видов — таблица, контентного ключа settings больше нет."""
+
+    code: str = Field(description="Код вида документа (уникален)")
+    name: str = Field(description="Название вида документа")
+    is_active: bool = Field(description="Активен ли вид (активные — в селекте формы)")
+    sort_order: int = Field(description="Порядок сортировки в селекте")
+
+
+class DocTypeCreateIn(BaseModel):
+    """Создание вида документа (только admin): code обязателен и уникален."""
+
+    code: str = Field(description="Код вида документа (уникален, занятый — 409)")
+    name: str = Field(description="Название вида документа")
+    sort_order: int | None = Field(
+        default=None, description="Порядок сортировки (по умолчанию 0)"
+    )
+
+
+class DocTypeUpdateIn(BaseModel):
+    """Правка вида документа (только admin): все поля опциональны (частичное)."""
+
+    name: str | None = Field(default=None, description="Название вида документа")
+    is_active: bool | None = Field(
+        default=None, description="Активен ли вид (false — мягкое отключение)"
+    )
+    sort_order: int | None = Field(default=None, description="Порядок сортировки")
 
 
 class OnecBaseItem(BaseModel):
@@ -451,6 +626,10 @@ class SettingsPayload(BaseModel):
     )
     admin_groups: list[str] | None = Field(
         default=None, description="Группы администраторов (фолбэк — env ADMIN_GROUPS)"
+    )
+    sed_admin_groups: list[str] | None = Field(
+        default=None,
+        description="Группы администраторов СЭД (фолбэк — env SED_ADMIN_GROUPS)",
     )
     hr_groups: list[str] | None = Field(
         default=None, description="Группы ОК (фолбэк — env HR_GROUPS)"
@@ -845,3 +1024,142 @@ def list_step_groups(
     if not isinstance(values, list):
         return []
     return [item for item in values if isinstance(item, str)]
+
+
+# --- Виды документов (таблица doc_types, миграция 0003) ---
+# Единый источник правды — таблица, контентного ключа settings больше нет.
+# Чтение — любому аутентифицированному (селект формы заявки), правка — admin.
+
+@router.get("/doc-types")
+def list_doc_types(
+    active_only: bool = True,
+    user: CurrentUser = Depends(get_current_user),
+    store: DbSettingsStore = Depends(get_settings_store),
+) -> list[dict]:
+    """Виды документов из таблицы doc_types: любой аутентифицированный.
+
+    active_only=true (по умолчанию) — только активные (селект формы);
+    active_only=false — все, включая отключенные (редактор админки).
+    БД недоступна — 503."""
+    try:
+        items = store.list_doc_types()
+    except SettingsUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    if active_only:
+        items = [item for item in items if item["is_active"]]
+    return items
+
+
+@router.post("/doc-types", status_code=status.HTTP_201_CREATED)
+def create_doc_type(
+    payload: DocTypeCreateIn,
+    user: CurrentUser = Depends(get_current_user),
+    store: DbSettingsStore = Depends(get_settings_store),
+) -> dict:
+    """Создать вид документа (только admin): code уникален, занятый — 409."""
+    _require_admin(user)
+    try:
+        item = store.create_doc_type(payload.code, payload.name, payload.sort_order or 0)
+    except DocTypeConflict as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
+    except SettingsUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    audit_log.append(
+        AuditEvent(
+            actor=user.sam,
+            action="doc_types.create",
+            entity="doc_type",
+            entity_id=item["code"],
+        )
+    )
+    return item
+
+
+@router.patch("/doc-types/{code}")
+def update_doc_type(
+    code: str,
+    payload: DocTypeUpdateIn,
+    user: CurrentUser = Depends(get_current_user),
+    store: DbSettingsStore = Depends(get_settings_store),
+) -> dict:
+    """Изменить вид документа (только admin): частичное обновление полей.
+
+    Мягкое отключение — PATCH с is_active=false: для видов, на которые есть
+    ссылки в заявках, физическое удаление запрещено (см. DELETE)."""
+    _require_admin(user)
+    updates = payload.model_dump(mode="json", exclude_unset=True)
+    try:
+        item = store.update_doc_type(
+            code,
+            updates.get("name"),
+            updates.get("is_active"),
+            updates.get("sort_order"),
+        )
+        if item is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Вид документа не найден",
+            )
+    except SettingsUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    audit_log.append(
+        AuditEvent(
+            actor=user.sam,
+            action="doc_types.update",
+            entity="doc_type",
+            entity_id=code,
+            detail=",".join(updates),
+        )
+    )
+    return item
+
+
+@router.delete("/doc-types/{code}")
+def delete_doc_type(
+    code: str,
+    user: CurrentUser = Depends(get_current_user),
+    store: DbSettingsStore = Depends(get_settings_store),
+) -> dict:
+    """Удалить вид документа (только admin).
+
+    Физическое удаление разрешено, только если на код нет ссылок в заявках
+    (doc_type_code). Если ссылки есть — 409: историю заявок не рвём внешним
+    ключом, для «занятых» видов доступно только мягкое отключение
+    (PATCH /doc-types/{code} с is_active=false)."""
+    _require_admin(user)
+    try:
+        if store.doc_type_in_use(code):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "Вид документа используется заявками: физическое удаление "
+                    "запрещено, доступно только мягкое отключение "
+                    "(PATCH is_active=false)"
+                ),
+            )
+        if not store.delete_doc_type(code):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Вид документа не найден",
+            )
+    except SettingsUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    audit_log.append(
+        AuditEvent(
+            actor=user.sam,
+            action="doc_types.delete",
+            entity="doc_type",
+            entity_id=code,
+        )
+    )
+    return {"deleted": code}

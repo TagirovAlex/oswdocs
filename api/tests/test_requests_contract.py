@@ -136,6 +136,8 @@ def _create(client, headers, **kw) -> object:
         "tab_num": "В-0001",
         "department": FAKE_SERVICE,
         "position": FAKE_POSITION_LINE,
+        "subject": "Вымышленная тема",
+        "content": "Вымышленное содержание",
     }
     body.update(kw)
     return client.post("/requests", json=body, headers=headers)

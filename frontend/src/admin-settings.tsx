@@ -3,12 +3,17 @@
 // для руководителя ОК), в коде не хардкодятся. Вкладки: Процесс / Справочники /
 // Шаблоны (контент) и Инфра / Регламенты / Доступ и роли (только админ).
 import { useEffect, useState } from "react";
+import { getDocTypes } from "./requests-client";
+import type { DocType } from "./requests-client";
 import {
+  createDocType,
+  deleteDocType,
   getSettings,
   getSettingsContent,
   saveSettings,
   saveSettingsContent,
   syncEnterprises,
+  updateDocType,
 } from "./settings-client";
 import type {
   ContentSettingsData,
@@ -601,6 +606,157 @@ function ScheduleReglamentEditor(props: {
   );
 }
 
+// Редактор видов документов (таблица doc_types; только админ). Список —
+// code/name/is_active/sort_order; добавить (code+name), переименовать,
+// деактивировать, удалить (DELETE; при ссылках в заявках бэкенд отвечает 409).
+// Операции идут сразу в API, не через общий PUT /settings.
+function DocTypesEditor() {
+  const [items, setItems] = useState<DocType[]>([]);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [error, setError] = useState<string>("");
+  const [newCode, setNewCode] = useState<string>("");
+  const [newName, setNewName] = useState<string>("");
+  const [busy, setBusy] = useState<boolean>(false);
+
+  function load(): void {
+    setError("");
+    getDocTypes(false)
+      .then((data) => setItems(data))
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : "Ошибка загрузки видов документов"))
+      .finally(() => setLoading(false));
+  }
+
+  useEffect(load, []);
+
+  function patch(index: number, p: Partial<DocType>): void {
+    setItems(items.map((it, i) => (i === index ? { ...it, ...p } : it)));
+  }
+
+  async function handleCreate(): Promise<void> {
+    const code = newCode.trim();
+    const name = newName.trim();
+    if (code === "" || name === "") {
+      setError("Укажите код и название вида документа");
+      return;
+    }
+    setError("");
+    setBusy(true);
+    try {
+      await createDocType({ code, name });
+      setNewCode("");
+      setNewName("");
+      load();
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Ошибка добавления вида документа");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleUpdate(item: DocType): Promise<void> {
+    setError("");
+    setBusy(true);
+    try {
+      await updateDocType(item.code, {
+        name: item.name,
+        is_active: item.is_active,
+        sort_order: item.sort_order,
+      });
+      load();
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Ошибка сохранения вида документа");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleDelete(code: string): Promise<void> {
+    setError("");
+    setBusy(true);
+    try {
+      await deleteDocType(code);
+      load();
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Ошибка удаления вида документа");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <fieldset>
+      <legend>Виды документов</legend>
+      {loading && <div className="sed-note">Загрузка видов документов…</div>}
+      {error && <div className="sed-note">Виды документов: {error}</div>}
+      {!loading && !error && items.length === 0 && (
+        <div className="sed-note">Видов документов нет</div>
+      )}
+      {items.map((item, i) => (
+        <div key={item.code} className="sed-doc-row">
+          <label>
+            Код
+            <input aria-label={`Код вида ${item.code}`} value={item.code} readOnly />
+          </label>
+          <label>
+            Название
+            <input
+              aria-label={`Название вида ${item.code}`}
+              value={item.name}
+              onChange={(e) => patch(i, { name: e.target.value })}
+            />
+          </label>
+          <label>
+            Порядок
+            <input
+              aria-label={`Порядок вида ${item.code}`}
+              type="number"
+              value={item.sort_order}
+              onChange={(e) => patch(i, { sort_order: Number(e.target.value) })}
+            />
+          </label>
+          <label>
+            <input
+              type="checkbox"
+              aria-label={`Вид ${item.code} активен`}
+              checked={item.is_active}
+              onChange={(e) => patch(i, { is_active: e.target.checked })}
+            />
+            Активен
+          </label>
+          <div className="sed-toolbar" style={{ marginTop: 8 }}>
+            <button type="button" className="sed-btn" onClick={() => handleUpdate(item)} disabled={busy}>
+              Применить
+            </button>
+            <button
+              type="button"
+              className="sed-btn sed-btn--ghost"
+              onClick={() => handleDelete(item.code)}
+              disabled={busy}
+            >
+              Удалить вид
+            </button>
+          </div>
+        </div>
+      ))}
+      <div className="sed-doc-row">
+        <label>
+          Код нового вида
+          <input aria-label="Код нового вида" value={newCode} onChange={(e) => setNewCode(e.target.value)} />
+        </label>
+        <label>
+          Название нового вида
+          <input aria-label="Название нового вида" value={newName} onChange={(e) => setNewName(e.target.value)} />
+        </label>
+        <div className="sed-toolbar" style={{ marginTop: 8 }}>
+          <button type="button" className="sed-btn" onClick={handleCreate} disabled={busy}>
+            Добавить вид
+          </button>
+        </div>
+      </div>
+    </fieldset>
+  );
+}
+
 // Админка: контент (TTL/флаги, справочники, шаблоны) + инфра (сессия/сканы/SMTP,
 // регламенты, доступ и роли). Админ видит все вкладки (GET/PUT /api/settings),
 // руководитель ОК — только контент (GET/PUT /api/settings/content). Всё — из
@@ -858,6 +1014,8 @@ export function AdminSettings(props: AdminSettingsProps) {
           <EnterprisesEditor value={enterprises} onChange={setEnterprises} />
           <GroupsEditor value={adGroups} onChange={setAdGroups} />
           <PositionCategoryEditor value={positionCategory} onChange={setPositionCategory} />
+          {/* Виды документов — таблица doc_types; только админ (не контент-ключ settings). */}
+          {isAdmin && <DocTypesEditor />}
         </>
       )}
 

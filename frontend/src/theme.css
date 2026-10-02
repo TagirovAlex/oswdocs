@@ -420,6 +420,21 @@ a {
   padding: 10px;
 }
 
+/* Панель «Рассмотрение» макета (маршрут создания): как .panel, без отступов сетки. */
+.sed-review {
+  background: var(--sed-panel);
+  border: 1px solid var(--sed-border);
+  border-radius: var(--sed-radius);
+  padding: 10px;
+}
+
+/* Строка редактора видов документов (таблица doc_types): карточка с рамкой. */
+.sed-doc-row {
+  border: 1px solid var(--sed-border);
+  margin-top: 8px;
+  padding: 8px;
+}
+
 /* Подпись поля (label макета): блоком с отступами; поля не растягиваются по
    ширине — иначе ломаются строки-флексы. */
 .sed-field {

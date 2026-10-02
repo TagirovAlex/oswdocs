@@ -5,20 +5,35 @@
 import { useEffect, useState } from "react";
 import type { ChangeEvent } from "react";
 import {
+  addComment,
   decideStep,
   deleteRequest,
   finishRequest,
   getAttachments,
+  getComments,
+  getDocTypes,
   getDocuments,
+  getHistory,
   getRequest,
   notifyRequestsChanged,
   printRequest,
+  rollbackRequest,
   stepLabel,
   submitRequest,
   toExecution,
+  updateRequest,
   uploadAttachment,
 } from "./requests-client";
-import type { AttachmentMeta, DocumentMeta, RequestOut, RequestStep, StepDecision } from "./requests-client";
+import type {
+  AttachmentMeta,
+  DocType,
+  DocumentMeta,
+  RequestComment,
+  RequestHistoryItem,
+  RequestOut,
+  RequestStep,
+  StepDecision,
+} from "./requests-client";
 import type { Role } from "./api-mock";
 
 interface RequestCardProps {
@@ -38,6 +53,12 @@ function stepOwnerCell(step: RequestStep): string {
   if (step.owner_name) return step.owner_name;
   if (step.resolver === "by_user") return "Персональный исполнитель";
   return step.owner_group || "—";
+}
+
+// Дата записи истории: локализованная; при битой строке — как пришла.
+function historyWhen(at: string): string {
+  const d = new Date(at);
+  return isNaN(d.getTime()) ? at : d.toLocaleString("ru-RU");
 }
 
 // Карточка заявки со всеми блоками (W5b + документы + вложения).
@@ -64,6 +85,22 @@ export function RequestCard(props: RequestCardProps) {
   const [attachments, setAttachments] = useState<AttachmentMeta[]>([]);
   const [attachmentsError, setAttachmentsError] = useState<string>("");
   const [uploadError, setUploadError] = useState<string>("");
+  // История изменений (GET /api/requests/{id}/history) и комментарии заявки.
+  const [history, setHistory] = useState<RequestHistoryItem[]>([]);
+  const [historyError, setHistoryError] = useState<string>("");
+  const [comments, setComments] = useState<RequestComment[]>([]);
+  const [commentsError, setCommentsError] = useState<string>("");
+  const [newComment, setNewComment] = useState<string>("");
+  const [commentError, setCommentError] = useState<string>("");
+  // Панель администратора СЭД (роль sed_admin от бэкенда): правка полей и откат.
+  const isSedAdmin = (role as string) === "sed_admin";
+  const [sedDocTypes, setSedDocTypes] = useState<DocType[]>([]);
+  const [sedSubject, setSedSubject] = useState<string>("");
+  const [sedContent, setSedContent] = useState<string>("");
+  const [sedDocType, setSedDocType] = useState<string>("");
+  const [rollbackStep, setRollbackStep] = useState<string>("");
+  const [sedStatus, setSedStatus] = useState<string>("");
+  const [sedError, setSedError] = useState<string>("");
 
   // Загрузка документов (версии бегунка и ссылки на PDF).
   useEffect(() => {
@@ -138,6 +175,69 @@ export function RequestCard(props: RequestCardProps) {
       alive = false;
     };
   }, [requestId]);
+
+  // История заявки (GET /api/requests/{id}/history; видна участникам). Своя
+  // загрузка: ошибка — примечанием, карточку не ломает (alert не используем).
+  useEffect(() => {
+    let alive = true;
+    setHistoryError("");
+    getHistory(requestId)
+      .then((items) => {
+        if (alive) setHistory(items);
+      })
+      .catch((e: unknown) => {
+        if (alive) {
+          setHistory([]);
+          setHistoryError(e instanceof Error ? e.message : "Ошибка загрузки истории");
+        }
+      });
+    return () => {
+      alive = false;
+    };
+  }, [requestId]);
+
+  // Комментарии заявки (GET /api/requests/{id}/comments; отдельная таблица).
+  useEffect(() => {
+    let alive = true;
+    setCommentsError("");
+    getComments(requestId)
+      .then((items) => {
+        if (alive) setComments(items);
+      })
+      .catch((e: unknown) => {
+        if (alive) {
+          setComments([]);
+          setCommentsError(e instanceof Error ? e.message : "Ошибка загрузки комментариев");
+        }
+      });
+    return () => {
+      alive = false;
+    };
+  }, [requestId]);
+
+  // Виды документов для панели админа СЭД (все, включая деактивированные —
+  // чтобы показать уже выбранный код). Недоступность — пустой селект без текста.
+  useEffect(() => {
+    if (!isSedAdmin) return;
+    let alive = true;
+    getDocTypes(false)
+      .then((items) => {
+        if (alive) setSedDocTypes(items);
+      })
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, [isSedAdmin]);
+
+  // Инициализация полей панели админа СЭД данными карточки (смена заявки/роли).
+  useEffect(() => {
+    if (!card || !isSedAdmin) return;
+    setSedSubject(card.subject ?? "");
+    setSedContent(card.content ?? "");
+    setSedDocType(card.doc_type_code ?? "");
+    setRollbackStep("");
+  }, [card, isSedAdmin]);
 
   // Печать бегунка: POST /api/requests/{id}/print. generated=false с reason —
   // НЕ ошибка: показываем reason как статус, не как сбой. При успешной генерации
@@ -284,6 +384,53 @@ export function RequestCard(props: RequestCardProps) {
       // Обнуляем input всегда (успех/ошибка), иначе повторный выбор того же
       // файла не даст onChange. Независимо от исхода исключение наружу не уходит.
       if (input) input.value = "";
+    }
+  }
+
+  // Админ СЭД: сохранение правки Тема/Содержание/Вид (PATCH /requests/{id}).
+  async function handleSedSave(): Promise<void> {
+    if (!card) return;
+    setSedError("");
+    setSedStatus("");
+    const patch: { subject?: string; content?: string; doc_type_code?: string } = {};
+    if (sedSubject !== (card.subject ?? "")) patch.subject = sedSubject;
+    if (sedContent !== (card.content ?? "")) patch.content = sedContent;
+    if (sedDocType !== (card.doc_type_code ?? "")) patch.doc_type_code = sedDocType;
+    if (Object.keys(patch).length === 0) return;
+    try {
+      await updateRequest(requestId, patch);
+      setSedStatus("Изменения сохранены");
+      await refreshRequest();
+    } catch (e: unknown) {
+      setSedError(e instanceof Error ? e.message : "Ошибка сохранения");
+    }
+  }
+
+  // Админ СЭД: откат заявки к выбранному шагу (POST /requests/{id}/rollback).
+  async function handleRollback(): Promise<void> {
+    if (rollbackStep === "") return;
+    setSedError("");
+    setSedStatus("");
+    try {
+      await rollbackRequest(requestId, Number(rollbackStep));
+      setSedStatus(`Заявка откачена к шагу ${rollbackStep}`);
+      await refreshRequest();
+    } catch (e: unknown) {
+      setSedError(e instanceof Error ? e.message : "Ошибка отката");
+    }
+  }
+
+  // Добавление комментария к заявке (POST /requests/{id}/comments).
+  async function handleAddComment(): Promise<void> {
+    const body = newComment.trim();
+    if (body === "") return;
+    setCommentError("");
+    try {
+      const created = await addComment(requestId, body);
+      setComments([...comments, created]);
+      setNewComment("");
+    } catch (e: unknown) {
+      setCommentError(e instanceof Error ? e.message : "Ошибка добавления комментария");
     }
   }
 
@@ -457,6 +604,130 @@ export function RequestCard(props: RequestCardProps) {
           {cardActionStatus && <div role="status">{cardActionStatus}</div>}
           {cardActionError && <div role="alert">{cardActionError}</div>}
           {deleteError && <div role="alert">{deleteError}</div>}
+
+          {/* Панель администратора СЭД (роль sed_admin): правка Тема/Содержание/Вид
+              и откат к шагу. ПДн в макете не встраиваются — только поля карточки. */}
+          {isSedAdmin && (
+            <section aria-label="Панель администратора СЭД">
+              <h4>Администратор СЭД</h4>
+              <label className="sed-field">
+                Тема
+                <input
+                  aria-label="Тема (админ СЭД)"
+                  value={sedSubject}
+                  onChange={(e) => setSedSubject(e.target.value)}
+                />
+              </label>
+              <label className="sed-field">
+                Содержание
+                <textarea
+                  aria-label="Содержание (админ СЭД)"
+                  rows={3}
+                  value={sedContent}
+                  onChange={(e) => setSedContent(e.target.value)}
+                />
+              </label>
+              <label className="sed-field">
+                Вид документа
+                <select
+                  aria-label="Вид документа (админ СЭД)"
+                  value={sedDocType}
+                  onChange={(e) => setSedDocType(e.target.value)}
+                >
+                  <option value="">— не выбран —</option>
+                  {sedDocTypes.map((dt) => (
+                    <option key={dt.code} value={dt.code}>
+                      {dt.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="sed-toolbar" style={{ marginTop: 8 }}>
+                <button type="button" className="sed-btn" onClick={handleSedSave}>
+                  Сохранить
+                </button>
+              </div>
+              <label className="sed-field">
+                Откатить к шагу
+                <select
+                  aria-label="Откатить к шагу"
+                  value={rollbackStep}
+                  onChange={(e) => setRollbackStep(e.target.value)}
+                >
+                  <option value="">— выберите шаг —</option>
+                  {card.steps.map((s) => (
+                    <option key={s.order} value={String(s.order)}>
+                      {stepLabel(s.order)} · {stepOwnerCell(s)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="sed-toolbar" style={{ marginTop: 8 }}>
+                <button
+                  type="button"
+                  className="sed-btn"
+                  onClick={handleRollback}
+                  disabled={rollbackStep === ""}
+                >
+                  Откатить
+                </button>
+              </div>
+              {sedStatus && <div role="status">{sedStatus}</div>}
+              {sedError && <div role="alert">{sedError}</div>}
+            </section>
+          )}
+
+          {/* История заявки: кто / когда / действие / детали (audit_log). */}
+          <section aria-label="История">
+            <h4>История</h4>
+            {historyError && <div className="sed-note">История недоступна: {historyError}</div>}
+            {history.length === 0 && !historyError && (
+              <div className="sed-note">Записей истории нет</div>
+            )}
+            {history.length > 0 && (
+              <ul>
+                {history.map((item, i) => (
+                  <li key={i}>
+                    <strong>{item.actor}</strong> · {historyWhen(item.at)} · {item.action}
+                    {item.details && <div className="sed-sub">{JSON.stringify(item.details)}</div>}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+
+          {/* Комментарии к заявке: список + поле добавления. */}
+          <section aria-label="Комментарии">
+            <h4>Комментарии</h4>
+            {commentsError && <div className="sed-note">Комментарии недоступны: {commentsError}</div>}
+            {comments.length === 0 && !commentsError && (
+              <div className="sed-note">Комментариев нет</div>
+            )}
+            {comments.length > 0 && (
+              <ul>
+                {comments.map((c) => (
+                  <li key={c.id}>
+                    <strong>{c.author}</strong> · {c.at.slice(0, 16).replace("T", " ")}: {c.body}
+                  </li>
+                ))}
+              </ul>
+            )}
+            <input
+              aria-label="Новый комментарий"
+              placeholder="Комментарий к заявке"
+              value={newComment}
+              onChange={(e) => setNewComment(e.target.value)}
+            />
+            <button
+              type="button"
+              className="sed-btn"
+              onClick={handleAddComment}
+              disabled={newComment.trim() === ""}
+            >
+              Добавить комментарий
+            </button>
+            {commentError && <div role="alert">{commentError}</div>}
+          </section>
 
           {/* Скан-вложения: список мета + загрузка файла. */}
           <section aria-label="Вложения">

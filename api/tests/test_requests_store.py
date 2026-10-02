@@ -227,6 +227,8 @@ def test_endpoints_go_through_store(client, settings_override, route_override):
                 "tab_num": "В-0001",
                 "department": FAKE_SERVICE,
                 "position": FAKE_POSITION,
+                "subject": "Вымышленная тема",
+                "content": "Вымышленное содержание",
                 "steps": [{"owner_group": BUH_GROUP}],
             },
             headers=headers,

@@ -93,6 +93,11 @@ async function fillEmployeeManually(): Promise<void> {
   fireEvent.change(screen.getByLabelText("Табельный №"), { target: { value: "Т-000201" } });
   fireEvent.change(screen.getByLabelText("Подразделение"), { target: { value: "Цех № 1" } });
   fireEvent.change(screen.getByLabelText("Должность"), { target: { value: "Слесарь" } });
+  // Обязательные поля макета: тема и содержание (иначе «Создать» недоступен).
+  fireEvent.change(screen.getByLabelText("Тема"), { target: { value: "Увольнение сотрудника" } });
+  fireEvent.change(screen.getByLabelText("Содержание"), {
+    target: { value: "Прошу согласовать увольнение" },
+  });
   // Маршрут появляется, когда сотрудник заполнен (без стадий и «Далее»).
   await waitFor(() => expect(screen.getByText("Маршрут согласования")).toBeInTheDocument());
 }

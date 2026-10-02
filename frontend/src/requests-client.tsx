@@ -10,6 +10,15 @@ export interface Enterprise {
   name: string;
 }
 
+// Вид документа (таблица doc_types; GET /api/doc-types). active_only=true — для
+// селекта в форме создания (только активные), false — админ-справочник.
+export interface DocType {
+  code: string;
+  name: string;
+  is_active: boolean;
+  sort_order: number;
+}
+
 // Идентификатор папки дерева (контракт GET /api/folders).
 export type FolderId = "agreement" | "revision" | "done" | "draft" | "mine";
 
@@ -59,6 +68,10 @@ export interface RequestOut {
   escalation_hours?: number | null;
   // Автор заявки (sAMAccountName) — только привилегированным, иначе null.
   created_by?: string | null;
+  // Тема, содержание и вид документа (таблица doc_types) — правятся админом СЭД.
+  subject?: string | null;
+  content?: string | null;
+  doc_type_code?: string | null;
   steps: RequestStep[];
 }
 
@@ -92,6 +105,11 @@ export interface CreateRequestBody {
     // Шаг блока: персональный исполнитель (sam) либо группа (owner_group).
     steps: Array<{ sam?: string; owner_group?: string; resolver?: string }>;
   }>;
+  // Тема и содержание заявки (обязательные поля формы).
+  subject: string;
+  content: string;
+  // Вид документа (GET /api/doc-types; пустой справочник — поле не уходит).
+  doc_type_code?: string;
 }
 
 // Ключ сортировки списка заявок (клик по заголовку колонки переключает знак).
@@ -164,6 +182,30 @@ export interface AttachmentMeta {
   filename: string;
   size: number;
   created_at: string;
+}
+
+// Комментарий заявки (таблица request_comments; GET/POST /api/requests/{id}/comments).
+export interface RequestComment {
+  id: string;
+  request_id: string;
+  author: string;
+  body: string;
+  at: string;
+  // Вид комментария: request | step | rollback (контракт API).
+  kind?: string | null;
+  // Шаг, к которому привязан комментарий (если есть).
+  step_id?: string | null;
+}
+
+// Запись истории заявки (GET /api/requests/{id}/history; audit_log).
+export interface RequestHistoryItem {
+  at: string;
+  actor: string;
+  action: string;
+  entity?: string | null;
+  entity_id?: string | null;
+  // JSONB «было/стало» либо id/названия затронутых шагов (без раскрытия схемы).
+  details?: Record<string, unknown> | null;
 }
 
 // Фильтры над таблицей заявок.
@@ -245,6 +287,13 @@ export async function getEnterprises(): Promise<Enterprise[]> {
   return requestJson<Enterprise[]>("/api/enterprises");
 }
 
+// GET /api/doc-types: виды документов (active_only=true — только активные, селект
+// формы создания; без флага — весь справочник, в т.ч. деактивированные).
+export async function getDocTypes(activeOnly?: boolean): Promise<DocType[]> {
+  const query = activeOnly ? "?active_only=true" : "";
+  return requestJson<DocType[]>(`/api/doc-types${query}`);
+}
+
 // GET /api/step-groups: группы для ручного конструктора шагов.
 export async function getStepGroups(): Promise<string[]> {
   return requestJson<string[]>("/api/step-groups");
@@ -263,6 +312,43 @@ export async function getRequests(): Promise<RequestOut[]> {
 // GET /api/requests/{id}: карточка заявки (шаги, сроки, отметки).
 export async function getRequest(id: string): Promise<RequestOut> {
   return requestJson<RequestOut>(`/api/requests/${encodeURIComponent(id)}`);
+}
+
+// GET /api/requests/{id}/history: история изменений заявки (видна участникам).
+export async function getHistory(id: string): Promise<RequestHistoryItem[]> {
+  return requestJson<RequestHistoryItem[]>(`/api/requests/${encodeURIComponent(id)}/history`);
+}
+
+// GET /api/requests/{id}/comments: комментарии заявки (отдельная таблица).
+export async function getComments(id: string): Promise<RequestComment[]> {
+  return requestJson<RequestComment[]>(`/api/requests/${encodeURIComponent(id)}/comments`);
+}
+
+// POST /api/requests/{id}/comments: добавить комментарий к заявке.
+export async function addComment(id: string, body: string, stepId?: string): Promise<RequestComment> {
+  return requestJson<RequestComment>(`/api/requests/${encodeURIComponent(id)}/comments`, {
+    method: "POST",
+    body: JSON.stringify({ body, step_id: stepId }),
+  });
+}
+
+// PATCH /api/requests/{id}: правка полей карточки (только админ СЭД).
+export async function updateRequest(
+  id: string,
+  patch: { subject?: string; content?: string; doc_type_code?: string },
+): Promise<RequestOut> {
+  return requestJson<RequestOut>(`/api/requests/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+}
+
+// POST /api/requests/{id}/rollback: откат заявки к шагу (только админ СЭД).
+export async function rollbackRequest(id: string, toStepId: number): Promise<RequestOut> {
+  return requestJson<RequestOut>(`/api/requests/${encodeURIComponent(id)}/rollback`, {
+    method: "POST",
+    body: JSON.stringify({ to_step_id: toStepId }),
+  });
 }
 
 // POST /api/requests/{id}/steps/{order}/decision: отметка владельца шага.

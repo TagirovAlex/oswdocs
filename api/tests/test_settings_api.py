@@ -76,6 +76,7 @@ SEED_VALUES = {
 # Группы ролей (admin_groups/hr_groups/hr_admin_groups) в сиде НЕ сеются — в
 # ответе они приходят фолбэком на env (bootstrap); access_groups — None.
 ENV_ROLE_VALUES = {
+    "sed_admin_groups": [],
     "admin_groups": ["SED_ADMINS"],
     "hr_groups": ["SED_HR"],
     "hr_admin_groups": ["SED_HR_ADMIN"],
@@ -143,6 +144,7 @@ UPDATED_VALUES = {
     # Группы ролей в обновлённом наборе содержат и env-группы: админ, который
     # сохраняет настройки, не должен терять роль после собственной записи.
     "admin_groups": ["SED_ADMINS", "SED_ADMINS_2"],
+    "sed_admin_groups": [],
     "hr_groups": ["SED_HR", "SED_HR_2"],
     "hr_admin_groups": ["SED_HR_ADMIN", "SED_HR_ADMIN_2"],
     "session_ttl_minutes": 480,

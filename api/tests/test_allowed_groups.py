@@ -199,6 +199,7 @@ def test_resolve_role_groups_store_down_falls_back_to_env():
 
 def test_resolve_role_groups_without_store_only_env():
     assert resolve_role_groups(_role_settings(), None) == {
+        "sed_admin_groups": set(),
         "admin_groups": {"SED_ADMINS"},
         "hr_groups": {"SED_HR"},
         "hr_admin_groups": {"SED_HR_ADMIN"},

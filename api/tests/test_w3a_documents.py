@@ -208,6 +208,8 @@ def _create(client, headers, **kw) -> dict:
         "tab_num": "В-0001",
         "department": FAKE_SERVICE,
         "position": FAKE_POSITION,
+        "subject": "Вымышленная тема",
+        "content": "Вымышленное содержание",
     }
     body.update(kw)
     response = client.post("/requests", json=body, headers=headers)
