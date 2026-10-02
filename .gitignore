@@ -27,3 +27,6 @@ script_remote/
 
 # Скриншоты для передачи человеку.
 des*.png
+
+# Исторические спеки задач (текущее состояние — temp/TASKS_CONSOLIDATED.md).
+task/
