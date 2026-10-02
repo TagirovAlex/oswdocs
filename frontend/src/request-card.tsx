@@ -596,35 +596,78 @@ export function RequestCard(props: RequestCardProps) {
             </div>
           )}
 
-          {/* Рассмотрение (низ образца): шаги маршрута таблицей. Логин AD
+          {/* Рассмотрение (низ образца): шаги маршрута по блокам карточками,
+              как в создании. Группировка — по коду order (блок*1000 + режим +
+              позиция, см. stepLabel): order<1000 — один общий блок. Логин AD
               согласующего (assignee) в UI не выводится — только ФИО (owner_name)
               для персональных шагов либо название группы. */}
           <div className="sed-review">
             <b>Рассмотрение</b>
-            <table className="sed-table sed-mt-8" aria-label="Шаги заявки">
-              <thead>
-                <tr>
-                  <th>№</th>
-                  <th>Исполнитель</th>
-                  <th>Статус</th>
-                  <th>Срок</th>
-                  <th>Комментарий</th>
-                </tr>
-              </thead>
-              <tbody>
-                {card.steps.map((step) => (
-                  <tr key={step.order}>
-                    <td>{stepLabel(step.order)}</td>
-                    <td>
-                      {stepOwnerCell(step)}
-                    </td>
-                    <td>{step.status}</td>
-                    <td>{step.expires_at.slice(0, 10)}</td>
-                    <td>{step.comment ?? "—"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            {(() => {
+              // Группы шагов по блокам с сохранением порядка из API.
+              const groups: { key: string; title: string; parallel: boolean; steps: RequestStep[] }[] = [];
+              const indexByKey = new Map<string, number>();
+              card.steps.forEach((step) => {
+                const coded = step.order >= 1000;
+                const blockNo = coded ? Math.floor(step.order / 1000) + 1 : 1;
+                const parallel = coded && Math.floor((step.order % 1000) / 100) === 1;
+                const key = coded ? `b${blockNo}` : "b1";
+                let idx = indexByKey.get(key);
+                if (idx === undefined) {
+                  idx = groups.length;
+                  indexByKey.set(key, idx);
+                  groups.push({
+                    key,
+                    title: `Блок ${blockNo}`,
+                    parallel,
+                    steps: [],
+                  });
+                }
+                groups[idx].steps.push(step);
+              });
+              return groups.map((group) => (
+                <section
+                  key={group.key}
+                  aria-label={`${group.title} рассмотрения`}
+                  className={
+                    group.parallel
+                      ? "sed-blockcard sed-blockcard--parallel"
+                      : "sed-blockcard sed-blockcard--sequential"
+                  }
+                >
+                  <div className="sed-blockcard__head">
+                    <span className="sed-blockcard__title">{group.title}</span>
+                    <span className="sed-blockcard__type">
+                      {group.parallel ? "Параллельно" : "Последовательно"}
+                    </span>
+                  </div>
+                  <table className="sed-table" aria-label="Шаги заявки">
+                    <thead>
+                      <tr>
+                        <th>№</th>
+                        <th>Исполнитель</th>
+                        <th>Статус</th>
+                        <th>Срок</th>
+                        <th>Комментарий</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {group.steps.map((step) => (
+                        <tr key={step.order}>
+                          <td>{stepLabel(step.order)}</td>
+                          <td>
+                            {stepOwnerCell(step)}
+                          </td>
+                          <td>{step.status}</td>
+                          <td>{step.expires_at.slice(0, 10)}</td>
+                          <td>{step.comment ?? "—"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </section>
+              ));
+            })()}
           </div>
 
           {/* Действия ОК/админа по статусу заявки. */}

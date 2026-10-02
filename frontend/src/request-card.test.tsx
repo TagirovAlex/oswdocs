@@ -152,7 +152,7 @@ describe("RequestCard", () => {
     await waitFor(() => expect(screen.getByText("Печать доступна только ОК")).toBeInTheDocument());
   });
 
-  // Карточка показывает шаги выбранной заявки.
+  // Карточка показывает шаги выбранной заявки (по блокам карточками).
   it("карточка показывает шаги заявки", async () => {
     vi.mocked(getRequest).mockResolvedValue({
       ...requestWith("Громов Игорь Олегович", "На согласовании"),
@@ -163,8 +163,8 @@ describe("RequestCard", () => {
     });
 
     renderCard();
-    await waitFor(() => expect(screen.getByLabelText("Шаги заявки")).toBeInTheDocument());
-    const steps = within(screen.getByLabelText("Шаги заявки"));
+    await waitFor(() => expect(screen.getAllByLabelText("Шаги заявки").length).toBeGreaterThan(0));
+    const steps = within(screen.getAllByLabelText("Шаги заявки")[0]);
     expect(steps.getByText("SED_STEP_BUH")).toBeInTheDocument();
     expect(steps.getByText("SED_STEP_OK")).toBeInTheDocument();
   });
