@@ -546,31 +546,61 @@ a {
   cursor: pointer;
 }
 
-/* Блоки согласования: последовательный — левая полоса primary,
-   параллельный — левая полоса accent + метка. Только токены темы. */
-.sed-row--sequential td:first-child {
-  border-left: 3px solid var(--sed-primary);
-}
-
-.sed-row--parallel td:first-child {
-  border-left: 3px solid var(--sed-accent);
-}
-
-.sed-blocktag {
-  display: inline-block;
-  margin-top: 4px;
-  padding: 1px 8px;
+/* Блоки согласования: каждый блок отдельной карточкой с колонкой типа
+   (Последовательно/Параллельно) слева, как в образце. Только токены темы. */
+.sed-blockcard {
   border: 1px solid var(--sed-border);
+  border-radius: var(--sed-radius);
+  margin-top: 8px;
+  padding: 8px;
+  background: var(--sed-surface);
+}
+
+.sed-blockcard__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.sed-blockcard__title {
+  font-weight: 700;
+}
+
+.sed-blockcard__type {
+  display: inline-block;
+  padding: 2px 10px;
   border-radius: 10px;
   font-size: 11px;
-  color: var(--sed-text-muted);
+  font-weight: 700;
   white-space: nowrap;
 }
 
-.sed-row--parallel .sed-blocktag {
-  border-color: var(--sed-accent);
+.sed-blockcard--sequential .sed-blockcard__type {
+  border: 1px solid var(--sed-primary);
+  color: var(--sed-primary);
+}
+
+.sed-blockcard--parallel .sed-blockcard__type {
+  border: 1px solid var(--sed-accent);
   color: var(--sed-accent);
 }
+
+.sed-blockcard--sequential {
+  border-left: 4px solid var(--sed-primary);
+}
+
+.sed-blockcard--parallel {
+  border-left: 4px solid var(--sed-accent);
+}
+
+.sed-blockcard__spacer {
+  flex: 1;
+}
+
+/* Старые метки строк сняты (блоки теперь карточками); классы оставлены пустыми,
+   чтобы не ломать возможные ссылки. Удалить при чистке. */
 
 /* Иконка в заголовке таблицы (крест удаления блока): по центру ячейки. */
 .sed-th-icon {
@@ -625,12 +655,14 @@ a {
   padding: 10px;
 }
 
-/* Панель «Рассмотрение» макета (маршрут создания): как .panel, без отступов сетки. */
+/* Панель «Рассмотрение» макета (маршрут создания): как .panel, с отступом
+   сверху от содержимого карточки. */
 .sed-review {
   background: var(--sed-panel);
   border: 1px solid var(--sed-border);
   border-radius: var(--sed-radius);
   padding: 10px;
+  margin-top: 12px;
 }
 
 /* Строка редактора видов документов (таблица doc_types): карточка с рамкой. */

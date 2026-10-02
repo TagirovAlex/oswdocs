@@ -324,17 +324,18 @@ describe("CreateForm", () => {
     expect(initiator).toHaveAttribute("readonly");
   });
 
-  // Конструктор блоков — таблица «Рассмотрение»; ссылки задают режим блока.
+  // Конструктор блоков — карточки «Рассмотрение»; ссылки задают режим блока.
   it("ссылки добавляют последовательный и параллельный блоки в таблицу «Рассмотрение»", async () => {
     vi.mocked(searchEmployees).mockRejectedValue(new ApiHttpError(503, "Клиент 1С не настроен"));
 
     render(<CreateForm role="hr" />);
     await fillEmployeeManually();
-    expect(screen.queryByText("Вид рассмотрения")).not.toBeInTheDocument();
+    expect(screen.queryByText("Последовательно")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByText("Добавить последовательный блок"));
     fireEvent.click(screen.getByText("Добавить параллельный блок"));
-    expect(screen.getByText("Вид рассмотрения")).toBeInTheDocument();
+    expect(screen.getByText("Последовательно")).toBeInTheDocument();
+    expect(screen.getByText("Параллельно")).toBeInTheDocument();
     expect(screen.getByLabelText("Режим блока 1")).toHaveValue("sequential");
     expect(screen.getByLabelText("Режим блока 2")).toHaveValue("parallel");
   });

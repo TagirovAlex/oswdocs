@@ -896,64 +896,59 @@ export function CreateForm(props: CreateFormProps) {
           </div>
           {groupsError && <div className="sed-note">Группы: {groupsError}</div>}
           {blocks.length === 0 && <div className="sed-note">Добавьте блок и исполнителей.</div>}
-          {/* Конструктор блоков — таблица «Рассмотрение» макета в панели (DESIGN.md п.1.12). */}
+          {/* Конструктор блоков — таблица «Рассмотрение» образца: каждый блок
+              отдельной карточкой с колонкой типа (последовательно/параллельно). */}
           {blocks.length > 0 && (
             <div className="sed-review">
               <b>Рассмотрение</b>
-              <table className="sed-table">
-                <thead>
-                  <tr>
-                    <th scope="col">
-                      <span className="sed-th-icon" aria-hidden="true">
-                        <CrossIcon />
-                      </span>
-                    </th>
-                    <th scope="col">Вид рассмотрения</th>
-                    <th scope="col">Должность</th>
-                    <th scope="col">Сотрудник</th>
-                    <th scope="col">Комментарий</th>
-                    <th scope="col">Действия</th>
-                  </tr>
-                </thead>
-              <tbody>
-                {blocks.map((block, bi) => (
-                  <tr
-                    key={block.id}
-                    className={
-                      block.mode === "parallel"
-                        ? "sed-row--parallel"
-                        : "sed-row--sequential"
-                    }
-                  >
-                    {/* Удаление блока и его номер. */}
-                    <td>
-                      <button
-                        type="button"
-                        className="sed-btn sed-btn--ghost sed-delbtn"
-                        aria-label="Удалить блок"
-                        onClick={() => removeBlock(block.id)}
-                      >
-                        <CrossIcon />
-                        Удалить
-                      </button>
-                      <div className="sed-note">Блок {bi + 1}</div>
-                      <span className="sed-blocktag">
-                        {block.mode === "parallel" ? "Параллельный" : "Последовательный"}
-                      </span>
-                    </td>
+              {blocks.map((block, bi) => (
+                <section
+                  key={block.id}
+                  aria-label={`Блок ${bi + 1}`}
+                  className={
+                    block.mode === "parallel"
+                      ? "sed-blockcard sed-blockcard--parallel"
+                      : "sed-blockcard sed-blockcard--sequential"
+                  }
+                >
+                  <div className="sed-blockcard__head">
+                    <span className="sed-blockcard__title">Блок {bi + 1}</span>
+                    <span className="sed-blockcard__type">
+                      {block.mode === "parallel" ? "Параллельно" : "Последовательно"}
+                    </span>
+                    <span className="sed-blockcard__spacer" />
                     {/* Вид рассмотрения: последовательный или параллельный. */}
-                    <td>
-                      <select
-                        aria-label={`Режим блока ${bi + 1}`}
-                        value={block.mode}
-                        onChange={(e) => setBlockMode(block.id, e.target.value as "sequential" | "parallel")}
-                      >
-                        <option value="sequential">Последовательный</option>
-                        <option value="parallel">Параллельный</option>
-                      </select>
-                    </td>
-                    {/* Тип исполнителя и группа-владелец шага. */}
-                    <td>
+                    <select
+                      aria-label={`Режим блока ${bi + 1}`}
+                      value={block.mode}
+                      onChange={(e) => setBlockMode(block.id, e.target.value as "sequential" | "parallel")}
+                    >
+                      <option value="sequential">Последовательный</option>
+                      <option value="parallel">Параллельный</option>
+                    </select>
+                    <button
+                      type="button"
+                      className="sed-btn sed-btn--ghost sed-delbtn"
+                      aria-label="Удалить блок"
+                      onClick={() => removeBlock(block.id)}
+                    >
+                      <CrossIcon />
+                      Удалить
+                    </button>
+                  </div>
+                  <table className="sed-table">
+                    <thead>
+                      <tr>
+                        <th scope="col">Должность</th>
+                        <th scope="col">Сотрудник</th>
+                        <th scope="col">Комментарий</th>
+                        <th scope="col">Действия</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        {/* Тип исполнителя и группа-владелец шага. */}
+                        <td>
                       <select
                         aria-label={`Тип исполнителя блока ${bi + 1}`}
                         value={block.kind}
@@ -1100,9 +1095,10 @@ export function CreateForm(props: CreateFormProps) {
                       )}
                     </td>
                   </tr>
-                ))}
-              </tbody>
+                </tbody>
               </table>
+            </section>
+              ))}
             </div>
           )}
           <div className="sed-toolbar sed-mt-8">
