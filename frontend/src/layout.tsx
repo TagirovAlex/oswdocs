@@ -200,7 +200,12 @@ export function SedLayout(props: SedLayoutProps) {
     <div className="sed-shell">
       {/* Шапка: роль из сессии (без выбора), тема и выход. */}
       <header className="sed-header">
-        <span className="sed-logo">СЭД — Увольнение (скелет)</span>
+        <span className="sed-logo">
+          <img
+            src={theme === "dark" ? "/logo-oswdocs-dark.svg" : "/logo-oswdocs.svg"}
+            alt="СЭД — Увольнение"
+          />
+        </span>
         <span className="sed-note">· роль: {ROLE_LABELS[role]}</span>
         <span className="sed-header__spacer" />
         <button
