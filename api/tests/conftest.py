@@ -18,6 +18,7 @@ API_DIR = Path(__file__).resolve().parents[1]
 if str(API_DIR) not in sys.path:
     sys.path.insert(0, str(API_DIR))
 
+import app.audit as audit_module  # noqa: E402
 from app.audit import audit_log  # noqa: E402
 from app.employee_sync import InMemoryEmployeeSyncStore, get_employee_sync_store  # noqa: E402
 from app.employees import get_ad_reader  # noqa: E402
@@ -123,7 +124,7 @@ OFFLINE_BOUNDARIES = (
 
 
 @pytest.fixture(autouse=True)
-def offline_boundaries():
+def offline_boundaries(monkeypatch):
     """Подменить живые границы офлайн-прогонов: настройки — пусто, AD — None,
     локальный справочник — пустой (фолбэк поиска на живой 1С).
 
@@ -133,6 +134,9 @@ def offline_boundaries():
     app.dependency_overrides[get_settings_store] = lambda: OfflineSettingsStore()
     app.dependency_overrides[get_ad_reader] = lambda: None
     app.dependency_overrides[get_employee_sync_store] = lambda: InMemoryEmployeeSyncStore()
+    # Персистентный аудит (INSERT в audit_log) — best-effort, но офлайн Postgres
+    # нет: отключаем БД-хранилище, журнал остаётся in-memory (контракт прежний).
+    monkeypatch.setattr(audit_module, "_get_db_store", lambda: None)
     yield
     for factory in OFFLINE_BOUNDARIES:
         app.dependency_overrides.pop(factory, None)

@@ -156,6 +156,8 @@ export interface SettingsData {
   hr_groups: string[] | null;
   // Группы AD роли «Руководитель ОК» (hr_admin_groups): список; GET — эффективное.
   hr_admin_groups: string[] | null;
+  // Сколько сотрудников на страницу справочника (directory_page_size).
+  directory_page_size?: number | null;
 }
 
 // Контент-настройки (GET/PUT /api/settings/content): контент-ключи для
@@ -181,11 +183,13 @@ export interface ContentSettingsData {
   doc_templates: SettingsDocTemplate[] | null;
   // Шаблоны писем (mail_templates).
   mail_templates: SettingsMailTemplate[] | null;
+  // Сколько сотрудников на страницу справочника (directory_page_size).
+  directory_page_size?: number | null;
 }
 
 // Запрос к /api/settings* с Bearer-токеном; ответ — настройки.
 // Ошибки: 401 — нет сессии, 403 — доступ закрыт, 422 — неверные типы, 503 — сервис недоступен.
-async function requestSettings<T>(path: string, method: "GET" | "PUT", data?: T): Promise<T> {
+async function requestSettings<T>(path: string, method: "GET" | "PUT" | "POST", data?: T): Promise<T> {
   const token = getToken();
   if (!token) {
     throw new ApiHttpError(401, "Нет токена");
@@ -310,4 +314,84 @@ export async function updateDocType(code: string, patch: Partial<DocType>): Prom
 // в заявках бэкенд отвечает 409 — остаётся мягкое отключение is_active=false).
 export async function deleteDocType(code: string): Promise<Record<string, unknown>> {
   return requestDocType<Record<string, unknown>>(`/api/doc-types/${encodeURIComponent(code)}`, "DELETE");
+}
+
+// ---------------------------------------------------------------------------
+// Архивация (бэкапы) — GET/PUT /api/archive, POST /api/archive/backup,
+// GET /api/archive/files. Только админ; значения — из settings БД (вкладка
+// «Архивация» админки), хранилище — каталог с правами контейнера api/worker.
+// ---------------------------------------------------------------------------
+
+// Настройки архивации (GET/PUT /api/archive): место хранения, шаблон имени
+// файла, количество хранимых копий и расписание (как у других регламентов).
+export interface ArchiveSettingsData {
+  // Каталог хранения бэкапов (с правами контейнера api/worker).
+  storage_path: string;
+  // Шаблон имени файла бэкапа (без хардкода значений — только из settings).
+  file_pattern: string;
+  // Сколько хранимых копий бэкапов.
+  keep_copies: number;
+  // Расписание регламентного бэкапа (null — «не настроено»).
+  schedule: ScheduleReglament | null;
+  // Метка последнего бэкапа (read-only, может отсутствовать).
+  backup_at?: string | null;
+}
+
+// Файл сохранённого бэкапа (GET /api/archive/files).
+export interface BackupFile {
+  // Имя файла бэкапа.
+  name: string;
+  // Размер в байтах.
+  size: number;
+  // Дата создания (ISO).
+  created_at: string;
+}
+
+// GET /api/archive: настройки архивации (бэкенд отдаёт archive_* ключи — маппим в форму).
+export async function getArchiveSettings(): Promise<ArchiveSettingsData> {
+  const raw = await requestSettings<Record<string, unknown>>("/api/archive", "GET");
+  return {
+    storage_path: String(raw["archive_backup_dir"] ?? ""),
+    file_pattern: String(raw["archive_name_template"] ?? ""),
+    keep_copies: Number(raw["archive_keep_copies"] ?? 10),
+    schedule: (raw["archive_schedule"] as ScheduleReglament | null) ?? null,
+    backup_at: raw["archive_backup_at"] != null ? String(raw["archive_backup_at"]) : null,
+  };
+}
+
+// PUT /api/archive: сохранение настроек архивации (маппим из формы в archive_* ключи).
+export async function saveArchiveSettings(data: ArchiveSettingsData): Promise<ArchiveSettingsData> {
+  const raw = await requestSettings<Record<string, unknown>>("/api/archive", "PUT", {
+    archive_backup_dir: data.storage_path,
+    archive_name_template: data.file_pattern,
+    archive_keep_copies: data.keep_copies,
+    archive_schedule: data.schedule,
+  });
+  return {
+    storage_path: String(raw["archive_backup_dir"] ?? ""),
+    file_pattern: String(raw["archive_name_template"] ?? ""),
+    keep_copies: Number(raw["archive_keep_copies"] ?? 10),
+    schedule: (raw["archive_schedule"] as ScheduleReglament | null) ?? null,
+    backup_at: raw["archive_backup_at"] != null ? String(raw["archive_backup_at"]) : null,
+  };
+}
+
+// Результат ручного бэкапа (POST /api/archive/backup): ok — создан ли файл,
+// path/files — путь и список бэкапов, error — причина сбоя (успех — не ошибка).
+export interface RunBackupResult {
+  ok: boolean;
+  path?: string | null;
+  files?: BackupFile[];
+  error?: string | null;
+}
+
+// POST /api/archive/backup: ручной запуск бэкапа (только админ).
+export async function runBackup(): Promise<RunBackupResult> {
+  return requestSettings<RunBackupResult>("/api/archive/backup", "POST");
+}
+
+// GET /api/archive/files: список сохранённых бэкапов (бэкенд отдаёт поле date — маппим в created_at).
+export async function listBackups(): Promise<BackupFile[]> {
+  const raw = await requestSettings<{ name: string; size: number; date: string }[]>("/api/archive/files", "GET");
+  return (raw ?? []).map((f) => ({ name: f.name, size: f.size, created_at: f.date }));
 }

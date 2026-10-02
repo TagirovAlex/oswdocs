@@ -20,6 +20,7 @@ import {
 } from "./requests-client";
 import type { AdCandidate, AdGroupMember, DocType, EmployeeHit, Enterprise } from "./requests-client";
 import type { Role } from "./api-mock";
+import { employeeUrl, openPopup } from "./windows";
 
 interface CreateFormProps {
   // Роль (создание — только ОК/админам, гард как в API _is_hr).
@@ -105,6 +106,9 @@ export function CreateForm(props: CreateFormProps) {
   // Сотрудник уже выбран из списка (клик по кандидату): поле показывает ФИО,
   // повторный поиск по empQuery не запускается (иначе список открывался бы заново).
   const [empPicked, setEmpPicked] = useState<boolean>(false);
+  // Составной ключ выбранного сотрудника (enterprise|base_code|tab_num):
+  // ссылка «карточка сотрудника» (окно ?view=employee) после выбора.
+  const [empKey, setEmpKey] = useState<string>("");
   const [manualMode, setManualMode] = useState<boolean>(false);
   const [manualNote, setManualNote] = useState<string>("");
   const [fio, setFio] = useState<string>("");
@@ -380,6 +384,8 @@ export function CreateForm(props: CreateFormProps) {
     setEmpHits([]);
     setEmpListOpen(false);
     setEmpPicked(true);
+    // Ключ карточки сотрудника: enterprise|base_code|tab_num (hit.key).
+    setEmpKey(hit.key);
     const parts = hit.key.split("|");
     if (parts.length < 3) {
       return; // битый ключ — подразделение/должность останутся пустыми («—»)
@@ -399,6 +405,7 @@ export function CreateForm(props: CreateFormProps) {
   function clearEmployeePick(): void {
     markTouched();
     setEmpPicked(false);
+    setEmpKey("");
     setEmpQuery("");
     setEmpHits([]);
     setEmpListOpen(false);
@@ -529,6 +536,7 @@ export function CreateForm(props: CreateFormProps) {
     setEmpHits([]);
     setEmpListOpen(false);
     setEmpPicked(false);
+    setEmpKey("");
     setManualMode(false);
     setManualNote("");
     setSubject("");
@@ -799,6 +807,20 @@ export function CreateForm(props: CreateFormProps) {
               <div className="sed-note">Данные из 1С — справочно, изменить нельзя.</div>
               <div className="sed-block">
                 ФИО: <strong>{fio}</strong>
+                {empKey !== "" && (
+                  <a
+                    href={employeeUrl(empKey)}
+                    onClick={(e) => {
+                      // Окно карточки сотрудника открывается по клику (иначе
+                      // браузер блокирует popup); default-переход не нужен.
+                      e.preventDefault();
+                      openPopup(employeeUrl(empKey));
+                    }}
+                    className="sed-ml-8"
+                  >
+                    карточка сотрудника
+                  </a>
+                )}
               </div>
               <div className="sed-block">
                 Табельный №: <strong>{tabNum}</strong>

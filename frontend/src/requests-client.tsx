@@ -60,6 +60,8 @@ export interface RequestOut {
   // Название предприятия (из settings); приходит вместе с enterprise
   // привилегированным, при отсутствии — откат на код предприятия.
   enterprise_name?: string | null;
+  // Код базы 1С (часть ключа карточки сотрудника; когда есть у запроса).
+  base_code?: string | null;
   tab_num?: string | null;
   department: string;
   position: string;
@@ -89,6 +91,9 @@ export interface RequestRow {
   department: string;
   position: string;
   steps: RequestStep[];
+  // Составной ключ карточки сотрудника (enterprise|base_code|tab_num);
+  // непустой только когда все части есть (для ссылки на карточку).
+  employeeKey?: string;
 }
 
 // Тело POST /api/requests (ручной маршрут — шаги с группами владельцев).
@@ -148,9 +153,17 @@ export interface EmployeeHit {
   needs_manual_review: boolean;
 }
 
-// Ответ поиска сотрудников.
+// Ответ поиска сотрудников. Пагинация локального справочника: total/page/
+// page_size приходят, когда серверная пагинация включена (совместимо: items
+// остаётся, остальных полей может не быть — считаем по длине items).
 export interface EmployeeSearchResult {
   items: EmployeeHit[];
+  // Всего найдено (серверная пагинация; отсутствует — считаем по items).
+  total?: number;
+  // Текущая страница (1-based).
+  page?: number;
+  // Размер страницы (page_size из запроса).
+  page_size?: number;
   errors?: string[];
   needs_manual_review?: boolean;
 }
@@ -439,13 +452,18 @@ export async function uploadAttachment(id: string, file: File): Promise<Attachme
 }
 
 // GET /api/employees: поиск сотрудников предприятия; без баз 1С — 503.
+// Пагинация локального справочника: page (1-based) и pageSize — размер
+// страницы; без них сервер отдаёт прежний ответ (до limit).
 export async function searchEmployees(
   enterprise: string,
   q: string,
+  page?: number,
+  pageSize?: number,
 ): Promise<EmployeeSearchResult> {
-  return requestJson<EmployeeSearchResult>(
-    `/api/employees?enterprise=${encodeURIComponent(enterprise)}&q=${encodeURIComponent(q)}`,
-  );
+  let path = `/api/employees?enterprise=${encodeURIComponent(enterprise)}&q=${encodeURIComponent(q)}`;
+  if (page !== undefined && page > 0) path += `&page=${page}`;
+  if (pageSize !== undefined && pageSize > 0) path += `&page_size=${pageSize}`;
+  return requestJson<EmployeeSearchResult>(path);
 }
 
 // Карточка сотрудника: 1С-блок + AD-блок + связка и расхождения (GET /api/employees/card).
@@ -599,6 +617,11 @@ export function toRequestRow(request: RequestOut): RequestRow {
   const expires = current?.expires_at ?? "";
   // Текущий согласующий: исполнитель текущего шага — ФИО или группа, но не логин.
   const ownerName = stepOwnerLabel(current);
+  // Ключ карточки сотрудника: enterprise|base_code|tab_num (если все есть).
+  const employeeKey =
+    request.enterprise && request.base_code && request.tab_num
+      ? `${request.enterprise}|${request.base_code}|${request.tab_num}`
+      : "";
   return {
     id: request.id,
     fio: request.fio ?? `Сотрудник № ${request.id}`,
@@ -610,6 +633,7 @@ export function toRequestRow(request: RequestOut): RequestRow {
     department: request.department,
     position: request.position,
     steps: request.steps,
+    employeeKey,
   };
 }
 

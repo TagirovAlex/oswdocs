@@ -34,6 +34,7 @@ import type {
   StepDecision,
 } from "./requests-client";
 import type { Role } from "./api-mock";
+import { employeeUrl, openPopup } from "./windows";
 
 interface RequestCardProps {
   // Идентификатор заявки (REQ-XXXX).
@@ -276,6 +277,31 @@ export function RequestCard(props: RequestCardProps) {
     ? null
     : (card?.steps.find((s) => s.status === "ожидает" && s.can_act === true) ?? null);
 
+  // Ключ карточки сотрудника (enterprise|base_code|tab_num): непустой только
+  // когда все части есть — тогда ФИО становится ссылкой на карточку.
+  const employeeKey =
+    card?.enterprise && card?.base_code && card?.tab_num
+      ? `${card.enterprise}|${card.base_code}|${card.tab_num}`
+      : "";
+
+  // ФИО сотрудника: ссылка на карточку, когда key доступен (иначе текст).
+  function employeeCell(fio: string) {
+    if (employeeKey === "") return fio;
+    const url = employeeUrl(employeeKey);
+    return (
+      <a
+        href={url}
+        onClick={(e) => {
+          // Окно карточки сотрудника — по клику (иначе браузер блокирует popup).
+          e.preventDefault();
+          openPopup(url);
+        }}
+      >
+        {fio}
+      </a>
+    );
+  }
+
   async function refreshRequest(): Promise<void> {
     try {
       setCard(await getRequest(requestId));
@@ -453,7 +479,7 @@ export function RequestCard(props: RequestCardProps) {
               <>Сотрудник № {card.id}</>
             ) : (
               <>
-                {card.fio ?? `Сотрудник № ${card.id}`}
+                {employeeCell(card.fio ?? `Сотрудник № ${card.id}`)}
                 {card.tab_num ? ` · Таб.№ ${card.tab_num}` : ""} · {card.department} · {card.position}
                 {card.enterprise ? ` · ${card.enterprise_name ?? card.enterprise}` : ""}
               </>

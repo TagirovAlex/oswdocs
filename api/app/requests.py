@@ -42,6 +42,7 @@ from .requests_store import (
 from .settings_routes import (
     DbSettingsStore,
     SettingsUnavailable,
+    _groups_with_names,
     get_settings_store,
     read_setting_value,
 )
@@ -251,7 +252,10 @@ class StepOut(BaseModel):
     assignee: str | None = None
     owner_name: str | None = Field(
         default=None,
-        description="ФИО согласующего по данным AD; у группового шага — null",
+        description=(
+            "Наименование владельца шага: персональный — ФИО из AD, "
+            "групповой — наименование группы из settings (если известно)"
+        ),
     )
     status: str
     require_comment: bool = False
@@ -283,6 +287,10 @@ class RequestOut(BaseModel):
     subject: str | None = None
     content: str | None = None
     doc_type_code: str | None = None
+    doc_type_name: str | None = Field(
+        default=None,
+        description="Наименование вида документа (для показа вместо кода)",
+    )
     escalation_hours: int | None = None
     created_by: str | None = Field(
         default=None,
@@ -609,25 +617,82 @@ def _enterprise_names_map() -> dict[str, str]:
     return names
 
 
+def _step_group_names_map() -> dict[str, str]:
+    """Карта «id группы → наименование» из контент-ключа allowed_ad_groups.
+
+    Формат — объекты {id, name} (блок B); строки старого формата читаются как
+    id=name. Ключа нет, хранилище недоступно или формат неожиданный — пустая
+    карта, тогда owner_name у группового шага None (без 500).
+    """
+    try:
+        store = _resolve_dependency(get_settings_store, get_settings())
+        raw = read_setting_value(store, "allowed_ad_groups")
+    except Exception:
+        return {}
+    return {item["id"]: item["name"] for item in _groups_with_names(raw)}
+
+
+def _doc_type_names_map() -> dict[str, str]:
+    """Карта «код вида документа → наименование» из таблицы doc_types.
+
+    Чтение через хранилище заявок (RequestsStore.get_doc_types) — тот же
+    источник, что валидация doc_type_code. Сбой/пусто/формат неожиданный —
+    пустая карта, тогда doc_type_name в ответе None (без 500).
+    """
+    try:
+        store = _resolve_dependency(get_requests_store, get_settings())
+        items = store.get_doc_types()
+    except Exception:
+        return {}
+    if not isinstance(items, list):
+        return {}
+    names: dict[str, str] = {}
+    for item in items:
+        if isinstance(item, dict):
+            code = str(item.get("code") or "").strip()
+            name = str(item.get("name") or "").strip()
+            if code and name:
+                names[code] = name
+    return names
+
+
+def _step_owner_name(
+    ad_reader: object | None,
+    assignee: str | None,
+    group_names: dict[str, str] | None,
+    owner_group: str,
+) -> str | None:
+    """Наименование владельца шага: персональный — ФИО из AD, групповой —
+    наименование группы из settings (allowed_ad_groups), когда известно."""
+    if assignee:
+        return _owner_display_name(ad_reader, assignee)
+    if group_names:
+        return group_names.get(owner_group)
+    return None
+
+
 def _public_view(
     request: _Request,
     user: CurrentUser,
     *,
     ad_reader: object | None = None,
     enterprise_names: dict[str, str] | None = None,
+    group_names: dict[str, str] | None = None,
+    doc_type_names: dict[str, str] | None = None,
 ) -> RequestOut:
     """Ролевая обрезка: ОК/админы — всё, владелец — без tab_num (ПДн).
 
-    ad_reader и enterprise_names резолвятся ОДИН раз на вызов и переиспользуются
-    для всех шагов (list_requests поднимает их над циклом по заявкам, чтобы на
-    списке не было ни одного лишнего обращения к AD/БД на шаг).
+    ad_reader, enterprise_names, group_names и doc_type_names резолвятся ОДИН раз
+    на вызов и переиспользуются для всех шагов (list_requests поднимает их над
+    циклом по заявкам, чтобы на списке не было ни одного лишнего обращения к
+    AD/БД на шаг).
 
     ПДн по ролям: enterprise_name (как enterprise/tab_num/fio) — только
-    привилегированным, остальным None; owner_name (ФИО согласующего) — всем
-    авторизованным, сотруднику полезно видеть, кто согласует; assignee, created_by
-    и done_by — это sAMAccountName, поэтому скрываются всем, кроме привилегированных
-    (assignee владельцу шага остаётся — это его собственный логин); can_act
-    считается всегда и для всех ролей.
+    привилегированным, остальным None; owner_name (ФИО согласующего/наименование
+    группы) — всем авторизованным, сотруднику полезно видеть, кто согласует;
+    assignee, created_by и done_by — это sAMAccountName, поэтому скрываются всем,
+    кроме привилегированных (assignee владельцу шага остаётся — это его собственный
+    логин); can_act считается всегда и для всех ролей.
     """
     privileged = user.role in ("hr", "hr_admin", "admin")
     reader = ad_reader if ad_reader is not None else _resolve_dependency(get_ad_reader)
@@ -636,6 +701,8 @@ def _public_view(
     names = enterprise_names if enterprise_names is not None else (
         _enterprise_names_map() if privileged else {}
     )
+    groups = group_names if group_names is not None else _step_group_names_map()
+    doc_names = doc_type_names if doc_type_names is not None else _doc_type_names_map()
     now = _utcnow()
     pending_orders = {s.order for s in _current_pending_steps(request)}
     steps = [
@@ -644,7 +711,7 @@ def _public_view(
             owner_group=s.owner_group,
             resolver=s.resolver,
             assignee=s.assignee if privileged or _owns_step(s, user) else None,
-            owner_name=_owner_display_name(reader, s.assignee),
+            owner_name=_step_owner_name(reader, s.assignee, groups, s.owner_group),
             status=s.status,
             require_comment=s.require_comment,
             expires_at=s.expires_at.isoformat(),
@@ -669,6 +736,7 @@ def _public_view(
         subject=request.subject,
         content=request.content,
         doc_type_code=request.doc_type_code,
+        doc_type_name=doc_names.get(request.doc_type_code) if request.doc_type_code else None,
         escalation_hours=request.escalation_hours,
         created_by=request.created_by if privileged else None,
         steps=steps,
@@ -962,12 +1030,22 @@ def list_requests(
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
-    # Резолв AD/предприятий — один раз над циклом (иначе запрос на каждый шаг).
+    # Резолв AD/предприятий/групп/видов — один раз над циклом (иначе запрос на
+    # каждый шаг).
     ad_reader = _resolve_dependency(get_ad_reader)
     enterprise_names = _enterprise_names_map() if _is_hr(user) else {}
+    group_names = _step_group_names_map()
+    doc_type_names = _doc_type_names_map()
     if _is_hr(user):
         return [
-            _public_view(r, user, ad_reader=ad_reader, enterprise_names=enterprise_names)
+            _public_view(
+                r,
+                user,
+                ad_reader=ad_reader,
+                enterprise_names=enterprise_names,
+                group_names=group_names,
+                doc_type_names=doc_type_names,
+            )
             for r in requests
         ]
     mine = [
@@ -979,7 +1057,14 @@ def list_requests(
         )
     ]
     return [
-        _public_view(r, user, ad_reader=ad_reader, enterprise_names=enterprise_names)
+        _public_view(
+            r,
+            user,
+            ad_reader=ad_reader,
+            enterprise_names=enterprise_names,
+            group_names=group_names,
+            doc_type_names=doc_type_names,
+        )
         for r in mine
     ]
 

@@ -9,7 +9,14 @@ import { useEffect, useState } from "react";
 import type { Role } from "./api-mock";
 import { getEnterprises, searchEmployees, syncLinks } from "./requests-client";
 import type { EmployeeHit, Enterprise } from "./requests-client";
+import { getSettingsContent } from "./settings-client";
 import { employeeUrl, openPopup } from "./windows";
+
+// Размер страницы справочника по умолчанию: если настройка directory_page_size
+// недоступна (нет прав/ключа), берём 50 (без хардкода значения настройки).
+const DEFAULT_PAGE_SIZE = 50;
+// Варианты селекта размера страницы (значение по умолчанию — из настроек).
+const PAGE_SIZE_OPTIONS = [25, 50, 100, 200];
 
 interface DirectoryProps {
   // Роль (привязку AD и автосвязку видит только админ; ОК/руководитель — просмотр).
@@ -24,6 +31,11 @@ export function Directory(props: DirectoryProps) {
   const [query, setQuery] = useState<string>("");
   const [items, setItems] = useState<EmployeeHit[]>([]);
   const [listError, setListError] = useState<string>("");
+  // Пагинация справочника: текущая страница (1-based), размер страницы и
+  // всего найдено (total от сервера; нет — по длине выдачи текущей страницы).
+  const [page, setPage] = useState<number>(1);
+  const [pageSize, setPageSize] = useState<number>(DEFAULT_PAGE_SIZE);
+  const [total, setTotal] = useState<number>(0);
   // Принудительная автосвязка 1С↔AD по точному ФИО (админ).
   const [syncStatus, setSyncStatus] = useState<string>("");
   const [syncError, setSyncError] = useState<string>("");
@@ -44,7 +56,27 @@ export function Directory(props: DirectoryProps) {
     };
   }, []);
 
-  async function handleSearch(): Promise<void> {
+  // Размер страницы — из настроек (directory_page_size): читаем только теми,
+  // кому доступно (руководитель ОК/админ); иначе — дефолт. Настройка — в
+  // settings БД, хардкода нет.
+  useEffect(() => {
+    let alive = true;
+    getSettingsContent()
+      .then((data) => {
+        if (!alive) return;
+        if (typeof data.directory_page_size === "number" && data.directory_page_size > 0) {
+          setPageSize(data.directory_page_size);
+        }
+      })
+      .catch(() => {
+        // 403/503 (ОК без прав настроек) — дефолтный размер, не ошибка.
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  async function runSearch(targetPage: number, targetPageSize: number): Promise<void> {
     if (!enterprise) {
       setListError("Выберите предприятие");
       return;
@@ -53,13 +85,37 @@ export function Directory(props: DirectoryProps) {
     setSyncStatus("");
     setSyncError("");
     try {
-      const result = await searchEmployees(enterprise, query);
+      const result = await searchEmployees(enterprise, query, targetPage, targetPageSize);
       setItems(result.items);
+      setPage(targetPage);
+      setPageSize(targetPageSize);
+      // total от серверной пагинации; нет — считаем по текущей выдаче.
+      setTotal(typeof result.total === "number" ? result.total : result.items.length);
       if (result.errors?.length) setListError(result.errors.join("; "));
     } catch (e: unknown) {
       setListError(e instanceof Error ? e.message : "Ошибка поиска сотрудников");
     }
   }
+
+  // «Найти» — с первой страницы (новая выдача).
+  async function handleSearch(): Promise<void> {
+    await runSearch(1, pageSize);
+  }
+
+  // Переход на другую страницу: повторный поиск с новой страницей.
+  function goToPage(next: number): void {
+    if (next < 1) return;
+    void runSearch(next, pageSize);
+  }
+
+  // Смена размера страницы: возврат на первую страницу и поиск заново.
+  function changePageSize(next: number): void {
+    if (next === pageSize) return;
+    void runSearch(1, next);
+  }
+
+  // Число страниц (для счётчика «стр N из M»).
+  const totalPages = total > 0 ? Math.max(1, Math.ceil(total / pageSize)) : 0;
 
   // Клик по строке — окно карточки сотрудника (вместо «под списком»).
   function handleCard(hit: EmployeeHit): void {
@@ -153,6 +209,49 @@ export function Directory(props: DirectoryProps) {
           )}
         </tbody>
       </table>
+      {/* Пагинация справочника: счётчик, навигация и селект размера страницы.
+          totalPages=0 до первого поиска — блок не показываем. */}
+      {totalPages > 0 && (
+        <div className="sed-pager" aria-label="Пагинация справочника">
+          <button
+            type="button"
+            className="sed-btn"
+            aria-label="Предыдущая страница"
+            disabled={page <= 1}
+            onClick={() => goToPage(page - 1)}
+          >
+            ← Назад
+          </button>
+          <span role="status">стр {page} из {totalPages}</span>
+          <button
+            type="button"
+            className="sed-btn"
+            aria-label="Следующая страница"
+            disabled={page >= totalPages}
+            onClick={() => goToPage(page + 1)}
+          >
+            Вперёд →
+          </button>
+          <label>
+            На странице
+            <select
+              aria-label="Размер страницы справочника"
+              value={pageSize}
+              onChange={(e) => changePageSize(Number(e.target.value))}
+            >
+              {/* Значение из настроек может не входить в дефолтные варианты —
+                  добавляем его, чтобы селект всегда показывал текущий размер. */}
+              {[...new Set([...PAGE_SIZE_OPTIONS, pageSize])]
+                .sort((a, b) => a - b)
+                .map((size) => (
+                  <option key={size} value={size}>
+                    {size}
+                  </option>
+                ))}
+            </select>
+          </label>
+        </div>
+      )}
       <div className="sed-note">
         Карточка сотрудника открывается в отдельном окне (клик по строке).
       </div>

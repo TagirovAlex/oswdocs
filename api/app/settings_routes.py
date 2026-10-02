@@ -168,12 +168,31 @@ def read_setting_value(store: DbSettingsStore, key: str) -> object:
     return _from_stored(store.get(key))
 
 
-def _clean_groups(raw: object) -> set[str]:
-    """Список AD-групп из значения настройки: только непустые строки без
-    пробелов вокруг (json-массив; битые элементы отбрасываются)."""
+def _groups_with_names(raw: object) -> list[dict[str, str]]:
+    """Список групп из значения настройки: объекты {id, name} (блок B);
+    строки старого формата читаются как id=name. Пустые/битые отбрасываются."""
     if not isinstance(raw, list):
-        return set()
-    return {item.strip() for item in raw if isinstance(item, str) and item.strip()}
+        return []
+    items: list[dict[str, str]] = []
+    for item in raw:
+        if isinstance(item, str):
+            value = item.strip()
+            if value:
+                items.append({"id": value, "name": value})
+        elif isinstance(item, dict):
+            group_id = item.get("id")
+            name = item.get("name")
+            if isinstance(group_id, str) and group_id.strip():
+                items.append(
+                    {"id": group_id.strip(), "name": str(name or group_id).strip()}
+                )
+    return items
+
+
+def _clean_groups(raw: object) -> set[str]:
+    """Список AD-групп из значения настройки: строки либо объекты {id, name}
+    (значим id), только непустые без пробелов вокруг; битые отбрасываются."""
+    return {item["id"] for item in _groups_with_names(raw)}
 
 
 def resolve_allowed_groups(
@@ -307,8 +326,9 @@ class DbSettingsStore:
     )
     _DOC_TYPES_INSERT = text(
         """
-        INSERT INTO doc_types (code, name, is_active, sort_order, created_at, updated_at)
-        VALUES (:code, :name, true, :sort_order, now(), now())
+        INSERT INTO doc_types (name, is_active, sort_order, created_at, updated_at)
+        VALUES (:name, true, :sort_order, now(), now())
+        RETURNING code
         """
     )
     _DOC_TYPES_UPDATE = text(
@@ -399,20 +419,21 @@ class DbSettingsStore:
             raise SettingsUnavailable(f"Хранилище настроек недоступно: {exc}") from exc
         return self._doc_type_dict(row) if row is not None else None
 
-    def create_doc_type(self, code: str, name: str, sort_order: int) -> dict:
-        """Создать вид документа (активным по умолчанию). Занятый code — DocTypeConflict."""
+    def create_doc_type(self, name: str, sort_order: int) -> dict:
+        """Создать вид документа (активным по умолчанию); код — автонумерация
+        (DEFAULT из последовательности doc_types_num_seq, миграция 0005)."""
         try:
             with self._session_factory() as session:
-                session.execute(
+                row = session.execute(
                     self._DOC_TYPES_INSERT,
-                    {"code": code, "name": name, "sort_order": sort_order},
-                )
+                    {"name": name, "sort_order": sort_order},
+                ).first()
                 session.commit()
         except IntegrityError as exc:
-            raise DocTypeConflict(f"Вид документа с кодом {code!r} уже существует") from exc
+            raise DocTypeConflict("Вид документа не создан (конфликт кода)") from exc
         except SQLAlchemyError as exc:
             raise SettingsUnavailable(f"Хранилище настроек недоступно: {exc}") from exc
-        return self.get_doc_type(code)
+        return self.get_doc_type(row.code)
 
     def update_doc_type(
         self,
@@ -527,9 +548,9 @@ class DocTypeItem(BaseModel):
 
 
 class DocTypeCreateIn(BaseModel):
-    """Создание вида документа (только admin): code обязателен и уникален."""
+    """Создание вида документа (только admin): код назначается автоматически
+    (автонумерация, миграция 0005), name обязателен, code в запросе не передаётся."""
 
-    code: str = Field(description="Код вида документа (уникален, занятый — 409)")
     name: str = Field(description="Название вида документа")
     sort_order: int | None = Field(
         default=None, description="Порядок сортировки (по умолчанию 0)"
@@ -1010,9 +1031,10 @@ def list_enterprises(
 def list_step_groups(
     user: CurrentUser = Depends(get_current_user),
     store: DbSettingsStore = Depends(get_settings_store),
-) -> list[str]:
+) -> list[dict]:
     """Группы ручного конструктора шагов (Волна 1): ОК/админы, иначе 403;
-    значения — из таблицы settings (ключ allowed_ad_groups), хардкода нет."""
+    значения — из таблицы settings (ключ allowed_ad_groups), хардкода нет.
+    Формат — объекты {id, name}: строки старого формата читаются как id=name."""
     _require_hr(user)
     try:
         raw = store.get("allowed_ad_groups")
@@ -1020,10 +1042,7 @@ def list_step_groups(
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
-    values = _from_stored(raw)
-    if not isinstance(values, list):
-        return []
-    return [item for item in values if isinstance(item, str)]
+    return _groups_with_names(_from_stored(raw))
 
 
 # --- Виды документов (таблица doc_types, миграция 0003) ---
@@ -1058,10 +1077,11 @@ def create_doc_type(
     user: CurrentUser = Depends(get_current_user),
     store: DbSettingsStore = Depends(get_settings_store),
 ) -> dict:
-    """Создать вид документа (только admin): code уникален, занятый — 409."""
+    """Создать вид документа (только admin): код назначается автоматически
+    (автонумерация), name — обязательное, code в запросе игнорируется."""
     _require_admin(user)
     try:
-        item = store.create_doc_type(payload.code, payload.name, payload.sort_order or 0)
+        item = store.create_doc_type(payload.name, payload.sort_order or 0)
     except DocTypeConflict as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=str(exc)

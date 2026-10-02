@@ -617,6 +617,23 @@ fieldset textarea {
   flex-wrap: wrap;
 }
 
+/* Пагинация справочника: счётчик/кнопки/селект в одну строку, токены темы. */
+.sed-pager {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+
+.sed-pager select {
+  border: 1px solid var(--sed-border);
+  border-radius: 4px;
+  padding: 5px 8px;
+  background: var(--sed-surface);
+  color: var(--sed-text);
+}
+
 /* Экран входа (login-screen.tsx): карточка по центру. */
 .sed-login {
   max-width: 380px;

@@ -8,14 +8,20 @@ import type { DocType } from "./requests-client";
 import {
   createDocType,
   deleteDocType,
+  getArchiveSettings,
   getSettings,
   getSettingsContent,
+  listBackups,
+  runBackup,
+  saveArchiveSettings,
   saveSettings,
   saveSettingsContent,
   syncEnterprises,
   updateDocType,
 } from "./settings-client";
 import type {
+  ArchiveSettingsData,
+  BackupFile,
   ContentSettingsData,
   ScheduleReglament,
   SettingsData,
@@ -34,8 +40,8 @@ interface AdminSettingsProps {
   role: Role;
 }
 
-// Вкладки админки: контент (Процесс/Справочники/Шаблоны) + Инфра, Регламенты
-// и Доступ и роли (только админ).
+// Вкладки админки: контент (Процесс/Справочники/Шаблоны) + Инфра, Регламенты,
+// Доступ и роли и Архивация (бэкапы) — только админ.
 const CONTENT_TABS = ["Процесс", "Справочники", "Шаблоны"] as const;
 const ALL_TABS = [
   "Процесс",
@@ -44,6 +50,7 @@ const ALL_TABS = [
   "Инфра",
   "Регламенты",
   "Доступ и роли",
+  "Архивация",
 ] as const;
 type SettingsTab = (typeof ALL_TABS)[number];
 
@@ -757,10 +764,169 @@ function DocTypesEditor() {
   );
 }
 
+// Вкладка «Архивация» (только админ): настройки бэкапов (место хранения,
+// шаблон имени, количество копий, расписание — как у регламентов), ручной
+// запуск бэкапа и список сохранённых файлов. Значения — из GET/PUT /api/archive
+// (settings БД), файлы — GET /api/archive/files; хардкода нет.
+function ArchiveTab() {
+  const [settings, setSettings] = useState<ArchiveSettingsData | null>(null);
+  const [backups, setBackups] = useState<BackupFile[]>([]);
+  const [loadError, setLoadError] = useState<string>("");
+  const [saveError, setSaveError] = useState<string>("");
+  const [saved, setSaved] = useState<string>("");
+  const [backupStatus, setBackupStatus] = useState<string>("");
+  const [backupError, setBackupError] = useState<string>("");
+  const [busy, setBusy] = useState<boolean>(false);
+  const [backupBusy, setBackupBusy] = useState<boolean>(false);
+
+  // Загрузка настроек архивации и списка бэкапов (без перезагрузки вкладки).
+  function load(): void {
+    setLoadError("");
+    getArchiveSettings()
+      .then((data) => setSettings(data))
+      .catch((e: unknown) =>
+        setLoadError(e instanceof Error ? e.message : "Ошибка загрузки настроек архивации"),
+      );
+    listBackups()
+      .then((items) => setBackups(items))
+      .catch((e: unknown) =>
+        setLoadError(e instanceof Error ? e.message : "Ошибка загрузки списка бэкапов"),
+      );
+  }
+
+  useEffect(load, []);
+
+  // Сохранение настроек архивации (PUT /api/archive).
+  async function handleSave(): Promise<void> {
+    if (!settings || busy) return;
+    setSaveError("");
+    setSaved("");
+    setBusy(true);
+    try {
+      await saveArchiveSettings(settings);
+      setSaved("Настройки архивации сохранены");
+    } catch (e: unknown) {
+      setSaveError(e instanceof Error ? e.message : "Ошибка сохранения настроек архивации");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Ручной запуск бэкапа (POST /api/archive/backup); после — обновляем список.
+  async function handleBackup(): Promise<void> {
+    if (backupBusy) return;
+    setBackupError("");
+    setBackupStatus("");
+    setBackupBusy(true);
+    try {
+      const result = await runBackup();
+      if (result.ok) {
+        setBackupStatus("Бэкап создан");
+        setBackups(await listBackups());
+      } else {
+        setBackupError(result.error ?? "Бэкап не создан");
+      }
+    } catch (e: unknown) {
+      setBackupError(e instanceof Error ? e.message : "Ошибка создания бэкапа");
+    } finally {
+      setBackupBusy(false);
+    }
+  }
+
+  return (
+    <fieldset>
+      <legend>Архивация (бэкапы)</legend>
+      {loadError && <div className="sed-note">Архивация: {loadError}</div>}
+      {!settings && !loadError && <div className="sed-note">Загрузка настроек архивации…</div>}
+      {settings && (
+        <>
+          <label className="sed-field">
+            Место хранения
+            <input
+              aria-label="Место хранения бэкапов"
+              type="text"
+              value={settings.storage_path}
+              onChange={(e) => setSettings({ ...settings, storage_path: e.target.value })}
+            />
+          </label>
+          <label className="sed-field">
+            Шаблон имени файла
+            <input
+              aria-label="Шаблон имени бэкапа"
+              type="text"
+              value={settings.file_pattern}
+              onChange={(e) => setSettings({ ...settings, file_pattern: e.target.value })}
+            />
+          </label>
+          <label className="sed-field">
+            Количество хранимых копий
+            <input
+              aria-label="Количество копий бэкапов"
+              type="number"
+              min={1}
+              value={settings.keep_copies}
+              onChange={(e) =>
+                setSettings({ ...settings, keep_copies: Number(e.target.value) })
+              }
+            />
+          </label>
+          <ScheduleReglamentEditor
+            title="бэкапов"
+            value={settings.schedule}
+            onChange={(schedule) => setSettings({ ...settings, schedule })}
+          />
+          <div className="sed-toolbar" style={{ marginTop: 12 }}>
+            <button type="button" className="sed-btn" onClick={handleSave} disabled={busy}>
+              {busy ? "Сохранение…" : "Сохранить"}
+            </button>
+            <button
+              type="button"
+              className="sed-btn"
+              onClick={handleBackup}
+              disabled={backupBusy}
+            >
+              {backupBusy ? "Создание…" : "Сделать бэкап сейчас"}
+            </button>
+          </div>
+          {saveError && <div role="alert">{saveError}</div>}
+          {saved && <div role="status">{saved}</div>}
+          {backupStatus && <div role="status">{backupStatus}</div>}
+          {backupError && <div role="alert">{backupError}</div>}
+        </>
+      )}
+      {/* Список сохранённых бэкапов: имя/размер/дата. */}
+      <div className="sed-note" style={{ marginTop: 12 }}>
+        Сохранённые бэкапы:
+      </div>
+      {backups.length === 0 && !loadError && <div className="sed-note">Бэкапов нет</div>}
+      {backups.length > 0 && (
+        <table className="sed-table" aria-label="Сохранённые бэкапы">
+          <thead>
+            <tr>
+              <th>Имя</th>
+              <th>Размер</th>
+              <th>Дата</th>
+            </tr>
+          </thead>
+          <tbody>
+            {backups.map((file) => (
+              <tr key={file.name}>
+                <td>{file.name}</td>
+                <td>{file.size} Б</td>
+                <td>{file.created_at.slice(0, 10)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </fieldset>
+  );
+}
+
 // Админка: контент (TTL/флаги, справочники, шаблоны) + инфра (сессия/сканы/SMTP,
-// регламенты, доступ и роли). Админ видит все вкладки (GET/PUT /api/settings),
-// руководитель ОК — только контент (GET/PUT /api/settings/content). Всё — из
-// settings БД.
+// регламенты, доступ и роли) + архивация. Админ видит все вкладки (GET/PUT
+// /api/settings), руководитель ОК — только контент (GET/PUT /api/settings/content).
+// Всё — из settings БД.
 export function AdminSettings(props: AdminSettingsProps) {
   const { role } = props;
   const isAdmin = role === "admin";
@@ -1417,13 +1583,19 @@ export function AdminSettings(props: AdminSettingsProps) {
         <AccessRolesEditor value={accessRoles} onChange={setAccessRoles} />
       )}
 
-      <div className="sed-toolbar" style={{ marginTop: 12 }}>
-        <button type="button" className="sed-btn" onClick={handleSave} disabled={busy}>
-          {busy ? "Сохранение…" : "Сохранить"}
-        </button>
-      </div>
-      {saveError && <div role="alert">{saveError}</div>}
-      {saved && <div role="status">{saved}</div>}
+      {activeTab === "Архивация" && isAdmin && <ArchiveTab />}
+
+      {/* Общий «Сохранить» — не для вкладки «Архивация»: у неё свой эндпоинт
+          и своя кнопка сохранения (PUT /api/archive). */}
+      {activeTab !== "Архивация" && (
+        <div className="sed-toolbar" style={{ marginTop: 12 }}>
+          <button type="button" className="sed-btn" onClick={handleSave} disabled={busy}>
+            {busy ? "Сохранение…" : "Сохранить"}
+          </button>
+        </div>
+      )}
+      {activeTab !== "Архивация" && saveError && <div role="alert">{saveError}</div>}
+      {activeTab !== "Архивация" && saved && <div role="status">{saved}</div>}
     </section>
   );
 }

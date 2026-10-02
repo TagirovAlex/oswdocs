@@ -220,10 +220,14 @@ def test_enterprises_audit_not_on_403(client, owner_headers, settings_store):
 # --- GET /step-groups ---
 
 def test_step_groups_hr_200(client, hr_headers, settings_store):
-    """ОК читает группы шагов: 200, список из сида."""
+    """ОК читает группы шагов: 200, объекты {id, name} из сида (строки → id=name)."""
     response = client.get("/step-groups", headers=hr_headers)
     assert response.status_code == 200
-    assert response.json() == ["SED_HR", "SED_ADMINS", "SED_STEP_EXEC"]
+    assert response.json() == [
+        {"id": "SED_HR", "name": "SED_HR"},
+        {"id": "SED_ADMINS", "name": "SED_ADMINS"},
+        {"id": "SED_STEP_EXEC", "name": "SED_STEP_EXEC"},
+    ]
 
 
 def test_step_groups_admin_200(client, admin_headers, settings_store):

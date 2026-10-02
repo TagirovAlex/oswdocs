@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from fastapi import Depends, FastAPI
 
+from . import archive as archive_routes  # блок F: закладка «Архивация» (бэкапы)
 from . import attachments as attachments_routes
 from . import auth as auth_routes
 from . import documents as documents_routes
@@ -18,6 +19,7 @@ from .config import Settings, get_settings
 from .deps import CurrentUser, get_current_user, is_privileged
 
 app = FastAPI(title="SED API", version="0.1.0")
+app.include_router(archive_routes.router)  # блок F: /api/archive*
 app.include_router(auth_routes.router)
 app.include_router(employees_routes.router)
 app.include_router(link_routes.router)

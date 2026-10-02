@@ -291,6 +291,19 @@ def main() -> None:
     except Exception:
         pass
 
+    # Регламентный бэкап БД: тихо (сбой не валит проход), как у прочих
+    # регламентов; расписание/каталог/шаблон/копии — из settings архивации
+    # (archive_schedule/archive_backup_dir/archive_name_template/archive_keep_copies).
+    try:
+        from .archive import maybe_backup_weekly
+
+        if maybe_backup_weekly(
+            settings_store, settings.DATABASE_URL, settings.FILES_DIR
+        ):
+            print("archive: регламентный бэкап выполнен")
+    except Exception:
+        pass
+
     store = DbRequestsStore(settings.DATABASE_URL)
     mailer = SmtpMailer(
         host=smtp_host,
