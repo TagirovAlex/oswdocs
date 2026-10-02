@@ -238,7 +238,7 @@ export function SedLayout(props: SedLayoutProps) {
         ))}
       </nav>
 
-      <div className="sed-body">
+      <div className={tab === "Заявки" ? "sed-body" : "sed-body sed-body--wide"}>
         {/* Список папок со счётчиками (плоский; depth — задел под дерево).
             Только на вкладке «Заявки»: в настройках/справочнике дерево заявок
             не показываем (клик по счётчикам там бессмысленен). */}

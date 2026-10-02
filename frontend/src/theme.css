@@ -162,6 +162,12 @@ a {
   flex: 1;
 }
 
+/* Вкладки без дерева заявок (настройки/справочник): сайдбар не рендерится,
+   контент занимает всю ширину — иначе попадал бы в колонку 250px. */
+.sed-body--wide {
+  grid-template-columns: 1fr;
+}
+
 .sed-folders {
   background: var(--sed-surface);
   border: 1px solid var(--sed-border);

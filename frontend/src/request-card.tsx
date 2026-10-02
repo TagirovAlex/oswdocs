@@ -242,8 +242,7 @@ export function RequestCard(props: RequestCardProps) {
 
   // Печать бегунка: POST /api/requests/{id}/print. generated=false с reason —
   // НЕ ошибка: показываем reason как статус, не как сбой. При успешной генерации
-  // открываем PDF в новой вкладке (диалог печати браузера) — каждый раз новая
-  // версия, файл создаётся на бэкенде.
+  // открываем диалог печати браузера из скрытого iframe — без новой вкладки.
   async function handlePrint(): Promise<void> {
     setPrintError("");
     setPrintStatus("");
@@ -257,19 +256,36 @@ export function RequestCard(props: RequestCardProps) {
           : (result.reason ?? "Бегунок не сгенерирован"),
       );
       if (result.generated) {
-        // PDF качаем blob-ом с Bearer-токеном: прямая ссылка в новой вкладке
-        // упала бы в 401 (навигация браузера заголовок не передаёт).
+        // PDF качаем blob-ом с Bearer-токеном (прямая ссылка упала бы в 401) и
+        // печатаем через скрытый iframe: диалог печати открывается с нужным
+        // файлом, без создания новых вкладок.
         try {
           const pdfUrl = await getPdfBlobUrl(requestId, version);
-          const win = window.open(pdfUrl, "_blank");
-          if (win) {
-            win.opener = null;
-            win.focus();
-          } else {
-            // Всплывающее окно заблокировано: даём ручную ссылку на blob.
-            setPrintPdf({ url: pdfUrl, version });
-            setPrintStatus("Блокировка всплывающих окон: откройте ссылку вручную");
-          }
+          const frame = document.createElement("iframe");
+          frame.style.position = "absolute";
+          frame.style.width = "1px";
+          frame.style.height = "1px";
+          frame.style.opacity = "0";
+          frame.style.border = "none";
+          frame.src = pdfUrl;
+          frame.onload = () => {
+            try {
+              frame.contentWindow?.focus();
+              frame.contentWindow?.print();
+            } catch {
+              // Браузер заблокировал печать: даём ручную ссылку на blob.
+              setPrintPdf({ url: pdfUrl, version });
+              setPrintStatus("Браузер заблокировал печать: откройте PDF вручную");
+            } finally {
+              // Blob-адрес освобождаем с задержкой, чтобы диалог печати успел
+              // прочитать документ.
+              setTimeout(() => {
+                URL.revokeObjectURL(pdfUrl);
+                frame.remove();
+              }, 60_000);
+            }
+          };
+          document.body?.appendChild(frame);
         } catch (e: unknown) {
           setPrintError(e instanceof Error ? e.message : "Не удалось открыть PDF для печати");
         }
@@ -369,6 +385,17 @@ export function RequestCard(props: RequestCardProps) {
       setAttachmentsError("");
     } catch (e: unknown) {
       setAttachmentsError(e instanceof Error ? e.message : "Ошибка загрузки вложений");
+    }
+  }
+
+  // Открыть сохранённый PDF бегунка: качаем blob-ом с Bearer-токеном (прямая
+  // ссылка дала бы 401) и открываем blob URL в новой вкладке.
+  async function openDocPdf(version: string): Promise<void> {
+    try {
+      const url = await getPdfBlobUrl(requestId, version);
+      window.open(url, "_blank", "noopener,noreferrer");
+    } catch (e: unknown) {
+      setDocsError(e instanceof Error ? e.message : "Не удалось открыть PDF");
     }
   }
 
@@ -497,8 +524,14 @@ export function RequestCard(props: RequestCardProps) {
               {docs.map((doc) => (
                 <li key={doc.version}>
                   Бегунок {doc.version} · {doc.created_at} ·{" "}
+                  {/* Прямая навигация по /pdf дала бы 401 (без Bearer-токена);
+                      перехватываем клик и открываем PDF через blob-загрузку. */}
                   <a
                     href={`/api/documents/${encodeURIComponent(requestId)}/pdf?version=${encodeURIComponent(doc.version)}`}
+                    onClick={(e) => {
+                      e.preventDefault();
+                      void openDocPdf(doc.version);
+                    }}
                   >
                     PDF
                   </a>
