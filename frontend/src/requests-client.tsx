@@ -155,14 +155,21 @@ export interface EmployeeSearchResult {
   needs_manual_review?: boolean;
 }
 
-// Результат POST /api/requests/{id}/print: сгенерированный бегунок (v1/v2).
-// generated=false + reason — НЕ ошибка (нет LibreOffice/шаблона), текст показывает экран.
+// Результат POST /api/requests/{id}/print (вариант 1): печатная форма без версий,
+// PDF приходит base64 в ответе, документы в БД не пишутся. generated=false +
+// reason — НЕ ошибка (нет LibreOffice/шаблона), текст показывает экран.
 export interface PrintResult {
-  version: "v1" | "v2";
-  pdf_path?: string;
-  qr_payload?: string;
   generated: boolean;
-  reason?: string;
+  reason?: string | null;
+  pdf_b64?: string | null;
+}
+
+// Декодирование base64 в Blob (PDF печати из ответа): atob → байты → Blob.
+export function base64ToBlob(b64: string, mime: string): Blob {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new Blob([bytes], { type: mime });
 }
 
 // Мета документа заявки (GET /api/documents/{id}).
@@ -402,24 +409,12 @@ export async function createRequest(body: CreateRequestBody): Promise<RequestOut
 }
 
 // POST /api/requests/{id}/print: генерация бегунка (ОК/админ). При отсутствии
-// LibreOffice/шаблона — generated=false с reason (не ошибка).
+// LibreOffice/шаблона — generated=false с reason (не ошибка); при успехе PDF —
+// base64 (pdf_b64), версии не создаются.
 export async function printRequest(id: string): Promise<PrintResult> {
   return requestJson<PrintResult>(`/api/requests/${encodeURIComponent(id)}/print`, {
     method: "POST",
   });
-}
-
-// Скачать PDF бегунка с авторизацией и вернуть object URL (для печати в новой
-// вкладке). Напрямую открыть /api/documents/{id}/pdf нельзя: API требует
-// Bearer-токен в заголовке, а навигация браузера заголовок не передаёт.
-export async function getPdfBlobUrl(id: string, version: string): Promise<string> {
-  const token = getToken();
-  const res = await fetch(
-    `/api/documents/${encodeURIComponent(id)}/pdf?version=${encodeURIComponent(version)}`,
-    { headers: token ? { Authorization: `Bearer ${token}` } : {} },
-  );
-  if (!res.ok) throw new ApiHttpError(res.status, await res.text());
-  return URL.createObjectURL(await res.blob());
 }
 
 // GET /api/documents/{id}: мета документов заявки (версии, пути, QR).

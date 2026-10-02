@@ -1,5 +1,5 @@
 // Тесты карточки заявки (Задача 3): шаги, отметки владельца, действия ОК,
-// документы/печать, скан-вложения. Компонент RequestCard используется в
+// печать бегунка, скан-вложения. Компонент RequestCard используется в
 // окне-попе (?view=request&id=…). Данные — из requests-client (мокается).
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -10,21 +10,19 @@ import {
   deleteRequest,
   finishRequest,
   getAttachments,
-  getDocuments,
   getRequest,
   printRequest,
   submitRequest,
   toExecution,
   uploadAttachment,
 } from "./requests-client";
-import type { AttachmentMeta, DocumentMeta, RequestOut } from "./requests-client";
+import type { AttachmentMeta, RequestOut } from "./requests-client";
 import type { Role } from "./api-mock";
 
 vi.mock("./requests-client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./requests-client")>();
   return {
     ...actual,
-    getDocuments: vi.fn(),
     getRequest: vi.fn(),
     decideStep: vi.fn(),
     submitRequest: vi.fn(),
@@ -103,7 +101,6 @@ beforeEach(() => {
   vi.restoreAllMocks();
   window.localStorage.clear();
   clearOpener();
-  vi.mocked(getDocuments).mockReset();
   vi.mocked(getRequest).mockReset();
   vi.mocked(decideStep).mockReset();
   vi.mocked(submitRequest).mockReset();
@@ -113,29 +110,29 @@ beforeEach(() => {
   vi.mocked(getAttachments).mockReset();
   vi.mocked(uploadAttachment).mockReset();
   vi.mocked(printRequest).mockReset();
-  vi.mocked(getDocuments).mockResolvedValue([]);
   vi.mocked(getRequest).mockResolvedValue(requestWith("Громов Игорь Олегович", "На согласовании"));
   vi.mocked(getAttachments).mockResolvedValue([]);
   vi.mocked(deleteRequest).mockResolvedValue({ deleted: "REQ-0001" });
 });
 
 describe("RequestCard", () => {
-  // Печать бегунка: версия в статусе, запрос с requestId.
-  it("печать генерирует бегунок и показывает версию", async () => {
+  // Печать бегунка (вариант 1): PDF base64 в ответе, версий нет — статус
+  // «Бегунок сгенерирован», запрос с requestId.
+  it("печать генерирует бегунок и показывает статус без версии", async () => {
     vi.mocked(getRequest).mockResolvedValue(requestWith("Громов Игорь Олегович", "На согласовании"));
-    vi.mocked(printRequest).mockResolvedValue({ version: "v2", generated: true, pdf_path: "/data/2.pdf", qr_payload: "q" });
+    vi.mocked(printRequest).mockResolvedValue({ generated: true, reason: null, pdf_b64: "AAAA" });
 
     renderCard();
     await waitFor(() => expect(screen.getByRole("button", { name: "Печать" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Печать" }));
-    await waitFor(() => expect(screen.getByText("Бегунок v2 сгенерирован")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("Бегунок сгенерирован")).toBeInTheDocument());
     expect(vi.mocked(printRequest)).toHaveBeenCalledWith("REQ-0001");
   });
 
   // generated=false с reason (нет LibreOffice/шаблона) — статус, не ошибка.
   it("печать без LibreOffice показывает reason как статус, не как ошибку", async () => {
     vi.mocked(getRequest).mockResolvedValue(requestWith("Громов Игорь Олегович", "На согласовании"));
-    vi.mocked(printRequest).mockResolvedValue({ version: "v1", generated: false, reason: "LibreOffice не настроен" });
+    vi.mocked(printRequest).mockResolvedValue({ generated: false, reason: "LibreOffice не настроен", pdf_b64: null });
 
     renderCard();
     await waitFor(() => expect(screen.getByRole("button", { name: "Печать" })).toBeInTheDocument());
@@ -153,25 +150,6 @@ describe("RequestCard", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Печать" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Печать" }));
     await waitFor(() => expect(screen.getByText("Печать доступна только ОК")).toBeInTheDocument());
-  });
-
-  // Блок «Документы»: версии со ссылками на PDF (URL строится из id).
-  it("блок «Документы» показывает версии со ссылками на PDF", async () => {
-    vi.mocked(getRequest).mockResolvedValue(requestWith("Громов Игорь Олегович", "На согласовании"));
-    const docs: DocumentMeta[] = [
-      { version: "v1", pdf_path: "/data/1.pdf", qr_payload: "q", created_at: "2026-09-28T10:00:00+00:00" },
-      { version: "v2", pdf_path: "/data/2.pdf", qr_payload: "q", created_at: "2026-09-29T10:00:00+00:00" },
-    ];
-    vi.mocked(getDocuments).mockResolvedValue(docs);
-
-    renderCard();
-    await waitFor(() => expect(screen.getByText(/Бегунок v1/)).toBeInTheDocument());
-    expect(screen.getByText(/Бегунок v2/)).toBeInTheDocument();
-    const links = screen.getAllByRole("link");
-    expect(links.map((l) => l.getAttribute("href"))).toEqual([
-      "/api/documents/REQ-0001/pdf?version=v1",
-      "/api/documents/REQ-0001/pdf?version=v2",
-    ]);
   });
 
   // Карточка показывает шаги выбранной заявки.

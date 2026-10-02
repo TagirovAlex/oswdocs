@@ -6,15 +6,14 @@ import { useEffect, useState } from "react";
 import type { ChangeEvent } from "react";
 import {
   addComment,
+  base64ToBlob,
   decideStep,
   deleteRequest,
   finishRequest,
   getAttachments,
   getComments,
   getDocTypes,
-  getDocuments,
   getHistory,
-  getPdfBlobUrl,
   getRequest,
   notifyRequestsChanged,
   printRequest,
@@ -28,7 +27,6 @@ import {
 import type {
   AttachmentMeta,
   DocType,
-  DocumentMeta,
   RequestComment,
   RequestHistoryItem,
   RequestOut,
@@ -70,9 +68,7 @@ export function RequestCard(props: RequestCardProps) {
   const [printStatus, setPrintStatus] = useState<string>("");
   const [printError, setPrintError] = useState<string>("");
   // Свежий PDF последней печати — ручная ссылка, если вкладку открыть не дали.
-  const [printPdf, setPrintPdf] = useState<{ url: string; version: string } | null>(null);
-  const [docs, setDocs] = useState<DocumentMeta[]>([]);
-  const [docsError, setDocsError] = useState<string>("");
+  const [printPdf, setPrintPdf] = useState<string | null>(null);
   const [decisionComment, setDecisionComment] = useState<string>("");
   const [decisionError, setDecisionError] = useState<string>("");
   // Форма решения скрыта на время запроса: после отказа закрывается сразу,
@@ -102,27 +98,6 @@ export function RequestCard(props: RequestCardProps) {
   const [rollbackStep, setRollbackStep] = useState<string>("");
   const [sedStatus, setSedStatus] = useState<string>("");
   const [sedError, setSedError] = useState<string>("");
-
-  // Загрузка документов (версии бегунка и ссылки на PDF).
-  useEffect(() => {
-    let alive = true;
-    getDocuments(requestId)
-      .then((data) => {
-        if (alive) {
-          setDocs(data);
-          setDocsError("");
-        }
-      })
-      .catch((e: unknown) => {
-        if (alive) {
-          setDocs([]);
-          setDocsError(e instanceof Error ? e.message : "Ошибка загрузки документов");
-        }
-      });
-    return () => {
-      alive = false;
-    };
-  }, [requestId]);
 
   // Загрузка карточки (GET /api/requests/{id}).
   useEffect(() => {
@@ -240,27 +215,27 @@ export function RequestCard(props: RequestCardProps) {
     setRollbackStep("");
   }, [card, isSedAdmin]);
 
-  // Печать бегунка: POST /api/requests/{id}/print. generated=false с reason —
+  // Печать бегунка: POST /api/requests/{id}/print. Вариант 1 — версии не
+  // накапливаются: PDF приходит base64 в ответе. generated=false с reason —
   // НЕ ошибка: показываем reason как статус, не как сбой. При успешной генерации
-  // открываем диалог печати браузера из скрытого iframe — без новой вкладки.
+  // декодируем PDF в Blob и открываем диалог печати браузера из скрытого iframe —
+  // без новой вкладки.
   async function handlePrint(): Promise<void> {
     setPrintError("");
     setPrintStatus("");
     setPrintPdf(null);
     try {
       const result = await printRequest(requestId);
-      const version = result.version;
       setPrintStatus(
         result.generated
-          ? `Бегунок ${version} сгенерирован`
+          ? "Бегунок сгенерирован"
           : (result.reason ?? "Бегунок не сгенерирован"),
       );
-      if (result.generated) {
-        // PDF качаем blob-ом с Bearer-токеном (прямая ссылка упала бы в 401) и
-        // печатаем через скрытый iframe: диалог печати открывается с нужным
-        // файлом, без создания новых вкладок.
+      if (result.generated && result.pdf_b64) {
+        // PDF печатаем blob-ом из base64 ответа через скрытый iframe: диалог
+        // печати открывается с нужным файлом, без создания новых вкладок.
         try {
-          const pdfUrl = await getPdfBlobUrl(requestId, version);
+          const pdfUrl = URL.createObjectURL(base64ToBlob(result.pdf_b64, "application/pdf"));
           const frame = document.createElement("iframe");
           frame.style.position = "absolute";
           frame.style.width = "1px";
@@ -274,7 +249,7 @@ export function RequestCard(props: RequestCardProps) {
               frame.contentWindow?.print();
             } catch {
               // Браузер заблокировал печать: даём ручную ссылку на blob.
-              setPrintPdf({ url: pdfUrl, version });
+              setPrintPdf(pdfUrl);
               setPrintStatus("Браузер заблокировал печать: откройте PDF вручную");
             } finally {
               // Blob-адрес освобождаем с задержкой, чтобы диалог печати успел
@@ -290,9 +265,6 @@ export function RequestCard(props: RequestCardProps) {
           setPrintError(e instanceof Error ? e.message : "Не удалось открыть PDF для печати");
         }
       }
-      getDocuments(requestId)
-        .then((data) => setDocs(data))
-        .catch(() => undefined);
     } catch (e: unknown) {
       setPrintError(e instanceof Error ? e.message : "Ошибка печати");
     }
@@ -385,17 +357,6 @@ export function RequestCard(props: RequestCardProps) {
       setAttachmentsError("");
     } catch (e: unknown) {
       setAttachmentsError(e instanceof Error ? e.message : "Ошибка загрузки вложений");
-    }
-  }
-
-  // Открыть сохранённый PDF бегунка: качаем blob-ом с Bearer-токеном (прямая
-  // ссылка дала бы 401) и открываем blob URL в новой вкладке.
-  async function openDocPdf(version: string): Promise<void> {
-    try {
-      const url = await getPdfBlobUrl(requestId, version);
-      window.open(url, "_blank", "noopener,noreferrer");
-    } catch (e: unknown) {
-      setDocsError(e instanceof Error ? e.message : "Не удалось открыть PDF");
     }
   }
 
@@ -507,38 +468,13 @@ export function RequestCard(props: RequestCardProps) {
               </button>
               {printStatus && <span role="status">{printStatus}</span>}
               {printPdf && (
-                <a href={printPdf.url} target="_blank" rel="noopener noreferrer">
-                  Открыть PDF {printPdf.version}
+                <a href={printPdf} target="_blank" rel="noopener noreferrer">
+                  Открыть PDF
                 </a>
               )}
               {printError && <span role="alert">{printError}</span>}
             </div>
           )}
-
-          {/* Документы: версии бегунка и ссылки на PDF. */}
-          <section aria-label="Документы">
-            <h4>Документы</h4>
-            {docsError && <div role="alert">{docsError}</div>}
-            {docs.length === 0 && !docsError && <div className="sed-note">Документов нет</div>}
-            <ul>
-              {docs.map((doc) => (
-                <li key={doc.version}>
-                  Бегунок {doc.version} · {doc.created_at} ·{" "}
-                  {/* Прямая навигация по /pdf дала бы 401 (без Bearer-токена);
-                      перехватываем клик и открываем PDF через blob-загрузку. */}
-                  <a
-                    href={`/api/documents/${encodeURIComponent(requestId)}/pdf?version=${encodeURIComponent(doc.version)}`}
-                    onClick={(e) => {
-                      e.preventDefault();
-                      void openDocPdf(doc.version);
-                    }}
-                  >
-                    PDF
-                  </a>
-                </li>
-              ))}
-            </ul>
-          </section>
 
           {/* Шаги маршрута: исполнитель/статус/срок/комментарий. Логин AD
               согласующего (assignee) в UI не выводится — только ФИО (owner_name)

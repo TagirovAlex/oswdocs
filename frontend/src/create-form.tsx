@@ -102,6 +102,9 @@ export function CreateForm(props: CreateFormProps) {
   const [empHits, setEmpHits] = useState<EmployeeHit[]>([]);
   const [empListOpen, setEmpListOpen] = useState<boolean>(false);
   const [empSearching, setEmpSearching] = useState<boolean>(false);
+  // Сотрудник уже выбран из списка (клик по кандидату): поле показывает ФИО,
+  // повторный поиск по empQuery не запускается (иначе список открывался бы заново).
+  const [empPicked, setEmpPicked] = useState<boolean>(false);
   const [manualMode, setManualMode] = useState<boolean>(false);
   const [manualNote, setManualNote] = useState<string>("");
   const [fio, setFio] = useState<string>("");
@@ -261,7 +264,16 @@ export function CreateForm(props: CreateFormProps) {
 
   // Живой поиск сотрудника: ввод → debounce 150 мс → searchEmployees; старые
   // ответы отбрасываем по searchSeq. 503 или пустой результат — ручной ввод.
+  // При уже выбранном сотруднике (empPicked) поиск не запускаем: поле держит
+  // ФИО, иначе после клика по кандидату список открывался бы заново.
   useEffect(() => {
+    if (empPicked) {
+      searchSeq.current++;
+      setEmpHits([]);
+      setEmpListOpen(false);
+      setEmpSearching(false);
+      return;
+    }
     const q = empQuery.trim();
     if (q === "") {
       searchSeq.current++;
@@ -305,7 +317,7 @@ export function CreateForm(props: CreateFormProps) {
         });
     }, 150);
     return () => clearTimeout(timer);
-  }, [empQuery, enterprise]);
+  }, [empQuery, enterprise, empPicked]);
 
   // Живой поиск в AD для панели конструктора: debounce 150 мс → searchAd.
   useEffect(() => {
@@ -367,6 +379,7 @@ export function CreateForm(props: CreateFormProps) {
     setEmpQuery(hit.fio);
     setEmpHits([]);
     setEmpListOpen(false);
+    setEmpPicked(true);
     const parts = hit.key.split("|");
     if (parts.length < 3) {
       return; // битый ключ — подразделение/должность останутся пустыми («—»)
@@ -379,6 +392,23 @@ export function CreateForm(props: CreateFormProps) {
       .catch(() => {
         // Карточка недоступна — подразделение/должность останутся «—».
       });
+  }
+
+  // Очистка выбора сотрудника (кнопка ✕ рядом с поиском): сброс полей
+  // сотрудника и возврат к поиску в 1С.
+  function clearEmployeePick(): void {
+    markTouched();
+    setEmpPicked(false);
+    setEmpQuery("");
+    setEmpHits([]);
+    setEmpListOpen(false);
+    setEmpSearching(false);
+    setManualMode(false);
+    setManualNote("");
+    setFio("");
+    setTabNum("");
+    setDepartment("");
+    setPosition("");
   }
 
   // Конструктор маршрута: добавление/удаление блоков и шагов (→ dirty).
@@ -498,6 +528,7 @@ export function CreateForm(props: CreateFormProps) {
     setEmpQuery("");
     setEmpHits([]);
     setEmpListOpen(false);
+    setEmpPicked(false);
     setManualMode(false);
     setManualNote("");
     setSubject("");
@@ -621,24 +652,39 @@ export function CreateForm(props: CreateFormProps) {
             <fieldset className="sed-fieldset sed-mt-12">
               <legend>Сотрудник</legend>
               <div className="sed-rel">
-                <label className="sed-field">
-                  Поиск сотрудника
-                  <input
-                    aria-label="Поиск сотрудника"
-                    placeholder="ФИО / табельный №"
-                    value={empQuery}
-                    onChange={(e) => {
-                      markTouched();
-                      setEmpQuery(e.target.value);
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.key === "Escape") setEmpListOpen(false);
-                    }}
-                    onFocus={() => {
-                      if (empHits.length > 0) setEmpListOpen(true);
-                    }}
-                  />
-                </label>
+                <div className="sed-fieldrow">
+                  <label className="sed-field">
+                    Поиск сотрудника
+                    <input
+                      aria-label="Поиск сотрудника"
+                      placeholder="ФИО / табельный №"
+                      value={empQuery}
+                      onChange={(e) => {
+                        markTouched();
+                        // Редактирование после выбора — новый поиск: сбрасываем выбор.
+                        if (empPicked) clearEmployeePick();
+                        setEmpQuery(e.target.value);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Escape") setEmpListOpen(false);
+                      }}
+                      onFocus={() => {
+                        if (empHits.length > 0) setEmpListOpen(true);
+                      }}
+                    />
+                  </label>
+                  {empPicked && (
+                    <button
+                      type="button"
+                      className="sed-ibtn"
+                      aria-label="Очистить выбор сотрудника"
+                      title="Очистить выбор"
+                      onClick={clearEmployeePick}
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
                 {empListOpen && empHits.length > 0 && (
                   <ul className="sed-dropdown">
                     {empHits.map((h) => (

@@ -224,6 +224,8 @@ a {
   display: flex;
   gap: 6px;
   margin-bottom: 6px;
+  /* Кнопки тулбара — в одну линию (макет: ОК/Отправить/Отмена). */
+  flex-wrap: nowrap;
 }
 
 .sed-btn {
@@ -233,6 +235,8 @@ a {
   border-radius: 4px;
   padding: 6px 12px;
   cursor: pointer;
+  /* Подписи кнопок не переносятся: тулбар остаётся одной строкой. */
+  white-space: nowrap;
 }
 
 .sed-btn--ghost {
@@ -460,18 +464,29 @@ a {
   color: var(--sed-text);
 }
 
-/* Поля ввода настроек/редакторов (внутри .sed-fieldset, без класса .sed-field):
-   та же стилизация, что у .sed-field — иначе браузерные инпуты выбиваются из
-   дизайна своих блоков. Ширину не растягиваем: строки-флексы (Код+Название). */
-.sed-fieldset input[type="text"],
-.sed-fieldset input:not([type]),
-.sed-fieldset select,
-.sed-fieldset textarea {
+/* Поля ввода настроек/редакторов (fieldset без класса .sed-field): та же
+   стилизация, что у .sed-field — иначе браузерные инпуты выбиваются из дизайна
+   своих блоков. Ширину не растягиваем: строки-флексы (Код+Название). */
+fieldset input[type="text"],
+fieldset input[type="number"],
+fieldset input[type="email"],
+fieldset input[type="password"],
+fieldset input[type="time"],
+fieldset input:not([type]),
+fieldset select,
+fieldset textarea {
   border: 1px solid var(--sed-border);
   border-radius: 4px;
   padding: 5px 8px;
   background: var(--sed-surface);
   color: var(--sed-text);
+}
+
+/* Многострочные поля настроек (textarea) — на всю ширину блока (бланки бегунков,
+   шаблоны писем, текст письма, адресаты). Высота — атрибутом rows у поля. */
+fieldset textarea {
+  width: 100%;
+  box-sizing: border-box;
 }
 
 /* Метаданные заявки: значения данных, а не примечание. */
@@ -530,6 +545,19 @@ a {
 
 /* Контекст позиционирования выпадающего списка (родитель .sed-dropdown). */
 .sed-rel { position: relative; }
+
+/* Строка поля с иконочной кнопкой (очистка выбора сотрудника): поле — на всю
+   ширину, кнопка — по контенту. Только токены темы. */
+.sed-fieldrow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sed-fieldrow .sed-field {
+  flex: 1 1 auto;
+  min-width: 0;
+}
 
 /* Строка внутри блока: блоком с отступом сверху (справочные данные из 1С). */
 .sed-block { display: block; margin-top: 8px; }

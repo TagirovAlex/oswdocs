@@ -222,7 +222,7 @@ function AccessRolesEditor(props: { value: AccessRoleGroups; onChange: (v: Acces
         руководитель ОК во вкладке «Справочники».
       </div>
       {ACCESS_ROLE_FIELDS.map((field) => (
-        <label key={field.key} style={{ display: "block", marginTop: 8 }}>
+        <label key={field.key} className="sed-field">
           {field.label}
           <input
             aria-label={field.ariaLabel}
@@ -318,7 +318,7 @@ function TemplatesEditor(props: { value: SettingsTemplate[]; onChange: (v: Setti
       {value.length === 0 && <div className="sed-note">не задано</div>}
       {value.map((template, i) => (
         <div key={i} style={{ border: "1px solid var(--sed-border)", marginTop: 8, padding: 8 }}>
-          <label style={{ display: "block" }}>
+          <label className="sed-field">
             Служба
             <input
               aria-label={`Служба шаблона ${i + 1}`}
@@ -326,7 +326,7 @@ function TemplatesEditor(props: { value: SettingsTemplate[]; onChange: (v: Setti
               onChange={(e) => updateTemplate(i, { service: e.target.value })}
             />
           </label>
-          <label style={{ display: "block", marginTop: 8 }}>
+          <label className="sed-field">
             Категория
             <input
               aria-label={`Категория шаблона ${i + 1}`}
@@ -390,7 +390,7 @@ function DocTemplatesEditor(props: { value: SettingsDocTemplate[]; onChange: (v:
       {value.length === 0 && <div className="sed-note">не задано</div>}
       {value.map((doc, i) => (
         <div key={i} style={{ border: "1px solid var(--sed-border)", marginTop: 8, padding: 8 }}>
-          <label style={{ display: "block" }}>
+          <label className="sed-field">
             Служба
             <input
               aria-label={`Служба бланка ${i + 1}`}
@@ -398,7 +398,7 @@ function DocTemplatesEditor(props: { value: SettingsDocTemplate[]; onChange: (v:
               onChange={(e) => update(i, { service: e.target.value })}
             />
           </label>
-          <label style={{ display: "block", marginTop: 8 }}>
+          <label className="sed-field">
             Категория
             <input
               aria-label={`Категория бланка ${i + 1}`}
@@ -406,7 +406,7 @@ function DocTemplatesEditor(props: { value: SettingsDocTemplate[]; onChange: (v:
               onChange={(e) => update(i, { category: e.target.value })}
             />
           </label>
-          <label style={{ display: "block", marginTop: 8 }}>
+          <label className="sed-field">
             Тело бегунка (Jinja-плейсхолдеры)
             <textarea
               aria-label={`Тело бланка ${i + 1}`}
@@ -451,7 +451,7 @@ function MailTemplatesEditor(props: { value: SettingsMailTemplate[]; onChange: (
       {value.length === 0 && <div className="sed-note">не задано</div>}
       {value.map((mail, i) => (
         <div key={i} style={{ border: "1px solid var(--sed-border)", marginTop: 8, padding: 8 }}>
-          <label style={{ display: "block" }}>
+          <label className="sed-field">
             Код события (code)
             <input
               aria-label={`Код письма ${i + 1}`}
@@ -459,7 +459,7 @@ function MailTemplatesEditor(props: { value: SettingsMailTemplate[]; onChange: (
               onChange={(e) => update(i, { code: e.target.value })}
             />
           </label>
-          <label style={{ display: "block", marginTop: 8 }}>
+          <label className="sed-field">
             Тема письма (subject)
             <input
               aria-label={`Тема письма ${i + 1}`}
@@ -467,7 +467,7 @@ function MailTemplatesEditor(props: { value: SettingsMailTemplate[]; onChange: (
               onChange={(e) => update(i, { subject: e.target.value })}
             />
           </label>
-          <label style={{ display: "block", marginTop: 8 }}>
+          <label className="sed-field">
             HTML-тело (body_html; Jinja-плейсхолдеры)
             <textarea
               aria-label={`HTML письма ${i + 1}`}
@@ -517,7 +517,7 @@ function ScheduleReglamentEditor(props: {
   };
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
-      <label style={{ display: "block" }}>
+      <label className="sed-field">
         Режим
         <select
           aria-label={`Режим расписания ${title}`}
@@ -537,7 +537,7 @@ function ScheduleReglamentEditor(props: {
         </select>
       </label>
       {mode === "interval" && (
-        <label style={{ display: "block", marginTop: 8 }}>
+        <label className="sed-field">
           Интервал, часов
           <input
             aria-label={`Интервал часов ${title}`}
@@ -549,7 +549,7 @@ function ScheduleReglamentEditor(props: {
         </label>
       )}
       {mode === "daily" && (
-        <label style={{ display: "block", marginTop: 8 }}>
+        <label className="sed-field">
           Время (HH:MM)
           <input
             aria-label={`Время ${title}`}
@@ -571,7 +571,7 @@ function ScheduleReglamentEditor(props: {
             />
             Отправлять уведомление о выполненной операции
           </label>
-          <label style={{ display: "block", marginTop: 8 }}>
+          <label className="sed-field">
             Тема письма
             <input
               aria-label={`Тема письма ${title}`}
@@ -580,7 +580,7 @@ function ScheduleReglamentEditor(props: {
               onChange={(e) => update({ subject: e.target.value })}
             />
           </label>
-          <label style={{ display: "block", marginTop: 8 }}>
+          <label className="sed-field">
             Текст письма ({"{{summary}}"} — сводка операции)
             <textarea
               aria-label={`Текст письма ${title}`}
@@ -589,11 +589,11 @@ function ScheduleReglamentEditor(props: {
               onChange={(e) => update({ body: e.target.value })}
             />
           </label>
-          <label style={{ display: "block", marginTop: 8 }}>
+          <label className="sed-field">
             Адресаты (по одному e-mail на строку)
             <textarea
               aria-label={`Адресаты ${title}`}
-              rows={2}
+              rows={3}
               value={(value?.recipients ?? []).join("\n")}
               onChange={(e) =>
                 update({ recipients: e.target.value.split("\n").map((s) => s.trim()) })
