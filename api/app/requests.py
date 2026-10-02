@@ -1125,10 +1125,13 @@ def decide_step(
 ) -> RequestOut:
     """Отметка владельца: согласие/отказ/возврат (комментарий по require_comment).
 
+    Отказ — тоже назад по маршруту (переоткрывается предыдущий блок), шаг при
+    этом остаётся «отклонен» (в отличие от «возвращен»).
+
     Уведомление «назначена»: при согласии — новые ожидающие шаги следующего
-    блока (без дублей внутри параллельного блока), при возврате — владельцы
-    переоткрытого предыдущего блока, а если возвращать некуда — автор заявки
-    («возврат», заявка на доработке)."""
+    блока (без дублей внутри параллельного блока), при отказе и возврате —
+    владельцы переоткрытого предыдущего блока, а если возвращать некуда — автор
+    заявки («возврат», заявка на доработке)."""
     settings.ensure_read_only()
     reopened: list[_Step] | None = None
     before_orders: set[int] = set()
@@ -1175,8 +1178,21 @@ def decide_step(
                 _reopen_returned_if_current(request, route, now)
         elif body.decision == "reject":
             step.status = STEP_REJECTED
-            request.status = REJECTED
             _audit(user.sam, "step.reject", request.id, f"order={order}")
+            # Отказ — назад по маршруту, как возврат: предыдущий блок снова в
+            # работе с новым TTL (route.approval_ttl_days), заявка остаётся на
+            # согласовании. Возвращать некуда — заявка автору на доработку.
+            reopened = _previous_block_steps(request, order)
+            if reopened:
+                for reopened_step in reopened:
+                    reopened_step.status = STEP_PENDING
+                    reopened_step.done_by = None
+                    reopened_step.done_at = None
+                    reopened_step.comment = None
+                    reopened_step.expires_at = now + timedelta(days=route.approval_ttl_days)
+                request.status = IN_APPROVAL
+            else:
+                request.status = REWORK
         else:
             step.status = STEP_RETURNED
             _audit(user.sam, "step.return", request.id, f"order={order}")
@@ -1210,7 +1226,7 @@ def decide_step(
                 _notify_assigned(
                     request, mail_queue, settings_store, ad_reader, settings, steps=fresh
                 )
-    elif body.decision == "return":
+    elif body.decision in ("return", "reject"):
         if reopened:
             _notify_assigned(
                 request, mail_queue, settings_store, ad_reader, settings, steps=reopened

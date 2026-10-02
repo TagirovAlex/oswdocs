@@ -349,7 +349,7 @@ def test_folders_empty_counts(client, hr_headers, settings_override):
 def test_folders_counts_by_status(
     client, hr_headers, owner_headers, settings_override, route_override
 ):
-    """Счетчики по статусам: согласование/доработка/завершенные (отказ+отзыв)."""
+    """Счетчики по статусам: согласование/доработка/завершенные (возврат+отзыв)."""
     # A — На согласовании.
     a = _create(client, hr_headers).json()
     assert client.post(f"/requests/{a['id']}/submit", headers=hr_headers).status_code == 200
@@ -361,7 +361,7 @@ def test_folders_counts_by_status(
         json={"decision": "return", "comment": "На доработку"},
         headers=owner_headers,
     ).status_code == 200
-    # C — Отклонено (завершенные).
+    # C — На доработке (отказ по первому шагу: возвращать некуда).
     c = _create(client, hr_headers).json()
     assert client.post(f"/requests/{c['id']}/submit", headers=hr_headers).status_code == 200
     assert client.post(
@@ -377,8 +377,10 @@ def test_folders_counts_by_status(
     folders = client.get("/folders", headers=hr_headers).json()
     by_id = {f["id"]: f for f in folders}
     assert by_id["agreement"]["count"] == 1
-    assert by_id["revision"]["count"] == 1
-    assert by_id["done"]["count"] == 2
+    # B и C — на доработке (возврат и отказ по первому шагу), A — на согласовании.
+    assert by_id["revision"]["count"] == 2
+    # Завершённые: D — отозвано (статус «Отклонено» недостижим, отказ = возврат по маршруту).
+    assert by_id["done"]["count"] == 1
     # У ОК нет шагов (группы SED_HR нет среди SED_STEP_*), поэтому mine=0.
     assert by_id["mine"]["count"] == 0
 

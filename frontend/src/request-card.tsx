@@ -47,10 +47,15 @@ export function RequestCard(props: RequestCardProps) {
   const [cardError, setCardError] = useState<string>("");
   const [printStatus, setPrintStatus] = useState<string>("");
   const [printError, setPrintError] = useState<string>("");
+  // Свежий PDF последней печати — ручная ссылка, если вкладку открыть не дали.
+  const [printPdf, setPrintPdf] = useState<{ url: string; version: string } | null>(null);
   const [docs, setDocs] = useState<DocumentMeta[]>([]);
   const [docsError, setDocsError] = useState<string>("");
   const [decisionComment, setDecisionComment] = useState<string>("");
   const [decisionError, setDecisionError] = useState<string>("");
+  // Форма решения скрыта на время запроса: после отказа закрывается сразу,
+  // не дожидаясь ответа бэкенда.
+  const [actStepHidden, setActStepHidden] = useState<boolean>(false);
   const [cardActionStatus, setCardActionStatus] = useState<string>("");
   const [cardActionError, setCardActionError] = useState<string>("");
   const [deleteBusy, setDeleteBusy] = useState<boolean>(false);
@@ -135,17 +140,37 @@ export function RequestCard(props: RequestCardProps) {
   }, [requestId]);
 
   // Печать бегунка: POST /api/requests/{id}/print. generated=false с reason —
-  // НЕ ошибка: показываем reason как статус, не как сбой.
+  // НЕ ошибка: показываем reason как статус, не как сбой. При успешной генерации
+  // открываем PDF в новой вкладке (диалог печати браузера) — каждый раз новая
+  // версия, файл создаётся на бэкенде.
   async function handlePrint(): Promise<void> {
     setPrintError("");
     setPrintStatus("");
+    setPrintPdf(null);
     try {
       const result = await printRequest(requestId);
+      const version = result.version;
       setPrintStatus(
         result.generated
-          ? `Бегунок ${result.version} сгенерирован`
+          ? `Бегунок ${version} сгенерирован`
           : (result.reason ?? "Бегунок не сгенерирован"),
       );
+      if (result.generated) {
+        const pdfUrl = `/api/documents/${encodeURIComponent(requestId)}/pdf?version=${encodeURIComponent(version)}`;
+        // noopener/noreferrer в windowFeatures не передаём: с ними open() всегда
+        // отдаёт null, и блокировку всплывающих окон не отличить. Связь с opener
+        // обрываем сразу сами (windowFeatures без noopener — иначе вкладка с PDF
+        // держит ссылку на карточку).
+        const win = window.open(pdfUrl, "_blank");
+        if (win) {
+          win.opener = null;
+          win.focus();
+        } else if (win === null) {
+          // Всплывающее окно заблокировано: даём ручную ссылку на свежую версию.
+          setPrintPdf({ url: pdfUrl, version });
+          setPrintStatus("Блокировка всплывающих окон: откройте ссылку вручную");
+        }
+      }
       getDocuments(requestId)
         .then((data) => setDocs(data))
         .catch(() => undefined);
@@ -156,7 +181,9 @@ export function RequestCard(props: RequestCardProps) {
 
   // Шаг, который может отметить ТЕКУЩИЙ пользователь: ожидает И can_act
   // (единственный источник истины от бэкенда, без эвристики по роли).
-  const actStep = card?.steps.find((s) => s.status === "ожидает" && s.can_act === true) ?? null;
+  const actStep = actStepHidden
+    ? null
+    : (card?.steps.find((s) => s.status === "ожидает" && s.can_act === true) ?? null);
 
   async function refreshRequest(): Promise<void> {
     try {
@@ -188,10 +215,14 @@ export function RequestCard(props: RequestCardProps) {
       return;
     }
     setDecisionError("");
+    // Отказ: форму закрываем сразу, не дожидаясь ответа. После запроса карточка
+    // приходит обновлённой — показываем то, что в ней есть (can_act бэкенда).
+    setActStepHidden(decision === "reject");
     const ok = await runAction(
       () => decideStep(requestId, order, decision, text || undefined),
       "Отметка сохранена",
     );
+    setActStepHidden(false);
     if (ok) setDecisionComment("");
   }
 
@@ -239,15 +270,20 @@ export function RequestCard(props: RequestCardProps) {
   }
 
   async function handleUploadFile(e: ChangeEvent<HTMLInputElement>): Promise<void> {
-    const file = e.target.files?.[0];
+    // Ссылку на input берём до await: после await target может быть недоступен.
+    const input = e.target;
+    const file = input?.files?.[0];
     if (!file) return;
     setUploadError("");
     try {
       await uploadAttachment(requestId, file);
-      e.target.value = "";
       await refreshAttachments();
     } catch (err: unknown) {
       setUploadError(err instanceof Error ? err.message : "Ошибка загрузки файла");
+    } finally {
+      // Обнуляем input всегда (успех/ошибка), иначе повторный выбор того же
+      // файла не даст onChange. Независимо от исхода исключение наружу не уходит.
+      if (input) input.value = "";
     }
   }
 
@@ -293,6 +329,11 @@ export function RequestCard(props: RequestCardProps) {
                 Печать
               </button>
               {printStatus && <span role="status">{printStatus}</span>}
+              {printPdf && (
+                <a href={printPdf.url} target="_blank" rel="noopener noreferrer">
+                  Открыть PDF {printPdf.version}
+                </a>
+              )}
               {printError && <span role="alert">{printError}</span>}
             </div>
           )}

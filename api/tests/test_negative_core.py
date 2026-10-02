@@ -496,7 +496,8 @@ def test_decision_comment_rules_422(client, hr_headers, owner_headers, neg_mocks
         headers=owner_headers,
     )
     assert ok.status_code == 200
-    assert ok.json()["status"] == "Отклонено"
+    # Отказ по первому шагу: предыдущего блока нет → заявка на доработку.
+    assert ok.json()["status"] == "На доработке"
 
 
 # --- Полнота audit_log: каждое значимое действие пишет событие ---

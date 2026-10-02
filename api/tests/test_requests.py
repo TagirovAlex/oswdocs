@@ -477,7 +477,7 @@ def test_patch_empty_blocks_422(client, hr, test_settings_override, route_overri
 
 
 def test_reject_without_comment_422(client, hr, buh_owner, test_settings_override, route_override):
-    """Отказ без комментария → 422, с комментарием → Отклонено."""
+    """Отказ без комментария → 422, с комментарием → На доработке (возврат по маршруту)."""
     created = _create(client, hr).json()
     rid = created["id"]
     assert client.post(f"/requests/{rid}/submit", headers=hr).status_code == 200
@@ -493,7 +493,8 @@ def test_reject_without_comment_422(client, hr, buh_owner, test_settings_overrid
         headers=buh_owner,
     )
     assert with_comment.status_code == 200
-    assert with_comment.json()["status"] == "Отклонено"
+    # Отказ по первому блоку: возвращать некуда → заявка на доработку.
+    assert with_comment.json()["status"] == "На доработке"
 
 
 def test_foreign_step_403(client, hr, other_owner, test_settings_override, route_override):
