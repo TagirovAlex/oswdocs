@@ -16,7 +16,7 @@ export function EmployeeWindow(props: EmployeeWindowProps) {
   }
   return (
     <div className="sed-shell">
-      <main className="sed-content" style={{ maxWidth: 940, margin: "0 auto", padding: 16 }}>
+      <main className="sed-content sed-window">
         <EmployeeCardView enterprise={parts[0]} baseCode={parts[1]} tabNum={parts[2]} role={role} />
       </main>
     </div>

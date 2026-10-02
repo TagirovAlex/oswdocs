@@ -34,13 +34,120 @@ import { createUrl, openPopup, requestUrl } from "./windows";
 const TABS = ["Заявки", "Справочник", "Настройки"] as const;
 type Tab = (typeof TABS)[number];
 
-// Глифы иконок вкладок-модулей (макет). Выводятся отдельным узлом с
-// aria-hidden: подпись вкладки остаётся текстом кнопки.
-const TAB_ICONS: Record<Tab, string> = {
-  Заявки: "📄",
-  Справочник: "📖",
-  Настройки: "⚙",
-};
+// Иконки вкладок-модулей и кнопки темы — инлайн-SVG из ico/*.svg (currentColor,
+// viewBox/штрихи как в исходниках). Подпись вкладки остаётся текстом кнопки.
+function TabIcon(props: { tab: Tab }) {
+  const { tab } = props;
+  const common = {
+    width: 24,
+    height: 24,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 1.75,
+    strokeLinecap: "round",
+    strokeLinejoin: "round",
+    "aria-hidden": true,
+  } as const;
+  if (tab === "Заявки") {
+    return (
+      <svg {...common}>
+        <rect x="5" y="4.5" width="14" height="17" rx="2" />
+        <rect x="9" y="2.5" width="6" height="4" rx="1" />
+        <path d="M9 14l2.2 2.2L15.5 12" />
+      </svg>
+    );
+  }
+  if (tab === "Справочник") {
+    return (
+      <svg {...common}>
+        <path d="M5 4.5A1.5 1.5 0 0 1 6.5 3H19v15H6.5A1.5 1.5 0 0 0 5 19.5v-15Z" />
+        <path d="M5 19.5A1.5 1.5 0 0 0 6.5 21H19v-3" />
+        <path d="M9 7.5h6M9 11h4" />
+      </svg>
+    );
+  }
+  return (
+    <svg {...common}>
+      <path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1" />
+      <circle cx="15" cy="6" r="2" />
+      <circle cx="9" cy="12" r="2" />
+      <circle cx="17" cy="18" r="2" />
+    </svg>
+  );
+}
+
+// Иконка кнопки темы — инлайн-SVG из ico/theme-moon.svg и ico/theme-sun.svg.
+function ThemeIcon(props: { theme: "light" | "dark" }) {
+  const { theme } = props;
+  const common = {
+    width: 20,
+    height: 20,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 1.75,
+    strokeLinecap: "round",
+    strokeLinejoin: "round",
+    "aria-hidden": true,
+  } as const;
+  if (theme === "light") {
+    return (
+      <svg {...common}>
+        <path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 0 0 10.5 10.5Z" />
+      </svg>
+    );
+  }
+  return (
+    <svg {...common}>
+      <circle cx="12" cy="12" r="4" />
+      <path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4" />
+    </svg>
+  );
+}
+
+// Иконка кнопки «Создать заявку» — инлайн-SVG: плюс в рамке документа
+// (мотив заявки из ico/requests.svg, без текстового глифа).
+function CreateIcon() {
+  return (
+    <svg
+      width={20}
+      height={20}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.75}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <rect x="5" y="4.5" width="14" height="17" rx="2" />
+      <rect x="9" y="2.5" width="6" height="4" rx="1" />
+      <path d="M12 11v6M9 14h6" />
+    </svg>
+  );
+}
+
+// Иконка кнопки «Обновить список» — инлайн-SVG (стрелка обновления,
+// текстовый глиф заменён графикой под макет .ibtn).
+function RefreshIcon() {
+  return (
+    <svg
+      width={20}
+      height={20}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.75}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M20 12a8 8 0 1 1-2.3-5.6" />
+      <path d="M20 3v4h-4" />
+    </svg>
+  );
+}
 
 // Заголовки сортируемых колонок: подпись → ключ сортировки (§3.8 хендоффа).
 const SORTABLE_COLUMNS: { label: string; key: RequestSortKey }[] = [
@@ -198,9 +305,24 @@ export function SedLayout(props: SedLayoutProps) {
 
   return (
     <div className="sed-shell">
-      {/* Шапка: только выход (роль и тема переехали: роль убрана, тема — к вкладкам). */}
+      {/* Шапка по макету (.top): логотип, кнопка темы и «Выйти» справа. */}
       <header className="sed-header">
+        <span className="sed-logo">
+          <img
+            src={theme === "dark" ? "/logo-oswdocs-dark.svg" : "/logo-oswdocs.svg"}
+            alt="СЭД — Увольнение"
+          />
+        </span>
         <span className="sed-header__spacer" />
+        <button
+          type="button"
+          className="sed-btn sed-btn--neutral sed-themebtn"
+          onClick={() => setTheme(theme === "light" ? "dark" : "light")}
+          title="Светлая/тёмная тема"
+          aria-label="Переключить тему"
+        >
+          <ThemeIcon theme={theme} />
+        </button>
         <button
           type="button"
           className="sed-btn sed-btn--neutral"
@@ -211,7 +333,7 @@ export function SedLayout(props: SedLayoutProps) {
         </button>
       </header>
 
-      {/* Вкладки слева, переключение темы в их стиле, логотип справа. */}
+      {/* Вкладки-модули синей полосой (как .mods макета), только модули. */}
       <nav className="sed-tabs" aria-label="Вкладки">
         {visibleTabs.map((name) => (
           <button
@@ -221,25 +343,11 @@ export function SedLayout(props: SedLayoutProps) {
             onClick={() => setTab(name)}
           >
             <span className="sed-tab__icon" aria-hidden="true">
-              {TAB_ICONS[name]}
+              <TabIcon tab={name} />
             </span>
             {name}
           </button>
         ))}
-        <button
-          type="button"
-          className="sed-tab"
-          onClick={() => setTheme(theme === "light" ? "dark" : "light")}
-          title="Светлая/тёмная тема"
-        >
-          {theme === "light" ? "🌙" : "☀️"}
-        </button>
-        <span className="sed-logo">
-          <img
-            src={theme === "dark" ? "/logo-oswdocs-dark.svg" : "/logo-oswdocs.svg"}
-            alt="СЭД — Увольнение"
-          />
-        </span>
       </nav>
 
       <div className={tab === "Заявки" ? "sed-body" : "sed-body sed-body--wide"}>
@@ -325,7 +433,7 @@ export function SedLayout(props: SedLayoutProps) {
               title="Создать заявку"
               aria-label="Создать заявку"
             >
-              ＋
+              <CreateIcon />
             </button>
             <button
               type="button"
@@ -334,7 +442,7 @@ export function SedLayout(props: SedLayoutProps) {
               title="Обновить список"
               aria-label="Обновить список"
             >
-              ⟳
+              <RefreshIcon />
             </button>
           </div>
 

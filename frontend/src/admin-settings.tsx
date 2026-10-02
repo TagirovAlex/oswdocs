@@ -87,7 +87,7 @@ function EnterprisesEditor(props: { value: SettingsEnterprise[]; onChange: (v: S
       <legend>Предприятия</legend>
       {value.length === 0 && <div className="sed-note">не задано</div>}
       {value.map((ent, i) => (
-        <div key={i} style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+        <div key={i} className="sed-editor-row">
           <label>
             Код
             <input
@@ -113,7 +113,7 @@ function EnterprisesEditor(props: { value: SettingsEnterprise[]; onChange: (v: S
           </button>
         </div>
       ))}
-      <div className="sed-toolbar" style={{ marginTop: 12 }}>
+      <div className="sed-toolbar sed-mt-12">
         <button type="button" className="sed-btn" onClick={() => onChange([...value, { code: "", name: "" }])}>
           Добавить предприятие
         </button>
@@ -130,7 +130,7 @@ function GroupsEditor(props: { value: string[]; onChange: (v: string[]) => void 
       <legend>Группы доступа (владельцы шагов)</legend>
       {value.length === 0 && <div className="sed-note">не задано</div>}
       {value.map((group, i) => (
-        <div key={i} style={{ display: "flex", gap: 8, marginTop: 8, alignItems: "center" }}>
+        <div key={i} className="sed-editor-row sed-editor-row--center">
           <input
             aria-label={`Группа доступа ${i + 1}`}
             value={group}
@@ -145,7 +145,7 @@ function GroupsEditor(props: { value: string[]; onChange: (v: string[]) => void 
           </button>
         </div>
       ))}
-      <div className="sed-toolbar" style={{ marginTop: 12 }}>
+      <div className="sed-toolbar sed-mt-12">
         <button type="button" className="sed-btn" onClick={() => onChange([...value, ""])}>
           Добавить группу
         </button>
@@ -257,7 +257,7 @@ function PositionCategoryEditor(props: { value: PositionCategoryPair[]; onChange
       <legend>Должность → категория</legend>
       {value.length === 0 && <div className="sed-note">не задано</div>}
       {value.map((pair, i) => (
-        <div key={i} style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+        <div key={i} className="sed-editor-row">
           <label>
             Должность
             <input
@@ -283,7 +283,7 @@ function PositionCategoryEditor(props: { value: PositionCategoryPair[]; onChange
           </button>
         </div>
       ))}
-      <div className="sed-toolbar" style={{ marginTop: 12 }}>
+      <div className="sed-toolbar sed-mt-12">
         <button
           type="button"
           className="sed-btn"
@@ -326,7 +326,7 @@ function TemplatesEditor(props: { value: SettingsTemplate[]; onChange: (v: Setti
       <legend>Шаблоны маршрутов</legend>
       {value.length === 0 && <div className="sed-note">не задано</div>}
       {value.map((template, i) => (
-        <div key={i} style={{ border: "1px solid var(--sed-border)", marginTop: 8, padding: 8 }}>
+        <div key={i} className="sed-editor-card">
           <label className="sed-field">
             Служба
             <input
@@ -343,10 +343,10 @@ function TemplatesEditor(props: { value: SettingsTemplate[]; onChange: (v: Setti
               onChange={(e) => updateTemplate(i, { category: e.target.value })}
             />
           </label>
-          <div style={{ marginTop: 8 }}>
+          <div className="sed-mt-8">
             {template.steps.length === 0 && <div className="sed-note">шагов нет</div>}
             {template.steps.map((step, j) => (
-              <div key={j} style={{ display: "flex", gap: 8, marginTop: 8, alignItems: "center" }}>
+              <div key={j} className="sed-editor-row sed-editor-row--center">
                 <input
                   aria-label={`Владелец шага ${i + 1}.${j + 1}`}
                   value={step.owner_group}
@@ -358,12 +358,12 @@ function TemplatesEditor(props: { value: SettingsTemplate[]; onChange: (v: Setti
               </div>
             ))}
           </div>
-          <div className="sed-toolbar" style={{ marginTop: 8 }}>
+          <div className="sed-toolbar sed-mt-8">
             <button type="button" className="sed-btn" onClick={() => addStep(i)}>
               Добавить шаг
             </button>
           </div>
-          <div className="sed-toolbar" style={{ marginTop: 8 }}>
+          <div className="sed-toolbar sed-mt-8">
             <button
               type="button"
               className="sed-btn sed-btn--ghost"
@@ -374,7 +374,7 @@ function TemplatesEditor(props: { value: SettingsTemplate[]; onChange: (v: Setti
           </div>
         </div>
       ))}
-      <div className="sed-toolbar" style={{ marginTop: 12 }}>
+      <div className="sed-toolbar sed-mt-12">
         <button
           type="button"
           className="sed-btn"
@@ -398,7 +398,7 @@ function DocTemplatesEditor(props: { value: SettingsDocTemplate[]; onChange: (v:
       <legend>Бланки бегунков (doc_templates)</legend>
       {value.length === 0 && <div className="sed-note">не задано</div>}
       {value.map((doc, i) => (
-        <div key={i} style={{ border: "1px solid var(--sed-border)", marginTop: 8, padding: 8 }}>
+        <div key={i} className="sed-editor-card">
           <label className="sed-field">
             Служба
             <input
@@ -424,7 +424,7 @@ function DocTemplatesEditor(props: { value: SettingsDocTemplate[]; onChange: (v:
               onChange={(e) => update(i, { body: e.target.value })}
             />
           </label>
-          <div className="sed-toolbar" style={{ marginTop: 8 }}>
+          <div className="sed-toolbar sed-mt-8">
             <button
               type="button"
               className="sed-btn sed-btn--ghost"
@@ -435,7 +435,7 @@ function DocTemplatesEditor(props: { value: SettingsDocTemplate[]; onChange: (v:
           </div>
         </div>
       ))}
-      <div className="sed-toolbar" style={{ marginTop: 12 }}>
+      <div className="sed-toolbar sed-mt-12">
         <button
           type="button"
           className="sed-btn"
@@ -459,7 +459,7 @@ function MailTemplatesEditor(props: { value: SettingsMailTemplate[]; onChange: (
       <legend>Письма (mail_templates)</legend>
       {value.length === 0 && <div className="sed-note">не задано</div>}
       {value.map((mail, i) => (
-        <div key={i} style={{ border: "1px solid var(--sed-border)", marginTop: 8, padding: 8 }}>
+        <div key={i} className="sed-editor-card">
           <label className="sed-field">
             Код события (code)
             <input
@@ -485,7 +485,7 @@ function MailTemplatesEditor(props: { value: SettingsMailTemplate[]; onChange: (
               onChange={(e) => update(i, { body_html: e.target.value })}
             />
           </label>
-          <div className="sed-toolbar" style={{ marginTop: 8 }}>
+          <div className="sed-toolbar sed-mt-8">
             <button
               type="button"
               className="sed-btn sed-btn--ghost"
@@ -496,7 +496,7 @@ function MailTemplatesEditor(props: { value: SettingsMailTemplate[]; onChange: (
           </div>
         </div>
       ))}
-      <div className="sed-toolbar" style={{ marginTop: 12 }}>
+      <div className="sed-toolbar sed-mt-12">
         <button
           type="button"
           className="sed-btn"
@@ -525,7 +525,7 @@ function ScheduleReglamentEditor(props: {
     onChange({ ...(value ?? {}), ...patch });
   };
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
+    <div className="sed-stack-8">
       <label className="sed-field">
         Режим
         <select
@@ -571,7 +571,7 @@ function ScheduleReglamentEditor(props: {
       )}
       {mode !== "" && (
         <>
-          <label style={{ display: "block", marginTop: 8 }}>
+          <label className="sed-field sed-mt-8">
             <input
               type="checkbox"
               aria-label={`Отправлять уведомление ${title}`}
@@ -732,10 +732,10 @@ function DocTypesEditor() {
             />
             Активен
           </label>
-          <div className="sed-toolbar" style={{ marginTop: 8 }}>
-            <button type="button" className="sed-btn" onClick={() => handleUpdate(item)} disabled={busy}>
-              Применить
-            </button>
+            <div className="sed-toolbar sed-mt-8">
+              <button type="button" className="sed-btn" onClick={() => handleUpdate(item)} disabled={busy}>
+                Применить
+              </button>
             <button
               type="button"
               className="sed-btn sed-btn--ghost"
@@ -756,7 +756,7 @@ function DocTypesEditor() {
           Название нового вида
           <input aria-label="Название нового вида" value={newName} onChange={(e) => setNewName(e.target.value)} />
         </label>
-        <div className="sed-toolbar" style={{ marginTop: 8 }}>
+        <div className="sed-toolbar sed-mt-8">
           <button type="button" className="sed-btn" onClick={handleCreate} disabled={busy}>
             Добавить вид
           </button>
@@ -897,7 +897,7 @@ function ArchiveTab() {
             value={settings.schedule}
             onChange={(schedule) => setSettings({ ...settings, schedule })}
           />
-          <div className="sed-toolbar" style={{ marginTop: 12 }}>
+          <div className="sed-toolbar sed-mt-12">
             <button type="button" className="sed-btn" onClick={handleSave} disabled={busy}>
               {busy ? "Сохранение…" : "Сохранить"}
             </button>
@@ -917,7 +917,7 @@ function ArchiveTab() {
         </>
       )}
       {/* Список сохранённых бэкапов: имя/размер/дата. */}
-      <div className="sed-note" style={{ marginTop: 12 }}>
+      <div className="sed-note sed-mt-12">
         Сохранённые бэкапы:
       </div>
       {backups.length === 0 && !loadError && <div className="sed-note">Бэкапов нет</div>}
@@ -938,7 +938,7 @@ function ArchiveTab() {
                 <td>{formatBackupSize(file.size)}</td>
                 <td>{file.created_at.slice(0, 10)}</td>
                 <td>
-                  <div className="sed-toolbar" style={{ marginTop: 0 }}>
+                  <div className="sed-toolbar sed-mt-0">
                     <button
                       type="button"
                       className="sed-btn sed-btn--ghost"
@@ -1188,7 +1188,7 @@ export function AdminSettings(props: AdminSettingsProps) {
       {activeTab === "Процесс" && (
         <fieldset>
           <legend>Процесс</legend>
-          <label style={{ display: "block", marginTop: 8 }}>
+          <label className="sed-field sed-mt-8">
             TTL отметок, дней (approval_ttl_days)
             <input
               aria-label="TTL отметок"
@@ -1197,7 +1197,7 @@ export function AdminSettings(props: AdminSettingsProps) {
               onChange={(e) => setTtl(Number(e.target.value))}
             />
           </label>
-          <label style={{ display: "block", marginTop: 8 }}>
+          <label className="sed-field sed-mt-8">
             <input
               type="checkbox"
               aria-label="Требовать бумажное заявление"
@@ -1206,7 +1206,7 @@ export function AdminSettings(props: AdminSettingsProps) {
             />
             Требовать бумажное заявление (require_paper_signature)
           </label>
-          <label style={{ display: "block", marginTop: 8 }}>
+          <label className="sed-field sed-mt-8">
             <input
               type="checkbox"
               aria-label="Комментарий обязателен при согласовании"
@@ -1239,7 +1239,7 @@ export function AdminSettings(props: AdminSettingsProps) {
       {activeTab === "Инфра" && isAdmin && (
         <fieldset>
           <legend>Инфра (сессия, сканы, SMTP)</legend>
-          <label style={{ display: "block", marginTop: 8 }}>
+          <label className="sed-field sed-mt-8">
             Длительность сессии, минут (session_ttl_minutes; 600 = 10 часов)
             <input
               aria-label="Длительность сессии"
@@ -1248,7 +1248,7 @@ export function AdminSettings(props: AdminSettingsProps) {
               onChange={(e) => setSessionTtl(Number(e.target.value))}
             />
           </label>
-          <label style={{ display: "block", marginTop: 8 }}>
+          <label className="sed-field sed-mt-8">
             Хранение сканов, дней (scan_retention_days)
             <input
               aria-label="Хранение сканов"
@@ -1257,7 +1257,7 @@ export function AdminSettings(props: AdminSettingsProps) {
               onChange={(e) => setRetentionDays(Number(e.target.value))}
             />
           </label>
-          <label style={{ display: "block", marginTop: 8 }}>
+          <label className="sed-field sed-mt-8">
             Лимит скана, МБ (scan_max_mb)
             <input
               aria-label="Лимит скана"
@@ -1266,7 +1266,7 @@ export function AdminSettings(props: AdminSettingsProps) {
               onChange={(e) => setMaxMb(Number(e.target.value))}
             />
           </label>
-          <label style={{ display: "block", marginTop: 8 }}>
+          <label className="sed-field sed-mt-8">
             Хост SMTP-релея (smtp_host)
             <input
               aria-label="Хост SMTP-релея"
@@ -1275,7 +1275,7 @@ export function AdminSettings(props: AdminSettingsProps) {
               onChange={(e) => setSmtpHost(e.target.value)}
             />
           </label>
-          <label style={{ display: "block", marginTop: 8 }}>
+          <label className="sed-field sed-mt-8">
             Порт SMTP-релея (smtp_port)
             <input
               aria-label="Порт SMTP-релея"
@@ -1284,7 +1284,7 @@ export function AdminSettings(props: AdminSettingsProps) {
               onChange={(e) => setSmtpPort(Number(e.target.value))}
             />
           </label>
-          <label style={{ display: "block", marginTop: 8 }}>
+          <label className="sed-field sed-mt-8">
             Отправитель уведомлений, e-mail (smtp_from)
             <input
               aria-label="Отправитель уведомлений"
@@ -1293,7 +1293,7 @@ export function AdminSettings(props: AdminSettingsProps) {
               onChange={(e) => setSmtpFrom(e.target.value)}
             />
           </label>
-          <label style={{ display: "block", marginTop: 8 }}>
+          <label className="sed-field sed-mt-8">
             Логин SMTP-релея (smtp_user; пусто — отправка без авторизации)
             <input
               aria-label="Логин SMTP-релея"
@@ -1302,7 +1302,7 @@ export function AdminSettings(props: AdminSettingsProps) {
               onChange={(e) => setSmtpUser(e.target.value)}
             />
           </label>
-          <label style={{ display: "block", marginTop: 8 }}>
+          <label className="sed-field sed-mt-8">
             Пароль SMTP-релея (smtp_password; оставьте пустым, чтобы сохранить текущий)
             <input
               aria-label="Пароль SMTP-релея"
@@ -1326,8 +1326,8 @@ export function AdminSettings(props: AdminSettingsProps) {
           </div>
           {onecBases.length === 0 && <div className="sed-note">не задано</div>}
           {onecBases.map((base, i) => (
-            <div key={i} style={{ border: "1px solid var(--sed-border)", marginTop: 8, padding: 8 }}>
-              <label style={{ display: "block" }}>
+            <div key={i} className="sed-editor-card">
+              <label className="sed-field">
                 Код базы 1С (base_code)
                 <input
                   aria-label={`Код базы 1С ${i + 1}`}
@@ -1338,7 +1338,7 @@ export function AdminSettings(props: AdminSettingsProps) {
                   }
                 />
               </label>
-              <label style={{ display: "block", marginTop: 8 }}>
+              <label className="sed-field sed-mt-8">
                 Название базы
                 <input
                   aria-label={`Название базы 1С ${i + 1}`}
@@ -1349,7 +1349,7 @@ export function AdminSettings(props: AdminSettingsProps) {
                   }
                 />
               </label>
-              <label style={{ display: "block", marginTop: 8 }}>
+              <label className="sed-field sed-mt-8">
                 OData-URL публикации базы (до /odata/standard.odata/)
                 <input
                   aria-label={`OData URL базы 1С ${i + 1}`}
@@ -1361,7 +1361,7 @@ export function AdminSettings(props: AdminSettingsProps) {
                   }
                 />
               </label>
-              <label style={{ display: "block", marginTop: 8 }}>
+              <label className="sed-field sed-mt-8">
                 Сервисная УЗ чтения (user, роль OData)
                 <input
                   aria-label={`УЗ базы 1С ${i + 1}`}
@@ -1372,7 +1372,7 @@ export function AdminSettings(props: AdminSettingsProps) {
                   }
                 />
               </label>
-              <label style={{ display: "block", marginTop: 8 }}>
+              <label className="sed-field sed-mt-8">
                 Пароль УЗ (оставьте пустым, чтобы сохранить текущий)
                 <input
                   aria-label={`Пароль базы 1С ${i + 1}`}
@@ -1386,7 +1386,7 @@ export function AdminSettings(props: AdminSettingsProps) {
               </label>
               <details>
                 <summary>Схема OData (ЗУП 3.х; имена уточняет ИТ по факту)</summary>
-                <label style={{ display: "block", marginTop: 8 }}>
+                <label className="sed-field sed-mt-8">
                   Сущность сотрудников (справочник)
                   <input
                     aria-label={`Сущность сотрудников базы 1С ${i + 1}`}
@@ -1397,7 +1397,7 @@ export function AdminSettings(props: AdminSettingsProps) {
                     }
                   />
                 </label>
-                <label style={{ display: "block", marginTop: 8 }}>
+                <label className="sed-field sed-mt-8">
                   Поле предприятия (код = Ref_Key организации)
                   <input
                     aria-label={`Поле предприятия базы 1С ${i + 1}`}
@@ -1408,7 +1408,7 @@ export function AdminSettings(props: AdminSettingsProps) {
                     }
                   />
                 </label>
-                <label style={{ display: "block", marginTop: 8 }}>
+                <label className="sed-field sed-mt-8">
                   Сущность организаций (предприятий)
                   <input
                     aria-label={`Сущность организаций базы 1С ${i + 1}`}
@@ -1419,7 +1419,7 @@ export function AdminSettings(props: AdminSettingsProps) {
                     }
                   />
                 </label>
-                <label style={{ display: "block", marginTop: 8 }}>
+                <label className="sed-field sed-mt-8">
                   Поле таб.№
                   <input
                     aria-label={`Поле таб.№ базы 1С ${i + 1}`}
@@ -1430,7 +1430,7 @@ export function AdminSettings(props: AdminSettingsProps) {
                     }
                   />
                 </label>
-                <label style={{ display: "block", marginTop: 8 }}>
+                <label className="sed-field sed-mt-8">
                   Поле ФИО
                   <input
                     aria-label={`Поле ФИО базы 1С ${i + 1}`}
@@ -1441,7 +1441,7 @@ export function AdminSettings(props: AdminSettingsProps) {
                     }
                   />
                 </label>
-                <label style={{ display: "block", marginTop: 8 }}>
+                <label className="sed-field sed-mt-8">
                   Поле подразделения (регистр кадровых данных, $expand)
                   <input
                     aria-label={`Поле подразделения базы 1С ${i + 1}`}
@@ -1452,7 +1452,7 @@ export function AdminSettings(props: AdminSettingsProps) {
                     }
                   />
                 </label>
-                <label style={{ display: "block", marginTop: 8 }}>
+                <label className="sed-field sed-mt-8">
                   Поле должности (регистр кадровых данных, $expand)
                   <input
                     aria-label={`Поле должности базы 1С ${i + 1}`}
@@ -1463,7 +1463,7 @@ export function AdminSettings(props: AdminSettingsProps) {
                     }
                   />
                 </label>
-                <label style={{ display: "block", marginTop: 8 }}>
+                <label className="sed-field sed-mt-8">
                   Поле даты приёма (регистр кадровых данных)
                   <input
                     aria-label={`Поле даты приёма базы 1С ${i + 1}`}
@@ -1474,7 +1474,7 @@ export function AdminSettings(props: AdminSettingsProps) {
                     }
                   />
                 </label>
-                <label style={{ display: "block", marginTop: 8 }}>
+                <label className="sed-field sed-mt-8">
                   Поле даты увольнения (регистр кадровых данных)
                   <input
                     aria-label={`Поле даты увольнения базы 1С ${i + 1}`}
@@ -1485,7 +1485,7 @@ export function AdminSettings(props: AdminSettingsProps) {
                     }
                   />
                 </label>
-                <label style={{ display: "block", marginTop: 8 }}>
+                <label className="sed-field sed-mt-8">
                   Регистр кадровых данных (второй запрос карточки)
                   <input
                     aria-label={`Регистр кадровых данных базы 1С ${i + 1}`}
@@ -1496,7 +1496,7 @@ export function AdminSettings(props: AdminSettingsProps) {
                     }
                   />
                 </label>
-                <label style={{ display: "block", marginTop: 8 }}>
+                <label className="sed-field sed-mt-8">
                   Поле сотрудника в регистре (Ref_Key)
                   <input
                     aria-label={`Поле сотрудника в регистре базы 1С ${i + 1}`}
@@ -1507,7 +1507,7 @@ export function AdminSettings(props: AdminSettingsProps) {
                     }
                   />
                 </label>
-                <label style={{ display: "block", marginTop: 8 }}>
+                <label className="sed-field sed-mt-8">
                   Поле кода организации (у ЗУП кода нет — Ref_Key/ИНН)
                   <input
                     aria-label={`Поле кода организации базы 1С ${i + 1}`}
@@ -1518,7 +1518,7 @@ export function AdminSettings(props: AdminSettingsProps) {
                     }
                   />
                 </label>
-                <label style={{ display: "block", marginTop: 8 }}>
+                <label className="sed-field sed-mt-8">
                   Поле названия организации
                   <input
                     aria-label={`Поле названия организации базы 1С ${i + 1}`}
@@ -1530,7 +1530,7 @@ export function AdminSettings(props: AdminSettingsProps) {
                   />
                 </label>
               </details>
-              <div className="sed-toolbar" style={{ marginTop: 8 }}>
+              <div className="sed-toolbar sed-mt-8">
                 <button
                   type="button"
                   className="sed-btn sed-btn--ghost"
@@ -1544,7 +1544,7 @@ export function AdminSettings(props: AdminSettingsProps) {
               </div>
             </div>
           ))}
-          <div className="sed-toolbar" style={{ marginTop: 12 }}>
+          <div className="sed-toolbar sed-mt-12">
             <button
               type="button"
               className="sed-btn"
@@ -1578,7 +1578,7 @@ export function AdminSettings(props: AdminSettingsProps) {
               Добавить базу 1С
             </button>
           </div>
-          <div className="sed-toolbar" style={{ marginTop: 12 }}>
+          <div className="sed-toolbar sed-mt-12">
             <button type="button" className="sed-btn" onClick={handleSyncEnterprises}>
               Обновить из 1С
             </button>
@@ -1631,7 +1631,7 @@ export function AdminSettings(props: AdminSettingsProps) {
       {/* Общий «Сохранить» — не для вкладки «Архивация»: у неё свой эндпоинт
           и своя кнопка сохранения (PUT /api/archive). */}
       {activeTab !== "Архивация" && (
-        <div className="sed-toolbar" style={{ marginTop: 12 }}>
+        <div className="sed-toolbar sed-mt-12">
           <button type="button" className="sed-btn" onClick={handleSave} disabled={busy}>
             {busy ? "Сохранение…" : "Сохранить"}
           </button>

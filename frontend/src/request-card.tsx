@@ -458,9 +458,9 @@ export function RequestCard(props: RequestCardProps) {
       {!card && !cardError && !deleted && <div className="sed-note">Загрузка карточки…</div>}
       {/* Заявка удалена в этой же вкладке: закрыть окно нельзя — возврат к списку. */}
       {deleted && (
-        <div>
-          <div role="status">Заявка удалена</div>
-          <div className="sed-toolbar" style={{ marginTop: 8 }}>
+          <div>
+            <div role="status">Заявка удалена</div>
+            <div className="sed-toolbar sed-mt-8">
             <a className="sed-btn" href="?">
               К списку заявок
             </a>
@@ -488,7 +488,7 @@ export function RequestCard(props: RequestCardProps) {
 
           {/* Печать бегунка (ОК/админ) — в карточке, не в списке. */}
           {role !== "owner" && (
-            <div className="sed-toolbar" style={{ marginTop: 8 }}>
+            <div className="sed-toolbar sed-mt-8">
               <button type="button" className="sed-btn" onClick={handlePrint}>
                 Печать
               </button>
@@ -542,7 +542,7 @@ export function RequestCard(props: RequestCardProps) {
                 onChange={(e) => setDecisionComment(e.target.value)}
               />
               {decisionError && <div role="alert">{decisionError}</div>}
-              <div className="sed-toolbar" style={{ marginTop: 8 }}>
+              <div className="sed-toolbar sed-mt-8">
                 <button
                   type="button"
                   className="sed-btn"
@@ -640,7 +640,7 @@ export function RequestCard(props: RequestCardProps) {
                   ))}
                 </select>
               </label>
-              <div className="sed-toolbar" style={{ marginTop: 8 }}>
+              <div className="sed-toolbar sed-mt-8">
                 <button type="button" className="sed-btn" onClick={handleSedSave}>
                   Сохранить
                 </button>
@@ -660,7 +660,7 @@ export function RequestCard(props: RequestCardProps) {
                   ))}
                 </select>
               </label>
-              <div className="sed-toolbar" style={{ marginTop: 8 }}>
+              <div className="sed-toolbar sed-mt-8">
                 <button
                   type="button"
                   className="sed-btn"

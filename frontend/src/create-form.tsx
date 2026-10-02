@@ -79,6 +79,42 @@ function omitKey<T>(state: Record<string, T>, key: string): Record<string, T> {
   return next;
 }
 
+// Маленькие графические иконки формы (крест очистки/удаления, плюс
+// добавления): инлайн-SVG вместо текстовых глифов, под стиль .ibtn макета.
+function CrossIcon() {
+  return (
+    <svg
+      width={14}
+      height={14}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      aria-hidden="true"
+    >
+      <path d="M6 6l12 12M18 6L6 18" />
+    </svg>
+  );
+}
+
+function PlusIcon() {
+  return (
+    <svg
+      width={14}
+      height={14}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      aria-hidden="true"
+    >
+      <path d="M12 5v14M5 12h14" />
+    </svg>
+  );
+}
+
 // Форма создания: единый экран, блоки по зависимостям.
 export function CreateForm(props: CreateFormProps) {
   const { role, onDirtyChange, closeOnCreate } = props;
@@ -684,12 +720,12 @@ export function CreateForm(props: CreateFormProps) {
                   {empPicked && (
                     <button
                       type="button"
-                      className="sed-ibtn"
+                      className="sed-roundbtn"
                       aria-label="Очистить выбор сотрудника"
                       title="Очистить выбор"
                       onClick={clearEmployeePick}
                     >
-                      ✕
+                      <CrossIcon />
                     </button>
                   )}
                 </div>
@@ -868,7 +904,9 @@ export function CreateForm(props: CreateFormProps) {
                 <thead>
                   <tr>
                     <th scope="col">
-                      <span aria-hidden="true">✕</span>
+                      <span className="sed-th-icon" aria-hidden="true">
+                        <CrossIcon />
+                      </span>
                     </th>
                     <th scope="col">Вид рассмотрения</th>
                     <th scope="col">Должность</th>
@@ -884,11 +922,12 @@ export function CreateForm(props: CreateFormProps) {
                     <td>
                       <button
                         type="button"
-                        className="sed-btn"
+                        className="sed-btn sed-btn--ghost sed-delbtn"
                         aria-label="Удалить блок"
                         onClick={() => removeBlock(block.id)}
                       >
-                        ✕
+                        <CrossIcon />
+                        Удалить
                       </button>
                       <div className="sed-note">Блок {bi + 1}</div>
                     </td>
@@ -980,9 +1019,9 @@ export function CreateForm(props: CreateFormProps) {
                               aria-label={`Удалить исполнителя ${s.display_name}`}
                               title="Удалить исполнителя"
                               onClick={() => removeStep(block.id, si)}
-                              className="sed-btn sed-btn--ghost sed-ml-8"
+                              className="sed-roundbtn sed-ml-8"
                             >
-                              ✕
+                              <CrossIcon />
                             </button>
                           </li>
                         ))}
@@ -991,12 +1030,13 @@ export function CreateForm(props: CreateFormProps) {
                         <>
                           <button
                             type="button"
-                            className="sed-btn"
+                            className="sed-btn sed-delbtn"
                             aria-label="Добавить исполнителя"
                             title="Добавить исполнителя"
                             onClick={() => openAdPanel(block.id)}
                           >
-                            ＋
+                            <PlusIcon />
+                            Добавить
                           </button>
                           {adPanelBlock === block.id && (
                             <div className="sed-mt-8 sed-rel">

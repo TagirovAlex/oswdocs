@@ -113,14 +113,16 @@ a {
   font-size: 12px;
 }
 
-/* Навигация-модули: светлая тема — синий градиент, тёмная — плоская панель. */
+/* Навигация-модули: светлая тема — синий градиент, тёмная — плоская панель.
+   Полоса не на всю ширину: боковые отступы и скругление, как у контента. */
 .sed-tabs {
   display: flex;
   gap: 4px;
   background: var(--sed-head-grad);
   background-color: var(--sed-primary);
-  border-bottom: 1px solid var(--sed-border);
+  border-radius: var(--sed-radius);
   padding: 6px 10px;
+  margin: 0 12px 10px;
   overflow-x: auto;
 }
 
@@ -146,7 +148,33 @@ a {
 /* Иконка-модуль отдельной строкой над подписью (подпись остаётся текстом кнопки). */
 .sed-tab__icon {
   display: block;
-  font-size: 14px;
+}
+
+.sed-tab__icon svg {
+  width: 24px;
+  height: 24px;
+  vertical-align: middle;
+}
+
+/* Логотип шапки: изображение в высоту строки (как текст .logo макета). */
+.sed-logo img {
+  display: block;
+  height: 32px;
+  width: auto;
+}
+
+/* Кнопка темы в шапке: нейтральная, с иконкой по центру. */
+.sed-themebtn {
+  display: inline-grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+}
+
+.sed-themebtn svg {
+  width: 20px;
+  height: 20px;
 }
 
 .sed-tab--active {
@@ -289,11 +317,55 @@ a {
   width: 32px;
   height: 32px;
   padding: 0;
+  display: inline-grid;
+  place-items: center;
   border: 1px solid var(--sed-border);
   border-radius: 4px;
   background: var(--sed-primary);
   color: var(--sed-primary-contrast);
   cursor: pointer;
+}
+
+.sed-ibtn svg {
+  width: 20px;
+  height: 20px;
+}
+
+/* Круглая иконочная кнопка (очистка выбора, действия): нейтральная, по центру. */
+.sed-roundbtn {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  flex: 0 0 auto;
+  border: 1px solid var(--sed-border);
+  border-radius: 50%;
+  background: var(--sed-panel);
+  color: var(--sed-text);
+  cursor: pointer;
+}
+
+.sed-roundbtn:hover {
+  border-color: var(--sed-primary);
+  color: var(--sed-primary);
+}
+
+.sed-roundbtn svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* Кнопка удаления блока маршрута: текстовая, с иконкой креста слева. */
+.sed-delbtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sed-delbtn svg {
+  width: 14px;
+  height: 14px;
 }
 
 .sed-ibtn:hover {
@@ -373,9 +445,43 @@ a {
   background: var(--sed-panel);
 }
 
-/* Кликабельная таблица (список заявок): курсор на строке. */
+/* Окно-попа (создание/карточка): контентная область по центру, шириной до 940. */
+.sed-window {
+  max-width: 940px;
+  margin: 0 auto;
+  padding: 16px;
+}
+
+/* Кликабельная строка справочника (переход в карточку — клик по строке). */
 .sed-table--clickable tbody tr {
   cursor: pointer;
+}
+
+/* Карточка редактора настроек (шаблон/бланк/письмо/база 1С): рамка и отступы. */
+.sed-editor-card {
+  border: 1px solid var(--sed-border);
+  margin-top: 8px;
+  padding: 8px;
+}
+
+/* Строка редактора (Код+Название, группа, соответствие): поля в линию с переносом. */
+.sed-editor-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+
+.sed-editor-row--center {
+  align-items: center;
+}
+
+/* Колонка редактора расписания регламента: поля по вертикали. */
+.sed-stack-8 {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
 }
 
 /* Кнопка сортировки в заголовке: без рамки и заливки, наследует шрифт th. */
@@ -386,6 +492,17 @@ a {
   font: inherit;
   padding: 0;
   cursor: pointer;
+}
+
+/* Иконка в заголовке таблицы (крест удаления блока): по центру ячейки. */
+.sed-th-icon {
+  display: inline-grid;
+  place-items: center;
+}
+
+.sed-th-icon svg {
+  width: 14px;
+  height: 14px;
 }
 
 /* Рег.номер заявки — подпись акцентом, как ссылка макета (переход — клик по строке). */
@@ -535,6 +652,7 @@ fieldset textarea {
    и мелкая типографика — только токены темы, без инлайн-стилей. */
 
 /* Отступ сверху: перекрывают margin-top базовых классов (объявлены после них). */
+.sed-mt-0 { margin-top: 0; }
 .sed-mt-4 { margin-top: 4px; }
 .sed-mt-6 { margin-top: 6px; }
 .sed-mt-8 { margin-top: 8px; }

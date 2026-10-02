@@ -12,12 +12,12 @@ export function RequestWindow(props: RequestWindowProps) {
   const { requestId, role } = props;
   return (
     <div className="sed-shell">
-      <main className="sed-content" style={{ maxWidth: 940, margin: "0 auto", padding: 16 }}>
+      <main className="sed-content sed-window">
         <RequestCard requestId={requestId} role={role} />
         {/* Кнопка «Закрыть» — внизу содержимого (как в карточке сотрудника),
             не в верхней липкой полосе. Несохранённых правок в карточке нет:
             отметки отправляются сразу. */}
-        <div className="sed-toolbar" style={{ marginTop: 12 }}>
+        <div className="sed-toolbar sed-mt-12">
           <button type="button" className="sed-btn" onClick={() => window.close()}>
             Закрыть
           </button>

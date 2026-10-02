@@ -26,11 +26,11 @@ export function CreateWindow(props: CreateWindowProps) {
 
   return (
     <div className="sed-shell">
-      <main className="sed-content" style={{ maxWidth: 940, margin: "0 auto", padding: 16 }}>
+      <main className="sed-content sed-window">
         <CreateForm role={role} onDirtyChange={setDirty} closeOnCreate />
         {/* Кнопка «Закрыть» — внизу содержимого (как в карточке сотрудника),
             не в верхней липкой полосе; при несохранённых данных — с подтверждением. */}
-        <div className="sed-toolbar" style={{ marginTop: 12 }}>
+        <div className="sed-toolbar sed-mt-12">
           <button type="button" className="sed-btn" onClick={handleClose}>
             Закрыть
           </button>

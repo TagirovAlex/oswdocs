@@ -192,7 +192,7 @@ export function Directory(props: DirectoryProps) {
       {syncError && <div role="alert">{syncError}</div>}
       {syncStatus && <div role="status">{syncStatus}</div>}
       {listError && <div role="alert">{listError}</div>}
-      <table className="sed-table" aria-label="Справочник сотрудников">
+      <table className="sed-table sed-table--clickable" aria-label="Справочник сотрудников">
         <thead>
           <tr>
             <th>ФИО</th>
@@ -202,7 +202,7 @@ export function Directory(props: DirectoryProps) {
         </thead>
         <tbody>
           {items.map((hit) => (
-            <tr key={hit.key} onClick={() => handleCard(hit)} style={{ cursor: "pointer" }}>
+            <tr key={hit.key} onClick={() => handleCard(hit)}>
               <td>{hit.fio}</td>
               <td>{hit.tab_num}</td>
               <td>{adLabel(hit)}</td>
