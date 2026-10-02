@@ -37,11 +37,18 @@ class EmployeeSyncStore(Protocol):
         """Всего строк в таблице (0 = синк ещё не прошёл, нужен фолбэк на 1С)."""
         ...
 
-    def search(self, enterprise: str, q: str, limit: int) -> list[dict]:
+    def search(
+        self, enterprise: str, q: str, limit: int, offset: int = 0
+    ) -> list[dict]:
         """Строки предприятия по подстроке fio/tab_num/position/ad_sam (без регистра).
 
         Каждая строка: enterprise/base_code/tab_num/fio/department/position/ad_sam/
-        ad_status; до limit записей (порядок — как в хранилище)."""
+        ad_status; limit записей, начиная с offset (порядок — как в хранилище)."""
+        ...
+
+    def count_matching(self, enterprise: str, q: str) -> int:
+        """Сколько строк предприятия отвечают подстроке fio/tab_num/position/ad_sam
+        (те же условия, что в search — для total серверной пагинации)."""
         ...
 
     def upsert_many(self, rows: list[dict]) -> int:
@@ -62,7 +69,9 @@ class InMemoryEmployeeSyncStore:
     def count(self) -> int:
         return len(self._rows)
 
-    def search(self, enterprise: str, q: str, limit: int) -> list[dict]:
+    def search(
+        self, enterprise: str, q: str, limit: int, offset: int = 0
+    ) -> list[dict]:
         needle = (q or "").strip().lower()
         hits = []
         for row in self._rows.values():
@@ -76,7 +85,10 @@ class InMemoryEmployeeSyncStore:
             ):
                 continue
             hits.append(dict(row))
-        return hits[:limit]
+        return hits[offset : offset + limit]
+
+    def count_matching(self, enterprise: str, q: str) -> int:
+        return len(self.search(enterprise, q, len(self._rows)))
 
     def upsert_many(self, rows: list[dict]) -> int:
         for row in rows:
@@ -102,7 +114,19 @@ class DbEmployeeSyncStore:
                OR tab_num ILIKE '%' || :q || '%'
                OR COALESCE(position, '') ILIKE '%' || :q || '%'
                OR COALESCE(ad_sam, '') ILIKE '%' || :q || '%')
-        LIMIT :limit
+        ORDER BY fio, tab_num
+        LIMIT :limit OFFSET :offset
+        """
+    )
+    _COUNT_SQL = text(
+        """
+        SELECT count(*) FROM employees
+        WHERE enterprise = :enterprise
+          AND (:q = ''
+               OR fio ILIKE '%' || :q || '%'
+               OR tab_num ILIKE '%' || :q || '%'
+               OR COALESCE(position, '') ILIKE '%' || :q || '%'
+               OR COALESCE(ad_sam, '') ILIKE '%' || :q || '%')
         """
     )
     _UPSERT_SQL = text(
@@ -151,18 +175,38 @@ class DbEmployeeSyncStore:
             ) from exc
         return int(value or 0)
 
-    def search(self, enterprise: str, q: str, limit: int) -> list[dict]:
+    def search(
+        self, enterprise: str, q: str, limit: int, offset: int = 0
+    ) -> list[dict]:
         try:
             with self._session_factory() as session:
                 rows = session.execute(
                     self._SEARCH_SQL,
-                    {"enterprise": enterprise, "q": (q or "").strip(), "limit": limit},
+                    {
+                        "enterprise": enterprise,
+                        "q": (q or "").strip(),
+                        "limit": limit,
+                        "offset": offset,
+                    },
                 ).all()
         except SQLAlchemyError as exc:
             raise EmployeeSyncUnavailable(
                 "Справочник сотрудников недоступен: %s" % exc
             ) from exc
         return [self._to_dict(row) for row in rows]
+
+    def count_matching(self, enterprise: str, q: str) -> int:
+        try:
+            with self._session_factory() as session:
+                value = session.execute(
+                    self._COUNT_SQL,
+                    {"enterprise": enterprise, "q": (q or "").strip()},
+                ).scalar()
+        except SQLAlchemyError as exc:
+            raise EmployeeSyncUnavailable(
+                "Справочник сотрудников недоступен: %s" % exc
+            ) from exc
+        return int(value or 0)
 
     def upsert_many(self, rows: list[dict]) -> int:
         params = [

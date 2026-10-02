@@ -317,7 +317,7 @@ class DbSettingsStore:
 
     # Виды документов (таблица doc_types, миграция 0003): единый источник правды,
     # контентного ключа settings больше нет. Наружу — кортеж полей справочника.
-    _DOC_TYPES_COLUMNS = "code, name, is_active, sort_order"
+    _DOC_TYPES_COLUMNS = "code, name, is_active, sort_order, num"
     _DOC_TYPES_SELECT = text(
         f"SELECT {_DOC_TYPES_COLUMNS} FROM doc_types ORDER BY sort_order, code"
     )
@@ -391,12 +391,13 @@ class DbSettingsStore:
 
     @staticmethod
     def _doc_type_dict(row) -> dict:
-        """Строка doc_types -> словарь контракта (code/name/is_active/sort_order)."""
+        """Строка doc_types -> словарь контракта (code/name/is_active/sort_order/num)."""
         return {
             "code": row.code,
             "name": row.name,
             "is_active": row.is_active,
             "sort_order": row.sort_order,
+            "num": row.num,
         }
 
     def list_doc_types(self) -> list[dict]:
@@ -542,6 +543,7 @@ class DocTypeItem(BaseModel):
     Единый источник видов — таблица, контентного ключа settings больше нет."""
 
     code: str = Field(description="Код вида документа (уникален)")
+    num: int = Field(description="Автономер вида (BIGSERIAL, миграция 0005)")
     name: str = Field(description="Название вида документа")
     is_active: bool = Field(description="Активен ли вид (активные — в селекте формы)")
     sort_order: int = Field(description="Порядок сортировки в селекте")

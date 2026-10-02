@@ -49,6 +49,11 @@ from .settings_routes import (
 
 router = APIRouter(tags=["сотрудники"])
 
+# Размер страницы справочника по умолчанию (блок E): константа модуля, чтобы
+# дефолт не хардкодить в Query; фронт может переопределить настройкой
+# directory_page_size (settings БД, см. PLAN.md блок E).
+DIRECTORY_PAGE_SIZE = 50
+
 
 # ---------------------------------------------------------------------------
 # Зависимости-интерфейсы (границы для моков волны A)
@@ -301,7 +306,10 @@ def _local_item(row: dict, duplicate: bool, privileged: bool) -> dict:
 def search_employees(
     enterprise: str = Query(..., min_length=1, description="Предприятие из настроек"),
     q: str = Query(default="", max_length=200, description="Подстрока ФИО, таб. № или логина (пусто — весь список)"),
-    limit: int = Query(default=25, ge=1, le=100, description="Максимум записей в выдаче"),
+    page: int = Query(default=1, ge=1, description="Номер страницы (1-based)"),
+    page_size: int = Query(
+        default=DIRECTORY_PAGE_SIZE, ge=1, le=500, description="Размер страницы"
+    ),
     user: CurrentUser = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
     client: OneCClient = Depends(get_onec_client),
@@ -312,20 +320,26 @@ def search_employees(
 
     Источник — ЛОКАЛЬНАЯ таблица employees (синк из 1С + связка AD): фильтр по
     предприятию (точное) + подстрока ФИО/таб.№/должности/логина (без регистра),
-    тот же контракт выдачи. Пока таблица пуста (первый запуск, синк не прошёл)
-    или БД справочника недоступна — фолбэк на живой поиск 1С (прежний путь),
-    чтобы форма не ломалась до первого синка. q пустой — вернуть список (до limit),
-    для справочника.
+    тот же контракт выдачи. Серверная пагинация локальной таблицы — page/
+    page_size (LIMIT/OFFSET + COUNT(*) по тем же условиям); ответ дополнен
+    total/page/page_size, совместимо с прежним (items остаётся). Пока таблица
+    пуста (первый запуск, синк не прошёл) или БД справочника недоступна —
+    фолбэк на живой поиск 1С (прежний путь, без доп. пейджинга 1С), total =
+    len(items). q пустой — вернуть список (страницу page_size), для справочника.
     """
     settings.ensure_read_only()
     # Локальный справочник: если синк прошёл (в таблице есть строки) — читаем из
     # неё; пустая таблица и падение БД справочника — фолбэк на живой 1С.
     table_has_data = False
     local_rows: list[dict] = []
+    local_total = 0
     try:
         table_has_data = emp_store.count() > 0
         if table_has_data:
-            local_rows = emp_store.search(enterprise, q, limit)
+            local_rows = emp_store.search(
+                enterprise, q, page_size, (page - 1) * page_size
+            )
+            local_total = emp_store.count_matching(enterprise, q)
     except Exception:
         table_has_data = False  # БД справочника недоступна — живой поиск не ломаем
     if table_has_data:
@@ -346,6 +360,9 @@ def search_employees(
         )
         return {
             "items": items,
+            "total": local_total,
+            "page": page,
+            "page_size": page_size,
             "errors": [],
             "needs_manual_review": bool(duplicates),
         }
@@ -389,7 +406,9 @@ def search_employees(
     for card in list(found.cards) + extra:
         merged.setdefault(card.key(), card)
     # Пустой q — весь список (справочник), иначе фильтр по ФИО/таб.№/логину.
-    cards = [c for c in merged.values() if (not q.strip()) or _match_query(c, _link_sam_for(c), q)][:limit]
+    # Обрезка до page_size (как раньше до limit); доп. пейджинга 1С нет —
+    # total = len(items), page/page_size отдаём как запрошено.
+    cards = [c for c in merged.values() if (not q.strip()) or _match_query(c, _link_sam_for(c), q)][:page_size]
     duplicates = _duplicated_fios(cards)
     privileged = is_privileged(user)
     items = []
@@ -414,6 +433,9 @@ def search_employees(
     )
     return {
         "items": items,
+        "total": len(items),
+        "page": page,
+        "page_size": page_size,
         "errors": found.errors,
         "needs_manual_review": bool(duplicates),
     }
