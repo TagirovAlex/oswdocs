@@ -88,6 +88,15 @@ describe("EmployeeCardView", () => {
     expect(screen.getByText("CN=Начальник Тестович,OU=SED,DC=example,DC=local")).toBeInTheDocument();
   });
 
+  // Даты работы из 1С в блоке «Должность»: приём выводится, увольнение — прочерк.
+  it("показывает даты приёма и увольнения из 1С", async () => {
+    renderView("hr");
+    await waitCard();
+    expect(screen.getByText("Дата приёма").nextElementSibling).toHaveTextContent("2020-01-15");
+    // Увольнения не было — прочерк вместо пустой даты.
+    expect(screen.getByText("Дата увольнения").nextElementSibling).toHaveTextContent("—");
+  });
+
   it("админ подтверждает привязку по найденному совпадению одним кликом", async () => {
     vi.mocked(createLink).mockResolvedValue({});
 

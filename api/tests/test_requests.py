@@ -7,7 +7,7 @@ import base64
 import json
 import os
 import sys
-from datetime import timedelta
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -21,7 +21,12 @@ from app.config import Settings, get_settings  # noqa: E402
 from app.deps import CurrentUser  # noqa: E402
 from app.employees import get_ad_reader  # noqa: E402
 from app.main import app  # noqa: E402
-from app.mailer import EVENT_ASSIGNED, FileMailQueue  # noqa: E402
+from app.mailer import (  # noqa: E402
+    EVENT_ASSIGNED,
+    EVENT_RETURNED,
+    FileMailQueue,
+    get_mail_queue,
+)
 from app.requests import (  # noqa: E402
     IN_APPROVAL,
     STEP_APPROVED,
@@ -879,3 +884,341 @@ def test_notify_assigned_lazy_settings_read(tmp_path, ad_reader):
     _notify_assigned(_request_for_notify(), queue, store, ad_reader, settings)
     assert store.reads == ["mail_templates", "smtp_from"]
     assert queue.pending_count() == 1
+
+
+# --- Уведомления согласующим на этапах: переход блока, возврат, повтор (W3a) ---
+
+# Вымышленные группы-владельцы шагов и их участники (только для мока AD).
+GROUP_BUH = "SED_STEP_BUH"
+GROUP_HR = "SED_STEP_HR"
+GROUP_DIRECTOR = "SED_STEP_DIRECTOR"
+GROUP_ARCHIVE = "SED_STEP_ARCHIVE"
+HR_STEP_SAM = "step.kadrovik"
+DIRECTOR_SAM = "step.direktor"
+
+MAIL_TEMPLATES_SEED = json.dumps(
+    [
+        {
+            "code": EVENT_ASSIGNED,
+            "subject": "Назначена {{ request_id }}",
+            "body_html": "<html>{{ fio }} {{ url }}</html>",
+        },
+        {
+            "code": EVENT_RETURNED,
+            "subject": "Возврат {{ request_id }}",
+            "body_html": "<html>{{ url }}</html>",
+        },
+    ],
+    ensure_ascii=False,
+)
+
+
+class FakeMailAdReader:
+    """Мок AdReader для писем (только чтение): почта по sAMAccountName и состав групп."""
+
+    def __init__(self, groups: dict):
+        self._groups = dict(groups)
+
+    def get_user(self, sam: str):
+        return SimpleNamespace(
+            sam=sam,
+            display_name="Вымышленный Участник Группы",
+            mail="%s@example.local" % sam,
+        )
+
+    def group_members(self, group: str):
+        return [
+            SimpleNamespace(sam=sam, mail="%s@example.local" % sam, enabled=True)
+            for sam in self._groups.get(group, [])
+        ]
+
+
+def _mail_of(sam: str) -> str:
+    """Почта участника по правилам FakeMailAdReader (адрес только из AD)."""
+    return "%s@example.local" % sam
+
+
+@pytest.fixture
+def mail_queue(tmp_path):
+    """Файловая очередь писем (вместо боевой очереди в БД) — что ушло, видно в тесте."""
+    queue = FileMailQueue(tmp_path / "mail_queue.json")
+    app.dependency_overrides[get_mail_queue] = lambda: queue
+    yield queue
+    app.dependency_overrides.pop(get_mail_queue, None)
+
+
+@pytest.fixture
+def mail_settings_store():
+    """Хранилище настроек писем: mail_templates/smtp_from + предприятия (сид-формат)."""
+    store = InMemorySettingsStore(
+        {
+            "enterprises": SEED_ENTERPRISES,
+            "mail_templates": MAIL_TEMPLATES_SEED,
+            "smtp_from": json.dumps("sed@example.local"),
+        }
+    )
+    app.dependency_overrides[get_settings_store] = lambda: store
+    yield store
+    app.dependency_overrides.pop(get_settings_store, None)
+
+
+@pytest.fixture
+def mail_ad_reader():
+    """Ридер AD с составом вымышленных групп-владельцев шагов."""
+    reader = FakeMailAdReader(
+        {GROUP_BUH: [BUH_SAM], GROUP_HR: [HR_STEP_SAM], GROUP_DIRECTOR: [DIRECTOR_SAM]}
+    )
+    app.dependency_overrides[get_ad_reader] = lambda: reader
+    yield reader
+    app.dependency_overrides.pop(get_ad_reader, None)
+
+
+def _sent(queue) -> list[tuple[str, str]]:
+    """Письма очереди как пары (получатель, событие)."""
+    return [(message.to, message.event) for message in queue.pending()]
+
+
+def _notify_skips() -> list[str]:
+    """Причины пропущенных уведомлений из журнала аудита (без ПДн)."""
+    return [e.detail for e in audit_log.all() if e.action == "notify.skip"]
+
+
+def _approve(client, rid: str, order: int, headers: dict):
+    """Отметка «согласовано» владельцем шага."""
+    response = client.post(
+        f"/requests/{rid}/steps/{order}/decision",
+        json={"decision": "approve"},
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+    return response
+
+
+def test_approve_notifies_next_block(
+    client, hr, buh_owner, hr_step_owner, mail_queue, mail_settings_store,
+    mail_ad_reader, test_settings_override, route_override
+):
+    """Переход этапа: после отметки последнего шага блока письмо уходит следующему.
+
+    Раньше письмо ставилось только при подаче, поэтому второй блок узнавал о
+    назначении лишь из карточки."""
+    rid = _create(
+        client,
+        hr,
+        blocks=[
+            {"mode": "sequential", "steps": [{"owner_group": GROUP_BUH}]},
+            {"mode": "sequential", "steps": [{"owner_group": GROUP_HR}]},
+        ],
+    ).json()["id"]
+    assert client.post(f"/requests/{rid}/submit", headers=hr).status_code == 200
+    assert _sent(mail_queue) == [(_mail_of(BUH_SAM), EVENT_ASSIGNED)]
+    response = _approve(client, rid, 1, buh_owner)
+    assert response.json()["status"] == IN_APPROVAL
+    assert _sent(mail_queue) == [
+        (_mail_of(BUH_SAM), EVENT_ASSIGNED),
+        (_mail_of(HR_STEP_SAM), EVENT_ASSIGNED),
+    ]
+
+
+def test_parallel_block_notifies_each_step_once(
+    client, hr, buh_owner, hr_step_owner, mail_queue, mail_settings_store,
+    mail_ad_reader, test_settings_override, route_override
+):
+    """Параллельный блок: письма по одному на шаг блока и НЕ по одному на отметку.
+
+    Отметка второго шага параллельного блока новых писем не добавляет — иначе
+    второй согласующий получал бы дубли."""
+    director = _headers_for(DIRECTOR_SAM, [GROUP_DIRECTOR])
+    rid = _create(
+        client,
+        hr,
+        blocks=[
+            {"mode": "sequential", "steps": [{"owner_group": GROUP_BUH}]},
+            {
+                "mode": "parallel",
+                "steps": [{"owner_group": GROUP_HR}, {"owner_group": GROUP_DIRECTOR}],
+            },
+        ],
+    ).json()["id"]
+    assert client.post(f"/requests/{rid}/submit", headers=hr).status_code == 200
+    assert len(_sent(mail_queue)) == 1
+    _approve(client, rid, 1, buh_owner)
+    expected = [
+        (_mail_of(BUH_SAM), EVENT_ASSIGNED),
+        (_mail_of(HR_STEP_SAM), EVENT_ASSIGNED),
+        (_mail_of(DIRECTOR_SAM), EVENT_ASSIGNED),
+    ]
+    assert _sent(mail_queue) == expected
+    # Отметка первого шага параллельного блока: новых писем нет (второй уже получил).
+    _approve(client, rid, 1101, hr_step_owner)
+    assert _sent(mail_queue) == expected
+    # Последний шаг блока закрывает заявку — уведомлений по-прежнему нет.
+    final = _approve(client, rid, 1102, director)
+    assert final.json()["status"] == "Согласовано"
+    assert _sent(mail_queue) == expected
+
+
+def test_return_reopens_previous_block_and_notifies(
+    client, hr, buh_owner, hr_step_owner, mail_queue, mail_settings_store,
+    mail_ad_reader, test_settings_override, route_override
+):
+    """Возврат: предыдущий блок снова в работе (новый TTL), уведомлён его владелец.
+
+    Заявка остаётся «На согласовании» — возвращающий не отправляет её автору."""
+    rid = _create(
+        client,
+        hr,
+        blocks=[
+            {"mode": "sequential", "steps": [{"owner_group": GROUP_BUH}]},
+            {"mode": "sequential", "steps": [{"owner_group": GROUP_HR}]},
+        ],
+    ).json()["id"]
+    assert client.post(f"/requests/{rid}/submit", headers=hr).status_code == 200
+    _approve(client, rid, 1, buh_owner)
+    returned = client.post(
+        f"/requests/{rid}/steps/1001/decision",
+        json={"decision": "return", "comment": "Вымышленная причина возврата"},
+        headers=hr_step_owner,
+    )
+    assert returned.status_code == 200, returned.text
+    body = returned.json()
+    assert body["status"] == IN_APPROVAL
+    reopened = _step_of(body, 1)
+    assert reopened["status"] == "ожидает"
+    assert reopened["done_by"] is None
+    assert reopened["done_at"] is None
+    assert reopened["comment"] is None
+    # TTL переоткрытого шага — из route.approval_ttl_days, заново от момента возврата.
+    expires_at = datetime.fromisoformat(reopened["expires_at"])
+    assert expires_at > _utcnow() + timedelta(days=route_override.approval_ttl_days - 1)
+    assert _step_of(body, 1001)["status"] == "возвращен"
+    assert _sent(mail_queue) == [
+        (_mail_of(BUH_SAM), EVENT_ASSIGNED),
+        (_mail_of(HR_STEP_SAM), EVENT_ASSIGNED),
+        (_mail_of(BUH_SAM), EVENT_ASSIGNED),
+    ]
+
+
+def test_return_then_reapprove_reopens_returned_step(
+    client, hr, buh_owner, hr_step_owner, mail_queue, mail_settings_store,
+    mail_ad_reader, test_settings_override, route_override
+):
+    """Возврат отыгран: повторное согласование предыдущего блока снова открывает
+    возвращённый шаг (новый TTL) и уведомляет его владельца — заявка не зависает."""
+    rid = _create(
+        client,
+        hr,
+        blocks=[
+            {"mode": "sequential", "steps": [{"owner_group": GROUP_BUH}]},
+            {"mode": "sequential", "steps": [{"owner_group": GROUP_HR}]},
+        ],
+    ).json()["id"]
+    assert client.post(f"/requests/{rid}/submit", headers=hr).status_code == 200
+    _approve(client, rid, 1, buh_owner)
+    assert client.post(
+        f"/requests/{rid}/steps/1001/decision",
+        json={"decision": "return", "comment": "Вымышленная причина возврата"},
+        headers=hr_step_owner,
+    ).status_code == 200
+    again = _approve(client, rid, 1, buh_owner)
+    assert again.status_code == 200, again.text
+    body = again.json()
+    assert body["status"] == IN_APPROVAL
+    step = _step_of(body, 1001)
+    assert step["status"] == "ожидает"
+    assert step["done_by"] is None
+    assert step["comment"] is None
+    expires_at = datetime.fromisoformat(step["expires_at"])
+    assert expires_at > _utcnow() + timedelta(days=route_override.approval_ttl_days - 1)
+    assert _sent(mail_queue) == [
+        (_mail_of(BUH_SAM), EVENT_ASSIGNED),
+        (_mail_of(HR_STEP_SAM), EVENT_ASSIGNED),
+        (_mail_of(BUH_SAM), EVENT_ASSIGNED),
+        (_mail_of(HR_STEP_SAM), EVENT_ASSIGNED),
+    ]
+
+
+def test_return_without_previous_block_goes_to_rework(
+    client, hr, buh_owner, mail_queue, mail_settings_store, mail_ad_reader,
+    test_settings_override, route_override
+):
+    """Возвращать некуда (первый блок) — заявка на доработку, письмо «возврат» автору."""
+    rid = _create_and_submit(client, hr)
+    returned = client.post(
+        f"/requests/{rid}/steps/1/decision",
+        json={"decision": "return", "comment": "Вымышленная причина возврата"},
+        headers=buh_owner,
+    )
+    assert returned.status_code == 200, returned.text
+    assert returned.json()["status"] == "На доработке"
+    assert _sent(mail_queue) == [
+        (_mail_of(BUH_SAM), EVENT_ASSIGNED),
+        (_mail_of(hr["X-Mock-Sam"]), EVENT_RETURNED),
+    ]
+
+
+def test_reissue_notifies_step_owner(
+    client, hr, buh_owner, requests_store, mail_queue, mail_settings_store,
+    mail_ad_reader, test_settings_override, route_override
+):
+    """Повтор просроченного шага (reissue) — письмо «назначена» его владельцу."""
+    rid = _create(
+        client, hr, blocks=[{"mode": "sequential", "steps": [{"owner_group": GROUP_BUH}]}]
+    ).json()["id"]
+    assert client.post(f"/requests/{rid}/submit", headers=hr).status_code == 200
+    requests_store.get(rid).steps[0].expires_at = _utcnow() - timedelta(days=1)
+    assert client.post(
+        f"/requests/{rid}/steps/1/decision", json={"decision": "approve"}, headers=buh_owner
+    ).status_code == 410
+    assert client.post(f"/requests/{rid}/steps/1/reissue", headers=hr).status_code == 200
+    assert _sent(mail_queue) == [
+        (_mail_of(BUH_SAM), EVENT_ASSIGNED),
+        (_mail_of(BUH_SAM), EVENT_ASSIGNED),
+    ]
+
+
+def test_notify_skip_audited_without_ad_reader(
+    client, hr, mail_queue, mail_settings_store, test_settings_override, route_override
+):
+    """Ридер AD недоступен (ad_reader=None) — письмо пропущено, notify.skip в аудите.
+
+    Отметка согласования при этом работает (уведомление не роняет решение)."""
+    rid = _create(
+        client, hr, blocks=[{"mode": "sequential", "steps": [{"owner_group": GROUP_BUH}]}]
+    ).json()["id"]
+    assert client.post(f"/requests/{rid}/submit", headers=hr).status_code == 200
+    assert _sent(mail_queue) == []
+    assert _notify_skips() == ["assigned no_ad_reader"]
+    approve = client.post(
+        f"/requests/{rid}/steps/1/decision",
+        json={"decision": "approve"},
+        headers=_headers_for(BUH_SAM, [GROUP_BUH]),
+    )
+    assert approve.status_code == 200, approve.text
+
+
+def test_notify_skip_audited_without_mail_template(
+    client, hr, mail_queue, mail_settings_store, mail_ad_reader,
+    test_settings_override, route_override
+):
+    """Адресат есть, шаблона письма нет — notify.skip no_template, очередь пуста."""
+    mail_settings_store._values.pop("mail_templates")
+    rid = _create(
+        client, hr, blocks=[{"mode": "sequential", "steps": [{"owner_group": GROUP_BUH}]}]
+    ).json()["id"]
+    assert client.post(f"/requests/{rid}/submit", headers=hr).status_code == 200
+    assert _sent(mail_queue) == []
+    assert _notify_skips() == ["assigned no_template"]
+
+
+def test_notify_skip_audited_without_recipients(
+    client, hr, mail_queue, mail_settings_store, mail_ad_reader,
+    test_settings_override, route_override
+):
+    """Группы шага нет в AD (участники не резолвятся) — notify.skip no_recipients."""
+    rid = _create(
+        client, hr, blocks=[{"mode": "sequential", "steps": [{"owner_group": GROUP_ARCHIVE}]}]
+    ).json()["id"]
+    assert client.post(f"/requests/{rid}/submit", headers=hr).status_code == 200
+    assert _sent(mail_queue) == []
+    assert _notify_skips() == ["assigned no_recipients"]

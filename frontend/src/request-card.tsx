@@ -269,9 +269,12 @@ export function RequestCard(props: RequestCardProps) {
       )}
       {card && !deleted && (
         <>
-          {/* ПДн: владельцу fio/tab_num не приходят — маска «Сотрудник № id». */}
+          {/* Этап/Статус — пояснением (.sed-note), данные заявки — данными (.sed-meta). */}
           <div className="sed-note">
-            Статус: {card.status} ·{" "}
+            Этап: карточка заявки · Статус: {card.status}
+          </div>
+          {/* ПДн: владельцу fio/tab_num не приходят — маска «Сотрудник № id». */}
+          <div className="sed-meta">
             {role === "owner" ? (
               <>Сотрудник № {card.id}</>
             ) : (
@@ -400,7 +403,7 @@ export function RequestCard(props: RequestCardProps) {
               {role === "admin" && (
                 <button
                   type="button"
-                  className="sed-btn sed-btn--ghost"
+                  className="sed-btn sed-btn--danger"
                   onClick={handleDelete}
                   disabled={deleteBusy}
                 >

@@ -18,21 +18,11 @@ interface EmployeeCardViewProps {
   role: Role;
 }
 
-// Стиль строки «поле — значение» внутри блока (цвета — переменные темы).
-const rowStyle: React.CSSProperties = {
-  display: "flex",
-  justifyContent: "space-between",
-  gap: 16,
-  padding: "6px 0",
-  borderBottom: "1px solid var(--sed-border)",
-};
-const labelStyle: React.CSSProperties = { color: "var(--sed-text-muted)", whiteSpace: "nowrap" };
-
 // Строка «подпись: значение» в блоке.
 function FieldRow({ label, value }: { label: string; value: string }) {
   return (
-    <div style={rowStyle}>
-      <span style={labelStyle}>{label}</span>
+    <div className="sed-datarow">
+      <span className="sed-datarow__label">{label}</span>
       <span>{value || "—"}</span>
     </div>
   );
@@ -165,22 +155,14 @@ export function EmployeeCardView(props: EmployeeCardViewProps) {
   const matchSam = !linked && card?.ad_status === "match" ? (adInfo?.sam ?? null) : null;
 
   return (
-    <section
-      aria-label="Карточка сотрудника"
-      style={{
-        maxWidth: 760,
-        margin: "0 auto",
-        padding: "28px 32px",
-        background: "var(--sed-surface)",
-        color: "var(--sed-text)",
-        borderRadius: "var(--sed-radius)",
-      }}
-    >
+    // Рамку и отступы даёт оболочка окна (.sed-content, employee-window.tsx):
+    // своей рамки у карточки нет — иначе двойная (п.6.1 аудита).
+    <section aria-label="Карточка сотрудника" className="sed-card">
       {/* Шапка: ФИО по 1С (крупно) и ФИО из AD (мельче). */}
       <header>
-        <h3 style={{ margin: 0 }}>{card?.fio ?? "…"}</h3>
+        <h3>{card?.fio ?? "…"}</h3>
         {card && (
-          <div className="sed-note" style={{ margin: "4px 0 0" }}>
+          <div className="sed-note sed-mt-4">
             {adInfo?.display_name ?? "—"}
           </div>
         )}
@@ -190,39 +172,28 @@ export function EmployeeCardView(props: EmployeeCardViewProps) {
       {!card && !cardError && <div className="sed-note">Загрузка карточки…</div>}
 
       {card && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 20, marginTop: 20 }}>
-          {/* Блок: должность (1С и AD). */}
-          <fieldset
-            style={{
-              margin: 0,
-              border: "1px solid var(--sed-border)",
-              borderRadius: "var(--sed-radius)",
-              padding: "12px 16px",
-            }}
-          >
-            <legend style={{ padding: "0 6px", fontWeight: 600 }}>Должность</legend>
+        <div className="sed-stack">
+          {/* Блок: должность (1С и AD) и даты работы. */}
+          <fieldset className="sed-panel">
+            <legend className="sed-panel__legend">Должность</legend>
             <FieldRow label="1С" value={card.position ?? "—"} />
             <FieldRow label="AD" value={adInfo?.title ?? "—"} />
+            {/* Даты из 1С: приём и увольнение (для ОК/руководителя ОК). */}
+            <FieldRow label="Дата приёма" value={card.hire_date ? card.hire_date.slice(0, 10) : ""} />
+            <FieldRow label="Дата увольнения" value={card.dismissal_date ? card.dismissal_date.slice(0, 10) : ""} />
           </fieldset>
 
           {/* Блок: контактные данные — двумя колонками (1С и AD). */}
-          <fieldset
-            style={{
-              margin: 0,
-              border: "1px solid var(--sed-border)",
-              borderRadius: "var(--sed-radius)",
-              padding: "12px 16px",
-            }}
-          >
-            <legend style={{ padding: "0 6px", fontWeight: 600 }}>Контактные данные</legend>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24 }}>
+          <fieldset className="sed-panel">
+            <legend className="sed-panel__legend">Контактные данные</legend>
+            <div className="sed-colgrid">
               <div>
-                <div style={{ fontWeight: 600, marginBottom: 4 }}>1С</div>
+                <div className="sed-col-title">1С</div>
                 <FieldRow label="Телефон" value={card.phone ?? "—"} />
                 <FieldRow label="E-mail" value={card.email ?? "—"} />
               </div>
               <div>
-                <div style={{ fontWeight: 600, marginBottom: 4 }}>AD</div>
+                <div className="sed-col-title">AD</div>
                 <FieldRow label="E-mail" value={adInfo?.mail ?? "—"} />
                 <FieldRow label="Руководитель" value={adInfo?.manager_dn ?? "—"} />
               </div>
@@ -230,15 +201,8 @@ export function EmployeeCardView(props: EmployeeCardViewProps) {
           </fieldset>
 
           {/* Блок: связка 1С↔AD. */}
-          <fieldset
-            style={{
-              margin: 0,
-              border: "1px solid var(--sed-border)",
-              borderRadius: "var(--sed-radius)",
-              padding: "12px 16px",
-            }}
-          >
-            <legend style={{ padding: "0 6px", fontWeight: 600 }}>Связка 1С↔AD</legend>
+          <fieldset className="sed-panel">
+            <legend className="sed-panel__legend">Связка 1С↔AD</legend>
             {linked ? (
               <FieldRow
                 label="Связан"
@@ -247,7 +211,7 @@ export function EmployeeCardView(props: EmployeeCardViewProps) {
             ) : (
               <>
                 {matchSam && canLink && (
-                  <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                  <div className="sed-actionrow">
                     <div role="status">Точное совпадение ФИО в AD найдено: {matchSam}</div>
                     <button
                       type="button"
@@ -273,7 +237,7 @@ export function EmployeeCardView(props: EmployeeCardViewProps) {
               </>
             )}
             {canLink && linked && (
-              <div style={{ marginTop: 8 }}>
+              <div className="sed-mt-8">
                 <button
                   type="button"
                   className="sed-btn"
@@ -287,7 +251,7 @@ export function EmployeeCardView(props: EmployeeCardViewProps) {
               </div>
             )}
             {canLink && (!linked || editMode) && (
-              <div className="sed-toolbar" style={{ marginTop: 8 }}>
+              <div className="sed-toolbar sed-mt-8">
                 <input
                   aria-label="Поиск в AD"
                   placeholder="Подстрока ФИО для поиска в AD"
@@ -304,16 +268,15 @@ export function EmployeeCardView(props: EmployeeCardViewProps) {
             )}
             {adSearchError && <div role="alert">{adSearchError}</div>}
             {canLink && adCandidates.length > 0 && (
-              <ul aria-label="Кандидаты AD" style={{ margin: "8px 0 0", paddingLeft: 20 }}>
+              <ul aria-label="Кандидаты AD" className="sed-list">
                 {adCandidates.map((c) => (
-                  <li key={c.sam} style={{ marginTop: 6 }}>
+                  <li key={c.sam} className="sed-mt-6">
                     {c.display_name} · {c.sam} · {c.department} · {c.title}
                     <button
                       type="button"
-                      className="sed-btn"
+                      className="sed-btn sed-ml-8"
                       onClick={() => pickCandidate(c.sam)}
                       aria-pressed={pendingSam === c.sam}
-                      style={{ marginLeft: 8 }}
                     >
                       Привязать
                     </button>
@@ -331,7 +294,7 @@ export function EmployeeCardView(props: EmployeeCardViewProps) {
           {linkError && <div role="alert">{linkError}</div>}
 
           {/* Кнопки: Сохранить (админ, при изменении) и Закрыть. */}
-          <div className="sed-toolbar" style={{ marginTop: 8 }}>
+          <div className="sed-toolbar sed-mt-8">
             {canLink && (
               <button
                 type="button"

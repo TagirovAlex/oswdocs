@@ -6,7 +6,7 @@
 // Маршрут: конструктор блоков (последовательный/параллельный) с исполнителями
 // из AD (GET /api/ad/search); телом создания идут blocks, не группы (steps).
 import { useEffect, useRef, useState } from "react";
-import { ApiHttpError } from "./auth-client";
+import { ApiHttpError, me } from "./auth-client";
 import {
   createRequest,
   getAdGroupMembers,
@@ -142,6 +142,24 @@ export function CreateForm(props: CreateFormProps) {
     setTouched(true);
     onDirtyChange?.(true);
   }
+
+  // Инициатор для правой панели — из сессии (GET /auth/me), только чтение.
+  // ФИО у владельца может отсутствовать (урезанная карточка) — тогда логин.
+  const [initiator, setInitiator] = useState<string>("");
+  useEffect(() => {
+    let alive = true;
+    me()
+      .then((user) => {
+        if (alive) setInitiator(user.fio ?? user.sam);
+      })
+      .catch(() => {
+        // Сессия недоступна — поле инициатора остаётся пустым («—»).
+        if (alive) setInitiator("");
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   // Предприятия — только из API.
   useEffect(() => {
@@ -332,11 +350,11 @@ export function CreateForm(props: CreateFormProps) {
 
   // Конструктор маршрута: добавление/удаление блоков и шагов (→ dirty).
 
-  function addBlock(): void {
+  function addBlock(mode: "sequential" | "parallel"): void {
     markTouched();
     // Стабильный id блока: состояние группы привязано к нему, а не к индексу.
     const id = `blk-${++blockSeq.current}`;
-    setBlocks((prev) => [...prev, { id, mode: "sequential", kind: "user", steps: [] }]);
+    setBlocks((prev) => [...prev, { id, mode, kind: "user", steps: [] }]);
   }
 
   function removeBlock(blockId: string): void {
@@ -511,258 +529,321 @@ export function CreateForm(props: CreateFormProps) {
   return (
     <section aria-label="Создание заявки">
       <h3>Создание заявки</h3>
+      {/* Этап и статус процесса — как в макете (DESIGN.md п.1.6). */}
+      <div className="sed-meta">Этап: создание заявки · Статус: черновик</div>
 
       {loadError && <div role="alert">Ошибка: {loadError}</div>}
       {created && <div role="status">{created}</div>}
 
-      {/* Предприятие из настроек (без хардкод-массивов) — шаг 1 формы. */}
-      <label>
-        Предприятие
-        <select
-          aria-label="Предприятие"
-          value={enterprise}
-          onChange={(e) => {
-            markTouched();
-            setEnterprise(e.target.value);
-          }}
-        >
-          <option value="">— выберите —</option>
-          {enterprises.map((ent) => (
-            <option key={ent.code} value={ent.code}>
-              {ent.name}
-            </option>
-          ))}
-        </select>
-      </label>
+      {/* Две панели макета (.panels/.panel): слева — предприятие и сотрудник,
+          справа — инициатор (только чтение) и справочные данные из 1С. */}
+      <div className="sed-panels">
+        <div className="sed-panel">
+          {/* Предприятие из настроек (без хардкод-массивов) — шаг 1 формы. */}
+          <label className="sed-field">
+            Предприятие
+            <select
+              aria-label="Предприятие"
+              value={enterprise}
+              onChange={(e) => {
+                markTouched();
+                setEnterprise(e.target.value);
+              }}
+            >
+              <option value="">— выберите —</option>
+              {enterprises.map((ent) => (
+                <option key={ent.code} value={ent.code}>
+                  {ent.name}
+                </option>
+              ))}
+            </select>
+          </label>
 
-      {/* Сотрудник: активируется после выбора предприятия. */}
-      {enterprise && (
-        <fieldset style={{ marginTop: 12 }}>
-          <legend>Сотрудник</legend>
-          <div style={{ position: "relative" }}>
-            <label>
-              Поиск сотрудника
-              <input
-                aria-label="Поиск сотрудника"
-                placeholder="ФИО / табельный №"
-                value={empQuery}
-                onChange={(e) => {
-                  markTouched();
-                  setEmpQuery(e.target.value);
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === "Escape") setEmpListOpen(false);
-                }}
-                onFocus={() => {
-                  if (empHits.length > 0) setEmpListOpen(true);
-                }}
-              />
-            </label>
-            {empListOpen && empHits.length > 0 && (
-              <ul
-                style={{
-                  position: "absolute",
-                  zIndex: 10,
-                  left: 0,
-                  right: 0,
-                  margin: 0,
-                  padding: 0,
-                  listStyle: "none",
-                  border: "1px solid var(--sed-border)",
-                  background: "var(--sed-surface)",
-                  color: "var(--sed-text)",
-                  maxHeight: 220,
-                  overflowY: "auto",
-                }}
-              >
-                {empHits.map((h) => (
-                  <li key={h.key} style={{ margin: 0 }}>
-                    <button
-                      type="button"
-                      onClick={() => pickEmployee(h)}
-                      onMouseEnter={(e) => (e.currentTarget as HTMLButtonElement).style.background = "var(--sed-primary-soft)"}
-                      onMouseLeave={(e) => (e.currentTarget as HTMLButtonElement).style.background = ""}
-                      style={{
-                        display: "block",
-                        width: "100%",
-                        textAlign: "left",
-                        border: "none",
-                        background: "transparent",
-                        color: "var(--sed-text)",
-                        padding: 4,
-                        cursor: "pointer",
-                      }}
-                    >
-                      <strong>{h.fio}</strong> · {h.tab_num}
-                      {(h.dept || h.position) && (
-                        <div style={{ fontSize: "0.85em", opacity: 0.7 }}>
-                          {[h.dept, h.position].filter(Boolean).join(" · ")}
-                        </div>
-                      )}
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
+          {/* Сотрудник: активируется после выбора предприятия. */}
+          {enterprise && (
+            <fieldset className="sed-fieldset sed-mt-12">
+              <legend>Сотрудник</legend>
+              <div className="sed-rel">
+                <label className="sed-field">
+                  Поиск сотрудника
+                  <input
+                    aria-label="Поиск сотрудника"
+                    placeholder="ФИО / табельный №"
+                    value={empQuery}
+                    onChange={(e) => {
+                      markTouched();
+                      setEmpQuery(e.target.value);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Escape") setEmpListOpen(false);
+                    }}
+                    onFocus={() => {
+                      if (empHits.length > 0) setEmpListOpen(true);
+                    }}
+                  />
+                </label>
+                {empListOpen && empHits.length > 0 && (
+                  <ul className="sed-dropdown">
+                    {empHits.map((h) => (
+                      <li key={h.key}>
+                        <button type="button" className="sed-dropdown__item" onClick={() => pickEmployee(h)}>
+                          <strong>{h.fio}</strong> · {h.tab_num}
+                          {(h.dept || h.position) && (
+                            <div className="sed-sub">
+                              {[h.dept, h.position].filter(Boolean).join(" · ")}
+                            </div>
+                          )}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+              {empSearching && <div className="sed-note">Поиск в 1С…</div>}
+              {/* Ручной режим (503/ничего не найдено): поля редактируемые. */}
+              {manualMode && (
+                <fieldset className="sed-fieldset">
+                  <legend>Данные сотрудника (вручную)</legend>
+                  {manualNote && <div className="sed-note">{manualNote}</div>}
+                  <label className="sed-field">
+                    ФИО
+                    <input aria-label="ФИО" value={fio} onChange={(e) => { markTouched(); setFio(e.target.value); }} />
+                  </label>
+                  <label className="sed-field">
+                    Табельный №
+                    <input aria-label="Табельный №" value={tabNum} onChange={(e) => { markTouched(); setTabNum(e.target.value); }} />
+                  </label>
+                  <label className="sed-field">
+                    Подразделение
+                    <input aria-label="Подразделение" value={department} onChange={(e) => { markTouched(); setDepartment(e.target.value); }} />
+                  </label>
+                  <label className="sed-field">
+                    Должность
+                    <input aria-label="Должность" value={position} onChange={(e) => { markTouched(); setPosition(e.target.value); }} />
+                  </label>
+                </fieldset>
+              )}
+              {!manualMode && empHits.length === 0 && !empSearching && tabNum === "" && (
+                <div className="sed-note">Введите запрос для поиска в 1С либо укажите данные вручную.</div>
+              )}
+            </fieldset>
+          )}
+
+          {/* Файлы: до создания заявки загрузки нет (эндпоинт привязан к id
+              заявки) — подсказка вместо неработающих кнопок макета. */}
+          <div className="sed-note">
+            Файлы: скан заявления добавляется в карточке заявки после создания (необязательно).
           </div>
-          {empSearching && <div className="sed-note">Поиск в 1С…</div>}
+        </div>
+
+        <div className="sed-panel">
+          {/* Инициатор — из сессии, только чтение. */}
+          <label className="sed-field">
+            Инициатор (ОК, только чтение)
+            <input aria-label="Инициатор" readOnly value={initiator} placeholder="—" />
+          </label>
           {/* Данные сотрудника из 1С — справочные (read-only); подразделение/
               должность могут быть пустыми («—»), создание допустимо без них. */}
-          {!manualMode && tabNum !== "" && (
-            <fieldset>
-              <legend>Данные сотрудника</legend>
+          {!manualMode && enterprise !== "" && tabNum !== "" && (
+            <fieldset className="sed-fieldset sed-mt-12">
+              <legend>Подразделение / должность (из 1С)</legend>
               <div className="sed-note">Данные из 1С — справочно, изменить нельзя.</div>
-              <div style={{ display: "block", marginTop: 8 }}>
+              <div className="sed-block">
                 ФИО: <strong>{fio}</strong>
               </div>
-              <div style={{ display: "block", marginTop: 8 }}>
+              <div className="sed-block">
                 Табельный №: <strong>{tabNum}</strong>
               </div>
-              <div style={{ display: "block", marginTop: 8 }}>
+              <div className="sed-block">
                 Подразделение: <strong>{department || "—"}</strong>
               </div>
-              <div style={{ display: "block", marginTop: 8 }}>
+              <div className="sed-block">
                 Должность: <strong>{position || "—"}</strong>
               </div>
             </fieldset>
           )}
-          {/* Ручной режим (503/ничего не найдено): поля редактируемые. */}
-          {manualMode && (
-            <fieldset>
-              <legend>Данные сотрудника (вручную)</legend>
-              {manualNote && <div className="sed-note">{manualNote}</div>}
-              <label style={{ display: "block", marginTop: 8 }}>
-                ФИО
-                <input aria-label="ФИО" value={fio} onChange={(e) => { markTouched(); setFio(e.target.value); }} />
-              </label>
-              <label style={{ display: "block", marginTop: 8 }}>
-                Табельный №
-                <input aria-label="Табельный №" value={tabNum} onChange={(e) => { markTouched(); setTabNum(e.target.value); }} />
-              </label>
-              <label style={{ display: "block", marginTop: 8 }}>
-                Подразделение
-                <input aria-label="Подразделение" value={department} onChange={(e) => { markTouched(); setDepartment(e.target.value); }} />
-              </label>
-              <label style={{ display: "block", marginTop: 8 }}>
-                Должность
-                <input aria-label="Должность" value={position} onChange={(e) => { markTouched(); setPosition(e.target.value); }} />
-              </label>
-            </fieldset>
-          )}
-          {!manualMode && empHits.length === 0 && !empSearching && tabNum === "" && (
-            <div className="sed-note">Введите запрос для поиска в 1С либо укажите данные вручную.</div>
-          )}
-        </fieldset>
-      )}
+        </div>
+      </div>
 
       {/* Маршрут: конструктор блоков (последовательный/параллельный); исполнители
           — сотрудник (поиск AD) либо группа (список групп + состав из AD). */}
       {enterprise && employeeReady && (
-        <fieldset style={{ marginTop: 12 }}>
+        <fieldset className="sed-fieldset sed-mt-12">
           <legend>Маршрут согласования</legend>
           <div className="sed-note">
             Конструктор маршрута: блоки с исполнителями — сотрудником из AD или группой.
           </div>
           {groupsError && <div className="sed-note">Группы: {groupsError}</div>}
           {blocks.length === 0 && <div className="sed-note">Добавьте блок и исполнителей.</div>}
-          {blocks.map((block, bi) => (
-            <div
-              key={block.id}
-              style={{
-                border: "1px solid var(--sed-border)",
-                borderRadius: "var(--sed-radius)",
-                padding: 8,
-                marginTop: 8,
-              }}
-            >
-              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                <strong>Блок {bi + 1}</strong>
-                <select
-                  aria-label={`Режим блока ${bi + 1}`}
-                  value={block.mode}
-                  onChange={(e) => setBlockMode(block.id, e.target.value as "sequential" | "parallel")}
-                >
-                  <option value="sequential">Последовательный</option>
-                  <option value="parallel">Параллельный</option>
-                </select>
-                <select
-                  aria-label={`Тип исполнителя блока ${bi + 1}`}
-                  value={block.kind}
-                  onChange={(e) => setBlockKind(block.id, e.target.value as ExecutorKind)}
-                >
-                  <option value="user">Сотрудник</option>
-                  <option value="group">Группа</option>
-                </select>
-                <button type="button" className="sed-btn" onClick={() => removeBlock(block.id)}>
-                  Удалить блок
-                </button>
-              </div>
-              {block.steps.length === 0 && <div className="sed-note">Исполнители не добавлены.</div>}
-              <ul style={{ margin: "8px 0", paddingLeft: 20 }}>
-                {block.steps.map((s, si) => (
-                  <li key={`${s.kind}-${s.sam || s.owner_group}-${si}`}>
-                    {s.kind === "group" ? s.display_name : `${s.display_name} (${s.sam})`}
-                    <button
-                      type="button"
-                      aria-label={`Удалить исполнителя ${s.display_name}`}
-                      onClick={() => removeStep(block.id, si)}
-                      style={{ marginLeft: 8 }}
-                    >
-                      Удалить
-                    </button>
-                  </li>
-                ))}
-              </ul>
-              {block.kind === "group" ? (
-                <div style={{ marginTop: 8 }}>
-                  <label>
-                    Группа
-                    <select
-                      aria-label={`Группа блока ${bi + 1}`}
-                      value={groupPick[block.id] ?? ""}
-                      onChange={(e) => pickGroup(block.id, e.target.value)}
-                    >
-                      <option value="">— выберите —</option>
-                      {groups.map((g) => (
-                        <option key={g} value={g}>
-                          {g}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  {groups.length === 0 && !groupsError && (
-                    <div className="sed-note">Список групп пуст (задаётся в настройках).</div>
-                  )}
-                  {(groupPick[block.id] ?? "") !== "" && (() => {
-                    // Состав именно этого блока: у каждого группового блока своя группа.
-                    const gm = groupMembers[block.id] ?? EMPTY_GROUP_MEMBERS;
-                    return (
-                      <>
-                        {/* Состав группы: счётчик + раскрываемый список (ФИО/почта). */}
-                        <div className="sed-note">
-                          Состав группы: {gm.loading ? "загрузка…" : gm.members.length}
+          {/* Конструктор блоков — таблица «Рассмотрение» макета. */}
+          {blocks.length > 0 && (
+            <table className="sed-table">
+              <caption className="sed-note">Рассмотрение</caption>
+              <thead>
+                <tr>
+                  <th scope="col">
+                    <span aria-hidden="true">✕</span>
+                  </th>
+                  <th scope="col">Вид рассмотрения</th>
+                  <th scope="col">Должность</th>
+                  <th scope="col">Сотрудник</th>
+                  <th scope="col">Действия</th>
+                </tr>
+              </thead>
+              <tbody>
+                {blocks.map((block, bi) => (
+                  <tr key={block.id}>
+                    {/* Удаление блока и его номер. */}
+                    <td>
+                      <button
+                        type="button"
+                        className="sed-btn"
+                        aria-label="Удалить блок"
+                        onClick={() => removeBlock(block.id)}
+                      >
+                        ✕
+                      </button>
+                      <div className="sed-note">Блок {bi + 1}</div>
+                    </td>
+                    {/* Вид рассмотрения: последовательный или параллельный. */}
+                    <td>
+                      <select
+                        aria-label={`Режим блока ${bi + 1}`}
+                        value={block.mode}
+                        onChange={(e) => setBlockMode(block.id, e.target.value as "sequential" | "parallel")}
+                      >
+                        <option value="sequential">Последовательный</option>
+                        <option value="parallel">Параллельный</option>
+                      </select>
+                    </td>
+                    {/* Тип исполнителя и группа-владелец шага. */}
+                    <td>
+                      <select
+                        aria-label={`Тип исполнителя блока ${bi + 1}`}
+                        value={block.kind}
+                        onChange={(e) => setBlockKind(block.id, e.target.value as ExecutorKind)}
+                      >
+                        <option value="user">Сотрудник</option>
+                        <option value="group">Группа</option>
+                      </select>
+                      {block.kind === "group" && (
+                        <div className="sed-mt-8">
+                          <label className="sed-field">
+                            Группа
+                            <select
+                              aria-label={`Группа блока ${bi + 1}`}
+                              value={groupPick[block.id] ?? ""}
+                              onChange={(e) => pickGroup(block.id, e.target.value)}
+                            >
+                              <option value="">— выберите —</option>
+                              {groups.map((g) => (
+                                <option key={g} value={g}>
+                                  {g}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          {groups.length === 0 && !groupsError && (
+                            <div className="sed-note">Список групп пуст (задаётся в настройках).</div>
+                          )}
+                          {(groupPick[block.id] ?? "") !== "" && (() => {
+                            // Состав именно этого блока: у каждого группового блока своя группа.
+                            const gm = groupMembers[block.id] ?? EMPTY_GROUP_MEMBERS;
+                            return (
+                              <>
+                                {/* Состав группы: счётчик + раскрываемый список (ФИО/почта). */}
+                                <div className="sed-note">
+                                  Состав группы: {gm.loading ? "загрузка…" : gm.members.length}
+                                </div>
+                                {gm.error && <div role="alert">{gm.error}</div>}
+                                {!gm.loading && gm.error === "" && (
+                                  <button
+                                    type="button"
+                                    className="sed-btn sed-btn--ghost"
+                                    onClick={() => patchGroupMembers(block.id, { open: !gm.open })}
+                                  >
+                                    {gm.open ? "Скрыть состав" : "Показать состав"}
+                                  </button>
+                                )}
+                                {gm.open && gm.members.length > 0 && (
+                                  <ul aria-label={`Состав группы ${groupPick[block.id]}`} className="sed-list">
+                                    {gm.members.map((m) => (
+                                      <li key={m.sam}>
+                                        {m.display_name}
+                                        {m.mail ? ` · ${m.mail}` : ""}
+                                      </li>
+                                    ))}
+                                  </ul>
+                                )}
+                              </>
+                            );
+                          })()}
                         </div>
-                        {gm.error && <div role="alert">{gm.error}</div>}
-                        {!gm.loading && gm.error === "" && (
-                          <button
-                            type="button"
-                            className="sed-btn sed-btn--ghost"
-                            onClick={() => patchGroupMembers(block.id, { open: !gm.open })}
-                          >
-                            {gm.open ? "Скрыть состав" : "Показать состав"}
+                      )}
+                    </td>
+                    {/* Исполнители блока и выбор сотрудника из AD. */}
+                    <td>
+                      {block.steps.length === 0 && <div className="sed-note">Исполнители не добавлены.</div>}
+                      <ul className="sed-list">
+                        {block.steps.map((s, si) => (
+                          <li key={`${s.kind}-${s.sam || s.owner_group}-${si}`}>
+                            {s.kind === "group" ? s.display_name : `${s.display_name} (${s.sam})`}
+                            <button
+                              type="button"
+                              aria-label={`Удалить исполнителя ${s.display_name}`}
+                              onClick={() => removeStep(block.id, si)}
+                              className="sed-ml-8"
+                            >
+                              Удалить
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                      {block.kind === "user" && (
+                        <>
+                          <button type="button" className="sed-btn" onClick={() => openAdPanel(block.id)}>
+                            Добавить исполнителя
                           </button>
-                        )}
-                        {gm.open && gm.members.length > 0 && (
-                          <ul aria-label={`Состав группы ${groupPick[block.id]}`} style={{ margin: "6px 0", paddingLeft: 20 }}>
-                            {gm.members.map((m) => (
-                              <li key={m.sam}>
-                                {m.display_name}
-                                {m.mail ? ` · ${m.mail}` : ""}
-                              </li>
-                            ))}
-                          </ul>
-                        )}
-                      <div className="sed-toolbar" style={{ marginTop: 8 }}>
+                          {adPanelBlock === block.id && (
+                            <div className="sed-mt-8 sed-rel">
+                              <label className="sed-field">
+                                Поиск в AD
+                                <input
+                                  aria-label="Поиск в AD"
+                                  placeholder="ФИО в AD"
+                                  value={adQuery}
+                                  onChange={(e) => setAdQuery(e.target.value)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Escape") closeAdPanel();
+                                  }}
+                                />
+                              </label>
+                              {adSearching && <div className="sed-note">Поиск в AD…</div>}
+                              {adSearchError && <div className="sed-note">{adSearchError}</div>}
+                              {adCandidates.length > 0 && (
+                                <ul className="sed-dropdown">
+                                  {adCandidates.map((c) => (
+                                    <li key={c.sam}>
+                                      <button type="button" className="sed-dropdown__item" onClick={() => addStepToBlock(block.id, c)}>
+                                        <strong>{c.display_name}</strong> · {c.sam}
+                                        {(c.department || c.title) && (
+                                          <div className="sed-sub">
+                                            {[c.department, c.title].filter(Boolean).join(" · ")}
+                                          </div>
+                                        )}
+                                      </button>
+                                    </li>
+                                  ))}
+                                </ul>
+                              )}
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </td>
+                    {/* Действия: добавить выбранную группу-владельца в маршрут. */}
+                    <td>
+                      {block.kind === "group" && (groupPick[block.id] ?? "") !== "" && (
                         <button
                           type="button"
                           className="sed-btn"
@@ -770,92 +851,28 @@ export function CreateForm(props: CreateFormProps) {
                         >
                           Добавить группу
                         </button>
-                      </div>
-                    </>
-                    );
-                  })()}
-                </div>
-              ) : (
-                <>
-              <button type="button" className="sed-btn" onClick={() => openAdPanel(block.id)}>
-                Добавить исполнителя
-              </button>
-              {adPanelBlock === block.id && (
-                <div style={{ marginTop: 8 }}>
-                  <label>
-                    Поиск в AD
-                    <input
-                      aria-label="Поиск в AD"
-                      placeholder="ФИО в AD"
-                      value={adQuery}
-                      onChange={(e) => setAdQuery(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Escape") closeAdPanel();
-                      }}
-                    />
-                  </label>
-                  {adSearching && <div className="sed-note">Поиск в AD…</div>}
-                  {adSearchError && <div className="sed-note">{adSearchError}</div>}
-                  {adCandidates.length > 0 && (
-                    <ul
-                      style={{
-                        margin: 0,
-                        padding: 0,
-                        listStyle: "none",
-                        border: "1px solid var(--sed-border)",
-                        background: "var(--sed-surface)",
-                        color: "var(--sed-text)",
-                        maxHeight: 220,
-                        overflowY: "auto",
-                      }}
-                    >
-                      {adCandidates.map((c) => (
-                        <li key={c.sam} style={{ margin: 0 }}>
-                          <button
-                            type="button"
-                            onClick={() => addStepToBlock(block.id, c)}
-                            onMouseEnter={(e) => (e.currentTarget as HTMLButtonElement).style.background = "var(--sed-primary-soft)"}
-                            onMouseLeave={(e) => (e.currentTarget as HTMLButtonElement).style.background = ""}
-                            style={{
-                              display: "block",
-                              width: "100%",
-                              textAlign: "left",
-                              border: "none",
-                              background: "transparent",
-                              color: "var(--sed-text)",
-                              padding: 4,
-                              cursor: "pointer",
-                            }}
-                          >
-                            <strong>{c.display_name}</strong> · {c.sam}
-                            {(c.department || c.title) && (
-                              <div style={{ fontSize: "0.85em", opacity: 0.7 }}>
-                                {[c.department, c.title].filter(Boolean).join(" · ")}
-                              </div>
-                            )}
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
-              )}
-                </>
-              )}
-            </div>
-          ))}
-          <div className="sed-toolbar" style={{ marginTop: 8 }}>
-            <button type="button" className="sed-btn" onClick={addBlock}>
-              Добавить блок
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          <div className="sed-toolbar sed-mt-8">
+            <button type="button" className="sed-btn sed-btn--ghost" onClick={() => addBlock("sequential")}>
+              Добавить последовательный блок
+            </button>
+            <button type="button" className="sed-btn sed-btn--ghost" onClick={() => addBlock("parallel")}>
+              Добавить параллельный блок
             </button>
           </div>
         </fieldset>
       )}
 
-      <div className="sed-toolbar" style={{ marginTop: 12 }}>
+      <div className="sed-toolbar sed-mt-12">
         <button
           type="button"
-          className="sed-btn sed-btn--ghost"
+          className="sed-btn sed-btn--neutral"
           disabled={!canCreate}
           onClick={() => handleCreate(false)}
         >

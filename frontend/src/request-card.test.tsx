@@ -479,6 +479,33 @@ describe("RequestCard", () => {
     expect(close).not.toHaveBeenCalled();
   });
 
+  // Метаданные заявки — данными (.sed-meta), «Этап/Статус» — пояснением (.sed-note).
+  it("метаданные карточки выведены .sed-meta, этап/статус — .sed-note", async () => {
+    vi.mocked(getRequest).mockResolvedValue(requestWith("Громов Игорь Олегович", "На согласовании"));
+
+    renderCard();
+    await waitFor(() => expect(screen.getByLabelText("Шаги заявки")).toBeInTheDocument());
+    expect(
+      screen.getByText(/^Этап: карточка заявки · Статус: На согласовании$/),
+    ).toHaveClass("sed-note");
+    const meta = screen.getByText(/Таб\.№ Т-000201/);
+    expect(meta).toHaveClass("sed-meta");
+    expect(meta.textContent).toContain("Цех № 1");
+  });
+
+  // Опасное действие (удаление) — отдельный класс; обычные действия остаются sed-btn.
+  it("admin: удаление заявки помечено «опасной» кнопкой", async () => {
+    vi.mocked(getRequest).mockResolvedValue(requestWith("Громов Игорь Олегович", "На согласовании"));
+
+    renderCard("REQ-0001", "admin");
+    await waitFor(() => expect(screen.getByLabelText("Шаги заявки")).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Удалить заявку" })).toHaveClass(
+      "sed-btn",
+      "sed-btn--danger",
+    );
+    expect(screen.getByRole("button", { name: "Печать" })).not.toHaveClass("sed-btn--danger");
+  });
+
   // Матрица ролей: не-админу кнопка удаления не показывается.
   it("hr: кнопка «Удалить заявку» не показывается", async () => {
     renderCard("REQ-0001", "hr");

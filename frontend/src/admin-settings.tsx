@@ -1,7 +1,7 @@
 // Админка настроек: контент (руководитель ОК + админ) и инфра (только админ).
 // Значения — из settings БД (GET/PUT /api/settings для админа, /settings/content
 // для руководителя ОК), в коде не хардкодятся. Вкладки: Процесс / Справочники /
-// Шаблоны (контент) и Инфра (только админ).
+// Шаблоны (контент) и Инфра / Регламенты / Доступ и роли (только админ).
 import { useEffect, useState } from "react";
 import {
   getSettings,
@@ -29,10 +29,17 @@ interface AdminSettingsProps {
   role: Role;
 }
 
-// Вкладки админки: контент (Процесс/Справочники/Шаблоны) + Инфра и Регламенты
-// (только админ).
+// Вкладки админки: контент (Процесс/Справочники/Шаблоны) + Инфра, Регламенты
+// и Доступ и роли (только админ).
 const CONTENT_TABS = ["Процесс", "Справочники", "Шаблоны"] as const;
-const ALL_TABS = ["Процесс", "Справочники", "Шаблоны", "Инфра", "Регламенты"] as const;
+const ALL_TABS = [
+  "Процесс",
+  "Справочники",
+  "Шаблоны",
+  "Инфра",
+  "Регламенты",
+  "Доступ и роли",
+] as const;
 type SettingsTab = (typeof ALL_TABS)[number];
 
 // Пара «должность → категория» для формы (порядок строк сохраняется).
@@ -129,6 +136,98 @@ function GroupsEditor(props: { value: string[]; onChange: (v: string[]) => void 
           Добавить группу
         </button>
       </div>
+    </fieldset>
+  );
+}
+
+// Ключи секции «Доступ и роли»: группы AD для входа и группы ролей. В settings
+// и в API это списки (JSON-массив), в форме — текст через запятую; null —
+// значения нет в БД, сервер берёт его из env (фолбэк).
+type AccessRoleKey = "access_groups" | "admin_groups" | "hr_groups" | "hr_admin_groups";
+
+// Значения формы секции «Доступ и роли» (пустая строка — «не задано в БД»).
+interface AccessRoleGroups {
+  access_groups: string;
+  admin_groups: string;
+  hr_groups: string;
+  hr_admin_groups: string;
+}
+
+// Список групп из GET → текст формы через запятую (null — пустое поле).
+function groupsToText(groups: string[] | null): string {
+  return (groups ?? []).join(", ");
+}
+
+// Текст формы → список групп для PUT: разбор по запятым, trim, пустые отброшены.
+// Пустой ввод → null (ключ сбрасывается в БД, действует фолбэк env на сервере).
+function groupsFromText(text: string): string[] | null {
+  const list = text
+    .split(",")
+    .map((g) => g.trim())
+    .filter((g) => g !== "");
+  return list.length > 0 ? list : null;
+}
+
+// Описание поля секции: ключ, подпись с ключом, подсказка (назначение роли).
+const ACCESS_ROLE_FIELDS: readonly {
+  key: AccessRoleKey;
+  ariaLabel: string;
+  label: string;
+  hint: string;
+}[] = [
+  {
+    key: "access_groups",
+    ariaLabel: "Группы для входа",
+    label: "Кто может войти — группы AD (access_groups)",
+    hint: "Список групп через запятую; пусто — значение из env.",
+  },
+  {
+    key: "admin_groups",
+    ariaLabel: "Группы администраторов",
+    label: "Роль «Админ» — группы AD (admin_groups)",
+    hint: "Админ: все заявки и админка настроек; пусто — значение из env.",
+  },
+  {
+    key: "hr_groups",
+    ariaLabel: "Группы сотрудников ОК",
+    label: "Роль «ОК» — группы AD (hr_groups)",
+    hint: "ОК: все заявки и полная карточка; пусто — значение из env.",
+  },
+  {
+    key: "hr_admin_groups",
+    ariaLabel: "Группы руководителей ОК",
+    label: "Роль «Руководитель ОК» — группы AD (hr_admin_groups)",
+    hint: "Руководитель ОК: контентные настройки и конструктор шагов; пусто — значение из env.",
+  },
+];
+
+// Секция «Доступ и роли» (только админ): группы AD для входа и группы ролей. В
+// форме — текст через запятую, в settings — списки. Ключи инфра-настроек (правит
+// только админ); пустое поле — сброс ключа в БД и фолбэк env на стороне сервера.
+function AccessRolesEditor(props: { value: AccessRoleGroups; onChange: (v: AccessRoleGroups) => void }) {
+  const { value, onChange } = props;
+  return (
+    <fieldset>
+      <legend>Доступ и роли (группы AD)</legend>
+      <div className="sed-note">
+        Группы перечисляются через запятую (в settings хранятся списком). Пустое
+        поле — значение не задано в settings, сервер берёт его из env. Ключи групп
+        ролей показывают действующее значение (из БД или env), поэтому список может
+        прийти отсортированным. Группы владельцев шагов (allowed_ad_groups) правит
+        руководитель ОК во вкладке «Справочники».
+      </div>
+      {ACCESS_ROLE_FIELDS.map((field) => (
+        <label key={field.key} style={{ display: "block", marginTop: 8 }}>
+          {field.label}
+          <input
+            aria-label={field.ariaLabel}
+            type="text"
+            value={value[field.key]}
+            onChange={(e) => onChange({ ...value, [field.key]: e.target.value })}
+          />
+          <div className="sed-note">{field.hint}</div>
+        </label>
+      ))}
     </fieldset>
   );
 }
@@ -502,9 +601,10 @@ function ScheduleReglamentEditor(props: {
   );
 }
 
-// Админка: контент (TTL/флаги, справочники, шаблоны) + инфра (сессия/сканы/SMTP).
-// Админ видит все вкладки (GET/PUT /api/settings), руководитель ОК — только
-// контент (GET/PUT /api/settings/content). Всё — из settings БД.
+// Админка: контент (TTL/флаги, справочники, шаблоны) + инфра (сессия/сканы/SMTP,
+// регламенты, доступ и роли). Админ видит все вкладки (GET/PUT /api/settings),
+// руководитель ОК — только контент (GET/PUT /api/settings/content). Всё — из
+// settings БД.
 export function AdminSettings(props: AdminSettingsProps) {
   const { role } = props;
   const isAdmin = role === "admin";
@@ -547,6 +647,14 @@ export function AdminSettings(props: AdminSettingsProps) {
   const [syncError, setSyncError] = useState<string>("");
   // Эскалация в форме не редактируется (отдельная волна), передаём как загружено.
   const [positionEscalation, setPositionEscalation] = useState<Record<string, number> | null>(null);
+  // Группы входа и роли (access_groups/admin_groups/hr_groups/hr_admin_groups) —
+  // в settings списки, в форме текст через запятую; пусто = «не задано» (env).
+  const [accessRoles, setAccessRoles] = useState<AccessRoleGroups>({
+    access_groups: "",
+    admin_groups: "",
+    hr_groups: "",
+    hr_admin_groups: "",
+  });
 
   // Загрузка: админ — полный объект /api/settings, руководитель ОК — контент
   // /api/settings/content (инфра-поля у него не приходят и не показываются).
@@ -575,6 +683,13 @@ export function AdminSettings(props: AdminSettingsProps) {
           // Пустое расписание — null («не настроено»), дефолты не подставляем.
           setScheduleEnterprises(full.schedule_enterprises_sync ?? null);
           setScheduleAdLinks(full.schedule_ad_links_sync ?? null);
+          // Группы входа и ролей: список из GET → текст формы (null → пусто).
+          setAccessRoles({
+            access_groups: groupsToText(full.access_groups),
+            admin_groups: groupsToText(full.admin_groups),
+            hr_groups: groupsToText(full.hr_groups),
+            hr_admin_groups: groupsToText(full.hr_admin_groups),
+          });
         }
         setTtl(data.approval_ttl_days);
         setPaperRequired(data.require_paper_signature);
@@ -647,6 +762,11 @@ export function AdminSettings(props: AdminSettingsProps) {
           // Расписания регламентов: null — «не настроено» (хранится в settings).
           schedule_enterprises_sync: scheduleEnterprises,
           schedule_ad_links_sync: scheduleAdLinks,
+          // Группы входа и ролей: текст → список; пустое поле → null (сброс ключа).
+          access_groups: groupsFromText(accessRoles.access_groups),
+          admin_groups: groupsFromText(accessRoles.admin_groups),
+          hr_groups: groupsFromText(accessRoles.hr_groups),
+          hr_admin_groups: groupsFromText(accessRoles.hr_admin_groups),
         };
         const result = await saveSettings(full);
         setSaved(
@@ -1133,6 +1253,10 @@ export function AdminSettings(props: AdminSettingsProps) {
             />
           </fieldset>
         </>
+      )}
+
+      {activeTab === "Доступ и роли" && isAdmin && (
+        <AccessRolesEditor value={accessRoles} onChange={setAccessRoles} />
       )}
 
       <div className="sed-toolbar" style={{ marginTop: 12 }}>

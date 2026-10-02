@@ -2,15 +2,17 @@
 /* Тёмная тема — задел (переопределение тех же переменных). */
 :root,
 [data-theme="light"] {
-  --sed-bg: #f2f6fc;
+  --sed-bg: #eef2f7;
   --sed-surface: #ffffff;
   --sed-surface-2: #eaf1fa;
-  --sed-border: #c9d8ee;
-  --sed-text: #16283f;
+  --sed-border: #b9cbe4;
+  --sed-text: #1a2a44;
   --sed-text-muted: #5b7191;
   --sed-primary: #1a56ac;
   --sed-primary-hover: #144583;
   --sed-primary-soft: #dbe8fb;
+  /* Подпись на заливке primary: в тёмной теме primary светлый — подпись тёмная. */
+  --sed-primary-contrast: #ffffff;
   --sed-accent: #2f80ed;
   --sed-danger: #b3261e;
   --sed-radius: 6px;
@@ -24,10 +26,11 @@
   --sed-table-head-text: #ffffff;
   /* Контрастный к поверхности верхней полосы: подписи её кнопок. */
   --sed-on-primary: #1a56ac;
-  /* Подписи вкладок: на синем градиенте — светлые. Активная — затемняющая
-     подложка, иначе белый текст на осветлённом синем нечитаем. */
+  /* Подписи вкладок: на синем градиенте — светлые. Подложки вкладок-модулей —
+     полупрозрачный белый «чип» макета; активная вкладка светлее. */
   --sed-tab-text: #ffffff;
-  --sed-tab-active-bg: rgba(0, 0, 0, 0.18);
+  --sed-tab-bg: rgba(255, 255, 255, 0.12);
+  --sed-tab-active-bg: rgba(255, 255, 255, 0.32);
 }
 
 /* Задел под тёмную тему: те же имена переменных, другие значения. */
@@ -41,6 +44,7 @@
   --sed-primary: #7aa9ee;
   --sed-primary-hover: #9cc0f3;
   --sed-primary-soft: #24466f;
+  --sed-primary-contrast: #0f1b2d;
   --sed-accent: #7aa9ee;
   --sed-danger: #f2a5a0;
   /* Тёмная тема: те же места, что плоскости (градиенты запрещены). */
@@ -51,6 +55,8 @@
   --sed-table-head-text: #9db1cc;
   --sed-on-primary: #e3ecf8;
   --sed-tab-text: #9db1cc;
+  /* Вкладки в тёмной теме плоские: подложки-«чипа» нет (DESIGN.md п.1.9). */
+  --sed-tab-bg: transparent;
   --sed-tab-active-bg: #24466f;
 }
 
@@ -89,6 +95,24 @@ a {
   font-weight: 600;
 }
 
+/* Логотип шапки — как .logo макета: цвет primary, без переносов. */
+.sed-logo {
+  font-weight: 800;
+  color: var(--sed-primary);
+  white-space: nowrap;
+}
+
+/* Распорка шапки: прижимает кнопки к правому краю (flex:1 в макете). */
+.sed-header__spacer {
+  flex: 1;
+}
+
+/* Примечание в шапке — в строку, без вертикального отступа. */
+.sed-header .sed-note {
+  margin-top: 0;
+  font-size: 12px;
+}
+
 /* Навигация-модули: светлая тема — синий градиент, тёмная — плоская панель. */
 .sed-tabs {
   display: flex;
@@ -108,12 +132,21 @@ a {
 
 .sed-tab {
   border: none;
-  background: transparent;
+  background: var(--sed-tab-bg);
   color: var(--sed-tab-text);
   padding: 8px 10px;
+  min-width: 92px;
+  text-align: center;
+  line-height: 1.2;
   cursor: pointer;
   border-radius: 6px;
   white-space: nowrap;
+}
+
+/* Иконка-модуль отдельной строкой над подписью (подпись остаётся текстом кнопки). */
+.sed-tab__icon {
+  display: block;
+  font-size: 14px;
 }
 
 .sed-tab--active {
@@ -144,7 +177,7 @@ a {
   border: none;
   background: transparent;
   color: var(--sed-text);
-  padding: 8px 10px;
+  padding: 4px 6px;
   border-radius: 6px;
   cursor: pointer;
   text-align: left;
@@ -190,7 +223,7 @@ a {
 .sed-btn {
   border: 1px solid var(--sed-primary);
   background: var(--sed-primary);
-  color: #fff;
+  color: var(--sed-primary-contrast);
   border-radius: 4px;
   padding: 6px 12px;
   cursor: pointer;
@@ -199,6 +232,20 @@ a {
 .sed-btn--ghost {
   background: transparent;
   color: var(--sed-primary);
+}
+
+/* Нейтральная кнопка макета (.btn): панельная заливка, обычная рамка. */
+.sed-btn--neutral {
+  background: var(--sed-panel);
+  border-color: var(--sed-border);
+  color: var(--sed-text);
+}
+
+/* Опасное действие: рамка и подпись цветом опасности, без заливки. */
+.sed-btn--danger {
+  background: transparent;
+  border-color: var(--sed-danger);
+  color: var(--sed-danger);
 }
 
 /* Кнопки верхней полосы: обводка и подпись контрастом к поверхности. */
@@ -214,6 +261,33 @@ a {
 .sed-btn--ghost:hover,
 .sed-btn--on-surface:hover {
   background: var(--sed-primary-soft);
+}
+
+.sed-btn--neutral:hover {
+  background: var(--sed-surface-2);
+  border-color: var(--sed-primary);
+  color: var(--sed-primary);
+}
+
+.sed-btn--danger:hover {
+  background: var(--sed-danger);
+  color: var(--sed-surface);
+}
+
+/* Иконочная кнопка тулбара (как .ibtn макета): квадрат 32×32 с заливкой primary. */
+.sed-ibtn {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid var(--sed-border);
+  border-radius: 4px;
+  background: var(--sed-primary);
+  color: var(--sed-primary-contrast);
+  cursor: pointer;
+}
+
+.sed-ibtn:hover {
+  background: var(--sed-primary-hover);
 }
 
 /* Фильтры справочника и списка заявок (сами блоки — вне этого модуля). */
@@ -272,7 +346,7 @@ a {
 .sed-table th,
 .sed-table td {
   border-bottom: 1px solid var(--sed-border);
-  padding: 8px;
+  padding: 7px 8px;
   text-align: left;
   vertical-align: top;
 }
@@ -282,13 +356,222 @@ a {
   background-color: var(--sed-table-head-fallback);
   color: var(--sed-table-head-text);
   font-weight: 600;
+  font-size: 12px;
 }
 
 .sed-table tbody tr:nth-child(even) td {
   background: var(--sed-panel);
 }
 
+/* Кликабельная таблица (список заявок): курсор на строке. */
+.sed-table--clickable tbody tr {
+  cursor: pointer;
+}
+
+/* Кнопка сортировки в заголовке: без рамки и заливки, наследует шрифт th. */
+.sed-th-sort {
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  padding: 0;
+  cursor: pointer;
+}
+
+/* Рег.номер заявки — подпись акцентом, как ссылка макета (переход — клик по строке). */
+.sed-regnum {
+  color: var(--sed-accent);
+  cursor: pointer;
+}
+
 .sed-note {
   color: var(--sed-text-muted);
   margin-top: 12px;
+}
+
+/* Общие классы форм и панелей — объявлены здесь (владелец theme.css), применяют
+   зоны карточки/создания, справочника и настроек. Только токены темы. */
+
+/* Двухпанельная сетка формы (как .panels макета). */
+.sed-panels {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin: 12px 0;
+  background: var(--sed-surface);
+  border: 1px solid var(--sed-border);
+  border-radius: var(--sed-radius);
+  padding: 10px;
+}
+
+/* Панель внутри сетки (как .panel макета); в карточке — блок оболочки без своих отступов. */
+.sed-panel {
+  background: var(--sed-panel);
+  border: 1px solid var(--sed-border);
+  border-radius: 4px;
+  padding: 10px;
+  margin: 0;
+}
+
+/* Секция на <fieldset>: рамка и отступы как у панели. */
+.sed-fieldset {
+  border: 1px solid var(--sed-border);
+  border-radius: var(--sed-radius);
+  padding: 10px;
+}
+
+/* Подпись поля (label макета): блоком с отступами; поля не растягиваются по
+   ширине — иначе ломаются строки-флексы. */
+.sed-field {
+  display: block;
+  margin: 8px 0 2px;
+}
+
+.sed-field input,
+.sed-field select,
+.sed-field textarea {
+  border: 1px solid var(--sed-border);
+  border-radius: 4px;
+  padding: 5px 8px;
+  background: var(--sed-surface);
+  color: var(--sed-text);
+}
+
+/* Метаданные заявки: значения данных, а не примечание. */
+.sed-meta {
+  color: var(--sed-text);
+  font-size: 12px;
+}
+
+/* Выпадающий список подсказок поиска (сотрудник/группа AD). */
+.sed-dropdown {
+  position: absolute;
+  z-index: 10;
+  left: 0;
+  right: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--sed-border);
+  background: var(--sed-surface);
+  color: var(--sed-text);
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+/* Пункт внутри выпадающего списка: без браузерных отступов. */
+.sed-dropdown li {
+  margin: 0;
+}
+
+.sed-dropdown__item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  color: var(--sed-text);
+  padding: 4px;
+  cursor: pointer;
+}
+
+.sed-dropdown__item:hover {
+  background: var(--sed-primary-soft);
+}
+
+/* Утилитарные классы форм (создание/карточка): единичные отступы, позиционирование
+   и мелкая типографика — только токены темы, без инлайн-стилей. */
+
+/* Отступ сверху: перекрывают margin-top базовых классов (объявлены после них). */
+.sed-mt-4 { margin-top: 4px; }
+.sed-mt-6 { margin-top: 6px; }
+.sed-mt-8 { margin-top: 8px; }
+.sed-mt-12 { margin-top: 12px; }
+
+/* Отступ слева (кнопка после текста строки). */
+.sed-ml-8 { margin-left: 8px; }
+
+/* Контекст позиционирования выпадающего списка (родитель .sed-dropdown). */
+.sed-rel { position: relative; }
+
+/* Строка внутри блока: блоком с отступом сверху (справочные данные из 1С). */
+.sed-block { display: block; margin-top: 8px; }
+
+/* Список-колонка с отступом слева (состав группы, исполнители, кандидаты AD). */
+.sed-list { margin: 8px 0; padding-left: 20px; }
+
+/* Подпись под заголовком кандидата поиска: мельче и приглушённая. */
+.sed-sub { font-size: 0.85em; opacity: 0.7; }
+
+/* Карточка сотрудника: по центру; рамку даёт оболочка окна (.sed-content). */
+.sed-card { max-width: 760px; margin: 0 auto; }
+.sed-card h3 { margin: 0; }
+
+/* Колонка блоков карточки: по вертикали с промежутком. */
+.sed-stack { display: flex; flex-direction: column; gap: 20px; margin-top: 20px; }
+
+/* Строка «поле — значение» в блоке карточки. */
+.sed-datarow {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--sed-border);
+}
+
+/* Подпись строки «поле — значение»: приглушённая, без переносов. */
+.sed-datarow__label {
+  color: var(--sed-text-muted);
+  white-space: nowrap;
+}
+
+/* Подпись блока-панели карточки (legend). */
+.sed-panel__legend {
+  padding: 0 6px;
+  font-weight: 600;
+}
+
+/* Две колонки контактных данных (1С и AD). */
+.sed-colgrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+}
+
+/* Заголовок колонки контактов. */
+.sed-col-title {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+/* Строка действия с примечанием в одну линию с переносом (привязка). */
+.sed-actionrow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+/* Экран входа (login-screen.tsx): карточка по центру. */
+.sed-login {
+  max-width: 380px;
+  margin: 48px auto;
+  background: var(--sed-surface);
+  border: 1px solid var(--sed-border);
+  border-radius: var(--sed-radius);
+  padding: 24px;
+}
+
+.sed-login label {
+  display: block;
+  margin: 8px 0 2px;
+}
+
+.sed-login input {
+  width: 100%;
+  border: 1px solid var(--sed-border);
+  border-radius: 4px;
+  padding: 5px 8px;
+  background: var(--sed-surface);
+  color: var(--sed-text);
 }

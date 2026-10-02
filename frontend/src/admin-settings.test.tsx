@@ -57,6 +57,11 @@ const settings: SettingsData = {
     recipients: ["adm.petrov@example.com"],
   },
   schedule_ad_links_sync: null,
+  // Группы входа и ролей (списки, как в GET /settings) — вымышленные значения теста.
+  access_groups: ["TEST_VKHOD", "TEST_VKHOD_2"],
+  admin_groups: ["TEST_ADMINS"],
+  hr_groups: ["TEST_OK"],
+  hr_admin_groups: ["TEST_RUK_OK"],
 };
 
 // Контентная часть (как отдаёт GET /api/settings/content для руководителя ОК).
@@ -81,6 +86,11 @@ const contentOnly: SettingsData = {
   mail_templates: [],
   onec_bases: [],
   onec_enterprises_synced_at: null,
+  // Групп входа и ролей у руководителя ОК нет: ключи инфра-раздела (только админ).
+  access_groups: null,
+  admin_groups: null,
+  hr_groups: null,
+  hr_admin_groups: null,
 };
 
 beforeEach(() => {
@@ -434,5 +444,52 @@ describe("AdminSettings", () => {
     await waitFor(() => expect(screen.getByLabelText("TTL отметок")).toBeInTheDocument());
 
     expect(screen.queryByRole("button", { name: "Регламенты" })).not.toBeInTheDocument();
+  });
+
+  // Админ: вкладка «Доступ и роли» видна только админу; списки из GET /settings
+  // склеиваются в текст формы, правка уходит в общий PUT /settings списком.
+  it("админ правит группы входа и роли и сохраняет через PUT", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+    vi.mocked(saveSettings).mockImplementation(async (data: SettingsData) => data);
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Доступ и роли" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Доступ и роли" }));
+    await waitFor(() => expect(screen.getByLabelText("Группы для входа")).toBeInTheDocument());
+
+    // Загрузка: список групп из GET показан одной строкой через запятую.
+    expect(screen.getByLabelText("Группы для входа")).toHaveValue("TEST_VKHOD, TEST_VKHOD_2");
+    expect(screen.getByLabelText("Группы администраторов")).toHaveValue("TEST_ADMINS");
+    expect(screen.getByLabelText("Группы сотрудников ОК")).toHaveValue("TEST_OK");
+    expect(screen.getByLabelText("Группы руководителей ОК")).toHaveValue("TEST_RUK_OK");
+
+    // Сохранение: текст режется на список (trim, пустые отброшены), пустой ввод →
+    // null (сброс ключа в БД, фолбэк env).
+    fireEvent.change(screen.getByLabelText("Группы администраторов"), {
+      target: { value: "TEST_ADMINS, TEST_ADMINS_2 ,, " },
+    });
+    fireEvent.change(screen.getByLabelText("Группы для входа"), { target: { value: "" } });
+    fireEvent.click(screen.getByText("Сохранить"));
+
+    await waitFor(() => expect(screen.getByRole("status")).toBeInTheDocument());
+    expect(saveSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        access_groups: null,
+        admin_groups: ["TEST_ADMINS", "TEST_ADMINS_2"],
+        hr_groups: ["TEST_OK"],
+        hr_admin_groups: ["TEST_RUK_OK"],
+      }),
+    );
+    expect(saveSettingsContent).not.toHaveBeenCalled();
+  });
+
+  // Руководитель ОК: вкладки «Доступ и роли» нет (группы ролей правит админ).
+  it("руководитель ОК не видит вкладку Доступ и роли", async () => {
+    vi.mocked(getSettingsContent).mockResolvedValue(contentOnly);
+
+    render(<AdminSettings role="hr_admin" />);
+    await waitFor(() => expect(screen.getByLabelText("TTL отметок")).toBeInTheDocument());
+
+    expect(screen.queryByRole("button", { name: "Доступ и роли" })).not.toBeInTheDocument();
   });
 });

@@ -145,6 +145,16 @@ export interface SettingsData {
   schedule_enterprises_sync?: ScheduleReglament | null;
   // Расписание автосвязки 1С↔AD (schedule_ad_links_sync).
   schedule_ad_links_sync?: ScheduleReglament | null;
+  // Группы AD, которым разрешён вход (access_groups): список (JSON-массив).
+  // null — ключа нет в БД, сервер берёт значение из env (фолбэк).
+  access_groups: string[] | null;
+  // Группы AD роли «Админ» (admin_groups): список; GET отдаёт эффективное
+  // значение (из БД, иначе фолбэк env ADMIN_GROUPS) — отсортированным.
+  admin_groups: string[] | null;
+  // Группы AD роли «ОК» (hr_groups): список; GET — эффективное значение.
+  hr_groups: string[] | null;
+  // Группы AD роли «Руководитель ОК» (hr_admin_groups): список; GET — эффективное.
+  hr_admin_groups: string[] | null;
 }
 
 // Контент-настройки (GET/PUT /api/settings/content): контент-ключи для

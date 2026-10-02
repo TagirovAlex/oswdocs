@@ -7,9 +7,10 @@
 #   TTL — SESSION_TTL_MINUTES из настроек (дефолт 20, README п.5: 15–20 мин).
 #   Пароль проверяется bind'ом пользователя по DN (шлюз Ldap3Gateway с bind_user
 #   добавляет агент A1 в ad_reader.py), сам пароль нигде не хранится.
-#   Роль — существующий _detect_role из deps (admin > hr_admin > hr > owner); разрешенные
-#   группы — из настроек (is_group_allowed). AD недоступен -> 503, неверные
-#   данные/нет разрешенных групп -> 401.
+#   Роль — существующий _detect_role из deps (admin > hr_admin > hr > owner);
+#   группы ролей — из settings БД с фолбэком на env. Вход дают env
+#   ALLOWED_AD_GROUPS плюс инфра-ключ access_groups из settings БД. AD
+#   недоступен -> 503, неверные данные/нет входных групп -> 401.
 
 from __future__ import annotations
 
@@ -236,8 +237,9 @@ class LdapAuthService:
 
     Пароль проверяется bind'ом пользователя по DN (шлюз с bind_user добавит A1),
     пароль нигде не хранится. Роль — существующий _detect_role (admin > hr_admin > hr
-    > owner), разрешенные группы — из настроек. AD недоступен -> 503, неверные
-    данные/нет групп -> 401.
+    > owner) по группам ролей из БД (фолбэк env), вход — по env ALLOWED_AD_GROUPS
+    плюс access_groups из БД. AD недоступен -> 503, неверные данные/нет входных
+    групп -> 401.
     """
 
     def __init__(
@@ -278,7 +280,9 @@ class LdapAuthService:
             raise AdUnavailable(f"AD недоступен (bind пароля): {exc}") from exc
         if not ok:
             raise AuthFailed("Неверные данные")
-        if not self._has_allowed_group(ad_user):
+        # Хранилище настроек читается один раз: группы входа и группы ролей.
+        store = self._settings_store()
+        if not self._has_allowed_group(ad_user, store):
             raise AuthFailed("Нет доступа: пользователь не входит в разрешенные группы")
         groups = [group_cn(dn) for dn in ad_user.member_of]
         user = CurrentUser(
@@ -288,7 +292,7 @@ class LdapAuthService:
             department=ad_user.department,
             title=ad_user.title,
             groups=groups,
-            role=_detect_role(groups, self._settings),
+            role=_detect_role(groups, self._settings, store),
         )
         token = secrets.token_urlsafe(32)
         self._sessions.set(token, user, self._session_ttl_seconds())
@@ -300,17 +304,30 @@ class LdapAuthService:
     def logout(self, token: str) -> None:
         self._sessions.delete(token)
 
-    def _has_allowed_group(self, ad_user: AdUser) -> bool:
-        """Есть ли хоть одна разрешённая группа: env + список allowed_ad_groups
-        из настроек БД + префикс групп владельцев шагов. Набор считаем один раз
-        (одно чтение настроек), БД недоступна — фолбэк на env (вход не валим)."""
-        from .settings_routes import DbSettingsStore, resolve_allowed_groups
+    def _settings_store(self):
+        """DbSettingsStore для чтения групп входа/групп ролей из БД.
 
-        store = None
+        None — хранилище не создаётся: вход и роли считаются по env (фолбэк,
+        вход не валим)."""
         try:
-            store = DbSettingsStore(self._settings.DATABASE_URL)
+            from .settings_routes import DbSettingsStore
+
+            return DbSettingsStore(self._settings.DATABASE_URL)
         except Exception:
-            store = None
+            return None
+
+    def _has_allowed_group(self, ad_user: AdUser, store=None) -> bool:
+        """Есть ли хоть одна группа, дающая вход: env (bootstrap) + инфра-ключ
+        access_groups из настроек БД + префикс групп владельцев шагов. Набор
+        считаем один раз (одно чтение настроек), БД недоступна — фолбэк на env.
+
+        store=None — боевое хранилище создаётся внутри (как раньше).
+        Контент-ключ allowed_ad_groups входа НЕ даёт (группы конструктора шагов).
+        """
+        if store is None:
+            store = self._settings_store()
+        from .settings_routes import resolve_allowed_groups
+
         allowed = resolve_allowed_groups(self._settings, store)
         prefix = self._settings.STEP_GROUP_PREFIX
 

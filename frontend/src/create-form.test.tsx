@@ -5,7 +5,7 @@
 // requests-client мокается (как в admin-settings.test.tsx).
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ApiHttpError } from "./auth-client";
+import { ApiHttpError, me } from "./auth-client";
 import { CreateForm } from "./create-form";
 import { createRequest, getAdGroupMembers, getEmployeeCard, getEnterprises, getStepGroups, searchAd, searchEmployees, submitRequest } from "./requests-client";
 import type { AdGroupMember } from "./requests-client";
@@ -24,6 +24,12 @@ vi.mock("./requests-client", async (importOriginal) => {
     createRequest: vi.fn(),
     submitRequest: vi.fn(),
   };
+});
+
+// Мок сессии: правой панели нужен инициатор (me), остальное — реальное.
+vi.mock("./auth-client", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./auth-client")>();
+  return { ...actual, me: vi.fn() };
 });
 
 // Предприятия из настроек (код — значение, название — подпись).
@@ -63,6 +69,13 @@ beforeEach(() => {
   vi.mocked(getAdGroupMembers).mockReset();
   vi.mocked(createRequest).mockReset();
   vi.mocked(submitRequest).mockReset();
+  vi.mocked(me).mockReset();
+  vi.mocked(me).mockResolvedValue({
+    sam: "petrov.pp",
+    fio: "Петров Пётр Петрович",
+    groups: ["SED_HR"],
+    role: "hr",
+  });
   vi.mocked(getEnterprises).mockResolvedValue(enterprises);
   vi.mocked(getStepGroups).mockResolvedValue(stepGroups);
   vi.mocked(getAdGroupMembers).mockResolvedValue([groupMember]);
@@ -86,7 +99,7 @@ async function fillEmployeeManually(): Promise<void> {
 
 // Добавление исполнителя из AD в первый блок конструктора маршрута.
 async function addAdExecutor(): Promise<void> {
-  fireEvent.click(screen.getByText("Добавить блок"));
+  fireEvent.click(screen.getByText("Добавить последовательный блок"));
   fireEvent.click(screen.getByText("Добавить исполнителя"));
   fireEvent.change(screen.getByLabelText("Поиск в AD"), { target: { value: "Петров" } });
   await waitFor(() => expect(screen.getByText("Петров Пётр Петрович")).toBeInTheDocument());
@@ -265,7 +278,7 @@ describe("CreateForm", () => {
     // Пока нет блоков/исполнителей — «Создать» недоступен.
     expect(screen.getByText("Создать")).toBeDisabled();
 
-    fireEvent.click(screen.getByText("Добавить блок"));
+    fireEvent.click(screen.getByText("Добавить последовательный блок"));
     expect(screen.getByText("Блок 1")).toBeInTheDocument();
     expect(screen.getByText("Создать")).toBeDisabled();
 
@@ -295,6 +308,30 @@ describe("CreateForm", () => {
     // Блоки сотрудника и маршрута не видны, пока не выбрано предприятие.
     expect(screen.queryByLabelText("Поиск сотрудника")).not.toBeInTheDocument();
     expect(screen.queryByText("Маршрут согласования")).not.toBeInTheDocument();
+  });
+
+  // Шапка формы макета: этап/статус; правая панель: инициатор из сессии, read-only.
+  it("показывает этап/статус и инициатора из сессии (только чтение)", async () => {
+    render(<CreateForm role="hr" />);
+    expect(screen.getByText("Этап: создание заявки · Статус: черновик")).toBeInTheDocument();
+    const initiator = await screen.findByLabelText("Инициатор");
+    await waitFor(() => expect(initiator).toHaveValue("Петров Пётр Петрович"));
+    expect(initiator).toHaveAttribute("readonly");
+  });
+
+  // Конструктор блоков — таблица «Рассмотрение»; ссылки задают режим блока.
+  it("ссылки добавляют последовательный и параллельный блоки в таблицу «Рассмотрение»", async () => {
+    vi.mocked(searchEmployees).mockRejectedValue(new ApiHttpError(503, "Клиент 1С не настроен"));
+
+    render(<CreateForm role="hr" />);
+    await fillEmployeeManually();
+    expect(screen.queryByText("Вид рассмотрения")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("Добавить последовательный блок"));
+    fireEvent.click(screen.getByText("Добавить параллельный блок"));
+    expect(screen.getByText("Вид рассмотрения")).toBeInTheDocument();
+    expect(screen.getByLabelText("Режим блока 1")).toHaveValue("sequential");
+    expect(screen.getByLabelText("Режим блока 2")).toHaveValue("parallel");
   });
 
   // Админ тоже может создавать (роль admin, как в API _is_hr).
@@ -566,7 +603,7 @@ describe("CreateForm", () => {
 
     render(<CreateForm role="hr" />);
     await fillEmployeeManually();
-    fireEvent.click(screen.getByText("Добавить блок"));
+    fireEvent.click(screen.getByText("Добавить последовательный блок"));
 
     // Тип исполнителя блока: по умолчанию сотрудник, есть вариант «Группа».
     const kind = screen.getByLabelText("Тип исполнителя блока 1");
@@ -626,7 +663,7 @@ describe("CreateForm", () => {
     await fillEmployeeManually();
 
     // Блок 1 — группа SED_STEP_BUH.
-    fireEvent.click(screen.getByText("Добавить блок"));
+    fireEvent.click(screen.getByText("Добавить последовательный блок"));
     fireEvent.change(screen.getByLabelText("Тип исполнителя блока 1"), { target: { value: "group" } });
     await waitFor(() => expect(screen.getByLabelText("Группа блока 1")).toBeInTheDocument());
     fireEvent.change(screen.getByLabelText("Группа блока 1"), { target: { value: "SED_STEP_BUH" } });
@@ -635,7 +672,7 @@ describe("CreateForm", () => {
     expect(screen.getByText(/Сидорова Анна Сергеевна/)).toBeInTheDocument();
 
     // Блок 2 — группа SED_STEP_OK со своим составом.
-    fireEvent.click(screen.getByText("Добавить блок"));
+    fireEvent.click(screen.getByText("Добавить последовательный блок"));
     const groupKind2 = screen.getByLabelText("Тип исполнителя блока 2");
     fireEvent.change(groupKind2, { target: { value: "group" } });
     await waitFor(() => expect(screen.getByLabelText("Группа блока 2")).toBeInTheDocument());
@@ -674,7 +711,7 @@ describe("CreateForm", () => {
     await fillEmployeeManually();
 
     // Блок 1 — группа SED_STEP_BUH (состав из AD загрузился).
-    fireEvent.click(screen.getByText("Добавить блок"));
+    fireEvent.click(screen.getByText("Добавить последовательный блок"));
     fireEvent.change(screen.getByLabelText("Тип исполнителя блока 1"), { target: { value: "group" } });
     await waitFor(() => expect(screen.getByLabelText("Группа блока 1")).toBeInTheDocument());
     fireEvent.change(screen.getByLabelText("Группа блока 1"), { target: { value: "SED_STEP_BUH" } });
@@ -683,7 +720,7 @@ describe("CreateForm", () => {
     );
 
     // Блок 2 — группа SED_STEP_OK со своим составом.
-    fireEvent.click(screen.getByText("Добавить блок"));
+    fireEvent.click(screen.getByText("Добавить последовательный блок"));
     fireEvent.change(screen.getByLabelText("Тип исполнителя блока 2"), { target: { value: "group" } });
     await waitFor(() => expect(screen.getByLabelText("Группа блока 2")).toBeInTheDocument());
     fireEvent.change(screen.getByLabelText("Группа блока 2"), { target: { value: "SED_STEP_OK" } });
@@ -734,7 +771,7 @@ describe("CreateForm", () => {
 
     render(<CreateForm role="hr" />);
     await fillEmployeeManually();
-    fireEvent.click(screen.getByText("Добавить блок"));
+    fireEvent.click(screen.getByText("Добавить последовательный блок"));
     fireEvent.change(screen.getByLabelText("Тип исполнителя блока 1"), { target: { value: "group" } });
     await waitFor(() => expect(screen.getByLabelText("Группа блока 1")).toBeInTheDocument());
 
@@ -762,7 +799,7 @@ describe("CreateForm", () => {
 
     render(<CreateForm role="hr" />);
     await fillEmployeeManually();
-    fireEvent.click(screen.getByText("Добавить блок"));
+    fireEvent.click(screen.getByText("Добавить последовательный блок"));
     fireEvent.change(screen.getByLabelText("Тип исполнителя блока 1"), {
       target: { value: "group" },
     });
@@ -786,7 +823,7 @@ describe("CreateForm", () => {
     await fillEmployeeManually();
     await waitFor(() => expect(screen.getByText(/Доступ запрещён/)).toBeInTheDocument());
     // Персональный сценарий конструктора продолжает работать.
-    fireEvent.click(screen.getByText("Добавить блок"));
+    fireEvent.click(screen.getByText("Добавить последовательный блок"));
     fireEvent.click(screen.getByText("Добавить исполнителя"));
     expect(screen.getByLabelText("Поиск в AD")).toBeInTheDocument();
   });

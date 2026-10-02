@@ -35,6 +35,12 @@ class SettingsUnavailable(Exception):
 # параметры релея из settings; пароль маскируется в GET и пишется только при вводе).
 # Фаза 2: ключи разделены на КОНТЕНТ (руководитель ОК + админ) и ИНФРА (только админ);
 # SETTINGS_KEYS — полный набор (контент + инфра).
+# Группы доступа: access_groups (инфра, правит ТОЛЬКО admin) — AD-группы, дающие
+# вход в систему (дополняют env ALLOWED_AD_GROUPS); allowed_ad_groups остаётся
+# контент-ключом (правит руководитель ОК) — это группы ручного конструктора
+# шагов (GET /step-groups), входа они НЕ расширяют. Ключи ролей
+# admin_groups/hr_groups/hr_admin_groups (инфра) — группы ролей из БД с
+# фолбэком на env (ADMIN_GROUPS/HR_GROUPS/HR_ADMIN_GROUPS).
 CONTENT_KEYS: tuple[str, ...] = (
     "approval_ttl_days",
     "require_comment",
@@ -49,6 +55,10 @@ CONTENT_KEYS: tuple[str, ...] = (
 )
 
 INFRA_KEYS: tuple[str, ...] = (
+    "access_groups",
+    "admin_groups",
+    "hr_groups",
+    "hr_admin_groups",
     "session_ttl_minutes",
     "scan_retention_days",
     "scan_max_mb",
@@ -69,6 +79,10 @@ INFRA_KEYS: tuple[str, ...] = (
 # и ad_links_synced_at читаются GET /settings (read-only, пишут только
 # синхронизации) — в SettingsPayload их НЕТ, админ изменить не может.
 SETTINGS_KEYS: tuple[str, ...] = CONTENT_KEYS + INFRA_KEYS
+
+# Ключи групп ролей: значение из БД — единственный источник, ключа нет или БД
+# недоступна — env (аддитивно к DbSettingsStore, контракт не меняем).
+ROLE_GROUP_KEYS: tuple[str, ...] = ("admin_groups", "hr_groups", "hr_admin_groups")
 
 # Маска пароля SMTP в GET /settings: наружу отдаём только признак «задан/не задан»,
 # само значение — только запись (PUT) при явном вводе нового пароля.
@@ -142,44 +156,96 @@ def read_setting_value(store: DbSettingsStore, key: str) -> object:
     return _from_stored(store.get(key))
 
 
+def _clean_groups(raw: object) -> set[str]:
+    """Список AD-групп из значения настройки: только непустые строки без
+    пробелов вокруг (json-массив; битые элементы отбрасываются)."""
+    if not isinstance(raw, list):
+        return set()
+    return {item.strip() for item in raw if isinstance(item, str) and item.strip()}
+
+
 def resolve_allowed_groups(
     settings: Settings, store: DbSettingsStore | None = None
 ) -> set[str]:
-    """Разрешённые AD-группы: объединение env-набора (settings.allowed_groups)
-    и списка allowed_ad_groups из настроек БД (его правит админ).
+    """Группы, дающие ВХОД в систему: объединение env-набора
+    (settings.allowed_groups — ALLOWED_AD_GROUPS плюс bootstrap-группы ролей)
+    и инфра-ключа access_groups из настроек БД (его правит только админ).
 
-    Источник прикладного списка — настройки; env остаётся фолбэком. БД
-    недоступна — только env: вход/доступ не валим (как session_ttl в auth).
+    Контент-ключ allowed_ad_groups входа НЕ расширяет — это группы ручного
+    конструктора шагов (см. resolve_step_groups). БД недоступна — только env:
+    вход/доступ не валим (как session_ttl в auth).
     """
     allowed = set(settings.allowed_groups)
     if store is None:
         return allowed
     try:
-        raw = read_setting_value(store, "allowed_ad_groups")
+        raw = read_setting_value(store, "access_groups")
     except SettingsUnavailable:
         return allowed
-    if isinstance(raw, list):
-        allowed |= {
-            item.strip()
-            for item in raw
-            if isinstance(item, str) and item.strip()
-        }
-    return allowed
+    return allowed | _clean_groups(raw)
+
+
+def resolve_step_groups(
+    settings: Settings, store: DbSettingsStore | None = None
+) -> set[str]:
+    """Группы ручного конструктора шагов: контент-ключ allowed_ad_groups из БД
+    (его правит руководитель ОК) плюс env-набор как bootstrap.
+
+    БД недоступна — только env: просмотр состава группы не валим.
+    """
+    groups = set(settings.allowed_groups)
+    if store is None:
+        return groups
+    try:
+        raw = read_setting_value(store, "allowed_ad_groups")
+    except SettingsUnavailable:
+        return groups
+    return groups | _clean_groups(raw)
+
+
+def resolve_role_groups(
+    settings: Settings, store: DbSettingsStore | None = None
+) -> dict[str, set[str]]:
+    """Группы ролей из настроек БД с фолбэком на env.
+
+    Правило приоритета: значение ключа в БД есть — используем ТОЛЬКО его (env
+    не дополняет, иначе отзыв группы админом в БД не действовал бы); ключа нет
+    либо БД недоступна/не поддерживает чтение — env (ADMIN_GROUPS/HR_GROUPS/
+    HR_ADMIN_GROUPS). Одно чтение БД на все три ключа; значение не-массив
+    считаем отсутствующим (фолбэк на env).
+    """
+    groups: dict[str, set[str]] = {
+        "admin_groups": set(settings.admin_groups),
+        "hr_groups": set(settings.hr_groups),
+        "hr_admin_groups": set(settings.hr_admin_groups),
+    }
+    if store is None:
+        return groups
+    try:
+        raw = store.get_many(ROLE_GROUP_KEYS)
+    except (SettingsUnavailable, AttributeError, TypeError):
+        return groups
+    for key in ROLE_GROUP_KEYS:
+        value = _from_stored(raw.get(key))
+        if isinstance(value, list):
+            groups[key] = _clean_groups(value)
+    return groups
 
 
 def is_group_allowed_with_settings(
     settings: Settings, store: DbSettingsStore | None, group: str
 ) -> bool:
-    """Группа разрешена: в объединённом списке (env + settings БД) либо по
-    префиксу групп владельцев шагов STEP_GROUP_PREFIX.
+    """Группа доступна для конструктора шагов: в списке групп шагов
+    (env + контент-ключ allowed_ad_groups) либо по префиксу групп владельцев
+    шагов STEP_GROUP_PREFIX. Иначе группа входа в систему НЕ даёт.
 
-    Один вызов — одно чтение настроек; в цикле (auth) считай набор заранее
-    через resolve_allowed_groups.
+    Один вызов — одно чтение настроек; в цикле считай набор заранее
+    через resolve_step_groups.
     """
     name = (group or "").strip()
     if not name:
         return False
-    if name in resolve_allowed_groups(settings, store):
+    if name in resolve_step_groups(settings, store):
         return True
     return bool(settings.STEP_GROUP_PREFIX) and name.startswith(
         settings.STEP_GROUP_PREFIX
@@ -376,6 +442,23 @@ class SettingsPayload(BaseModel):
     session_ttl_minutes: int | None = Field(
         default=None, description="TTL сессии в минутах (10 ч = 600; иначе env SESSION_TTL_MINUTES)"
     )
+    access_groups: list[str] | None = Field(
+        default=None,
+        description=(
+            "AD-группы, дающие вход в систему (инфра-ключ, правит только админ; "
+            "дополняют env ALLOWED_AD_GROUPS)"
+        ),
+    )
+    admin_groups: list[str] | None = Field(
+        default=None, description="Группы администраторов (фолбэк — env ADMIN_GROUPS)"
+    )
+    hr_groups: list[str] | None = Field(
+        default=None, description="Группы ОК (фолбэк — env HR_GROUPS)"
+    )
+    hr_admin_groups: list[str] | None = Field(
+        default=None,
+        description="Группы руководителей ОК (фолбэк — env HR_ADMIN_GROUPS)",
+    )
     approval_ttl_days: int | None = Field(
         default=None, description="Срок отметки шага в днях"
     )
@@ -518,10 +601,29 @@ def _require_content_admin(user: CurrentUser) -> None:
         )
 
 
-def _settings_dict(store: DbSettingsStore) -> dict:
-    """Типизированный словарь настроек из хранилища (None — ключа нет в БД)."""
+def _effective_role_values(settings: Settings, values: dict) -> None:
+    """Эффективные значения ключей ролей в ответе GET/PUT /settings (на месте).
+
+    В БД значение есть — отдаём его (даже пустой список: админ снял все группы),
+    ключа нет — фолбэк на env (bootstrap). Порядок стабильный (сортировка).
+    """
+    env_fallback = resolve_role_groups(settings, None)
+    for key in ROLE_GROUP_KEYS:
+        stored = values.get(key)
+        if isinstance(stored, list):
+            values[key] = sorted(_clean_groups(stored))
+        else:
+            values[key] = sorted(env_fallback[key])
+
+
+def _settings_dict(store: DbSettingsStore, settings: Settings) -> dict:
+    """Типизированный словарь настроек из хранилища (None — ключа нет в БД).
+
+    Ключи групп ролей отдаются эффективными (БД, иначе env) — админ видит то,
+    что реально применяется; access_groups — как есть (нет ключа = None)."""
     raw = store.get_many(SETTINGS_KEYS)
     values = {key: _from_stored(raw.get(key)) for key in SETTINGS_KEYS}
+    _effective_role_values(settings, values)
     # Пароль SMTP наружу не отдаём: только признак «задан/не задан».
     values["smtp_password"] = _mask_smtp_password(values.get("smtp_password"))
     # Пароли баз 1С наружу не отдаём: маска/None (аналог smtp_password).
@@ -540,11 +642,14 @@ def _content_dict(store: DbSettingsStore) -> dict:
 def read_settings(
     user: CurrentUser = Depends(get_current_user),
     store: DbSettingsStore = Depends(get_settings_store),
+    settings: Settings = Depends(get_settings),
 ) -> dict:
-    """Прикладные настройки админки: только admin, иначе 403; БД недоступна — 503."""
+    """Прикладные настройки админки: только admin, иначе 403; БД недоступна — 503.
+
+    Группы ролей отдаются эффективными (значение из БД, иначе env)."""
     _require_admin(user)
     try:
-        values = _settings_dict(store)
+        values = _settings_dict(store, settings)
     except SettingsUnavailable as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
@@ -565,6 +670,7 @@ def update_settings(
     payload: SettingsPayload,
     user: CurrentUser = Depends(get_current_user),
     store: DbSettingsStore = Depends(get_settings_store),
+    settings: Settings = Depends(get_settings),
 ) -> dict:
     """Обновить настройки: только admin; все ключи опциональны (частичное
     обновление — пишутся только присутствующие), ответ — полное состояние."""
@@ -584,7 +690,7 @@ def update_settings(
             )
         stored = {key: _to_stored(value) for key, value in updates.items()}
         store.set_many(stored)
-        values = _settings_dict(store)
+        values = _settings_dict(store, settings)
     except SettingsUnavailable as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)

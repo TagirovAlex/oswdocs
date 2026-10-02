@@ -34,6 +34,14 @@ import { createUrl, openPopup, requestUrl } from "./windows";
 const TABS = ["Заявки", "Справочник", "Настройки"] as const;
 type Tab = (typeof TABS)[number];
 
+// Глифы иконок вкладок-модулей (макет). Выводятся отдельным узлом с
+// aria-hidden: подпись вкладки остаётся текстом кнопки.
+const TAB_ICONS: Record<Tab, string> = {
+  Заявки: "📄",
+  Справочник: "📖",
+  Настройки: "⚙",
+};
+
 // Заголовки сортируемых колонок: подпись → ключ сортировки (§3.8 хендоффа).
 const SORTABLE_COLUMNS: { label: string; key: RequestSortKey }[] = [
   { label: "№", key: "id" },
@@ -192,10 +200,12 @@ export function SedLayout(props: SedLayoutProps) {
     <div className="sed-shell">
       {/* Шапка: роль из сессии (без выбора), тема и выход. */}
       <header className="sed-header">
-        СЭД — Увольнение (скелет) · роль: {ROLE_LABELS[role]}
+        <span className="sed-logo">СЭД — Увольнение (скелет)</span>
+        <span className="sed-note">· роль: {ROLE_LABELS[role]}</span>
+        <span className="sed-header__spacer" />
         <button
           type="button"
-          className="sed-btn sed-btn--ghost sed-btn--on-surface"
+          className="sed-btn sed-btn--neutral"
           onClick={() => setTheme(theme === "light" ? "dark" : "light")}
           title="Задел тёмной темы"
         >
@@ -203,7 +213,7 @@ export function SedLayout(props: SedLayoutProps) {
         </button>
         <button
           type="button"
-          className="sed-btn sed-btn--ghost sed-btn--on-surface"
+          className="sed-btn sed-btn--neutral"
           onClick={onLogout}
           title="Выход из системы"
         >
@@ -220,6 +230,9 @@ export function SedLayout(props: SedLayoutProps) {
             className={tab === name ? "sed-tab sed-tab--active" : "sed-tab"}
             onClick={() => setTab(name)}
           >
+            <span className="sed-tab__icon" aria-hidden="true">
+              {TAB_ICONS[name]}
+            </span>
             {name}
           </button>
         ))}
@@ -241,6 +254,9 @@ export function SedLayout(props: SedLayoutProps) {
               <span className="sed-folder__count">({item.count})</span>
             </button>
           ))}
+          {folders.length > 0 && (
+            <div className="sed-note">Пока плоский список, задел под дерево</div>
+          )}
         </aside>
 
         {/* Контент: справочник/настройки — экраны B4, иначе таблица. */}
@@ -286,7 +302,7 @@ export function SedLayout(props: SedLayoutProps) {
             </select>
             <button
               type="button"
-              className="sed-btn sed-btn--ghost"
+              className="sed-btn sed-btn--neutral"
               onClick={() => setFilters(EMPTY_FILTERS)}
             >
               Сбросить фильтры
@@ -294,8 +310,23 @@ export function SedLayout(props: SedLayoutProps) {
           </div>
 
           <div className="sed-toolbar" aria-label="Панель действий">
-            <button type="button" className="sed-btn" onClick={() => openPopup(createUrl())}>
-              Создать заявку
+            <button
+              type="button"
+              className="sed-ibtn"
+              onClick={() => openPopup(createUrl())}
+              title="Создать заявку"
+              aria-label="Создать заявку"
+            >
+              ＋
+            </button>
+            <button
+              type="button"
+              className="sed-ibtn"
+              onClick={() => setListVersion((v) => v + 1)}
+              title="Обновить список"
+              aria-label="Обновить список"
+            >
+              ⟳
             </button>
           </div>
 
@@ -303,7 +334,7 @@ export function SedLayout(props: SedLayoutProps) {
 
           {/* Таблица заявок: клик по строке — окно карточки заявки (вместо «под списком»),
               клик по заголовку сортируемой колонки — сортировка. */}
-          <table className="sed-table" aria-label="Заявки">
+          <table className="sed-table sed-table--clickable" aria-label="Заявки">
             <thead>
               <tr>
                 {columns.map((col) => {
@@ -317,16 +348,9 @@ export function SedLayout(props: SedLayoutProps) {
                     >
                       <button
                         type="button"
+                        className="sed-th-sort"
                         aria-label={`Сортировать по «${col}»`}
                         onClick={() => toggleSort(sortable.key)}
-                        style={{
-                          border: "none",
-                          background: "transparent",
-                          color: "inherit",
-                          font: "inherit",
-                          padding: 0,
-                          cursor: "pointer",
-                        }}
                       >
                         {col}
                         {active ? (sort.dir === "asc" ? " ↑" : " ↓") : ""}
@@ -338,12 +362,10 @@ export function SedLayout(props: SedLayoutProps) {
             </thead>
             <tbody>
               {sortedRows.map((row) => (
-                <tr
-                  key={row.id}
-                  onClick={() => openPopup(requestUrl(row.id))}
-                  style={{ cursor: "pointer" }}
-                >
-                  <td>{row.id}</td>
+                <tr key={row.id} onClick={() => openPopup(requestUrl(row.id))}>
+                  <td>
+                    <span className="sed-regnum">{row.id}</span>
+                  </td>
                   <td>{row.fio}</td>
                   {role !== "owner" && (
                     <>

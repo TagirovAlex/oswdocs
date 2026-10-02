@@ -24,6 +24,7 @@ from app.link import clear_for_tests, get_memory_links_store  # noqa: E402
 from app.link_store import get_links_store  # noqa: E402
 from app.main import app  # noqa: E402
 from app.onec_client import HttpResult, OneCBaseConfig, OneCClient  # noqa: E402
+from app.settings_routes import get_settings_store  # noqa: E402
 
 # Тестовые группы повторяют conftest (имена тестовые, продовые — через env/БД).
 TEST_ALLOWED = "SED_HR,SED_ADMINS"
@@ -237,8 +238,46 @@ def b1_mocks(b1_settings):
 
 # --- Матрица доступа: 401/403 ---
 
+class _GroupStore:
+    """Мок хранилища настроек для мок-пути входа: сид-значения строками."""
+
+    def __init__(self, data=None):
+        self._data = dict(data or {})
+
+    def get(self, key):
+        return self._data.get(key)
+
+    def get_many(self, keys):
+        return {key: self._data.get(key) for key in keys}
+
+    def set(self, key, value):
+        self._data[key] = value
+
+    def set_many(self, values):
+        self._data.update(values)
+
+
+def _mock_headers(sam, groups):
+    """Заголовки мок-пользователя без ПДн (вход проверяется по группам)."""
+    return {"X-Mock-Sam": sam, "X-Mock-Groups": ",".join(groups)}
+
+
+@pytest.fixture
+def group_store():
+    """Подмена хранилища настроек для мок-пути входа (с возвратом подмены)."""
+    saved = app.dependency_overrides.get(get_settings_store)
+    store = _GroupStore()
+    app.dependency_overrides[get_settings_store] = lambda: store
+    yield store
+    app.dependency_overrides.pop(get_settings_store, None)
+    if saved is not None:
+        app.dependency_overrides[get_settings_store] = saved
+
+
 def test_detect_role_hierarchy(b1_settings):
-    """Иерархия ролей: админ > руководитель ОК > ОК > владелец (пересечение групп)."""
+    """Иерархия ролей: админ > руководитель ОК > ОК > владелец (пересечение групп).
+
+    Без хранилища настроек группы ролей берутся из env (bootstrap-фолбэк)."""
     settings = b1_settings
     assert _detect_role(["SED_STEP_BUH"], settings) == "owner"
     assert _detect_role(["SED_HR"], settings) == "hr"
@@ -247,6 +286,38 @@ def test_detect_role_hierarchy(b1_settings):
     # Руководитель ОК с группой ОК — всё равно hr_admin; админ в любой группе — admin.
     assert _detect_role(["SED_HR_ADMIN", "SED_HR"], settings) == "hr_admin"
     assert _detect_role(["SED_ADMINS", "SED_HR"], settings) == "admin"
+
+
+def test_auth_me_entry_by_access_groups(client, b1_mocks, group_store):
+    """Вход по инфра-ключу access_groups: группа только из БД пускает."""
+    group_store._data["access_groups"] = json.dumps(["SED_ENTRY_DB"])
+    allowed = client.get("/auth/me", headers=_mock_headers("t.entry", ["SED_ENTRY_DB"]))
+    assert allowed.status_code == 200
+    # Контент-ключ групп ручного конструктора шагов входа НЕ даёт.
+    group_store._data["allowed_ad_groups"] = json.dumps(["SED_MANUAL_DB"])
+    denied = client.get("/auth/me", headers=_mock_headers("t.manual", ["SED_MANUAL_DB"]))
+    assert denied.status_code == 403
+
+
+def test_auth_me_role_from_db_groups(client, admin_headers, b1_mocks, group_store):
+    """Роль по группам ролей из БД: access_groups пускает, admin_groups даёт admin."""
+    group_store._data["access_groups"] = json.dumps(["SED_ADMINS_DB"])
+    group_store._data["admin_groups"] = json.dumps(["SED_ADMINS_DB"])
+    body = client.get("/auth/me", headers=_mock_headers("adm.db", ["SED_ADMINS_DB"]))
+    assert body.status_code == 200
+    assert body.json()["role"] == "admin"
+    assert "fio" in body.json()  # полная заглушка
+    # Ключ admin_groups задан в БД — env-группа админа роль admin больше не дает.
+    trimmed = client.get("/auth/me", headers=admin_headers)
+    assert trimmed.status_code == 200
+    assert trimmed.json()["role"] == "owner"
+    assert set(trimmed.json()) == {"sam", "groups", "role"}
+
+
+def test_auth_me_role_env_fallback_without_db_key(client, admin_headers, hr_admin_headers, b1_mocks, group_store):
+    """Ключей групп ролей нет в БД — фолбэк на env (bootstrap), роли прежние."""
+    assert client.get("/auth/me", headers=admin_headers).json()["role"] == "admin"
+    assert client.get("/auth/me", headers=hr_admin_headers).json()["role"] == "hr_admin"
 
 
 def test_employees_no_auth_401(client, noauth_headers, b1_mocks):

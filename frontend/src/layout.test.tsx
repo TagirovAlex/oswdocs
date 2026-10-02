@@ -115,8 +115,8 @@ describe("SedLayout", () => {
     expect(screen.getByText("Справочник")).toBeInTheDocument();
     expect(screen.queryByText("Создание")).not.toBeInTheDocument();
     expect(screen.queryByText("Настройки")).not.toBeInTheDocument();
-    // Тулбар: создание в отдельном окне, печать — в карточке окна.
-    expect(screen.getByText("Создать заявку")).toBeInTheDocument();
+    // Тулбар: создание в отдельном окне (иконочная кнопка), печать — в карточке окна.
+    expect(screen.getByRole("button", { name: "Создать заявку" })).toBeInTheDocument();
     expect(screen.queryByText("Печать")).not.toBeInTheDocument();
     // Фильтры.
     expect(screen.getByLabelText("Поиск")).toBeInTheDocument();
@@ -245,8 +245,10 @@ describe("SedLayout", () => {
     const open = vi.spyOn(window, "open").mockImplementation(() => null);
 
     renderWithTheme("hr");
-    await waitFor(() => expect(screen.getByText("Создать заявку")).toBeInTheDocument());
-    fireEvent.click(screen.getByText("Создать заявку"));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Создать заявку" })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Создать заявку" }));
     expect(open).toHaveBeenCalledWith("?view=create", "_blank", expect.stringContaining("popup"));
     open.mockRestore();
   });

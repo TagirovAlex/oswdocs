@@ -24,9 +24,11 @@ from .docs import request_url
 from .employees import get_ad_reader
 from .mailer import (
     EVENT_ASSIGNED,
+    EVENT_RETURNED,
     MailQueue,
     enqueue_event,
     get_mail_queue,
+    recipient_mail,
     resolve_smtp_from,
     step_owner_mails,
 )
@@ -628,51 +630,161 @@ def _audit(actor: str, action: str, entity_id: str, detail: str = "") -> None:
     )
 
 
+def _previous_block_steps(request: _Request, order: int) -> list[_Step]:
+    """Шаги предыдущего блока маршрута — цель возврата (решение владельца, п.3).
+
+    Предыдущий блок — максимальный block_index строго меньше блока текущего шага
+    (кодирование блока: _block_info), у которого есть шаги. Пустой список —
+    предыдущего блока нет (первый блок): возврат уходит автору на доработку."""
+    current_block, _, _ = _block_info(order)
+    by_block: dict[int, list[_Step]] = {}
+    for step in request.steps:
+        by_block.setdefault(_block_info(step.order)[0], []).append(step)
+    earlier = [index for index in by_block if index < current_block]
+    if not earlier:
+        return []
+    return sorted(by_block[max(earlier)], key=lambda s: s.order)
+
+
+def _reopen_returned_if_current(
+    request: _Request, route: RouteSettings, now: datetime
+) -> list[_Step]:
+    """Возврат доведён до возвращённого блока — снова открыть его шаги.
+
+    После возврата («return») предыдущий блок переоткрывается, а шаг, по которому
+    вернули, остаётся STEP_RETURNED. Когда в маршруте не остаётся ожидающих шагов
+    (предыдущий блок снова согласован), самый ранний блок с возвращёнными шагами
+    становится текущим: они снова STEP_PENDING с новым TTL — заявка продолжает
+    маршрут, а владельцы попадают в fresh-рассылку «назначена»."""
+    if _current_pending_steps(request):
+        return []
+    returned_by_block: dict[int, list[_Step]] = {}
+    for step in request.steps:
+        if step.status != STEP_RETURNED:
+            continue
+        block_index, _, _ = _block_info(step.order)
+        returned_by_block.setdefault(block_index, []).append(step)
+    if not returned_by_block:
+        return []
+    reopened = sorted(returned_by_block[min(returned_by_block)], key=lambda s: s.order)
+    for step in reopened:
+        step.status = STEP_PENDING
+        step.done_by = None
+        step.done_at = None
+        step.comment = None
+        step.expires_at = now + timedelta(days=route.approval_ttl_days)
+    return reopened
+
+
+def _mail_context(request: _Request, settings: Settings) -> dict[str, object]:
+    """Контекст письма по заявке (как у worker: без ПДн, ссылка из APP_BASE_URL)."""
+    return {
+        "fio": request.fio,
+        "request_id": request.id,
+        "url": request_url(settings.APP_BASE_URL, request.id),
+    }
+
+
+def _notify_skip(request: _Request, event: str, reason: str) -> None:
+    """Пропуск уведомления в аудит: причина без ПДн (адресаты/настройки не резолвятся)."""
+    _audit("system", "notify.skip", request.id, f"{event} {reason}")
+
+
 def _notify_assigned(
     request: _Request,
     queue: MailQueue,
     settings_store: DbSettingsStore,
     ad_reader: object | None,
     settings: Settings,
+    steps: list[_Step] | None = None,
 ) -> None:
-    """Письмо «назначена» владельцам первого шага при submit (W3a).
+    """Письмо «назначена» владельцам шагов (W3a): подача, переход этапа,
+    возврат на предыдущий блок, повтор просроченного шага.
 
-    Получатели — mail из AD (только чтение): у персонального шага один адресат,
-    у группового — все активные участники группы (очередь mail_queue хранит по
-    одному письму на строку, поэтому рассылка разворачивается здесь). Шаблон — из
-    mail_templates/settings. Любой сбой (офлайн без AD/БД, нет шаблона) тихо
-    пропускается: уведомление не должно валить подачу заявки.
+    steps=None — текущий открытый блок (_current_pending_steps), иначе явно
+    заданные шаги. Получатели — mail из AD (только чтение): у персонального шага
+    один адресат, у группового — все активные участники группы (очередь
+    mail_queue хранит по одному письму на строку, поэтому рассылка разворачивается
+    здесь). Шаблон — из mail_templates/settings. Любой сбой (офлайн без AD/БД, нет
+    шаблона) не роняет решение по заявке: пропуск пишется в аудит (notify.skip).
     """
+    targets = list(steps) if steps is not None else _current_pending_steps(request)
+    if ad_reader is None:
+        _notify_skip(request, EVENT_ASSIGNED, "no_ad_reader")
+        return
     try:
-        # Всем исполнителям активного блока (в параллельном — все шаги блока).
-        recipients = [
-            to
-            for step in _current_pending_steps(request)
-            for to in step_owner_mails(step, ad_reader)
-        ]
-        if not recipients:
-            return
-        # Шаблон письма и адрес отправителя не зависят от шага — читаем один раз
-        # на заявку (иначе SELECT на каждый шаг активного блока); без адресатов
-        # настройки не читаем вовсе.
+        recipients = [to for step in targets for to in step_owner_mails(step, ad_reader)]
+    except Exception as exc:
+        _notify_skip(request, EVENT_ASSIGNED, f"resolve_error={type(exc).__name__}")
+        return
+    if not recipients:
+        _notify_skip(request, EVENT_ASSIGNED, "no_recipients")
+        return
+    # Шаблон письма и адрес отправителя не зависят от шага — читаем один раз
+    # на заявку (иначе SELECT на каждый шаг); без адресатов настройки не читаем вовсе.
+    try:
         templates = read_setting_value(settings_store, "mail_templates")
         smtp_from = read_setting_value(settings_store, "smtp_from")
+    except Exception as exc:
+        _notify_skip(request, EVENT_ASSIGNED, f"settings_error={type(exc).__name__}")
+        return
+    sent = 0
+    try:
         for to in recipients:
-            enqueue_event(
+            if enqueue_event(
                 queue,
                 to,
                 request.id,
                 EVENT_ASSIGNED,
                 templates or [],
-                {
-                    "fio": request.fio,
-                    "request_id": request.id,
-                    "url": request_url(settings.APP_BASE_URL, request.id),
-                },
+                _mail_context(request, settings),
                 subject_prefix=resolve_smtp_from(smtp_from, settings.SMTP_FROM),
-            )
-    except Exception:
+            ):
+                sent += 1
+    except Exception as exc:
+        _notify_skip(request, EVENT_ASSIGNED, f"queue_error={type(exc).__name__}")
         return
+    if not sent:
+        # Адресаты есть, но ни одного письма — нет шаблона события в mail_templates.
+        _notify_skip(request, EVENT_ASSIGNED, "no_template")
+
+
+def _notify_author_returned(
+    request: _Request,
+    queue: MailQueue,
+    settings_store: DbSettingsStore,
+    ad_reader: object | None,
+    settings: Settings,
+) -> None:
+    """Письмо «возврат» автору заявки — заявка ушла на доработку (REWORK).
+
+    Ставится, когда возвращать некуда (предыдущего блока нет). Best-effort:
+    сбой AD/настроек/очереди не роняет отметку — пишется notify.skip."""
+    to = recipient_mail(ad_reader, request.created_by)
+    if not to:
+        _notify_skip(request, EVENT_RETURNED, "no_recipients")
+        return
+    try:
+        templates = read_setting_value(settings_store, "mail_templates")
+        smtp_from = read_setting_value(settings_store, "smtp_from")
+    except Exception as exc:
+        _notify_skip(request, EVENT_RETURNED, f"settings_error={type(exc).__name__}")
+        return
+    try:
+        sent = enqueue_event(
+            queue,
+            to,
+            request.id,
+            EVENT_RETURNED,
+            templates or [],
+            _mail_context(request, settings),
+            subject_prefix=resolve_smtp_from(smtp_from, settings.SMTP_FROM),
+        )
+    except Exception as exc:
+        _notify_skip(request, EVENT_RETURNED, f"queue_error={type(exc).__name__}")
+        return
+    if not sent:
+        _notify_skip(request, EVENT_RETURNED, "no_template")
 
 
 @router.post("/requests", response_model=RequestOut, status_code=201)
@@ -1006,9 +1118,20 @@ def decide_step(
     user: CurrentUser = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
     store: RequestsStore = Depends(get_requests_store),
+    route: RouteSettings = Depends(get_route_settings),
+    mail_queue: MailQueue = Depends(get_mail_queue),
+    settings_store: DbSettingsStore = Depends(get_settings_store),
+    ad_reader: object | None = Depends(get_ad_reader),
 ) -> RequestOut:
-    """Отметка владельца: согласие/отказ/возврат (комментарий по require_comment)."""
+    """Отметка владельца: согласие/отказ/возврат (комментарий по require_comment).
+
+    Уведомление «назначена»: при согласии — новые ожидающие шаги следующего
+    блока (без дублей внутри параллельного блока), при возврате — владельцы
+    переоткрытого предыдущего блока, а если возвращать некуда — автор заявки
+    («возврат», заявка на доработке)."""
     settings.ensure_read_only()
+    reopened: list[_Step] | None = None
+    before_orders: set[int] = set()
     try:
         request = _get_request_or_404(store, request_id)
         if request.status != IN_APPROVAL:
@@ -1029,7 +1152,9 @@ def decide_step(
             raise HTTPException(
                 status_code=410, detail="Срок шага истек: нужен повтор (reissue)"
             )
-        if order not in {s.order for s in _current_pending_steps(request)}:
+        # Ожидающие шаги блока ДО отметки — по ним позже считаются новые (переход этапа).
+        before_orders = {s.order for s in _current_pending_steps(request)}
+        if order not in before_orders:
             raise HTTPException(
                 status_code=409,
                 detail="Шаг не в текущем блоке маршрута (строгий порядок/параллельный блок)",
@@ -1043,19 +1168,57 @@ def decide_step(
             _audit(user.sam, "step.approve", request.id, f"order={order}")
             if all(s.status == STEP_APPROVED for s in request.steps):
                 request.status = AGREED
+            else:
+                # Предыдущий блок снова согласован — возвращённые шаги позднего
+                # блока возвращаются в работу (иначе заявка зависла бы без
+                # ожидающих шагов), уведомление уйдёт им как fresh.
+                _reopen_returned_if_current(request, route, now)
         elif body.decision == "reject":
             step.status = STEP_REJECTED
             request.status = REJECTED
             _audit(user.sam, "step.reject", request.id, f"order={order}")
         else:
             step.status = STEP_RETURNED
-            request.status = REWORK
             _audit(user.sam, "step.return", request.id, f"order={order}")
+            # Возврат — на предыдущий блок: его шаги снова в работе с новым TTL
+            # (route.approval_ttl_days), заявка остаётся на согласовании. Нет
+            # предыдущего блока — заявка на доработку, уведомляется автор.
+            reopened = _previous_block_steps(request, order)
+            if reopened:
+                for reopened_step in reopened:
+                    reopened_step.status = STEP_PENDING
+                    reopened_step.done_by = None
+                    reopened_step.done_at = None
+                    reopened_step.comment = None
+                    reopened_step.expires_at = now + timedelta(days=route.approval_ttl_days)
+                request.status = IN_APPROVAL
+            else:
+                request.status = REWORK
         store.update(request)
     except RequestsUnavailable as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
+    if body.decision == "approve":
+        # Переход этапа: письмо только НОВЫМ ожидающим шагам (в параллельном
+        # блоке остальные уже получили письмо при входе в блок — дублей нет).
+        if request.status == IN_APPROVAL:
+            fresh = [
+                s for s in _current_pending_steps(request) if s.order not in before_orders
+            ]
+            if fresh:
+                _notify_assigned(
+                    request, mail_queue, settings_store, ad_reader, settings, steps=fresh
+                )
+    elif body.decision == "return":
+        if reopened:
+            _notify_assigned(
+                request, mail_queue, settings_store, ad_reader, settings, steps=reopened
+            )
+        else:
+            _notify_author_returned(
+                request, mail_queue, settings_store, ad_reader, settings
+            )
     return _public_view(request, user)
 
 
@@ -1067,8 +1230,13 @@ def reissue_step(
     settings: Settings = Depends(get_settings),
     route: RouteSettings = Depends(get_route_settings),
     store: RequestsStore = Depends(get_requests_store),
+    mail_queue: MailQueue = Depends(get_mail_queue),
+    settings_store: DbSettingsStore = Depends(get_settings_store),
+    ad_reader: object | None = Depends(get_ad_reader),
 ) -> RequestOut:
-    """Повтор просроченного шага: новый TTL, снова в работу (только ОК)."""
+    """Повтор просроченного шага: новый TTL, снова в работу (только ОК).
+
+    Возвращённый в работу шаг — уведомление «назначена» его владельцу(ям)."""
     settings.ensure_read_only()
     _require_hr(user)
     try:
@@ -1090,6 +1258,9 @@ def reissue_step(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
     _audit(user.sam, "step.reissue", request.id, f"order={order}")
+    _notify_assigned(
+        request, mail_queue, settings_store, ad_reader, settings, steps=[step]
+    )
     return _public_view(request, user)
 
 

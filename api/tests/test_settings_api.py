@@ -73,7 +73,17 @@ SEED_VALUES = {
 }
 
 # Контрактный ответ GET /settings (все ключи на месте, типы по B2).
+# Группы ролей (admin_groups/hr_groups/hr_admin_groups) в сиде НЕ сеются — в
+# ответе они приходят фолбэком на env (bootstrap); access_groups — None.
+ENV_ROLE_VALUES = {
+    "admin_groups": ["SED_ADMINS"],
+    "hr_groups": ["SED_HR"],
+    "hr_admin_groups": ["SED_HR_ADMIN"],
+}
+
 CONTRACT_VALUES = {
+    "access_groups": None,
+    **ENV_ROLE_VALUES,
     "session_ttl_minutes": 600,
     "approval_ttl_days": 3,
     "scan_retention_days": 365,
@@ -129,6 +139,12 @@ CONTENT_CONTRACT = {key: CONTRACT_VALUES[key] for key in CONTENT_KEYS}
 
 # Полный обновленный набор для PUT (все ключи переданы явно).
 UPDATED_VALUES = {
+    "access_groups": ["SED_DB_ENTRY"],
+    # Группы ролей в обновлённом наборе содержат и env-группы: админ, который
+    # сохраняет настройки, не должен терять роль после собственной записи.
+    "admin_groups": ["SED_ADMINS", "SED_ADMINS_2"],
+    "hr_groups": ["SED_HR", "SED_HR_2"],
+    "hr_admin_groups": ["SED_HR_ADMIN", "SED_HR_ADMIN_2"],
     "session_ttl_minutes": 480,
     "approval_ttl_days": 7,
     "scan_retention_days": 730,
@@ -249,7 +265,9 @@ def test_settings_get_admin_200(client, admin_headers, mock_store):
 
 
 def test_settings_get_missing_keys_none(client, admin_headers, settings_override):
-    """Ключей нет в БД — в ответе None (дефолтов в коде нет, значения только из БД)."""
+    """Ключей нет в БД — в ответе None (дефолтов в коде нет, значения только из БД).
+
+    Исключение — ключи групп ролей: они возвращают фолбэк на env (bootstrap)."""
     store = InMemorySettingsStore(initial={})
     app.dependency_overrides[get_settings_store] = lambda: store
     try:
@@ -257,7 +275,10 @@ def test_settings_get_missing_keys_none(client, admin_headers, settings_override
     finally:
         app.dependency_overrides.pop(get_settings_store, None)
     assert response.status_code == 200
-    assert response.json() == {key: None for key in SETTINGS_KEYS}
+    body = response.json()
+    expected = {key: None for key in SETTINGS_KEYS}
+    expected.update(ENV_ROLE_VALUES)
+    assert body == expected
 
 
 def test_settings_get_no_auth_401(client, noauth_headers, settings_override):
@@ -289,6 +310,36 @@ def test_settings_get_store_down_503(client, admin_headers, mock_store):
     mock_store.broken = True
     response = client.get("/settings", headers=admin_headers)
     assert response.status_code == 503
+
+
+# --- Группы доступа и групп ролей (инфра-ключи, правит только admin) ---
+
+def test_settings_get_role_keys_from_db_over_env(client, admin_headers, mock_store):
+    """Группы ролей из БД — единственный источник: роль по ним, env не дополняет.
+
+    Пользователь входит по access_groups (не env) и получает роль admin по
+    admin_groups из БД; env-группа админа роль больше не дает."""
+    mock_store._data["access_groups"] = json.dumps(["SED_ADMINS_DB"])
+    mock_store._data["admin_groups"] = json.dumps(["SED_ADMINS_DB"])
+    headers = {"X-Mock-Sam": "adm.petrov", "X-Mock-Groups": "SED_ADMINS_DB"}
+    body = client.get("/settings", headers=headers).json()
+    assert body["admin_groups"] == ["SED_ADMINS_DB"]
+    # Ключей hr нет в БД — фолбэк на env (bootstrap).
+    assert body["hr_groups"] == ["SED_HR"]
+    assert body["hr_admin_groups"] == ["SED_HR_ADMIN"]
+    # env-группа админа при заданном ключе в БД роль admin больше не дает.
+    assert client.get("/settings", headers=admin_headers).status_code == 403
+
+
+def test_settings_get_role_keys_empty_list_revokes_env_role(client, admin_headers, mock_store):
+    """Пустой список admin_groups в БД — env-группа админа роль больше не дает (403)."""
+    mock_store._data["admin_groups"] = "[]"
+    assert client.get("/settings", headers=admin_headers).status_code == 403
+
+
+def test_settings_get_access_groups_none_without_key(client, admin_headers, mock_store):
+    """access_groups не сеется: без ключа в БД в ответе None (env — bootstrap)."""
+    assert client.get("/settings", headers=admin_headers).json()["access_groups"] is None
 
 
 # --- PUT /settings ---
@@ -436,6 +487,55 @@ def test_settings_put_store_down_503(client, admin_headers, mock_store):
     assert response.status_code == 503
 
 
+# --- PUT: access_groups и ключи ролей (инфра, только admin) ---
+
+def test_settings_put_access_groups_and_roles_persists(client, admin_headers, mock_store):
+    """Админ правит access_groups и группы ролей: в БД — сид-формат (JSON-массив)."""
+    response = client.put(
+        "/settings",
+        json={"access_groups": ["SED_DB_ENTRY", "SED_DB_ENTRY_2"], "hr_groups": ["SED_HR_DB"]},
+        headers=admin_headers,
+    )
+    assert response.status_code == 200
+    assert json.loads(mock_store._data["access_groups"]) == ["SED_DB_ENTRY", "SED_DB_ENTRY_2"]
+    assert json.loads(mock_store._data["hr_groups"]) == ["SED_HR_DB"]
+    assert response.json()["access_groups"] == ["SED_DB_ENTRY", "SED_DB_ENTRY_2"]
+    assert response.json()["hr_groups"] == ["SED_HR_DB"]
+    # Незаписанный ключ роли — фолбэк на env.
+    assert response.json()["admin_groups"] == ["SED_ADMINS"]
+
+
+def test_settings_put_group_keys_wrong_types_422(client, admin_headers, mock_store):
+    """Неверные типы групповых ключей входа и ролей — 422."""
+    bad_cases = [
+        {"access_groups": ["SED_X", 1]},
+        {"access_groups": "SED_HR"},
+        {"admin_groups": "SED_ADMINS"},
+        {"hr_groups": [None]},
+        {"hr_admin_groups": {"SED_HR_ADMIN": True}},
+    ]
+    for bad in bad_cases:
+        assert client.put("/settings", json=bad, headers=admin_headers).status_code == 422
+
+
+def test_settings_put_access_groups_hr_admin_403(client, hr_admin_headers, mock_store):
+    """access_groups правит ТОЛЬКО админ: руководитель ОК — 403, в БД пусто."""
+    response = client.put(
+        "/settings", json={"access_groups": ["SED_HACK"]}, headers=hr_admin_headers
+    )
+    assert response.status_code == 403
+    assert "access_groups" not in mock_store._data
+
+
+def test_settings_put_access_groups_hr_403(client, hr_headers, mock_store):
+    """ОК не правит access_groups — 403."""
+    response = client.put(
+        "/settings", json={"access_groups": ["SED_HACK"]}, headers=hr_headers
+    )
+    assert response.status_code == 403
+    assert "access_groups" not in mock_store._data
+
+
 # --- onec_bases (базы 1С: пароль маскируется в GET, сливается при PUT) ---
 
 def test_settings_put_onec_bases_passwords_stored_and_masked(client, admin_headers, mock_store):
@@ -523,6 +623,21 @@ def test_settings_content_ignores_onec_bases(client, hr_admin_headers, mock_stor
     response = client.get("/settings/content", headers=hr_admin_headers)
     assert response.status_code == 200
     assert "onec_bases" not in response.json()
+
+
+def test_settings_content_ignores_access_groups_and_roles(client, hr_admin_headers, mock_store):
+    """access_groups и ключи ролей — инфра: контент-эндпоинт их не отдаёт и не пишет."""
+    body = client.get("/settings/content", headers=hr_admin_headers).json()
+    for key in ("access_groups", "admin_groups", "hr_groups", "hr_admin_groups"):
+        assert key not in body
+    response = client.put(
+        "/settings/content",
+        json={"access_groups": ["SED_HACK"], "admin_groups": ["SED_HACK"]},
+        headers=hr_admin_headers,
+    )
+    assert response.status_code == 200
+    assert "access_groups" not in mock_store._data
+    assert "admin_groups" not in mock_store._data
 
 
 # --- GET/PUT /settings/content (контент: руководитель ОК + админ) ---

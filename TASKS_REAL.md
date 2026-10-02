@@ -22,7 +22,7 @@
 > - TTL сессии 10 ч (`session_ttl_minutes=600` в settings) и SMTP-учётка (`smtp_user`/`smtp_password`)
 >   в settings (пароль маскируется); сессия читается из settings при входе.
 >
-> ### Следующая сессия (2026-10-01, коммиты 8ea483c→6b57588; на стенд не задеплоено)
+> ### Сессия 2026-10-01 (коммиты 8ea483c→6b57588; на стенд не задеплоено)
 > - **Карточка сотрудника**: дата увольнения (`dismissal_date`, конфиг
 >   `termination_date_field` дефолт `ДатаУвольнения`, пустое значение регистра
 >   `0001-01-01T00:00:00` нормализуется в `""`); убраны `vacation_balance`/`mol_flag`
@@ -43,6 +43,31 @@
 >   `test_requests_store/negative_core/requests/requests_contract` без Postgres),
 >   фронт 76 passed + typecheck.
 >
+> ### Волна 4 (2026-10-02, коммиты 6b57588→2901b36; на стенд не задеплоено)
+> - **Маршрут блоками**: конструктор в `create-form.tsx` — блоки `blocks`
+>   (последовательный/параллельный, `step_order` без миграции), исполнители —
+>   живой поиск AD, `can_act`/ФИО согласующего, уведомление согласующему;
+>   контракт `blocks` в `requests.py` (`CreateRequestIn`/`RouteBlockSpec`).
+> - **Черновики**: папка «Черновики», кнопка «Отправить на согласование»
+>   (создать+подать), повтор «Отправить» после сбоя не создаёт второй черновик;
+>   удаление заявки админом (`DELETE /requests/{id}`), только активные УЗ AD
+>   во всех поисках, ленивый bind RO-учёткой в AD-ридере.
+> - **Доступ и роли в settings**: вход — env `ALLOWED_AD_GROUPS` (bootstrap) плюс
+>   инфра-ключ `access_groups` из БД (правит только админ; `resolve_allowed_groups`
+>   в `settings_routes.py`, вход — `auth.py`, `deps.py`). Контент-ключ
+>   `allowed_ad_groups` — только группы ручного конструктора шагов
+>   (`resolve_step_groups`/`is_group_allowed_with_settings`, поиск — `employees.py`),
+>   входа НЕ даёт. Роли `admin_groups`/`hr_groups`/`hr_admin_groups` (инфра) —
+>   из БД с фолбэком на env `ADMIN_GROUPS`/`HR_GROUPS`/`HR_ADMIN_GROUPS`;
+>   БД недоступна — фолбэк на env.
+> - **Регламенты синхронизации**: `schedule_enterprises_sync`/
+>   `schedule_ad_links_sync` (инфра, только админ) + уведомления по расписанию
+>   в worker; учётная карточка и справочник переработаны блоками.
+> - **Фронт-тема**: цвета W1–W3 по эталону `samples/` (`theme.css`), вкладка
+>   «Регламенты» в админке; удалён мёртвый код `requests.tsx`,
+>   `owner-view.tsx` и их тесты (2901b36), в этой же сессии — моковый
+>   `employee-card.tsx` с тестом (живая карточка — `employee-card-view.tsx`).
+>
 > ### Открытые пункты (не код, данные/операции)
 > - `ONEC_BASES_JSON`/базы в settings не заполнены — 1С ждёт OData-контракт и учётки от ИТ;
 >   синхронизация предприятий заработает после настройки `onec_enterprises_source`.
@@ -56,8 +81,9 @@
 > ### Известные пробелы кода (не входят в Волны 1–5)
 > - Событие письма «закрыта» (EVENT_CLOSED) не ставится в очередь (нет при finish).
 > - Кнопки «Отозвать»/«Повторить шаг» в UI нет (API есть); эскалация не редактируется в админке.
-> - Блок AD в `employees.py`/`link.py` отключён: `get_ad_reader()` возвращает `None` (AD читается
->   только в auth и worker). Каталога сотрудников из AD нет — источник истины 1С (README п.1).
+> - `get_ad_reader()` (определение — `employees.py:122`, импортируется в `link.py`) больше не заглушка: создаёт реальный
+>   `Ldap3Gateway` из env с ленивым bind, при сбое конфигурации AD — `None` (API не падает).
+>   Каталога сотрудников из AD нет — источник истины 1С (README п.1).
 
 База: README.md (весь), AGENTS.md (правила), скилы `fastapi-sed`, `react-sed`,
 `pg-sed`, `approval-templates`, `mail-docs`, `qa-sed`. Правило: настройки/данные —
@@ -94,7 +120,7 @@ in-memory (теряется при рестарте), нет документо�
    только mine.
 5. Статусы и переходы (submit/to-execution/finish/decision) — уже есть, не менять.
 
-**Фронт (модули: create-form.tsx, layout.tsx, requests.tsx, новый requests-client.tsx):**
+**Фронт (модули: create-form.tsx, layout.tsx, новый requests-client.tsx):**
 6. `requests-client.tsx` (новый): `getEnterprises()`, `getStepGroups()`, `createRequest(body)`,
    `getRequests()`, `getFolders()` — fetch `/api/*` с Bearer; 401/403/422/503 → ApiHttpError.
 7. `create-form.tsx`: предприятия и группы — только из API (никаких хардкод-массивов).
@@ -203,7 +229,7 @@ in-memory (теряется при рестарте), нет документо�
 
 **W3b — frontend (скил react-sed):**
 8. `requests-client.tsx`: `printRequest(id)`, `getDocuments(id)`.
-9. `layout.tsx`/`requests.tsx`: кнопка «Печать» в тулбаре/строке → printRequest → статус
+9. `layout.tsx`: кнопка «Печать» в тулбаре/строке → printRequest → статус
    «v1 сгенерирован / v2» или ошибка; блок «Документы» в карточке заявки (версии, ссылка
    на PDF `GET /api/documents/{id}/pdf?version=v1`). Без хардкода текстов/путей.
 10. Тесты на печать/документы (мок requests-client).

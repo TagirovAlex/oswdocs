@@ -404,9 +404,11 @@ def ad_group_members(
     """Активные участники группы AD для конструктора маршрута: только ОК,
     руководитель ОК и админ.
 
-    Группа обязана быть разрешённой настройками (is_group_allowed: список
-    разрешённых групп либо префикс владельцев шагов) — иначе 403. Ридер AD не
-    настроен/сбой каталога — 503 (не 500), группа не найдена — 404. Набор
+    Группа обязана быть группой ручного конструктора шагов
+    (is_group_allowed_with_settings: контент-ключ allowed_ad_groups либо
+    префикс владельцев шагов STEP_GROUP_PREFIX) — иначе 403. Ключ
+    access_groups (группы входа в систему) состав шага НЕ открывает. Ридер AD
+    не настроен/сбой каталога — 503 (не 500), группа не найдена — 404. Набор
     полей тот же, что в /ad/search (sam/ФИО/депт/должность/mail). Только
     чтение AD."""
     settings.ensure_read_only()
@@ -419,7 +421,7 @@ def ad_group_members(
     if not is_group_allowed_with_settings(settings, store, name):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Группа не разрешена настройками (allowed_ad_groups)",
+            detail="Группа не разрешена настройками (allowed_ad_groups — группы ручного конструктора шагов)",
         )
     if reader is None:
         raise HTTPException(
