@@ -305,36 +305,15 @@ export function SedLayout(props: SedLayoutProps) {
 
   return (
     <div className="sed-shell">
-      {/* Шапка по макету (.top): логотип, кнопка темы и «Выйти» справа. */}
-      <header className="sed-header">
+      {/* Ряд модулей одной строкой (как .mods макета): логотип, вкладки,
+          справа — тема и «Выйти». Отдельной верхней строки нет. */}
+      <nav className="sed-tabs" aria-label="Вкладки">
         <span className="sed-logo">
           <img
             src={theme === "dark" ? "/logo-oswdocs-dark.svg" : "/logo-oswdocs.svg"}
             alt="СЭД — Увольнение"
           />
         </span>
-        <span className="sed-header__spacer" />
-        <button
-          type="button"
-          className="sed-btn sed-btn--neutral sed-themebtn"
-          onClick={() => setTheme(theme === "light" ? "dark" : "light")}
-          title="Светлая/тёмная тема"
-          aria-label="Переключить тему"
-        >
-          <ThemeIcon theme={theme} />
-        </button>
-        <button
-          type="button"
-          className="sed-btn sed-btn--neutral"
-          onClick={onLogout}
-          title="Выход из системы"
-        >
-          Выйти
-        </button>
-      </header>
-
-      {/* Вкладки-модули синей полосой (как .mods макета), только модули. */}
-      <nav className="sed-tabs" aria-label="Вкладки">
         {visibleTabs.map((name) => (
           <button
             key={name}
@@ -348,6 +327,19 @@ export function SedLayout(props: SedLayoutProps) {
             {name}
           </button>
         ))}
+        <span className="sed-tabs__spacer" />
+        <button
+          type="button"
+          className="sed-tab sed-themebtn"
+          onClick={() => setTheme(theme === "light" ? "dark" : "light")}
+          title="Светлая/тёмная тема"
+          aria-label="Переключить тему"
+        >
+          <ThemeIcon theme={theme} />
+        </button>
+        <button type="button" className="sed-tab" onClick={onLogout} title="Выход из системы">
+          Выйти
+        </button>
       </nav>
 
       <div className={tab === "Заявки" ? "sed-body" : "sed-body sed-body--wide"}>
@@ -361,7 +353,13 @@ export function SedLayout(props: SedLayoutProps) {
             <button
               key={item.id}
               type="button"
-              className={folder === item.id ? "sed-folder sed-folder--active" : "sed-folder"}
+              className={
+                folder === item.id
+                  ? "sed-folder sed-folder--active"
+                  : (item.depth ?? 0) > 0
+                    ? "sed-folder sed-folder--nested"
+                    : "sed-folder"
+              }
               style={{ paddingLeft: 10 + (item.depth ?? 0) * 14 }}
               onClick={() => setFolder(item.id)}
             >
@@ -370,7 +368,7 @@ export function SedLayout(props: SedLayoutProps) {
             </button>
           ))}
           {folders.length > 0 && (
-            <div className="sed-note">Пока плоский список, задел под дерево</div>
+            <div className="sed-note">Дерево папок (уровни — по отступу)</div>
           )}
         </aside>
         )}

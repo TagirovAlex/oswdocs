@@ -156,20 +156,29 @@ a {
   vertical-align: middle;
 }
 
-/* Логотип шапки: изображение в высоту строки (как текст .logo макета). */
+/* Логотип в ряду модулей: по высоте кнопок, перед «Заявки». */
+.sed-logo {
+  display: inline-flex;
+  align-items: center;
+  margin-right: 8px;
+}
+
 .sed-logo img {
   display: block;
-  height: 32px;
+  height: 44px;
   width: auto;
 }
 
-/* Кнопка темы в шапке: нейтральная, с иконкой по центру. */
+/* Распорка ряда модулей: тему и «Выйти» прижимает вправо. */
+.sed-tabs__spacer {
+  flex: 1;
+}
+
+/* Кнопка темы в ряду модулей: как вкладка, иконка по центру. */
 .sed-themebtn {
   display: inline-grid;
   place-items: center;
-  width: 32px;
-  height: 32px;
-  padding: 0;
+  min-width: 52px;
 }
 
 .sed-themebtn svg {
@@ -217,16 +226,32 @@ a {
   text-align: left;
 }
 
-/* Иконка папки — только CSS, вне текста названия (текст остаётся для поиска/тестов). */
+/* Иконка папки — только CSS, вне текста названия (текст остаётся для поиска/тестов).
+   Вид под дерево образца: папка с корешком, вложенные — с отступом по depth. */
 .sed-folder::before {
   content: "";
   display: inline-block;
-  width: 12px;
-  height: 9px;
+  width: 14px;
+  height: 11px;
   margin-right: 6px;
+  flex: 0 0 auto;
   border: 1px solid var(--sed-border);
+  border-bottom-width: 3px;
   border-radius: 2px;
   background: var(--sed-primary-soft);
+}
+
+/* Вложенная папка дерева: маркер уровня (уголок) перед иконкой папки. */
+.sed-folder--nested::after {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+  order: -1;
+  border-left: 1px solid var(--sed-border);
+  border-bottom: 1px solid var(--sed-border);
+  border-bottom-left-radius: 2px;
 }
 
 .sed-folder--active {
