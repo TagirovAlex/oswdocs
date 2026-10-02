@@ -14,6 +14,7 @@ import {
   getDocTypes,
   getDocuments,
   getHistory,
+  getPdfBlobUrl,
   getRequest,
   notifyRequestsChanged,
   printRequest,
@@ -256,19 +257,21 @@ export function RequestCard(props: RequestCardProps) {
           : (result.reason ?? "Бегунок не сгенерирован"),
       );
       if (result.generated) {
-        const pdfUrl = `/api/documents/${encodeURIComponent(requestId)}/pdf?version=${encodeURIComponent(version)}`;
-        // noopener/noreferrer в windowFeatures не передаём: с ними open() всегда
-        // отдаёт null, и блокировку всплывающих окон не отличить. Связь с opener
-        // обрываем сразу сами (windowFeatures без noopener — иначе вкладка с PDF
-        // держит ссылку на карточку).
-        const win = window.open(pdfUrl, "_blank");
-        if (win) {
-          win.opener = null;
-          win.focus();
-        } else if (win === null) {
-          // Всплывающее окно заблокировано: даём ручную ссылку на свежую версию.
-          setPrintPdf({ url: pdfUrl, version });
-          setPrintStatus("Блокировка всплывающих окон: откройте ссылку вручную");
+        // PDF качаем blob-ом с Bearer-токеном: прямая ссылка в новой вкладке
+        // упала бы в 401 (навигация браузера заголовок не передаёт).
+        try {
+          const pdfUrl = await getPdfBlobUrl(requestId, version);
+          const win = window.open(pdfUrl, "_blank");
+          if (win) {
+            win.opener = null;
+            win.focus();
+          } else {
+            // Всплывающее окно заблокировано: даём ручную ссылку на blob.
+            setPrintPdf({ url: pdfUrl, version });
+            setPrintStatus("Блокировка всплывающих окон: откройте ссылку вручную");
+          }
+        } catch (e: unknown) {
+          setPrintError(e instanceof Error ? e.message : "Не удалось открыть PDF для печати");
         }
       }
       getDocuments(requestId)

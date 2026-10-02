@@ -239,7 +239,10 @@ export function SedLayout(props: SedLayoutProps) {
       </nav>
 
       <div className="sed-body">
-        {/* Список папок со счётчиками (плоский; depth — задел под дерево). */}
+        {/* Список папок со счётчиками (плоский; depth — задел под дерево).
+            Только на вкладке «Заявки»: в настройках/справочнике дерево заявок
+            не показываем (клик по счётчикам там бессмысленен). */}
+        {tab === "Заявки" && (
         <aside className="sed-folders" aria-label="Папки заявок">
           {folders.length === 0 && <div className="sed-note">Папок нет (гость)</div>}
           {folders.map((item) => (
@@ -258,6 +261,7 @@ export function SedLayout(props: SedLayoutProps) {
             <div className="sed-note">Пока плоский список, задел под дерево</div>
           )}
         </aside>
+        )}
 
         {/* Контент: справочник/настройки — экраны B4, иначе таблица. */}
         <main className="sed-content">

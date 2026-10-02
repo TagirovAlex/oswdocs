@@ -259,7 +259,7 @@ export function CreateForm(props: CreateFormProps) {
       });
   }
 
-  // Живой поиск сотрудника: ввод → debounce 300 мс → searchEmployees; старые
+  // Живой поиск сотрудника: ввод → debounce 150 мс → searchEmployees; старые
   // ответы отбрасываем по searchSeq. 503 или пустой результат — ручной ввод.
   useEffect(() => {
     const q = empQuery.trim();
@@ -303,11 +303,11 @@ export function CreateForm(props: CreateFormProps) {
             setManualNote(e instanceof Error ? e.message : "Ошибка поиска сотрудника");
           }
         });
-    }, 300);
+    }, 150);
     return () => clearTimeout(timer);
   }, [empQuery, enterprise]);
 
-  // Живой поиск в AD для панели конструктора: debounce 300 мс → searchAd.
+  // Живой поиск в AD для панели конструктора: debounce 150 мс → searchAd.
   useEffect(() => {
     const q = adQuery.trim();
     if (q === "" || adPanelBlock === null) {
@@ -333,7 +333,7 @@ export function CreateForm(props: CreateFormProps) {
           setAdSearchError(e instanceof Error ? e.message : "Ошибка поиска в AD");
           setAdSearching(false);
         });
-    }, 300);
+    }, 150);
     return () => clearTimeout(timer);
   }, [adQuery, adPanelBlock]);
 

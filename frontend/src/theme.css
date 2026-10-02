@@ -445,6 +445,22 @@ a {
 .sed-field input,
 .sed-field select,
 .sed-field textarea {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--sed-border);
+  border-radius: 4px;
+  padding: 5px 8px;
+  background: var(--sed-surface);
+  color: var(--sed-text);
+}
+
+/* Поля ввода настроек/редакторов (внутри .sed-fieldset, без класса .sed-field):
+   та же стилизация, что у .sed-field — иначе браузерные инпуты выбиваются из
+   дизайна своих блоков. Ширину не растягиваем: строки-флексы (Код+Название). */
+.sed-fieldset input[type="text"],
+.sed-fieldset input:not([type]),
+.sed-fieldset select,
+.sed-fieldset textarea {
   border: 1px solid var(--sed-border);
   border-radius: 4px;
   padding: 5px 8px;

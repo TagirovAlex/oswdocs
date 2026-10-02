@@ -409,6 +409,19 @@ export async function printRequest(id: string): Promise<PrintResult> {
   });
 }
 
+// Скачать PDF бегунка с авторизацией и вернуть object URL (для печати в новой
+// вкладке). Напрямую открыть /api/documents/{id}/pdf нельзя: API требует
+// Bearer-токен в заголовке, а навигация браузера заголовок не передаёт.
+export async function getPdfBlobUrl(id: string, version: string): Promise<string> {
+  const token = getToken();
+  const res = await fetch(
+    `/api/documents/${encodeURIComponent(id)}/pdf?version=${encodeURIComponent(version)}`,
+    { headers: token ? { Authorization: `Bearer ${token}` } : {} },
+  );
+  if (!res.ok) throw new ApiHttpError(res.status, await res.text());
+  return URL.createObjectURL(await res.blob());
+}
+
 // GET /api/documents/{id}: мета документов заявки (версии, пути, QR).
 export async function getDocuments(id: string): Promise<DocumentMeta[]> {
   return requestJson<DocumentMeta[]>(`/api/documents/${encodeURIComponent(id)}`);
