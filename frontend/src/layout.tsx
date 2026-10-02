@@ -200,12 +200,6 @@ export function SedLayout(props: SedLayoutProps) {
     <div className="sed-shell">
       {/* Шапка: роль из сессии (без выбора), тема и выход. */}
       <header className="sed-header">
-        <span className="sed-logo">
-          <img
-            src={theme === "dark" ? "/logo-oswdocs-dark.svg" : "/logo-oswdocs.svg"}
-            alt="СЭД — Увольнение"
-          />
-        </span>
         <span className="sed-note">· роль: {ROLE_LABELS[role]}</span>
         <span className="sed-header__spacer" />
         <button
@@ -226,8 +220,14 @@ export function SedLayout(props: SedLayoutProps) {
         </button>
       </header>
 
-      {/* Вкладки скелета (по роли сессии). */}
+      {/* Логотип и вкладки — в одном ряду (по макету). */}
       <nav className="sed-tabs" aria-label="Вкладки">
+        <span className="sed-logo">
+          <img
+            src={theme === "dark" ? "/logo-oswdocs-dark.svg" : "/logo-oswdocs.svg"}
+            alt="СЭД — Увольнение"
+          />
+        </span>
         {visibleTabs.map((name) => (
           <button
             key={name}
