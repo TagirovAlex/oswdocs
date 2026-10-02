@@ -7,6 +7,7 @@
 import base64
 import json
 import os
+import re
 import sys
 import types
 from datetime import timedelta
@@ -24,7 +25,8 @@ from app.documents import (  # noqa: E402
     next_version_label,
     version_number,
 )
-from app.docs import BypassResult  # noqa: E402
+from app import docs as docs_module  # noqa: E402
+from app.docs import BypassResult, generate_bypass  # noqa: E402
 from app.main import app  # noqa: E402
 from app.mailer import (  # noqa: E402
     EVENT_ASSIGNED,
@@ -584,3 +586,117 @@ def test_worker_ignores_non_approval_requests(tmp_path):
     assert result.expired == 0
     assert store.get("REQ-0001").status == "Черновик"
     assert isinstance(result, WorkerResult)
+
+
+# --- W3a: зависимости стенда и разведение «офлайн»/настоящего сбоя ---
+
+DOCS_PY_PATH = os.path.join(os.path.dirname(__file__), "..", "app", "docs.py")
+REQUIREMENTS_PATH = os.path.join(os.path.dirname(__file__), "..", "requirements.txt")
+
+# Имя импорта может отличаться от имени пакета: docx приходит вместе с docxtpl
+# (python-docx — его зависимость, отдельной строкой не объявляем).
+IMPORT_TO_PACKAGE = {"docx": "docxtpl"}
+# PNG-бэкенд qrcode (img.save(format="PNG")) требует Pillow; по импортам docs.py
+# это не видно — PIL импортирует сам qrcode, поэтому проверяем пакет явно.
+RENDER_PACKAGES = ("pillow",)
+
+_IMPORT_RE = re.compile(
+    r"^[ \t]*(?:from[ \t]+([A-Za-z_][\w.]*)[ \t]+import|import[ \t]+([A-Za-z_][\w.]*))",
+    re.MULTILINE,
+)
+
+
+def _imported_modules(source: str) -> set:
+    """Верхнеуровневые модули из импортов исходника (файл + тела функций)."""
+    found = set()
+    for from_name, import_name in _IMPORT_RE.findall(source):
+        for name in (from_name, import_name):
+            for part in name.split(","):
+                top = part.strip().split(".")[0]
+                if top and top not in sys.stdlib_module_names:
+                    found.add(top)
+    return found
+
+
+def _declared_packages(requirements_text: str) -> set:
+    """Имена пакетов из requirements.txt: без версий, экстра и комментариев."""
+    names = set()
+    for line in requirements_text.splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line or line.startswith("-"):
+            continue
+        name = re.split(r"[\s\[\]<>=!~;]", line, maxsplit=1)[0].strip().lower()
+        if name:
+            names.add(name)
+    return names
+
+
+def test_docs_imports_declared_in_requirements():
+    """Каждый сторонний импорт docs.py объявлен в requirements.txt.
+
+    Список импортов выводится регуляркой из исходника docs.py (хардкод-списка
+    нет), имена пакетов читаются из requirements.txt без версий.
+    """
+    with open(DOCS_PY_PATH, encoding="utf-8") as fh:
+        imported = _imported_modules(fh.read())
+    assert "qrcode" in imported, "регулярка не нашла импорты docs.py — тест врёт"
+    with open(REQUIREMENTS_PATH, encoding="utf-8") as fh:
+        declared = _declared_packages(fh.read())
+    missing = sorted(
+        name
+        for name in imported | set(RENDER_PACKAGES)
+        if IMPORT_TO_PACKAGE.get(name, name).replace("_", "-") not in declared
+    )
+    assert not missing, f"в requirements.txt нет пакетов для docs.py: {missing}"
+
+
+def _ok_docx(template_body: str, context: dict) -> bytes:
+    """DOCX-рендер-заглушка: docx/docxtpl на машине может не быть установлен."""
+    return b"docx-bytes"
+
+
+def _raise_missing_pil(url: str) -> bytes:
+    """QR-рендер без Pillow (состояние стенда до добавления pillow)."""
+    raise ModuleNotFoundError("No module named 'PIL'")
+
+
+def _bypass_kwargs(tmp_path) -> dict:
+    return dict(
+        request_id="REQ-0001", version="v1", template_body=FAKE_BODY,
+        context={}, base_url=BASE_URL, files_dir=str(tmp_path),
+    )
+
+
+def test_generate_bypass_offline_reason_names_module(monkeypatch, tmp_path):
+    """ModuleNotFoundError → generated=False, причина называет сам модуль."""
+    monkeypatch.setattr(docs_module, "_render_docx_stand", _ok_docx)
+    monkeypatch.setattr(docs_module, "_render_qr_png", _raise_missing_pil)
+    result = generate_bypass(**_bypass_kwargs(tmp_path))
+    assert result.generated is False
+    assert result.reason.startswith("офлайн")
+    assert "PIL" in result.reason
+
+
+def test_generate_bypass_reraises_real_errors(monkeypatch, tmp_path):
+    """Настоящий сбой рендера не превращается в generated=False — проброс."""
+    monkeypatch.setattr(docs_module, "_render_docx_stand", _ok_docx)
+
+    def broken(url: str) -> bytes:
+        raise RuntimeError("сбой рендера QR")
+
+    monkeypatch.setattr(docs_module, "_render_qr_png", broken)
+    with pytest.raises(RuntimeError):
+        generate_bypass(**_bypass_kwargs(tmp_path))
+
+
+def test_print_offline_missing_module_is_not_500(client, hr, monkeypatch):
+    """Офлайн без библиотеки → 200 {"generated": false, "reason": ...}, не 500."""
+    monkeypatch.setattr(docs_module, "_render_docx_stand", _ok_docx)
+    monkeypatch.setattr(docs_module, "_render_qr_png", _raise_missing_pil)
+    rid = _create(client, hr, category="линейный",
+                  steps=[{"owner_group": "SED_STEP_BUH"}])["id"]
+    response = client.post(f"/requests/{rid}/print", headers=hr)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["generated"] is False
+    assert "PIL" in body["reason"]

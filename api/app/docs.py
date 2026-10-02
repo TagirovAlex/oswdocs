@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import io
+import logging
 import re
 import struct
 import zipfile
@@ -17,6 +18,9 @@ import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Protocol
+
+# Логгер модуля: сбои генерации бегунка пишем в журнал (см. generate_bypass).
+_LOGGER = logging.getLogger(__name__)
 
 # Метка PDF-стаба: рендер настоящего PDF — только на стенде через LibreOffice.
 PDF_STUB_MARK = "рендер на стенде (LibreOffice)"
@@ -213,9 +217,10 @@ class StdlibDocxRenderer:
 
 # ---------------------------------------------------------------------------
 # W3a: боевая генерация бегунка (DOCX -> PDF + QR) на стенде.
-# Зависимости стенда (python-docx-template/qrcode/LibreOffice) импортируются
-# лениво: офлайн их нет — generate_bypass вернет generated=False с причиной
-# (не 500). Тексты шаблонов — только из doc_templates/settings, хардкода нет.
+# Зависимости стенда (python-docx-template/qrcode/Pillow/LibreOffice)
+# импортируются лениво: офлайн их нет — generate_bypass вернет generated=False
+# с причиной (не 500); прочие сбои не глотаются. Тексты шаблонов — только из
+# doc_templates/settings, хардкода нет.
 # ---------------------------------------------------------------------------
 
 
@@ -332,6 +337,22 @@ def _convert_to_pdf(docx_path: str, out_dir: str, soffice: str | None) -> str | 
     return pdf if Path(pdf).exists() else None
 
 
+# Текст «No module named '...'» в ImportError/ModuleNotFoundError (у вручную
+# созданных исключений атрибут name пустой — берём имя из текста).
+_MISSING_MODULE_RE = re.compile(r"No module named [\"']([\w.]+)[\"']")
+
+
+def _missing_library(exc: BaseException) -> str:
+    """Имя модуля, которого нет: exc.name, иначе разбор текста ошибки.
+
+    Для вложенных импортов берётся верхний уровень (PIL.Image -> PIL)."""
+    name = getattr(exc, "name", None) or ""
+    if not name:
+        match = _MISSING_MODULE_RE.search(str(exc))
+        name = match.group(1) if match else "неизвестно"
+    return name.split(".")[0]
+
+
 def generate_bypass(
     request_id: str,
     version: str,
@@ -342,20 +363,30 @@ def generate_bypass(
 ) -> BypassResult:
     """Собрать бегунок: DOCX (python-docx-template) -> PDF (LibreOffice) + QR.
 
-    Офлайн (нет python-docx-template/qrcode/soffice) или сбой LibreOffice —
+    Офлайн (нет python-docx-template/qrcode/PIL) или нет soffice —
     BypassResult(generated=False, reason=...): файлы не записываются в документы
     (в БД только мета успешной генерации). QR payload — URL заявки.
+    Прочие сбои не глотаются: пишем в лог и пробрасываем наружу.
     """
     safe = sanitize_context(dict(context, request_id=request_id))
     url = request_url(base_url, request_id)
     try:
         docx_bytes = _render_docx_stand(template_body, safe)
         qr_bytes = _render_qr_png(url)
-    except Exception as exc:  # нет python-docx-template/qrcode — офлайн
+    except ImportError as exc:
+        # Офлайн: нет python-docx-template/qrcode/PIL (в т.ч. вложенный импорт).
+        # Называем саму библиотеку, а не только класс исключения.
         return BypassResult(
             generated=False,
-            reason=f"офлайн: библиотеки стенда недоступны ({exc.__class__.__name__})",
+            reason=(
+                f"офлайн: нет библиотеки {_missing_library(exc)} "
+                f"({exc.__class__.__name__}: {exc})"
+            ),
         )
+    except Exception:
+        # Настоящий сбой (шаблон, QR, файлы) — под «офлайн» его прятать нельзя.
+        _LOGGER.exception("Ошибка генерации бегунка по заявке %s", request_id)
+        raise
     out_dir = Path(files_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     docx_path = out_dir / f"bypass_{request_id}_v{version}.docx"
