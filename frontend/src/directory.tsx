@@ -21,6 +21,32 @@ const SEARCH_PAGE_SIZE = 500;
 // Варианты селекта размера страницы (значение по умолчанию — из настроек).
 const PAGE_SIZE_OPTIONS = [25, 50, 100, 200];
 
+// Номера страниц пейджера для перехода: всегда 1, пять вокруг текущей
+// (current-2..current+2) и пять с конца (total-4..total); «…» — разрыв.
+// При малом числе страниц (<=10) — все подряд без разрывов.
+function pagerPages(current: number, total: number): Array<number | "…"> {
+  if (total <= 1) return [1];
+  const set = new Set<number>();
+  if (total <= 10) {
+    for (let i = 1; i <= total; i++) set.add(i);
+  } else {
+    set.add(1);
+    for (let i = current - 2; i <= current + 2; i++) {
+      if (i >= 1 && i <= total) set.add(i);
+    }
+    for (let i = Math.max(1, total - 4); i <= total; i++) set.add(i);
+  }
+  const sorted = [...set].sort((a, b) => a - b);
+  const out: Array<number | "…"> = [];
+  let prev = 0;
+  for (const page of sorted) {
+    if (prev !== 0 && page - prev > 1) out.push("…");
+    out.push(page);
+    prev = page;
+  }
+  return out;
+}
+
 interface DirectoryProps {
   // Роль (привязку AD и автосвязку видит только админ; ОК/руководитель — просмотр).
   role: Role;
@@ -215,10 +241,19 @@ export function Directory(props: DirectoryProps) {
           )}
         </tbody>
       </table>
-      {/* Пагинация справочника: счётчик, навигация и селект размера страницы.
-          totalPages=0 до первого поиска — блок не показываем. */}
+      {/* Пагинация справочника: Первая/Последняя, номера страниц, счётчик и селект
+          размера страницы. totalPages=0 до первого поиска — блок не показываем. */}
       {totalPages > 0 && (
         <div className="sed-pager" aria-label="Пагинация справочника">
+          <button
+            type="button"
+            className="sed-btn"
+            aria-label="Первая страница"
+            disabled={page <= 1}
+            onClick={() => goToPage(1)}
+          >
+            Первая
+          </button>
           <button
             type="button"
             className="sed-btn"
@@ -228,7 +263,23 @@ export function Directory(props: DirectoryProps) {
           >
             ← Назад
           </button>
-          <span role="status">стр {page} из {totalPages}</span>
+          {pagerPages(page, totalPages).map((p, index) =>
+            p === "…" ? (
+              <span key={`ell-${index}`} aria-hidden="true">…</span>
+            ) : (
+              <button
+                key={p}
+                type="button"
+                className="sed-btn"
+                aria-label={`Страница ${p}`}
+                aria-current={p === page ? "page" : undefined}
+                disabled={p === page}
+                onClick={() => goToPage(p)}
+              >
+                {p}
+              </button>
+            ),
+          )}
           <button
             type="button"
             className="sed-btn"
@@ -238,6 +289,16 @@ export function Directory(props: DirectoryProps) {
           >
             Вперёд →
           </button>
+          <button
+            type="button"
+            className="sed-btn"
+            aria-label="Последняя страница"
+            disabled={page >= totalPages}
+            onClick={() => goToPage(totalPages)}
+          >
+            Последняя
+          </button>
+          <span role="status">стр {page} из {totalPages}</span>
           <label>
             На странице
             <select

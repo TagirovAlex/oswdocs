@@ -97,4 +97,35 @@ describe("Directory", () => {
       expect(searchEmployees).toHaveBeenLastCalledWith("A", "Сказочников", 1, 500),
     );
   });
+
+  // Пейджер справочника: номера страниц и «Первая/Последняя».
+  it("пейджер справочника: номера страниц и Первая/Последняя", async () => {
+    vi.mocked(getEnterprises).mockResolvedValue(enterprises);
+    vi.mocked(searchEmployees).mockResolvedValue({
+      items: hits,
+      total: 120,
+      page: 1,
+      page_size: 50,
+    });
+
+    render(<Directory role="hr" />);
+    await waitFor(() => expect(screen.getByLabelText("Предприятие справочника")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("Найти"));
+    await waitFor(() => expect(screen.getByText("стр 1 из 3")).toBeInTheDocument());
+
+    // Номера страниц, «Первая» недоступна на первой, «Последняя» доступна.
+    expect(screen.getByRole("button", { name: "Страница 2" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Страница 3" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Первая страница" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Последняя страница" })).not.toBeDisabled();
+
+    // Клик по номеру 3 → запрос page=3; «Последняя» становится недоступной.
+    fireEvent.click(screen.getByRole("button", { name: "Страница 3" }));
+    await waitFor(() => expect(searchEmployees).toHaveBeenLastCalledWith("A", "", 3, 50));
+    expect(screen.getByRole("button", { name: "Последняя страница" })).toBeDisabled();
+
+    // «Первая» → возврат на первую страницу.
+    fireEvent.click(screen.getByRole("button", { name: "Первая страница" }));
+    await waitFor(() => expect(searchEmployees).toHaveBeenLastCalledWith("A", "", 1, 50));
+  });
 });
