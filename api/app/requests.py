@@ -46,7 +46,6 @@ from .requests_store import (
 )
 from .settings_routes import (
     DbSettingsStore,
-    SettingsUnavailable,
     _groups_with_names,
     get_settings_store,
     read_setting_value,
