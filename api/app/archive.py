@@ -10,6 +10,8 @@
 # archive_name_template (шаблон имени, {ts} — метка времени), archive_keep_copies
 # (int >= 1), archive_schedule (mode interval|daily, как schedule_enterprises_sync);
 # техническая метка archive_backup_at (последний бэкап, read-only).
+# Уведомление о выполненном бэкапе (ручном и регламентном) — по archive_schedule
+# (notify/recipients/subject/body, event=reglament), как у прочих регламентов.
 # Доступ — только admin (как настройки админки); БД/каталог недоступны — 503.
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ from pydantic import BaseModel, Field
 from .audit import AuditEvent, audit_log
 from .config import Settings, get_settings
 from .deps import CurrentUser, get_current_user
+from .mailer import MailQueue, get_mail_queue, resolve_smtp_from
 from .settings_routes import (
     DbSettingsStore,
     SettingsUnavailable,
@@ -151,19 +154,56 @@ def _cleanup(backup_dir: Path, keep: int) -> None:
             pass  # файл не удалили — не роняем сам бэкап
 
 
+def _notify_backup(
+    store: DbSettingsStore,
+    queue: MailQueue,
+    smtp_from: str,
+    target: Path,
+) -> None:
+    """Уведомление о выполненном бэкапе по archive_schedule (event=reglament).
+
+    Адресаты/тема/текст — из настроек расписания; в тело подставляется сводка
+    ({{summary}}): имя файла и размер копии. Тихо, как у прочих регламентов:
+    notify=false/нет адресатов — писем нет; сбой уведомления не отменяет уже
+    созданный бэкап (в аудит — archive.notify.skip, без ПДн)."""
+    from .onec_sync import notify_schedule  # лениво: избегаем циклов импорта
+
+    try:
+        size_mb = target.stat().st_size / (1024 * 1024)
+        notify_schedule(
+            store,
+            queue,
+            "archive_schedule",
+            smtp_from,
+            "бэкап создан: %s; размер: %.1f МБ" % (target.name, size_mb),
+        )
+    except Exception:
+        audit_log.append(
+            AuditEvent(
+                actor="system",
+                action="archive.notify.skip",
+                entity="archive",
+                entity_id=target.name,
+            )
+        )
+
+
 def create_backup(
     store: DbSettingsStore,
     database_url: str,
     files_dir: str,
     moment: datetime | None = None,
+    queue: MailQueue | None = None,
+    smtp_from: str = "",
 ) -> Path:
     """Ручной/регламентный бэкап: дамп БД + подчистка старых копий.
 
     Каталог/шаблон/число копий — из settings (дефолты выше). Метка
     archive_backup_at обновляется после успешного дампа (единый «последний
     бэкап» для ручного и регламентного запуска); сбой записи метки не отменяет
-    сам бэкап. Возвращает путь созданного файла; ошибка — ArchiveUnavailable/
-    SettingsUnavailable."""
+    сам бэкап. При переданной очереди queue после успеха уходит уведомление по
+    archive_schedule (адресаты/тема/текст — из настроек). Возвращает путь
+    созданного файла; ошибка — ArchiveUnavailable/SettingsUnavailable."""
     moment = moment or datetime.now(timezone.utc)
     backup_dir = _backup_dir(store, files_dir)
     keep = _keep_copies(store)
@@ -186,6 +226,8 @@ def create_backup(
         store.set("archive_backup_at", json.dumps(moment.isoformat()))
     except SettingsUnavailable:
         pass  # техническая метка: бэкап уже создан
+    if queue is not None:
+        _notify_backup(store, queue, smtp_from, target)
     return target
 
 
@@ -218,12 +260,15 @@ def maybe_backup_weekly(
     database_url: str,
     files_dir: str,
     moment: datetime | None = None,
+    queue: MailQueue | None = None,
+    smtp_from: str = "",
 ) -> bool:
     """Регламентный бэкап (worker): тихо, без сбоев.
 
     «Не пора» по расписанию archive_schedule (нет расписания — раз в 7 дней от
     archive_backup_at) — False; иначе create_backup (сбой не валит worker —
-    False), успех — True."""
+    False), успех — True. При переданной очереди queue после успеха уходит
+    уведомление по archive_schedule."""
     from .onec_sync import due_schedule  # лениво: избегаем циклов импорта
 
     schedule = read_setting_value(store, "archive_schedule")
@@ -231,7 +276,14 @@ def maybe_backup_weekly(
     if not due_schedule(schedule, last_raw):
         return False
     try:
-        create_backup(store, database_url, files_dir, moment)
+        create_backup(
+            store,
+            database_url,
+            files_dir,
+            moment,
+            queue=queue,
+            smtp_from=smtp_from,
+        )
         return True
     except Exception:
         return False
@@ -373,15 +425,27 @@ def run_archive_backup(
     user: CurrentUser = Depends(get_current_user),
     store: DbSettingsStore = Depends(get_settings_store),
     settings: Settings = Depends(get_settings),
+    mail_queue: MailQueue = Depends(get_mail_queue),
 ) -> dict:
     """Ручной бэкап (только admin): дамп БД в каталог настроек, подчистка
     старых копий сверх archive_keep_copies; ответ {ok, path, files}.
 
+    После успеха письмо по archive_schedule (notify/recipients/subject/body) —
+    так же, как при регламентном бэкапе; сбой уведомления бэкап не отменяет.
     БД/каталог недоступны — 503 (не 500). RESTORE не реализован
     (восстановление вручную)."""
     _require_admin(user)
     try:
-        target = create_backup(store, settings.DATABASE_URL, settings.FILES_DIR)
+        smtp_from = resolve_smtp_from(
+            read_setting_value(store, "smtp_from"), settings.SMTP_FROM
+        )
+        target = create_backup(
+            store,
+            settings.DATABASE_URL,
+            settings.FILES_DIR,
+            queue=mail_queue,
+            smtp_from=smtp_from,
+        )
     except SettingsUnavailable as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
