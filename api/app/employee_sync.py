@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from typing import List, Optional, Protocol
 
 from fastapi import Depends
-from sqlalchemy import create_engine, text
+from sqlalchemy import bindparam, create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import sessionmaker
 
@@ -28,6 +28,15 @@ LIST_PAGE = 500
 
 class EmployeeSyncUnavailable(Exception):
     """Локальный справочник сотрудников недоступен (нет баз/предприятий/БД) — 503."""
+
+
+def _norm_people(values: list[str] | None) -> list[str]:
+    """Нормализация логинов/табельных номеров для точного сравнения (lower, без пустых).
+
+    Единый вид значения для in-memory и Postgres: обрезка пробелов и регистр,
+    иначе один и тот же человек искался бы по-разному в зависимости от того,
+    как его прислали (из 1С или вручную в заявке)."""
+    return [value.strip().lower() for value in (values or []) if value and value.strip()]
 
 
 class EmployeeSyncStore(Protocol):
@@ -49,6 +58,19 @@ class EmployeeSyncStore(Protocol):
     def count_matching(self, enterprise: str, q: str) -> int:
         """Сколько строк предприятия отвечают подстроке fio/tab_num/position/ad_sam
         (те же условия, что в search — для total серверной пагинации)."""
+        ...
+
+    def find_by_people(
+        self, enterprise: str, sam_list: list[str], tab_list: list[str]
+    ) -> list[dict]:
+        """Точный поиск сотрудников предприятия по спискам (без ILIKE, пакетно).
+
+        Условие — предприятие И (lower(ad_sam) IN (:sam_list) ИЛИ
+        lower(tab_num) IN (:tab_list)); сравнение регистронезависимое, только
+        точные совпадения. Пустые списки в запрос не подставляются, а если оба
+        списка пусты — хранилище не запрашивается вовсе и возвращает [].
+        Строки — как в search (enterprise/base_code/tab_num/fio/department/
+        position/ad_sam/ad_status)."""
         ...
 
     def upsert_many(self, rows: list[dict]) -> int:
@@ -89,6 +111,23 @@ class InMemoryEmployeeSyncStore:
 
     def count_matching(self, enterprise: str, q: str) -> int:
         return len(self.search(enterprise, q, len(self._rows)))
+
+    def find_by_people(
+        self, enterprise: str, sam_list: list[str], tab_list: list[str]
+    ) -> list[dict]:
+        sams = _norm_people(sam_list)
+        tabs = _norm_people(tab_list)
+        if not sams and not tabs:
+            return []
+        hits = []
+        for row in self._rows.values():
+            if row["enterprise"] != enterprise:
+                continue
+            ad_sam = (row.get("ad_sam") or "").strip().lower()
+            tab_num = (row.get("tab_num") or "").strip().lower()
+            if (ad_sam and ad_sam in sams) or (tab_num and tab_num in tabs):
+                hits.append(dict(row))
+        return hits
 
     def upsert_many(self, rows: list[dict]) -> int:
         for row in rows:
@@ -144,6 +183,17 @@ class DbEmployeeSyncStore:
             updated_at = now()
         """
     )
+    # Шаблон точного пакетного поиска: условие по логинам/табельным номерам
+    # собирается в методе (пустые списки в IN не подставляются), параметры
+    # списков — bindparam(expanding=True), иначе psycopg получает кортеж, а не
+    # список значений.
+    _FIND_BY_PEOPLE_SQL = """
+        SELECT enterprise, base_code, tab_num, fio, department, position, ad_sam, ad_status
+        FROM employees
+        WHERE enterprise = :enterprise
+          AND ({where})
+        ORDER BY fio, tab_num
+        """
 
     def __init__(self, database_url: str) -> None:
         self._engine = create_engine(database_url, pool_pre_ping=True)
@@ -207,6 +257,36 @@ class DbEmployeeSyncStore:
                 "Справочник сотрудников недоступен: %s" % exc
             ) from exc
         return int(value or 0)
+
+    def find_by_people(
+        self, enterprise: str, sam_list: list[str], tab_list: list[str]
+    ) -> list[dict]:
+        sams = _norm_people(sam_list)
+        tabs = _norm_people(tab_list)
+        if not sams and not tabs:
+            return []
+        clauses: list[str] = []
+        params: dict[str, object] = {"enterprise": enterprise}
+        expanding: list = []
+        if sams:
+            clauses.append("lower(ad_sam) IN :sam_list")
+            params["sam_list"] = sams
+            expanding.append(bindparam("sam_list", expanding=True))
+        if tabs:
+            clauses.append("lower(tab_num) IN :tab_list")
+            params["tab_list"] = tabs
+            expanding.append(bindparam("tab_list", expanding=True))
+        statement = text(self._FIND_BY_PEOPLE_SQL.format(where=" OR ".join(clauses)))
+        if expanding:
+            statement = statement.bindparams(*expanding)
+        try:
+            with self._session_factory() as session:
+                rows = session.execute(statement, params).all()
+        except SQLAlchemyError as exc:
+            raise EmployeeSyncUnavailable(
+                "Справочник сотрудников недоступен: %s" % exc
+            ) from exc
+        return [self._to_dict(row) for row in rows]
 
     def upsert_many(self, rows: list[dict]) -> int:
         params = [

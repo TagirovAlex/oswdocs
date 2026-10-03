@@ -280,12 +280,14 @@ export function RequestCard(props: RequestCardProps) {
     ? null
     : (card?.steps.find((s) => s.status === "ожидает" && s.can_act === true) ?? null);
 
-  // Ключ карточки сотрудника (enterprise|base_code|tab_num): непустой только
-  // когда все части есть — тогда ФИО становится ссылкой на карточку.
+  // Ключ карточки сотрудника (enterprise|base_code|tab_num): employee_key от
+  // бэкенда (собран по локальному справочнику, только привилегированным),
+  // иначе — как раньше, из полей самой заявки. Пусто — ФИО остаётся текстом.
   const employeeKey =
-    card?.enterprise && card?.base_code && card?.tab_num
+    card?.employee_key ||
+    (card?.enterprise && card?.base_code && card?.tab_num
       ? `${card.enterprise}|${card.base_code}|${card.tab_num}`
-      : "";
+      : "");
 
   // ФИО сотрудника: ссылка на карточку, когда key доступен (иначе текст).
   function employeeCell(fio: string) {
@@ -301,6 +303,26 @@ export function RequestCard(props: RequestCardProps) {
         }}
       >
         {fio}
+      </a>
+    );
+  }
+
+  // Исполнитель шага в таблице: при employee_key от бэкенда — ссылка на карточку
+  // сотрудника (окно-попа), иначе прежний текст stepOwnerCell.
+  function stepOwnerNode(step: RequestStep) {
+    const label = stepOwnerCell(step);
+    if (!step.employee_key) return label;
+    const url = employeeUrl(step.employee_key);
+    return (
+      <a
+        href={url}
+        onClick={(e) => {
+          // Окно карточки сотрудника — по клику (иначе браузер блокирует popup).
+          e.preventDefault();
+          openPopup(url);
+        }}
+      >
+        {label}
       </a>
     );
   }
@@ -660,7 +682,7 @@ export function RequestCard(props: RequestCardProps) {
                         <tr key={step.order}>
                           <td>{stepLabel(step.order)}</td>
                           <td>
-                            {stepOwnerCell(step)}
+                            {stepOwnerNode(step)}
                           </td>
                           <td>{step.status}</td>
                           <td>{step.expires_at.slice(0, 10)}</td>

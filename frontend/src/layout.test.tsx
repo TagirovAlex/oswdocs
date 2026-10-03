@@ -78,6 +78,10 @@ const myStep: RequestOut["steps"] = [
   },
 ];
 
+// Ключ карточки сотрудника, который бэкенд резолвит по локальному справочнику
+// (только привилегированным; в нём табельный номер — ПДн).
+const EMP_KEY = "ENT_PRIMER_1|zup|Т-000201";
+
 // Идентификаторы строк таблицы в порядке отображения (первая ячейка — «№»).
 function visibleIds(): (string | null)[] {
   const table = screen.getByLabelText("Заявки");
@@ -270,6 +274,62 @@ describe("SedLayout", () => {
       expect(vi.mocked(getFolders).mock.calls.length).toBeGreaterThan(foldersCalls),
     );
     expect(vi.mocked(getRequests).mock.calls.length).toBeGreaterThan(requestsCalls);
+  });
+
+  // ФИО в таблице — ссылка на карточку сотрудника (employee_key от бэкенда):
+  // окно сотрудника открывается по клику, карточка заявки при этом НЕ открывается
+  // (событие гасится), иначе клик по ФИО открывал бы оба окна.
+  it("ФИО в таблице — ссылка на карточку сотрудника, карточка заявки не открывается", async () => {
+    vi.mocked(getFolders).mockResolvedValue(folders);
+    vi.mocked(getRequests).mockResolvedValue([
+      { ...requestWith("Громов Игорь Олегович", "На согласовании"), employee_key: EMP_KEY },
+    ]);
+    const open = vi.spyOn(window, "open").mockImplementation(() => null);
+
+    renderWithTheme("hr");
+    await waitFor(() => expect(screen.getByText("REQ-0001")).toBeInTheDocument());
+    const link = screen.getByRole("link", { name: "Громов Игорь Олегович" });
+    expect(link).toHaveAttribute("href", `?view=employee&key=${encodeURIComponent(EMP_KEY)}`);
+    fireEvent.click(link);
+    expect(open).toHaveBeenCalledTimes(1);
+    expect(open).toHaveBeenCalledWith(
+      `?view=employee&key=${encodeURIComponent(EMP_KEY)}`,
+      "_blank",
+      expect.stringContaining("popup"),
+    );
+    open.mockRestore();
+  });
+
+  // Без employee_key (неоднозначное совпадение в справочнике, не привилегированный)
+  // ФИО остаётся текстом — клик по строке открывает карточку заявки, как раньше.
+  it("без employee_key ФИО — текст, клик по строке открывает карточку заявки", async () => {
+    vi.mocked(getFolders).mockResolvedValue(folders);
+    vi.mocked(getRequests).mockResolvedValue([requestWith("Громов Игорь Олегович", "На согласовании")]);
+    const open = vi.spyOn(window, "open").mockImplementation(() => null);
+
+    renderWithTheme("hr");
+    await waitFor(() => expect(screen.getByText("REQ-0001")).toBeInTheDocument());
+    expect(screen.queryByRole("link", { name: "Громов Игорь Олегович" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText("Громов Игорь Олегович"));
+    expect(open).toHaveBeenCalledWith("?view=request&id=REQ-0001", "_blank", expect.stringContaining("popup"));
+    open.mockRestore();
+  });
+
+  // employee_key бэкенда — источник ключа строки (fallback на enterprise|base_code|
+  // tab_num остаётся для старых ответов без employee_key).
+  it("toRequestRow берёт ключ из employee_key, иначе собирает из полей заявки", () => {
+    const withKey = toRequestRow({
+      ...requestWith("Громов Игорь Олегович", "На согласовании"),
+      employee_key: EMP_KEY,
+    });
+    expect(withKey.employeeKey).toBe(EMP_KEY);
+    const legacy = toRequestRow({
+      ...requestWith("Громов Игорь Олегович", "На согласовании"),
+      base_code: "zup",
+    });
+    expect(legacy.employeeKey).toBe("ENT_PRIMER_1|zup|Т-000201");
+    // Без ключа и без base_code — ссылки нет.
+    expect(toRequestRow(requestWith("Громов Игорь Олегович", "На согласовании")).employeeKey).toBe("");
   });
 
   // Колонка «Текущий согласующий» — только привилегированным: ФИО исполнителя

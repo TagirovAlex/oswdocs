@@ -27,7 +27,7 @@ import type { Role } from "./api-mock";
 import { useTheme } from "./theme";
 import { AdminSettings } from "./admin-settings";
 import { Directory } from "./directory";
-import { createUrl, openPopup, requestUrl } from "./windows";
+import { createUrl, employeeUrl, openPopup, requestUrl } from "./windows";
 
 // Вкладки скелета. «Создание» убрана: создание заявки — кнопка «Создать
 // заявку» (окно ?view=create), приватный маршрут создания сохранён.
@@ -475,23 +475,45 @@ export function SedLayout(props: SedLayoutProps) {
               </tr>
             </thead>
             <tbody>
-              {sortedRows.map((row) => (
-                <tr key={row.id} onClick={() => openPopup(requestUrl(row.id))}>
-                  <td>
-                    <span className="sed-regnum">{row.id}</span>
-                  </td>
-                  <td>{row.fio}</td>
-                  {role !== "owner" && (
-                    <>
-                      <td>{row.enterprise}</td>
-                      <td>{row.status}</td>
-                      <td>{row.ownerName}</td>
-                    </>
-                  )}
-                  <td>{row.step}</td>
-                  <td>{row.dueDate}</td>
-                </tr>
-              ))}
+              {sortedRows.map((row) => {
+                // Ключ карточки сотрудника (employee_key от бэкенда): есть — ФИО
+                // ссылка на карточку, иначе прежний текст.
+                const empKey = row.employeeKey;
+                return (
+                  <tr key={row.id} onClick={() => openPopup(requestUrl(row.id))}>
+                    <td>
+                      <span className="sed-regnum">{row.id}</span>
+                    </td>
+                    <td>
+                      {empKey ? (
+                        <a
+                          href={employeeUrl(empKey)}
+                          onClick={(e) => {
+                            // Клик по ФИО открывает карточку сотрудника, а не
+                            // заявки: событие гасим (иначе откроется и то, и то).
+                            e.preventDefault();
+                            e.stopPropagation();
+                            openPopup(employeeUrl(empKey));
+                          }}
+                        >
+                          {row.fio}
+                        </a>
+                      ) : (
+                        row.fio
+                      )}
+                    </td>
+                    {role !== "owner" && (
+                      <>
+                        <td>{row.enterprise}</td>
+                        <td>{row.status}</td>
+                        <td>{row.ownerName}</td>
+                      </>
+                    )}
+                    <td>{row.step}</td>
+                    <td>{row.dueDate}</td>
+                  </tr>
+                );
+              })}
               {rows.length === 0 && !error && (
                 <tr>
                   <td colSpan={columns.length}>Заявок нет</td>

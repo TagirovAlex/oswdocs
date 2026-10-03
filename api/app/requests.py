@@ -23,6 +23,10 @@ from .config import Settings, get_settings
 from .deps import CurrentUser, SedAdminUser, get_current_user
 from .docs import request_url
 from .employees import get_ad_reader
+from .employee_sync import (
+    EmployeeSyncStore,
+    get_employee_sync_store,
+)
 from .mailer import (
     EVENT_ASSIGNED,
     EVENT_RETURNED,
@@ -257,6 +261,13 @@ class StepOut(BaseModel):
             "групповой — наименование группы из settings (если известно)"
         ),
     )
+    employee_key: str | None = Field(
+        default=None,
+        description="Составной ключ сотрудника шага (enterprise|base_code|tab_num), только привилегированным",
+    )
+    emp_enterprise: str | None = Field(default=None)
+    emp_base_code: str | None = Field(default=None)
+    emp_tab_num: str | None = Field(default=None)
     status: str
     require_comment: bool = False
     expires_at: str
@@ -279,6 +290,7 @@ class RequestOut(BaseModel):
     enterprise_name: str | None = Field(
         default=None, description="Название предприятия из settings.enterprises"
     )
+    employee_key: str | None = Field(default=None, description="Составной ключ сотрудника заявки, только привилегированным")
     tab_num: str | None = None
     fio: str | None = None
     department: str
@@ -671,6 +683,116 @@ def _step_owner_name(
     return None
 
 
+def _employee_key(
+    enterprise: str | None, base_code: str | None, tab_num: str | None
+) -> str | None:
+    """Ключ карточки сотрудника: enterprise|base_code|tab_num (как windows.tsx).
+
+    Без предприятия или табельного номера ключа нет — ссылка была бы битой."""
+    if not enterprise or not tab_num:
+        return None
+    return "|".join([enterprise.strip(), (base_code or "").strip(), tab_num.strip()])
+
+
+def _unique_keys(values: list[str | None]) -> list[str]:
+    """Значения без пустых и повторов (порядок сохраняется).
+
+    Для пакетного резолва: в справочник уходит один вхождение табельного номера
+    или логина, сколько бы заявок и шагов их ни повторяли."""
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value and value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result
+
+
+def _employee_keys(
+    requests_list: list[_Request],
+    emp_store: EmployeeSyncStore | None = None,
+) -> tuple[dict[str, str | None], dict[tuple[str, int], dict[str, str | None]]]:
+    """Пакетный резолв ключей карточек сотрудников по локальному справочнику.
+
+    Один вызов find_by_people на предприятие: по всем табельным номерам заявок и
+    всем логинам исполнителей (assignee) шагов — без обращения к employees на
+    шаг. Ключ ставится только при ЕДИНСТВЕННОМ совпадении: неоднозначный
+    табельный номер или логин (человек числится в двух базах) ключа не даёт,
+    иначе ссылка увела бы на чужую карточку.
+
+    Возврат: (request_keys, step_keys), где request_keys — {id заявки: ключ},
+    step_keys — {(id заявки, order шага): {employee_key, emp_enterprise,
+    emp_base_code, emp_tab_num}} (шаг ключуется в паре с заявкой: order у шагов
+    разных заявок совпадает).
+
+    Fail-soft: справочник недоступен (EmployeeSyncUnavailable) или заявок нет —
+    пустые словари, выдача списка не роняется."""
+    request_keys: dict[str, str | None] = {}
+    step_keys: dict[tuple[str, int], dict[str, str | None]] = {}
+    if not requests_list:
+        return request_keys, step_keys
+    if emp_store is None:
+        try:
+            emp_store = _resolve_dependency(get_employee_sync_store, get_settings())
+        except Exception:
+            return request_keys, step_keys
+    # Табельные номера и логины группируем по предприятию: employees — таблица
+    # с предприятием в ключе, поэтому один запрос на предприятие.
+    tabs: dict[str, list[str | None]] = {}
+    sams: dict[str, list[str | None]] = {}
+    for request in requests_list:
+        enterprise = (request.enterprise or "").strip()
+        if not enterprise:
+            continue
+        tabs.setdefault(enterprise, []).append(request.tab_num)
+        sams.setdefault(enterprise, []).extend(
+            step.assignee for step in request.steps if step.assignee
+        )
+    for enterprise in sorted(set(tabs) | set(sams)):
+        enterprise_tabs = _unique_keys(tabs.get(enterprise, []))
+        enterprise_sams = _unique_keys(sams.get(enterprise, []))
+        if not enterprise_tabs and not enterprise_sams:
+            continue
+        try:
+            rows = emp_store.find_by_people(enterprise, enterprise_sams, enterprise_tabs)
+        except Exception:
+            # Справочник — мягкая зависимость: недоступен (EmployeeSyncUnavailable)
+            # или сломался иначе — выдача списка идёт без ключей, как и _step_owner_name.
+            continue
+        by_tab: dict[str, list[dict]] = {}
+        by_sam: dict[str, list[dict]] = {}
+        for row in rows:
+            tab = str(row.get("tab_num") or "").strip().lower()
+            if tab:
+                by_tab.setdefault(tab, []).append(row)
+            sam = str(row.get("ad_sam") or "").strip().lower()
+            if sam:
+                by_sam.setdefault(sam, []).append(row)
+        for request in requests_list:
+            if (request.enterprise or "").strip() != enterprise:
+                continue
+            hits = by_tab.get(str(request.tab_num or "").strip().lower(), [])
+            if len(hits) == 1:
+                request_keys[request.id] = _employee_key(
+                    enterprise, hits[0].get("base_code"), hits[0].get("tab_num")
+                )
+            for step in request.steps:
+                if not step.assignee:
+                    continue
+                step_hits = by_sam.get(step.assignee.strip().lower(), [])
+                if len(step_hits) == 1:
+                    row = step_hits[0]
+                    step_keys[(request.id, step.order)] = {
+                        "employee_key": _employee_key(
+                            enterprise, row.get("base_code"), row.get("tab_num")
+                        ),
+                        "emp_enterprise": enterprise,
+                        "emp_base_code": row.get("base_code"),
+                        "emp_tab_num": row.get("tab_num"),
+                    }
+    return request_keys, step_keys
+
+
 def _public_view(
     request: _Request,
     user: CurrentUser,
@@ -679,20 +801,26 @@ def _public_view(
     enterprise_names: dict[str, str] | None = None,
     group_names: dict[str, str] | None = None,
     doc_type_names: dict[str, str] | None = None,
+    employee_keys: dict[str, str | None] | None = None,
+    step_employee_keys: dict[tuple[str, int], dict[str, str | None]] | None = None,
 ) -> RequestOut:
     """Ролевая обрезка: ОК/админы — всё, владелец — без tab_num (ПДн).
 
     ad_reader, enterprise_names, group_names и doc_type_names резолвятся ОДИН раз
     на вызов и переиспользуются для всех шагов (list_requests поднимает их над
     циклом по заявкам, чтобы на списке не было ни одного лишнего обращения к
-    AD/БД на шаг).
+    AD/БД на шаг). employee_keys и step_employee_keys — результат пакетного
+    резолва _employee_keys на всю выборку (ключи карточек сотрудников для ссылок);
+    без них поля employee_key/emp_* остаются None.
 
     ПДн по ролям: enterprise_name (как enterprise/tab_num/fio) — только
     привилегированным, остальным None; owner_name (ФИО согласующего/наименование
     группы) — всем авторизованным, сотруднику полезно видеть, кто согласует;
     assignee, created_by и done_by — это sAMAccountName, поэтому скрываются всем,
     кроме привилегированных (assignee владельцу шага остаётся — это его собственный
-    логин); can_act считается всегда и для всех ролей.
+    логин); can_act считается всегда и для всех ролей. Ключи сотрудников
+    (employee_key/emp_*) — производные от ПДн (табельный номер), поэтому только
+    привилегированным.
     """
     privileged = user.role in ("hr", "hr_admin", "admin")
     reader = ad_reader if ad_reader is not None else _resolve_dependency(get_ad_reader)
@@ -705,29 +833,37 @@ def _public_view(
     doc_names = doc_type_names if doc_type_names is not None else _doc_type_names_map()
     now = _utcnow()
     pending_orders = {s.order for s in _current_pending_steps(request)}
-    steps = [
-        StepOut(
-            order=s.order,
-            owner_group=s.owner_group,
-            resolver=s.resolver,
-            assignee=s.assignee if privileged or _owns_step(s, user) else None,
-            owner_name=_step_owner_name(reader, s.assignee, groups, s.owner_group),
-            status=s.status,
-            require_comment=s.require_comment,
-            expires_at=s.expires_at.isoformat(),
-            done_by=s.done_by if privileged else None,
-            done_at=s.done_at.isoformat() if s.done_at else None,
-            comment=s.comment,
-            can_act=_can_act(request, s, user, pending_orders, now),
+    steps: list[StepOut] = []
+    for s in sorted(request.steps, key=lambda x: x.order):
+        # Данные сотрудника шага — из пакета резолва (пусто у непривилегированных).
+        emp = (step_employee_keys or {}).get((request.id, s.order), {}) if privileged else {}
+        steps.append(
+            StepOut(
+                order=s.order,
+                owner_group=s.owner_group,
+                resolver=s.resolver,
+                assignee=s.assignee if privileged or _owns_step(s, user) else None,
+                owner_name=_step_owner_name(reader, s.assignee, groups, s.owner_group),
+                employee_key=emp.get("employee_key"),
+                emp_enterprise=emp.get("emp_enterprise"),
+                emp_base_code=emp.get("emp_base_code"),
+                emp_tab_num=emp.get("emp_tab_num"),
+                status=s.status,
+                require_comment=s.require_comment,
+                expires_at=s.expires_at.isoformat(),
+                done_by=s.done_by if privileged else None,
+                done_at=s.done_at.isoformat() if s.done_at else None,
+                comment=s.comment,
+                can_act=_can_act(request, s, user, pending_orders, now),
+            )
         )
-        for s in sorted(request.steps, key=lambda x: x.order)
-    ]
     return RequestOut(
         id=request.id,
         status=request.status,
         route_origin=request.route_origin,
         enterprise=request.enterprise if privileged else None,
         enterprise_name=names.get(request.enterprise) if privileged else None,
+        employee_key=(employee_keys or {}).get(request.id) if privileged else None,
         tab_num=request.tab_num if privileged else None,
         fio=request.fio if privileged else None,
         department=request.department,
@@ -1036,6 +1172,9 @@ def list_requests(
     enterprise_names = _enterprise_names_map() if _is_hr(user) else {}
     group_names = _step_group_names_map()
     doc_type_names = _doc_type_names_map()
+    # Ключи карточек сотрудников (ссылки на карточку): пакетно по всей выборке,
+    # только привилегированным (в _public_view обрезка по роли).
+    employee_keys, step_employee_keys = _employee_keys(requests)
     if _is_hr(user):
         return [
             _public_view(
@@ -1045,6 +1184,8 @@ def list_requests(
                 enterprise_names=enterprise_names,
                 group_names=group_names,
                 doc_type_names=doc_type_names,
+                employee_keys=employee_keys,
+                step_employee_keys=step_employee_keys,
             )
             for r in requests
         ]
@@ -1064,6 +1205,8 @@ def list_requests(
             enterprise_names=enterprise_names,
             group_names=group_names,
             doc_type_names=doc_type_names,
+            employee_keys=employee_keys,
+            step_employee_keys=step_employee_keys,
         )
         for r in mine
     ]

@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import io
 import os
 import sys
@@ -57,16 +58,30 @@ def _make_uploadable_docx() -> bytes:
 
 
 def _make_template_docx_with_table() -> bytes:
-    """Шаблон .docx для рендер-теста: {{ fio }} + {%tr%}-таблица по steps."""
+    """Шаблон .docx для рендер-теста: {{ fio }} + {%tr%}-таблица по steps.
+
+    Раскладка меток docxtpl: строка с `{%tr for %}` и строка с `{%tr endfor %}`
+    — отдельные строки (в одной строке две `{%tr %}`-метки docxtpl не понимает,
+    см. TEMPLATES.md), строка данных с `{{ step.* }}` — между ними.
+    """
     from docx import Document
 
     doc = Document()
     doc.add_paragraph("Сотрудник: {{ fio }}")
-    table = doc.add_table(rows=1, cols=3)
-    cells = table.rows[0].cells
-    cells[0].text = "{%tr%}{{ step.order }}{%tr%}"
-    cells[1].text = "{{ step.owner }}"
-    cells[2].text = "{{ step.status }}"
+    table = doc.add_table(rows=4, cols=3)
+    head = table.rows[0].cells
+    head[0].text = "№"
+    head[1].text = "Владелец шага"
+    head[2].text = "Статус"
+    opener = table.rows[1].cells
+    opener[0].text = "{%tr for step in steps %}"
+    data_row = table.rows[2].cells
+    data_row[0].text = "{{ step.order }}"
+    data_row[1].text = "{{ step.owner }}"
+    data_row[2].text = "{{ step.status }}"
+    closer = table.rows[3].cells
+    closer[0].text = "{%tr endfor %}"
+    doc.add_paragraph("QR: {{ qr }}")
     buf = io.BytesIO()
     doc.save(buf)
     return buf.getvalue()
@@ -161,13 +176,14 @@ def test_upload_rejects_zip_without_document_xml(client, admin_headers, settings
 
 def test_upload_accepts_valid_docx_offline(client, admin_headers, settings_override):
     """Структурно валидный .docx — 200, файл в FILES_DIR/templates/ с uuid-именем."""
-    response = _upload(client, admin_headers, _make_uploadable_docx())
+    content = _make_uploadable_docx()  # один раз: python-docx печатает в zip время сборки
+    response = _upload(client, admin_headers, content)
     assert response.status_code == 200, response.text
     name = response.json()["name"]
     assert name.endswith(".docx")
     target = _templates_dir(settings_override.FILES_DIR) / name
     assert target.is_file()
-    assert target.read_bytes() == _make_uploadable_docx()
+    assert target.read_bytes() == content
 
 
 def test_upload_previous_replaced(client, admin_headers, settings_override):
@@ -320,7 +336,7 @@ def test_render_from_file_substitutes_context(tmp_path, monkeypatch):
     rendered = Document(io.BytesIO(docx_bytes))
     paragraphs = [p.text for p in rendered.paragraphs]
     assert any("Иванов Иван Иванович" in text for text in paragraphs)
-    cells = [c.text for row in rendered.tables for c in row.cells]
+    cells = [c.text for t in rendered.tables for r in t.rows for c in r.cells]
     assert "Группа первая" in cells
     assert "Группа вторая" in cells
     assert "{{" not in " ".join(cells)
@@ -398,6 +414,10 @@ def test_generate_bypass_no_template_file_uses_text(tmp_path, monkeypatch):
     assert calls == ["Текст {{ fio }}"]
 
 
+@pytest.mark.skipif(
+    importlib.util.find_spec("docxtpl") is not None,
+    reason="ветка офлайна: docxtpl в окружении есть — ImportError не возникнет",
+)
 def test_generate_bypass_file_offline_reason(tmp_path, monkeypatch):
     """Файл есть, но нет docxtpl — ImportError → generated=False с причиной «офлайн»."""
     tpl_dir = tmp_path / "templates"

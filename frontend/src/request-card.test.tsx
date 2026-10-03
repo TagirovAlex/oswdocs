@@ -84,6 +84,10 @@ function requestForAction(fio: string | null): RequestOut {
   ]);
 }
 
+// Ключ карточки сотрудника, который бэкенд резолвит по локальному справочнику
+// (только привилегированным; в нём табельный номер — ПДн).
+const EMP_KEY = "ENT_PRIMER_1|zup|Т-000202";
+
 function renderCard(requestId: string = "REQ-0001", role: Role = "hr") {
   return render(<RequestCard requestId={requestId} role={role} />);
 }
@@ -223,6 +227,72 @@ describe("RequestCard", () => {
     expect(steps.queryByText("SED_STEP_BUH")).not.toBeInTheDocument();
     // Логин AD замены руководителя в карточке не выводится.
     expect(screen.queryByText(/sidorova\.as/)).not.toBeInTheDocument();
+  });
+
+  // Ключ карточки сотрудника резолвит бэкенд (только привилегированным).
+  // С ним ФИО исполнителя в таблице шагов — ссылка на карточку сотрудника.
+  it("шаг с employee_key: ФИО исполнителя — ссылка на карточку сотрудника", async () => {
+    vi.mocked(getRequest).mockResolvedValue({
+      ...requestWith("Громов Игорь Олегович", "На согласовании"),
+      steps: [
+        {
+          order: 1,
+          owner_group: "SED_STEP_BUH",
+          resolver: "ad_direct_manager",
+          assignee: "sidorova.as",
+          owner_name: "Сидорова Анна Сергеевна",
+          employee_key: EMP_KEY,
+          emp_enterprise: "ENT_PRIMER_1",
+          emp_base_code: "zup",
+          emp_tab_num: "Т-000202",
+          can_act: true,
+          status: "ожидает",
+          expires_at: "2026-10-05T10:00:00+00:00",
+        },
+      ],
+    });
+    const open = vi.spyOn(window, "open").mockImplementation(() => null);
+
+    renderCard();
+    await waitFor(() => expect(screen.getByLabelText("Шаги заявки")).toBeInTheDocument());
+    const steps = within(screen.getByLabelText("Шаги заявки"));
+    const link = steps.getByRole("link", { name: "Сидорова Анна Сергеевна" });
+    expect(link).toHaveAttribute("href", `?view=employee&key=${encodeURIComponent(EMP_KEY)}`);
+    fireEvent.click(link);
+    expect(open).toHaveBeenCalledTimes(1);
+    expect(open).toHaveBeenCalledWith(
+      `?view=employee&key=${encodeURIComponent(EMP_KEY)}`,
+      "_blank",
+      expect.stringContaining("popup"),
+    );
+  });
+
+  // Без employee_key (неоднозначное совпадение в справочнике или не привилегированный
+  // пользователь) ФИО остаётся текстом — ссылки на карточку сотрудника нет.
+  it("шаг без employee_key: ФИО исполнителя — текст, не ссылка", async () => {
+    vi.mocked(getRequest).mockResolvedValue({
+      ...requestWith("Громов Игорь Олегович", "На согласовании"),
+      steps: [
+        {
+          order: 1,
+          owner_group: "SED_STEP_BUH",
+          resolver: "ad_direct_manager",
+          assignee: "sidorova.as",
+          owner_name: "Сидорова Анна Сергеевна",
+          can_act: true,
+          status: "ожидает",
+          expires_at: "2026-10-05T10:00:00+00:00",
+        },
+      ],
+    });
+    const open = vi.spyOn(window, "open").mockImplementation(() => null);
+
+    renderCard();
+    await waitFor(() => expect(screen.getByLabelText("Шаги заявки")).toBeInTheDocument());
+    const steps = within(screen.getByLabelText("Шаги заявки"));
+    expect(steps.getByText("Сидорова Анна Сергеевна")).toBeInTheDocument();
+    expect(steps.queryByRole("link", { name: "Сидорова Анна Сергеевна" })).not.toBeInTheDocument();
+    expect(open).not.toHaveBeenCalled();
   });
 
   // Групповой шаг без ФИО — название группы владельцев (не прочерк).

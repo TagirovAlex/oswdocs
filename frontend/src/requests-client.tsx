@@ -40,6 +40,13 @@ export interface RequestStep {
   assignee?: string | null;
   // ФИО согласующего шага (резолв бэкенда); для владельца приходит всегда.
   owner_name?: string | null;
+  // Ключ карточки сотрудника шага (enterprise|base_code|tab_num) — только
+  // привилегированным (бэк решает по локальному справочнику, при неоднозначном
+  // совпадении не приходит). Есть — ФИО в таблице шагов кликабельно.
+  employee_key?: string | null;
+  emp_enterprise?: string | null;
+  emp_base_code?: string | null;
+  emp_tab_num?: string | null;
   // Единственный источник истины для кнопок согласования: может ли ТЕКУЩИЙ
   // пользователь поставить отметку по этому шагу.
   can_act?: boolean;
@@ -62,6 +69,9 @@ export interface RequestOut {
   enterprise_name?: string | null;
   // Код базы 1С (часть ключа карточки сотрудника; когда есть у запроса).
   base_code?: string | null;
+  // Ключ карточки сотрудника (enterprise|base_code|tab_num), собранный бэкендом по
+  // локальному справочнику; только привилегированным (ПДн: табельный номер).
+  employee_key?: string | null;
   tab_num?: string | null;
   department: string;
   position: string;
@@ -617,11 +627,13 @@ export function toRequestRow(request: RequestOut): RequestRow {
   const expires = current?.expires_at ?? "";
   // Текущий согласующий: исполнитель текущего шага — ФИО или группа, но не логин.
   const ownerName = stepOwnerLabel(current);
-  // Ключ карточки сотрудника: enterprise|base_code|tab_num (если все есть).
+  // Ключ карточки сотрудника: employee_key от бэкенда (собран по справочнику),
+  // иначе — как раньше, из enterprise|base_code|tab_num самого запроса.
   const employeeKey =
-    request.enterprise && request.base_code && request.tab_num
+    request.employee_key ||
+    (request.enterprise && request.base_code && request.tab_num
       ? `${request.enterprise}|${request.base_code}|${request.tab_num}`
-      : "";
+      : "");
   return {
     id: request.id,
     fio: request.fio ?? `Сотрудник № ${request.id}`,

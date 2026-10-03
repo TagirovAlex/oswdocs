@@ -19,6 +19,11 @@ from app import settings_routes  # noqa: E402
 from app.audit import audit_log  # noqa: E402
 from app.config import Settings, get_settings  # noqa: E402
 from app.deps import CurrentUser  # noqa: E402
+from app.employee_sync import (  # noqa: E402
+    EmployeeSyncUnavailable,
+    InMemoryEmployeeSyncStore,
+    get_employee_sync_store,
+)
 from app.employees import get_ad_reader  # noqa: E402
 from app.main import app  # noqa: E402
 from app.mailer import (  # noqa: E402
@@ -30,6 +35,7 @@ from app.mailer import (  # noqa: E402
 from app.requests import (  # noqa: E402
     IN_APPROVAL,
     STEP_APPROVED,
+    _employee_keys,
     _enterprise_names_map,
     _notify_assigned,
     _public_view,
@@ -784,6 +790,256 @@ def test_created_by_and_done_by_hidden_from_owner(
     hr_view = client.get(f"/requests/{rid}", headers=hr).json()
     assert hr_view["created_by"] == hr["X-Mock-Sam"]
     assert hr_view["steps"][0]["done_by"] == buh_owner["X-Mock-Sam"]
+
+
+# --- employee_key: пакетный резолв ключей карточек сотрудников по справочнику ---
+
+# Вымышленные предприятие/база/люди для локального справочника employees.
+EMP_ENT = "ENT_VYMYSHLENNAYA"
+EMP_BASE = "ZUP_VYM"
+EMP_TAB = "Т-000777"
+EMP_SAM = "vymyshlenny.soglasuyushchiy"
+
+
+class BrokenEmployeeStore:
+    """Справочник сотрудников недоступен (503-источник) — выдача не должна роняться."""
+
+    def find_by_people(self, enterprise, sam_list, tab_list):
+        raise EmployeeSyncUnavailable("Справочник сотрудников недоступен (тест)")
+
+
+class ExplodingEmployeeStore:
+    """Справочник падает не типизированным исключением (драйвер БД, сеть)."""
+
+    def find_by_people(self, enterprise, sam_list, tab_list):
+        raise RuntimeError("соединение разорвано (тест)")
+
+
+class CountingEmployeeStore(InMemoryEmployeeSyncStore):
+    """Справочник, считающий вызовы find_by_people (проверка пакетности)."""
+
+    def __init__(self, rows: list[dict]):
+        super().__init__()
+        self.calls: list[tuple] = []
+        self.upsert_many(rows)
+
+    def find_by_people(self, enterprise, sam_list, tab_list):
+        self.calls.append((enterprise, sorted(sam_list), sorted(tab_list)))
+        return super().find_by_people(enterprise, sam_list, tab_list)
+
+
+def _employee_store(rows: list[dict]):
+    """Хранилище справочника с вымышленными строками employees.
+
+    Подмена границы ставится на тест; снимает её автофикстура conftest
+    (offline_boundaries) — как и остальные офлайн-границы."""
+    store = InMemoryEmployeeSyncStore()
+    store.upsert_many(rows)
+    app.dependency_overrides[get_employee_sync_store] = lambda: store
+    return store
+
+
+def _employee_row(tab_num: str, sam: str | None, base_code: str = EMP_BASE) -> dict:
+    """Строка employees контракта справочника (как отдаёт sync_employees)."""
+    return {
+        "enterprise": EMP_ENT,
+        "base_code": base_code,
+        "tab_num": tab_num,
+        "fio": "Вымышленный Сотрудник Полный",
+        "department": FAKE_SERVICE,
+        "position": FAKE_POSITION_LINE,
+        "ad_sam": sam,
+        "ad_status": "linked" if sam else None,
+    }
+
+
+def test_employee_key_resolved_in_list_for_hr(
+    client, hr, test_settings_override, route_override, settings_store
+):
+    """Привилегированному employee_key заявки и шага — по локальному справочнику.
+
+    Ключ собирается из найденной строки employees (enterprise|base_code|tab_num),
+    поэтому в заявке base_code знать не нужно: достаточно предприятия и табельного
+    номера. Шаг резолвится по логину исполнителя (assignee)."""
+    _employee_store(
+        [_employee_row(EMP_TAB, None), _employee_row("Т-000888", EMP_SAM)]
+    )
+    # Заявка с персональным шагом (исполнитель — вымышленный сотрудник справочника).
+    created = _create(
+        client,
+        hr,
+        enterprise=EMP_ENT,
+        tab_num=EMP_TAB,
+        position=FAKE_POSITION_OTHER,
+        steps=[{"owner_group": "SED_STEP_BUH", "assignee": EMP_SAM}],
+    )
+    assert created.status_code == 201
+    body = client.get("/requests", headers=hr).json()[0]
+    assert body["employee_key"] == f"{EMP_ENT}|{EMP_BASE}|{EMP_TAB}"
+    step = body["steps"][0]
+    assert step["employee_key"] == f"{EMP_ENT}|{EMP_BASE}|Т-000888"
+    assert step["emp_enterprise"] == EMP_ENT
+    assert step["emp_base_code"] == EMP_BASE
+    assert step["emp_tab_num"] == "Т-000888"
+
+
+def test_employee_key_hidden_from_owner(
+    client, hr, test_settings_override, route_override, settings_store
+):
+    """Ключи сотрудников (в них табельный номер — ПДн) — только привилегированным.
+
+    Владелец шага получает employee_key=None и emp_*=None, как enterprise/tab_num."""
+    _employee_store(
+        [_employee_row(EMP_TAB, None), _employee_row("Т-000888", EMP_SAM)]
+    )
+    created = _create(
+        client,
+        hr,
+        enterprise=EMP_ENT,
+        tab_num=EMP_TAB,
+        position=FAKE_POSITION_OTHER,
+        steps=[{"owner_group": "SED_STEP_BUH", "assignee": EMP_SAM}],
+    )
+    rid = created.json()["id"]
+    assert client.post(f"/requests/{rid}/submit", headers=hr).status_code == 200
+    owner_headers = _headers_for(EMP_SAM, ["SED_STEP_BUH"])
+    body = client.get("/requests", headers=owner_headers).json()[0]
+    assert body["employee_key"] is None
+    assert body["steps"][0]["employee_key"] is None
+    assert body["steps"][0]["emp_tab_num"] is None
+    # Привилегированному по-прежнему виден.
+    assert client.get("/requests", headers=hr).json()[0]["employee_key"] is not None
+
+
+def test_employee_key_none_on_ambiguous_match(
+    client, hr, test_settings_override, route_override, settings_store
+):
+    """Неоднозначное совпадение ключа не даёт (иначе ссылка увела бы на чужую карточку).
+
+    Тот же табельный номер в двух базах предприятия и тот же логин в двух строках —
+    employee_key=None у заявки и у шага."""
+    _employee_store(
+        [
+            _employee_row(EMP_TAB, EMP_SAM),
+            _employee_row(EMP_TAB, None, base_code="ZUP_VYM_2"),
+            _employee_row("Т-000999", EMP_SAM, base_code="ZUP_VYM_2"),
+        ]
+    )
+    _create(
+        client,
+        hr,
+        enterprise=EMP_ENT,
+        tab_num=EMP_TAB,
+        position=FAKE_POSITION_OTHER,
+        steps=[{"owner_group": "SED_STEP_BUH", "assignee": EMP_SAM}],
+    )
+    body = client.get("/requests", headers=hr).json()[0]
+    assert body["employee_key"] is None
+    assert body["steps"][0]["employee_key"] is None
+    # emp_* шага тоже пустые — данных о сотруднике не резолвили.
+    assert body["steps"][0]["emp_base_code"] is None
+
+
+def test_employee_key_none_when_not_in_directory(
+    client, hr, test_settings_override, route_override, settings_store
+):
+    """Сотрудника нет в справочнике (или другое предприятие) — ключа нет, ответ 200."""
+    _employee_store([_employee_row(EMP_TAB, None)])
+    _create(
+        client,
+        hr,
+        enterprise=EMP_ENT,
+        tab_num="Т-000555",
+        position=FAKE_POSITION_OTHER,
+        steps=[{"owner_group": "SED_STEP_BUH", "assignee": EMP_SAM}],
+    )
+    body = client.get("/requests", headers=hr).json()[0]
+    assert body["employee_key"] is None
+    assert body["steps"][0]["employee_key"] is None
+
+
+def test_list_survives_unavailable_directory(
+    client, hr, test_settings_override, route_override, settings_store
+):
+    """Справочник недоступен (EmployeeSyncUnavailable) — список отдаётся, ключей нет."""
+    app.dependency_overrides[get_employee_sync_store] = lambda: BrokenEmployeeStore()
+    try:
+        _create(client, hr, enterprise=EMP_ENT, tab_num=EMP_TAB)
+        response = client.get("/requests", headers=hr)
+    finally:
+        app.dependency_overrides.pop(get_employee_sync_store, None)
+    assert response.status_code == 200
+    assert response.json()[0]["employee_key"] is None
+
+
+# Справочник падает не «своим» исключением (например, драйвер БД) — выдача
+# списка тоже не должна роняться: справочник здесь мягкая зависимость.
+def test_list_survives_broken_directory(
+    client, hr, test_settings_override, route_override, settings_store
+):
+    app.dependency_overrides[get_employee_sync_store] = lambda: ExplodingEmployeeStore()
+    try:
+        _create(client, hr, enterprise=EMP_ENT, tab_num=EMP_TAB)
+        response = client.get("/requests", headers=hr)
+    finally:
+        app.dependency_overrides.pop(get_employee_sync_store, None)
+    assert response.status_code == 200
+    assert response.json()[0]["employee_key"] is None
+
+
+def test_employee_keys_one_query_per_enterprise(
+    client, hr, requests_store, test_settings_override, route_override, settings_store
+):
+    """Резолв пакетный: один вызов find_by_people на предприятие, а не на заявку/шаг."""
+    store = CountingEmployeeStore([_employee_row(EMP_TAB, EMP_SAM)])
+    app.dependency_overrides[get_employee_sync_store] = lambda: store
+    try:
+        for tab in (EMP_TAB, "Т-000778"):
+            _create(
+                client,
+                hr,
+                enterprise=EMP_ENT,
+                tab_num=tab,
+                position=FAKE_POSITION_OTHER,
+                steps=[{"owner_group": "SED_STEP_BUH", "assignee": EMP_SAM}],
+            )
+        assert len(requests_store.list_all()) == 2
+        body = client.get("/requests", headers=hr).json()
+    finally:
+        app.dependency_overrides.pop(get_employee_sync_store, None)
+    # Один запрос на предприятие с обоими табельными номерами и логином шага.
+    assert len(store.calls) == 1
+    assert store.calls[0] == (EMP_ENT, [EMP_SAM], [EMP_TAB, "Т-000778"])
+    # Ключ есть только у той заявки, чей табельный номер найден.
+    assert [item["employee_key"] for item in body] == [f"{EMP_ENT}|{EMP_BASE}|{EMP_TAB}", None]
+
+
+def test_find_by_people_exact_match_only():
+    """Справочник: только точные совпадения (без подстроки), регистр не важен."""
+    store = InMemoryEmployeeSyncStore()
+    store.upsert_many(
+        [
+            _employee_row(EMP_TAB, EMP_SAM),
+            {"enterprise": "ENT_DRUGOY", "base_code": EMP_BASE, "tab_num": "Т-000777",
+             "fio": "Вымышленный Чужой", "department": FAKE_SERVICE, "position": "",
+             "ad_sam": EMP_SAM, "ad_status": "linked"},
+        ]
+    )
+    # Точное совпадение по табельному номеру (в другом регистре) — нашёлся.
+    assert [row["fio"] for row in store.find_by_people(EMP_ENT, [], [EMP_TAB.lower()])] == [
+        "Вымышленный Сотрудник Полный"
+    ]
+    # Подстрока не совпадение.
+    assert store.find_by_people(EMP_ENT, [], ["0007"]) == []
+    # Другое предприятие не отдаётся, даже при совпадении номера/логина.
+    assert store.find_by_people("ENT_DRUGOY", [], [EMP_TAB])[0]["fio"] == "Вымышленный Чужой"
+    # Пустые списки — хранилище не запрашивается вовсе.
+    assert store.find_by_people(EMP_ENT, [], []) == []
+
+
+def test_employee_keys_empty_without_requests():
+    """Нет заявок — пустые словари, обращения к справочнику не происходит."""
+    assert _employee_keys([]) == ({}, {})
 
 
 # --- enterprise_name: продакшн-ветка резолва настроек (без dependency_overrides) ---
