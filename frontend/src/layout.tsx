@@ -34,8 +34,9 @@ import { createUrl, employeeUrl, openPopup, requestUrl } from "./windows";
 const TABS = ["Заявки", "Справочник", "Настройки"] as const;
 type Tab = (typeof TABS)[number];
 
-// Иконки вкладок-модулей и кнопки темы — инлайн-SVG из ico/*.svg (currentColor,
-// viewBox/штрихи как в исходниках). Подпись вкладки остаётся текстом кнопки.
+// Иконки вкладок-модулей и кнопки темы — инлайн-SVG (currentColor,
+// viewBox/штрихи как в исходниках дизайн-задачи; каталог `ico/` в проекте
+// отсутствует, отдельных svg-файлов нет). Подпись вкладки — текстом кнопки.
 function TabIcon(props: { tab: Tab }) {
   const { tab } = props;
   const common = {
@@ -77,7 +78,7 @@ function TabIcon(props: { tab: Tab }) {
   );
 }
 
-// Иконка кнопки темы — инлайн-SVG из ico/theme-moon.svg и ico/theme-sun.svg.
+// Иконка кнопки темы — инлайн-SVG (луна/солнце, currentColor).
 function ThemeIcon(props: { theme: "light" | "dark" }) {
   const { theme } = props;
   const common = {
@@ -107,7 +108,7 @@ function ThemeIcon(props: { theme: "light" | "dark" }) {
 }
 
 // Иконка кнопки «Создать заявку» — инлайн-SVG: плюс в рамке документа
-// (мотив заявки из ico/requests.svg, без текстового глифа).
+// (мотив заявки, без текстового глифа).
 function CreateIcon() {
   return (
     <svg
