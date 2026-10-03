@@ -23,6 +23,7 @@ import {
   toExecution,
   updateRequest,
   uploadAttachment,
+  withdrawRequest,
 } from "./requests-client";
 import type {
   AttachmentMeta,
@@ -60,6 +61,16 @@ function historyWhen(at: string): string {
   const d = new Date(at);
   return isNaN(d.getTime()) ? at : d.toLocaleString("ru-RU");
 }
+
+// Статусы, из которых заявку ещё можно отозвать (POST /requests/{id}/withdraw):
+// закрытые (Завершено/Отклонено/Отозвано) бэкенд отдаёт 409 — их тут нет.
+const WITHDRAW_STATUSES = [
+  "Черновик",
+  "На согласовании",
+  "На доработке",
+  "Согласовано",
+  "К исполнению",
+];
 
 // Карточка заявки со всеми блоками (W5b + документы + вложения).
 export function RequestCard(props: RequestCardProps) {
@@ -376,6 +387,9 @@ export function RequestCard(props: RequestCardProps) {
   }
   async function handleFinish(): Promise<void> {
     await runAction(() => finishRequest(requestId), "Заявка завершена");
+  }
+  async function handleWithdraw(): Promise<void> {
+    await runAction(() => withdrawRequest(requestId), "Заявка отозвана");
   }
 
   // Удаление заявки (только админ; для тестового периода). Подтверждение —
@@ -712,6 +726,17 @@ export function RequestCard(props: RequestCardProps) {
               {card.status === "К исполнению" && (
                 <button type="button" className="sed-btn" onClick={handleFinish}>
                   Завершить
+                </button>
+              )}
+              {/* Отзыв (POST /requests/{id}/withdraw, ОК/админ): бэкенд отдаёт 409
+                  на закрытых статусах — кнопку там не показываем. */}
+              {WITHDRAW_STATUSES.includes(card.status) && (
+                <button
+                  type="button"
+                  className="sed-btn sed-btn--danger"
+                  onClick={handleWithdraw}
+                >
+                  Отозвать заявку
                 </button>
               )}
               {role === "admin" && (

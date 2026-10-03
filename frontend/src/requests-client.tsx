@@ -19,6 +19,13 @@ export interface DocType {
   sort_order: number;
 }
 
+// Группа-владелец шага из настроек (GET /api/step-groups): id уходит в
+// owner_group, name — человекочитаемое наименование в селекте формы.
+export interface StepGroup {
+  id: string;
+  name: string;
+}
+
 // Идентификатор папки дерева (контракт GET /api/folders).
 export type FolderId = "agreement" | "revision" | "done" | "draft" | "mine";
 
@@ -324,9 +331,10 @@ export async function getDocTypes(activeOnly?: boolean): Promise<DocType[]> {
   return requestJson<DocType[]>(`/api/doc-types${query}`);
 }
 
-// GET /api/step-groups: группы для ручного конструктора шагов.
-export async function getStepGroups(): Promise<string[]> {
-  return requestJson<string[]>("/api/step-groups");
+// GET /api/step-groups: группы для ручного конструктора шагов — {id, name}
+// (name — наименование из settings, id уходит в owner_group).
+export async function getStepGroups(): Promise<StepGroup[]> {
+  return requestJson<StepGroup[]>("/api/step-groups");
 }
 
 // GET /api/folders: папки со счётчиками.
@@ -398,6 +406,13 @@ export async function decideStep(
 // POST /api/requests/{id}/submit: Черновик/На доработке → На согласовании (ОК/админ).
 export async function submitRequest(id: string): Promise<RequestOut> {
   return requestJson<RequestOut>(`/api/requests/${encodeURIComponent(id)}/submit`, {
+    method: "POST",
+  });
+}
+
+// POST /api/requests/{id}/withdraw: отзыв заявки → Отозвано (ОК/админ).
+export async function withdrawRequest(id: string): Promise<RequestOut> {
+  return requestJson<RequestOut>(`/api/requests/${encodeURIComponent(id)}/withdraw`, {
     method: "POST",
   });
 }

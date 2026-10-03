@@ -15,6 +15,7 @@ import {
   submitRequest,
   toExecution,
   uploadAttachment,
+  withdrawRequest,
 } from "./requests-client";
 import type { AttachmentMeta, RequestOut } from "./requests-client";
 import type { Role } from "./api-mock";
@@ -28,6 +29,7 @@ vi.mock("./requests-client", async (importOriginal) => {
     submitRequest: vi.fn(),
     toExecution: vi.fn(),
     finishRequest: vi.fn(),
+    withdrawRequest: vi.fn(),
     deleteRequest: vi.fn(),
     getAttachments: vi.fn(),
     uploadAttachment: vi.fn(),
@@ -110,6 +112,7 @@ beforeEach(() => {
   vi.mocked(submitRequest).mockReset();
   vi.mocked(toExecution).mockReset();
   vi.mocked(finishRequest).mockReset();
+  vi.mocked(withdrawRequest).mockReset();
   vi.mocked(deleteRequest).mockReset();
   vi.mocked(getAttachments).mockReset();
   vi.mocked(uploadAttachment).mockReset();
@@ -559,5 +562,35 @@ describe("RequestCard", () => {
     renderCard("REQ-0001", "hr");
     await waitFor(() => expect(screen.getByLabelText("Шаги заявки")).toBeInTheDocument());
     expect(screen.queryByRole("button", { name: "Удалить заявку" })).not.toBeInTheDocument();
+  });
+
+  // Отзыв заявки (ОК/админ, POST /requests/{id}/withdraw): кнопка у активной
+  // заявки, после отзыва статус «Отозвано» и действие больше не предлагается.
+  it("hr: отзыв заявки вызывает withdraw и закрытую заявку кнопки не показывает", async () => {
+    vi.mocked(getRequest)
+      .mockResolvedValueOnce(requestWith("Громов Игорь Олегович", "На согласовании"))
+      .mockResolvedValue(requestWith("Громов Игорь Олегович", "Отозвано"));
+    vi.mocked(withdrawRequest).mockResolvedValue(
+      requestWith("Громов Игорь Олегович", "Отозвано"),
+    );
+
+    renderCard("REQ-0001", "hr");
+    await waitFor(() => expect(screen.getByLabelText("Шаги заявки")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Отозвать заявку" }));
+
+    await waitFor(() => expect(vi.mocked(withdrawRequest)).toHaveBeenCalledWith("REQ-0001"));
+    await waitFor(() => expect(screen.getByText("Заявка отозвана")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Отозвать заявку" })).not.toBeInTheDocument(),
+    );
+  });
+
+  // Владельцу шага (роль owner) блок действий ОК не показывается вовсе.
+  it("owner: кнопка «Отозвать заявку» не показывается", async () => {
+    vi.mocked(getRequest).mockResolvedValue(requestWith(null, "На согласовании"));
+
+    renderCard("REQ-0001", "owner");
+    await waitFor(() => expect(screen.getByLabelText("Шаги заявки")).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Отозвать заявку" })).not.toBeInTheDocument();
   });
 });

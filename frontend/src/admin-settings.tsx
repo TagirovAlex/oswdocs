@@ -917,6 +917,20 @@ function formatBackupSize(sizeBytes: number): string {
   return `${(sizeBytes / (1024 * 1024)).toFixed(1)} МБ`;
 }
 
+// Формат даты и времени бэкапа: «ДД.ММ.ГГГГ ЧЧ:ММ» по ru-RU (часы:минуты,
+// чтобы совпадало с {ts} в имени файла). Дата без времени — только дата.
+function formatBackupDate(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso.slice(0, 10);
+  return date.toLocaleString("ru-RU", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 // Вкладка «Архивация» (только админ): настройки бэкапов (место хранения,
 // шаблон имени, количество копий, расписание — как у регламентов), ручной
 // запуск бэкапа и список сохранённых файлов. Значения — из GET/PUT /api/archive
@@ -1071,7 +1085,7 @@ function ArchiveTab() {
             <tr>
               <th>Имя</th>
               <th>Размер</th>
-              <th>Дата</th>
+              <th>Дата и время</th>
               <th>Действия</th>
             </tr>
           </thead>
@@ -1080,7 +1094,7 @@ function ArchiveTab() {
               <tr key={file.name}>
                 <td>{file.name}</td>
                 <td>{formatBackupSize(file.size)}</td>
-                <td>{file.created_at.slice(0, 10)}</td>
+                <td>{formatBackupDate(file.created_at)}</td>
                 <td>
                   <div className="sed-toolbar sed-mt-0">
                     <button

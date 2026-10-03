@@ -29,6 +29,7 @@ from .employee_sync import (
 )
 from .mailer import (
     EVENT_ASSIGNED,
+    EVENT_CLOSED,
     EVENT_RETURNED,
     MailQueue,
     enqueue_event,
@@ -1034,6 +1035,46 @@ def _notify_assigned(
         _notify_skip(request, EVENT_ASSIGNED, "no_template")
 
 
+def _notify_author_closed(
+    request: _Request,
+    queue: MailQueue,
+    settings_store: DbSettingsStore,
+    ad_reader: object | None,
+    settings: Settings,
+) -> None:
+    """Письмо «закрыта» (EVENT_CLOSED) автору заявки при DONE.
+
+    Шаблон события — из mail_templates; нет шаблона/адресата/настроек — письмо
+    тихо пропускается (notify.skip), как у «назначена»/«возврат». При отзыве
+    (REVOKED) и отказе письма нет — закрытие там не наступило.
+    """
+    to = recipient_mail(ad_reader, request.created_by)
+    if not to:
+        _notify_skip(request, EVENT_CLOSED, "no_recipients")
+        return
+    try:
+        templates = read_setting_value(settings_store, "mail_templates")
+        smtp_from = read_setting_value(settings_store, "smtp_from")
+    except Exception as exc:
+        _notify_skip(request, EVENT_CLOSED, f"settings_error={type(exc).__name__}")
+        return
+    try:
+        sent = enqueue_event(
+            queue,
+            to,
+            request.id,
+            EVENT_CLOSED,
+            templates or [],
+            _mail_context(request, settings),
+            subject_prefix=resolve_smtp_from(smtp_from, settings.SMTP_FROM),
+        )
+    except Exception as exc:
+        _notify_skip(request, EVENT_CLOSED, f"queue_error={type(exc).__name__}")
+        return
+    if not sent:
+        _notify_skip(request, EVENT_CLOSED, "no_template")
+
+
 def _notify_author_returned(
     request: _Request,
     queue: MailQueue,
@@ -1416,8 +1457,14 @@ def finish_request(
     user: CurrentUser = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
     store: RequestsStore = Depends(get_requests_store),
+    mail_queue: MailQueue = Depends(get_mail_queue),
+    settings_store: DbSettingsStore = Depends(get_settings_store),
+    ad_reader: object | None = Depends(get_ad_reader),
 ) -> RequestOut:
-    """К исполнению → Завершено (только разрешенная группа)."""
+    """К исполнению → Завершено (только разрешенная группа).
+
+    При закрытии ставится письмо «закрыта» (EVENT_CLOSED) автору заявки; нет
+    шаблона/адресата/настроек — тихо пропускается (notify.skip)."""
     settings.ensure_read_only()
     _require_hr(user)
     try:
@@ -1431,7 +1478,8 @@ def finish_request(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
     _audit(user.sam, "request.finish", request.id, "")
-    return _public_view(request, user)
+    _notify_author_closed(request, mail_queue, settings_store, ad_reader, settings)
+    return _public_view(request, user, ad_reader=ad_reader)
 
 
 @router.post("/requests/{request_id}/steps/{order}/decision", response_model=RequestOut)

@@ -561,6 +561,18 @@ describe("AdminSettings", () => {
     expect(screen.getByText("5.0 МБ")).toBeInTheDocument();
     expect(screen.getByText("0.5 КБ")).toBeInTheDocument();
 
+    // Дата и время бэкапа (ru-RU, часы:минуты) — по локальному времени браузера.
+    const expectedWhen = new Date("2026-10-01T12:00:00+00:00").toLocaleString("ru-RU", {
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+    expect(screen.getAllByText(expectedWhen).length).toBe(2);
+    // Время есть — значит показывается не одна только дата.
+    expect(screen.queryByText("2026-10-01")).not.toBeInTheDocument();
+
     // «Скачать» — blob-скачивание с токеном.
     fireEvent.click(screen.getByRole("button", { name: "Скачать бэкап sed_2026-10-01.dump" }));
     expect(downloadBackup).toHaveBeenCalledWith("sed_2026-10-01.dump");

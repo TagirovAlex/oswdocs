@@ -18,7 +18,7 @@ import {
   searchEmployees,
   submitRequest,
 } from "./requests-client";
-import type { AdCandidate, AdGroupMember, DocType, EmployeeHit, Enterprise } from "./requests-client";
+import type { AdCandidate, AdGroupMember, DocType, EmployeeHit, Enterprise, StepGroup } from "./requests-client";
 import type { Role } from "./api-mock";
 import { employeeUrl, openPopup } from "./windows";
 
@@ -205,9 +205,9 @@ export function CreateForm(props: CreateFormProps) {
   // Порядковый номер поиска AD: устаревшие ответы отбрасываем.
   const adSeq = useRef(0);
 
-  // Тип исполнителя «Группа»: группы из settings (GET /api/step-groups) и
-  // состав выбранной группы из AD (GET /api/ad/groups/{group}/members).
-  const [groups, setGroups] = useState<string[]>([]);
+  // Тип исполнителя «Группа»: группы из settings (GET /api/step-groups, {id,name})
+  // и состав выбранной группы из AD (GET /api/ad/groups/{group}/members).
+  const [groups, setGroups] = useState<StepGroup[]>([]);
   const [groupsError, setGroupsError] = useState<string>("");
   // Выбранная группа по id блока.
   const [groupPick, setGroupPick] = useState<Record<string, string>>({});
@@ -1069,8 +1069,8 @@ export function CreateForm(props: CreateFormProps) {
                             >
                               <option value="">— выберите —</option>
                               {groups.map((g) => (
-                                <option key={g} value={g}>
-                                  {g}
+                                <option key={g.id} value={g.id}>
+                                  {g.name}
                                 </option>
                               ))}
                             </select>

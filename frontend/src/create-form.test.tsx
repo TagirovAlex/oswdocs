@@ -42,8 +42,12 @@ const adCandidate = {
   title: "Бухгалтер",
   mail: "petrov.pp@example.test",
 };
-// Группы-владельцы шагов из settings (GET /api/step-groups) и их состав из AD.
-const stepGroups = ["SED_STEP_BUH", "SED_STEP_OK"];
+// Группы-владельцы шагов из settings (GET /api/step-groups, {id,name}) и их
+// состав из AD. В селекте — наименование (name), в owner_group уходит id.
+const stepGroups = [
+  { id: "SED_STEP_BUH", name: "Бухгалтерия (вымышленная группа)" },
+  { id: "SED_STEP_OK", name: "Отдел кадров (вымышленная группа)" },
+];
 const groupMember = {
   sam: "sidorova.as",
   display_name: "Сидорова Анна Сергеевна",
@@ -699,11 +703,15 @@ describe("CreateForm", () => {
     expect(kind).toHaveValue("user");
     fireEvent.change(kind, { target: { value: "group" } });
 
-    // Группы — из /api/step-groups (settings), без хардкода.
+    // Группы — из /api/step-groups (settings), без хардкода: в селекте
+    // наименование (name), значение — id группы.
     await waitFor(() => expect(screen.getByLabelText("Группа блока 1")).toBeInTheDocument());
-    expect(screen.getAllByRole("option", { name: "SED_STEP_BUH" }).length).toBeGreaterThan(0);
+    const groupOption = screen.getByRole("option", {
+      name: "Бухгалтерия (вымышленная группа)",
+    }) as HTMLOptionElement;
+    expect(groupOption.value).toBe("SED_STEP_BUH");
 
-    // Выбор группы подгружает состав из AD.
+    // Выбор группы подгружает состав из AD (по id, не по наименованию).
     fireEvent.change(screen.getByLabelText("Группа блока 1"), {
       target: { value: "SED_STEP_BUH" },
     });

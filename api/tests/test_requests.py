@@ -28,6 +28,7 @@ from app.employees import get_ad_reader  # noqa: E402
 from app.main import app  # noqa: E402
 from app.mailer import (  # noqa: E402
     EVENT_ASSIGNED,
+    EVENT_CLOSED,
     EVENT_RETURNED,
     FileMailQueue,
     get_mail_queue,
@@ -1167,6 +1168,11 @@ MAIL_TEMPLATES_SEED = json.dumps(
             "subject": "Возврат {{ request_id }}",
             "body_html": "<html>{{ url }}</html>",
         },
+        {
+            "code": EVENT_CLOSED,
+            "subject": "Закрыта {{ request_id }}",
+            "body_html": "<html>{{ url }}</html>",
+        },
     ],
     ensure_ascii=False,
 )
@@ -1481,3 +1487,30 @@ def test_notify_skip_audited_without_recipients(
     assert client.post(f"/requests/{rid}/submit", headers=hr).status_code == 200
     assert _sent(mail_queue) == []
     assert _notify_skips() == ["assigned no_recipients"]
+
+
+# --- Письмо «закрыта» (EVENT_CLOSED) автору при завершении заявки ---
+
+def test_finish_notifies_author_closed(
+    client, hr, buh_owner, mail_queue, mail_settings_store, mail_ad_reader,
+    test_settings_override, route_override
+):
+    """К исполнению → Завершено: автору уходит письмо «закрыта» (EVENT_CLOSED).
+
+    До finish писем «закрыта» нет — откат/возврат закрытием не считаются
+    (точные списки _sent в тестах возврата это тоже фиксируют)."""
+    rid = _create(
+        client, hr, blocks=[{"mode": "sequential", "steps": [{"owner_group": GROUP_BUH}]}]
+    ).json()["id"]
+    assert client.post(f"/requests/{rid}/submit", headers=hr).status_code == 200
+    assert _approve(client, rid, 1, buh_owner).json()["status"] == "Согласовано"
+    assert client.post(f"/requests/{rid}/to-execution", headers=hr).status_code == 200
+    assert not [event for _, event in _sent(mail_queue) if event == EVENT_CLOSED]
+
+    finished = client.post(f"/requests/{rid}/finish", headers=hr)
+    assert finished.status_code == 200, finished.text
+    assert finished.json()["status"] == "Завершено"
+    assert _sent(mail_queue) == [
+        (_mail_of(BUH_SAM), EVENT_ASSIGNED),
+        (_mail_of(hr["X-Mock-Sam"]), EVENT_CLOSED),
+    ]

@@ -22,7 +22,9 @@ beforeEach(() => {
   vi.mocked(getEnterprises).mockResolvedValue([
     { code: "ENT_PRIMER_1", name: "Предприятие «Пример-1» (вымышленное)" },
   ]);
-  vi.mocked(getStepGroups).mockResolvedValue(["SED_STEP_BUH"]);
+  vi.mocked(getStepGroups).mockResolvedValue([
+    { id: "SED_STEP_BUH", name: "Бухгалтерия (вымышленная группа)" },
+  ]);
 });
 
 describe("CreateWindow", () => {
