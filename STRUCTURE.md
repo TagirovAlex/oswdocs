@@ -18,12 +18,21 @@
 - `requests.py` — заявки: создание, шаги, отметки (approve/reject/return), PATCH, rollback, история, комментарии.
 - `requests_store.py` — хранилище заявок (InMemory/Db), в т.ч. employees/документы-хелперы.
 - `employee_sync.py` — синк локальной таблицы сотрудников (1С+AD, пагинация).
-- `employees.py` — поиск сотрудников (локальная таблица + фолбэк 1С), `/employees`, `/employees/card`.
+- `employees.py` — поиск сотрудников (локальная таблица + фолбэк 1С), `/employees` (пагинация
+  page/page_size/total), `/employees/card`.
 - `oneс_client.py` / `onec_cache.py` / `onec_sync.py` — 1С HTTP-клиент, Redis-кэш карточек, синк предприятий.
+  Поиск с пагинацией: `search_page` ($skip/$top + total через $inlinecount), `SEARCH_DEFAULT_TOP`.
+- `resolver.py` — веерный опрос баз предприятия: `resolve_employee`, `search_enterprise`,
+  `search_enterprise_page` (страница + total по базам).
+- `employee_sync.py` — локальная таблица сотрудников (миграция 0004), синк постранично.
 - `ad_reader.py` / `ad_sync.py` / `link.py` / `link_store.py` — AD (LDAP), связка 1С↔AD.
-- `settings_routes.py` — настройки (GET/PUT /settings, /settings/content), doc_types CRUD, step-groups.
-- `documents.py` — печать бегунка (вариант 1, pdf_b64), документы.
-- `docs.py` — генерация DOCX/PDF/QR (docxtpl, LibreOffice), шаблоны бланков.
+- `settings_routes.py` — настройки (GET/PUT /settings, /settings/content), doc_types CRUD, step-groups;
+  файлы шаблонов бегунков (задача H): `POST/GET/DELETE /settings/doc-templates/files/{upload|download|delete|preview}`,
+  хранение `FILES_DIR/templates/`, `DocTemplateItem.file` (имя .docx, необязательно).
+- `documents.py` — печать бегунка (вариант 1, pdf_b64), документы; `_bypass_body` возвращает
+  `(body, template_file)` — печать использует .docx-файл при наличии.
+- `docs.py` — генерация DOCX/PDF/QR (docxtpl, LibreOffice), шаблоны бланков; рендер из .docx-файла
+  (`_render_docx_from_file`), `find_doc_template` по `body` ИЛИ `file`, контекст + `steps` + `qr`.
 - `archive.py` — бэкапы (ручной, расписание, настройки, список, скачать/удалить).
 - `audit.py` — журнал аудита (память + INSERT в БД).
 - `mailer.py` — письма (шаблоны, SMTP/файловая очередь).
