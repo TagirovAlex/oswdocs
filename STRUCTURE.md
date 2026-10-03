@@ -6,7 +6,7 @@
 - `api/` — FastAPI (Python 3.12), `app/` — код, `tests/` — pytest, `requirements.txt`.
 - `frontend/` — React SPA (Vite): `src/` — код, `public/` — статика, `dist/` — сборка.
 - `db/alembic/versions/` — миграции БД (0001..0005).
-- `proxy/` — nginx. `deploy/` — компоуз/деплой. `samples/` — DESIGN.md + макет. `ico/` — SVG-иконки.
+- `proxy/` — nginx. `deploy/` — компоуз/деплой. `samples/` — DESIGN.md + макет.
 - `script_local/`, `script_remote/` — инструментарий разработчика (gitignored).
 - `PLAN.md` — план/статус; `TEMPLATES.md` — переменные шаблонов; `task/` — исторические спеки (gitignored).
 
@@ -52,7 +52,7 @@
 
 ## Стили и шаблоны (где что лежит)
 - ВСЕ стили — один файл `frontend/src/theme.css` (токены, сетки, кнопки, таблицы, dropdown, панели).
-- Иконки меню/темы — `ico/*.svg` (directory, requests, settings, theme-moon, theme-sun), preview `ico/icons-preview.html`; логотипы — `logo-oswdocs*.svg` + `frontend/public/`.
+- Иконки меню/темы — инлайн-SVG в `frontend/src/layout.tsx` (каталог `ico/` удалён, в сборку не входит); логотипы — `logo-oswdocs*.svg` + `frontend/public/`.
 - Шаблоны бланков — settings `doc_templates` (текст, рендер docxtpl); писем — `mail_templates` (код/тема/тело); маршрутов — `templates` (служба/категория/шаги). Переменные — см. `TEMPLATES.md`.
 - `.docx`-файлов в репо нет (бланк = текст шаблона); вопрос «docx как шапка/строки/подвал + импорт/редактор» — PLAN.md блок H (обсуждается).
 
