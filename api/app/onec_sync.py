@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import base64
 import json
-from datetime import datetime, timedelta, timezone
+import os
+from datetime import datetime, timedelta, timezone, tzinfo
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -102,6 +104,18 @@ def _weekly_due(moment: datetime, last: datetime | None) -> bool:
     return moment >= last + timedelta(days=7)
 
 
+def _schedule_tz() -> tzinfo:
+    """Часовой пояс расписаний: TZ из env (compose: Europe/Moscow), иначе
+    локальный системный, иначе UTC. Значение — только чтение, не настройка."""
+    name = (os.environ.get("TZ") or "").strip()
+    if name:
+        try:
+            return ZoneInfo(name)
+        except Exception:
+            pass  # неизвестное имя TZ — системная локальная зона
+    return datetime.now().astimezone().tzinfo or timezone.utc
+
+
 def due_schedule(schedule, last_raw: str | None, now: datetime | None = None) -> bool:
     """«Пора» ли выполнять регламентную операцию по расписанию.
 
@@ -110,6 +124,8 @@ def due_schedule(schedule, last_raw: str | None, now: datetime | None = None) ->
     или невалидно (интервал <1 ч, битое daily_time, неизвестный режим) — прежнее
     поведение: раз в 7 дней от last_raw (не «пора всегда», иначе worker гонял бы
     операцию каждый проход). Битое last — «пора» (True).
+    daily_time — время ЛОКАЛЬНОЕ (_schedule_tz, на стенде Europe/Moscow): «06:00»
+    = 06:00 МСК, а не 06:00 UTC (иначе регламент уезжал на +3 часа).
     now — инжектируемые часы для детерминированных тестов (UTC), иначе текущие.
     """
     moment = now or datetime.now(timezone.utc)
@@ -137,10 +153,12 @@ def due_schedule(schedule, last_raw: str | None, now: datetime | None = None) ->
     if mode == "daily":
         try:
             hours, minutes = str(schedule.get("daily_time") or "").split(":", 1)
+            tz = _schedule_tz()
+            day = moment.astimezone(tz)  # календарный день — локальный (МСК)
             when = datetime(
-                moment.year, moment.month, moment.day,
-                int(hours), int(minutes), tzinfo=timezone.utc,
-            )
+                day.year, day.month, day.day,
+                int(hours), int(minutes), tzinfo=tz,
+            ).astimezone(timezone.utc)
         except (TypeError, ValueError):
             return _weekly_due(moment, last)  # битое время — расписание не настроено
         if moment < when:

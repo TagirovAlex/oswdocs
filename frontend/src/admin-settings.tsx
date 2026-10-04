@@ -710,7 +710,7 @@ function ScheduleReglamentEditor(props: {
             value={value?.daily_time ?? ""}
             onChange={(e) => update({ daily_time: e.target.value })}
           />
-          <div className="sed-note">Время в UTC (серверное); пустое время = «не настроено»</div>
+          <div className="sed-note">Время местное (МСК); пустое время = «не настроено»</div>
         </label>
       )}
       {mode !== "" && (

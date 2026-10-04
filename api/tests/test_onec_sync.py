@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import app.onec_sync as onec_sync  # noqa: E402
 from app.onec_sync import (  # noqa: E402
     OnecSyncUnavailable,
+    _schedule_tz,
     due_schedule,
     maybe_sync_weekly,
     sync_enterprises,
@@ -211,24 +212,55 @@ def test_due_interval_no_last_due():
     assert due_schedule(_schedule(interval_hours=3), None) is True
 
 
-def test_due_daily_passed_and_last_yesterday_due():
+def test_due_daily_passed_and_last_yesterday_due(monkeypatch):
     """mode=daily: время сегодня уже наступило, last вчера — пора."""
+    monkeypatch.setenv("TZ", "Europe/Moscow")
     now = datetime(2026, 10, 1, 10, 0, 0, tzinfo=timezone.utc)
     last = datetime(2026, 9, 30, 9, 0, 0, tzinfo=timezone.utc).isoformat()
     assert due_schedule(_schedule(mode="daily", daily_time="03:00"), last, now) is True
 
 
-def test_due_daily_time_not_reached():
+def test_due_daily_time_not_reached(monkeypatch):
     """mode=daily: время ещё не наступило — не пора (даже без отметки)."""
+    monkeypatch.setenv("TZ", "Europe/Moscow")
     now = datetime(2026, 10, 1, 10, 0, 0, tzinfo=timezone.utc)
     assert due_schedule(_schedule(mode="daily", daily_time="15:00"), None, now) is False
 
 
-def test_due_daily_already_ran_today():
+def test_due_daily_already_ran_today(monkeypatch):
     """mode=daily: последний запуск уже был сегодня после daily_time — не пора."""
+    monkeypatch.setenv("TZ", "Europe/Moscow")
     now = datetime(2026, 10, 1, 10, 0, 0, tzinfo=timezone.utc)
     last = datetime(2026, 10, 1, 3, 5, 0, tzinfo=timezone.utc).isoformat()
     assert due_schedule(_schedule(mode="daily", daily_time="03:00"), last, now) is False
+
+
+def test_due_daily_is_local_time_not_utc(monkeypatch):
+    """daily_time — локальное время (TZ), не UTC: «06:00» = 06:00 МСК = 03:00Z."""
+    monkeypatch.setenv("TZ", "Europe/Moscow")
+    schedule = _schedule(mode="daily", daily_time="06:00")
+    yesterday = (datetime(2026, 10, 3, 20, 0, tzinfo=timezone.utc)).isoformat()
+    # 05:10 МСК (02:10Z) — время ещё не наступило
+    assert due_schedule(schedule, yesterday, datetime(2026, 10, 4, 2, 10, tzinfo=timezone.utc)) is False
+    # 06:10 МСК (03:10Z) — «пора» (в UTC-трактовке это было бы 09:10 МСК)
+    assert due_schedule(schedule, yesterday, datetime(2026, 10, 4, 3, 10, tzinfo=timezone.utc)) is True
+
+
+def test_due_daily_utc_tz_shifts_back(monkeypatch):
+    """TZ=UTC — daily_time остаётся UTC (06:00Z = 09:00 МСК), без сдвига."""
+    monkeypatch.setenv("TZ", "UTC")
+    schedule = _schedule(mode="daily", daily_time="06:00")
+    yesterday = datetime(2026, 10, 3, 20, 0, tzinfo=timezone.utc).isoformat()
+    assert due_schedule(schedule, yesterday, datetime(2026, 10, 4, 3, 10, tzinfo=timezone.utc)) is False
+    assert due_schedule(schedule, yesterday, datetime(2026, 10, 4, 6, 10, tzinfo=timezone.utc)) is True
+
+
+def test_schedule_tz_reads_env(monkeypatch):
+    """Зона расписаний — из TZ (compose: Europe/Moscow); кривое имя — локальная."""
+    monkeypatch.setenv("TZ", "Europe/Moscow")
+    assert str(_schedule_tz()) == "Europe/Moscow"
+    monkeypatch.setenv("TZ", "не-зона")
+    assert str(_schedule_tz()) != "не-зона"
 
 
 def test_due_no_schedule_falls_back_to_7_days():

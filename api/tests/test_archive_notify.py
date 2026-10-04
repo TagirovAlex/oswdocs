@@ -172,13 +172,19 @@ def test_queue_failure_does_not_fail_backup(tmp_path, fake_dump):
 
 
 def test_maybe_backup_weekly_enqueues_when_due(tmp_path, fake_dump):
-    """Регламентный бэкап «пора» — True и письмо по archive_schedule."""
+    """Регламентный бэкап «пора» — True и письмо по archive_schedule.
+
+    Время «пора» определяется по системным часам, поэтому daily_time=00:00
+    (always в прошелом) и метка вчера — «пора» в любой момент запуска теста.
+    """
     queue = RecordingQueue()
     done = maybe_backup_weekly(
-        _store(_schedule(), last=MOMENT - timedelta(days=1)),
+        _store(
+            _schedule(daily_time="00:00"),
+            last=datetime.now(timezone.utc) - timedelta(days=1),
+        ),
         "postgresql://unused",
         str(tmp_path),
-        MOMENT,
         queue=queue,
         smtp_from="sed@example.com",
     )
@@ -188,13 +194,12 @@ def test_maybe_backup_weekly_enqueues_when_due(tmp_path, fake_dump):
 
 
 def test_maybe_backup_weekly_not_due_no_letters(tmp_path, fake_dump):
-    """Не «пора» (бэкап уже сегодня) — дампа и писем нет."""
+    """Не «пора» (бэкап только что был) — дампа и писем нет."""
     queue = RecordingQueue()
     done = maybe_backup_weekly(
-        _store(_schedule(), last=MOMENT),
+        _store(_schedule(), last=datetime.now(timezone.utc)),
         "postgresql://unused",
         str(tmp_path),
-        MOMENT,
         queue=queue,
     )
     assert done is False
@@ -211,10 +216,12 @@ def test_maybe_backup_weekly_dump_failure_silent(tmp_path, monkeypatch):
     monkeypatch.setattr(archive, "dump_database", _boom)
     queue = RecordingQueue()
     done = maybe_backup_weekly(
-        _store(_schedule(), last=MOMENT - timedelta(days=1)),
+        _store(
+            _schedule(daily_time="00:00"),
+            last=datetime.now(timezone.utc) - timedelta(days=1),
+        ),
         "postgresql://unused",
         str(tmp_path),
-        MOMENT,
         queue=queue,
     )
     assert done is False
