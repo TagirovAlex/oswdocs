@@ -77,6 +77,6 @@ OSWDocs — система электронного документооборо
 
 - AD_WRITE_ENABLED=false по умолчанию
 - Ролевая модель доступа
-- Аудит udit_log (append-only)
+- Аудит audit_log (append-only)
 - TLS 1.2+, HSTS
 - Секреты вне кода
