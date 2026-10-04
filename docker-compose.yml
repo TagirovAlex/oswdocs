@@ -8,8 +8,12 @@
 services:
   proxy:
     image: nginx:stable-alpine
+    # Ждём ЗДОРОВЫЙ api, а не просто «запущенный»: иначе proxy может
+    # подняться раньше готовности api. Смену IP при пересборке api это
+    # не чинит — её чинит resolver 127.0.0.11 в proxy/nginx.conf.
     depends_on:
-      - api
+      api:
+        condition: service_healthy
     ports:
       - "80:80"
       - "443:443"
@@ -55,6 +59,14 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    # /health без auth (см. api/app/main.py) — compose ждёт его, чтобы
+    # поднять proxy (depends_on condition: service_healthy).
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
     volumes:
       - files:/app/files
       - backups:/app/backups:ro
