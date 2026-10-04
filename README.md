@@ -54,6 +54,17 @@ OSWDocs — система электронного документооборо
 
 Секреты только в .env, файл не коммитится.
 
+## Разработка и прод (разделение compose)
+
+- `docker-compose.yml` — прод-база (образы, именованные тома, `frontend_dist` для статики).
+- `docker-compose.override.yml` — только локальная разработка (bind-mount `./api/app`,
+  `./frontend/dist`, `--reload` у `api`). Подхватывается автоматически любой голой
+  командой `docker compose ...`.
+- На прод-ВМ (`/srv/sed`) override применяться не должен: запуск только с явным `-f`
+  (`docker compose -f docker-compose.yml up -d --build`; при разъезде БД добавить
+  `-f docker-compose.prod-db-external.yml` и `--scale db=0`). Иначе прод подхватит
+  dev-монтирования (пустой host-`dist` даёт 403 от proxy).
+
 ## Документация
 
 - [AGENTS.md](AGENTS.md) — правила для ИИ-агентов
