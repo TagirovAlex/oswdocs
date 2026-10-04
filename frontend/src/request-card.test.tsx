@@ -3,10 +3,12 @@
 // окне-попе (?view=request&id=…). Данные — из requests-client (мокается).
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ApiHttpError } from "./auth-client";
+import { ApiHttpError, me } from "./auth-client";
+import type { AuthUser } from "./auth-client";
 import { RequestCard } from "./request-card";
 import {
   decideStep,
+  deleteAttachment,
   deleteRequest,
   finishRequest,
   getAttachments,
@@ -33,9 +35,20 @@ vi.mock("./requests-client", async (importOriginal) => {
     deleteRequest: vi.fn(),
     getAttachments: vi.fn(),
     uploadAttachment: vi.fn(),
+    deleteAttachment: vi.fn(),
     printRequest: vi.fn(),
   };
 });
+
+vi.mock("./auth-client", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./auth-client")>();
+  return { ...actual, me: vi.fn() };
+});
+
+// Пользователь сессии для кнопки «Удалить» у автора вложения.
+function sessionUser(sam: string): AuthUser {
+  return { sam, groups: ["SED_HR"], role: "hr" };
+}
 
 // Заявка из GET /api/requests (RequestOut; для владельца fio=null).
 // Шаг по умолчанию — групповой, can_act=false (кнопок согласования нет).
@@ -116,7 +129,11 @@ beforeEach(() => {
   vi.mocked(deleteRequest).mockReset();
   vi.mocked(getAttachments).mockReset();
   vi.mocked(uploadAttachment).mockReset();
+  vi.mocked(deleteAttachment).mockReset();
   vi.mocked(printRequest).mockReset();
+  vi.mocked(me).mockReset();
+  // По умолчанию сессии нет: кнопок удаления у не-админов нет (старое поведение).
+  vi.mocked(me).mockRejectedValue(new ApiHttpError(401, "Нет токена"));
   vi.mocked(getRequest).mockResolvedValue(requestWith("Громов Игорь Олегович", "На согласовании"));
   vi.mocked(getAttachments).mockResolvedValue([]);
   vi.mocked(deleteRequest).mockResolvedValue({ deleted: "REQ-0001" });
@@ -427,8 +444,8 @@ describe("RequestCard", () => {
     await waitFor(() => expect(screen.getByText("Заявка отправлена на согласование")).toBeInTheDocument());
   });
 
-  // Скан-вложения: мета со ссылкой на скачивание.
-  it("карточка показывает мета вложений со ссылкой на скачивание", async () => {
+  // Скан-вложения: мета со ссылкой на окно просмотра.
+  it("карточка показывает мета вложений со ссылкой на просмотр", async () => {
     vi.mocked(getRequest).mockResolvedValue(requestWith("Громов Игорь Олегович", "На согласовании"));
     const attachments: AttachmentMeta[] = [
       {
@@ -445,8 +462,8 @@ describe("RequestCard", () => {
 
     renderCard();
     await waitFor(() => expect(screen.getByText(/scan\.pdf/)).toBeInTheDocument());
-    expect(screen.getByRole("link", { name: "Скачать" }).getAttribute("href")).toBe(
-      "/api/attachments/1/file",
+    expect(screen.getByRole("link", { name: "Открыть" }).getAttribute("href")).toBe(
+      "?view=attachment&id=1&name=scan.pdf&mime=application%2Fpdf",
     );
   });
 
@@ -462,6 +479,90 @@ describe("RequestCard", () => {
     fireEvent.change(screen.getByLabelText("Файл скана"), { target: { files: [file] } });
     await waitFor(() => expect(screen.getByText("Файл больше лимита")).toBeInTheDocument());
     expect(vi.mocked(uploadAttachment)).toHaveBeenCalledWith("REQ-0001", file);
+  });
+
+  // Вложение чужого автора: кнопки «Удалить» нет (роль hr, сессия чужая).
+  function attachmentBy(author: string): AttachmentMeta[] {
+    return [
+      {
+        id: 1,
+        request_id: "REQ-0001",
+        file_name: "scan.pdf",
+        mime: "application/pdf",
+        size_bytes: 1024,
+        uploaded_by: author,
+        uploaded_at: "2026-09-29T10:00:00+00:00",
+      },
+    ];
+  }
+
+  // Удаление вложения: автор видит кнопку, подтверждение — удаление и обновление списка.
+  it("автор удаляет своё вложение после подтверждения", async () => {
+    vi.mocked(getRequest).mockResolvedValue(requestWith("Громов Игорь Олегович", "На согласовании"));
+    vi.mocked(me).mockResolvedValue(sessionUser("ok.vymyshlennaya"));
+    vi.mocked(getAttachments).mockResolvedValue(attachmentBy("ok.vymyshlennaya"));
+    vi.mocked(deleteAttachment).mockResolvedValue(undefined);
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    renderCard();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Удалить" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Удалить" }));
+    expect(confirm).toHaveBeenCalledWith("Удалить вложение scan.pdf? Действие необратимо.");
+    await waitFor(() => expect(vi.mocked(deleteAttachment)).toHaveBeenCalledWith(1));
+    // После удаления список вложений перезапрашивается.
+    await waitFor(() => expect(vi.mocked(getAttachments).mock.calls.length).toBeGreaterThan(1));
+  });
+
+  // Удаление вложения: отказ в подтверждении — запрос не уходит.
+  it("отказ в подтверждении не удаляет вложение", async () => {
+    vi.mocked(getRequest).mockResolvedValue(requestWith("Громов Игорь Олегович", "На согласовании"));
+    vi.mocked(me).mockResolvedValue(sessionUser("ok.vymyshlennaya"));
+    vi.mocked(getAttachments).mockResolvedValue(attachmentBy("ok.vymyshlennaya"));
+    vi.spyOn(window, "confirm").mockReturnValue(false);
+
+    renderCard();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Удалить" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Удалить" }));
+    expect(vi.mocked(deleteAttachment)).not.toHaveBeenCalled();
+  });
+
+  // Удаление вложения: админ видит кнопку у чужого файла.
+  it("admin удаляет чужое вложение", async () => {
+    vi.mocked(getRequest).mockResolvedValue(requestWith("Громов Игорь Олегович", "На согласовании"));
+    vi.mocked(me).mockResolvedValue({ sam: "admin.vymyshlenny", groups: ["SED_ADMINS"], role: "admin" });
+    vi.mocked(getAttachments).mockResolvedValue(attachmentBy("ok.vymyshlennaya"));
+    vi.mocked(deleteAttachment).mockResolvedValue(undefined);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    renderCard("REQ-0001", "admin");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Удалить" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Удалить" }));
+    await waitFor(() => expect(vi.mocked(deleteAttachment)).toHaveBeenCalledWith(1));
+  });
+
+  // Удаление вложения: чужой файл не-автору и не-админу — кнопки нет.
+  it("чужое вложение не-автору без кнопки удаления", async () => {
+    vi.mocked(getRequest).mockResolvedValue(requestWith("Громов Игорь Олегович", "На согласовании"));
+    vi.mocked(me).mockResolvedValue(sessionUser("step.chuzhoi"));
+    vi.mocked(getAttachments).mockResolvedValue(attachmentBy("ok.vymyshlennaya"));
+
+    renderCard();
+    await waitFor(() => expect(screen.getByText(/scan\.pdf/)).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Удалить" })).not.toBeInTheDocument();
+  });
+
+  // Удаление вложения: 403 от API — понятный текст, список не ломается.
+  it("удаление чужого: 403 показывает понятный текст", async () => {
+    vi.mocked(getRequest).mockResolvedValue(requestWith("Громов Игорь Олегович", "На согласовании"));
+    vi.mocked(me).mockResolvedValue(sessionUser("ok.vymyshlennaya"));
+    vi.mocked(getAttachments).mockResolvedValue(attachmentBy("ok.vymyshlennaya"));
+    vi.mocked(deleteAttachment).mockRejectedValue(new ApiHttpError(403, "Доступ запрещён"));
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    renderCard();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Удалить" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Удалить" }));
+    await waitFor(() => expect(screen.getByText("Доступ запрещён")).toBeInTheDocument());
   });
 
   // Удаление заявки (только админ; для тестового периода): кнопка видна,

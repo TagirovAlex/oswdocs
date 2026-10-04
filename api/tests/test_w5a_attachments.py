@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app.attachments import (  # noqa: E402
     AttachmentRecord,
+    DbAttachmentsStore,
     InMemoryAttachmentsStore,
     InMemoryFilesStore,
     get_attachments_store,
@@ -341,3 +342,107 @@ def test_audit_upload_and_read(client, hr):
     actions = [e.action for e in events]
     assert "attachment.upload" in actions
     assert "attachment.read" in actions
+
+
+# --- DELETE /attachments/{id} ---
+
+
+@pytest.fixture
+def admin():
+    return _headers_for("admin.vymyshlenny", ["SED_ADMINS"])
+
+
+def test_delete_by_author_204(client, hr, attachments_store, files_store):
+    """Автор удаляет свой скан: 204, мета и файл зачищены, аудит записан."""
+    rid = _create(client, hr, steps=[{"owner_group": "SED_STEP_BUH"}])["id"]
+    attachment_id = _upload(client, rid, hr).json()["id"]
+    response = client.delete(f"/attachments/{attachment_id}", headers=hr)
+    assert response.status_code == 204, response.text
+    assert attachments_store.get(attachment_id) is None
+    assert attachments_store.list_by_request(rid) == []
+    assert files_store._files == {}
+    assert client.get(f"/attachments/{attachment_id}/file", headers=hr).status_code == 404
+    actions = [e.action for e in audit_log.all() if e.entity == "attachment"]
+    assert "attachment.delete" in actions
+
+
+def test_delete_by_admin_204(client, hr, admin, attachments_store):
+    """Админ удаляет чужой скан: 204."""
+    rid = _create(client, hr, steps=[{"owner_group": "SED_STEP_BUH"}])["id"]
+    attachment_id = _upload(client, rid, hr).json()["id"]
+    assert client.delete(f"/attachments/{attachment_id}", headers=admin).status_code == 204
+    assert attachments_store.get(attachment_id) is None
+
+
+def test_delete_by_sed_admin_204(client, hr, attachments_store, monkeypatch):
+    """Администратор СЭД удаляет чужой скан: 204."""
+    monkeypatch.setenv("SED_ADMIN_GROUPS", "SED_STEP_SEDADM")
+    sed_admin = _headers_for("sed.admin", ["SED_STEP_SEDADM"])
+    rid = _create(client, hr, steps=[{"owner_group": "SED_STEP_BUH"}])["id"]
+    attachment_id = _upload(client, rid, hr).json()["id"]
+    assert client.delete(f"/attachments/{attachment_id}", headers=sed_admin).status_code == 204
+    assert attachments_store.get(attachment_id) is None
+
+
+def test_delete_forbidden_for_others(client, hr, other_user, buh_owner, attachments_store):
+    """Не автор и не админ — 403, вложение на месте; без логина — 401."""
+    rid = _create(client, hr, steps=[{"owner_group": "SED_STEP_BUH"}])["id"]
+    attachment_id = _upload(client, rid, hr).json()["id"]
+    assert client.delete(f"/attachments/{attachment_id}", headers=other_user).status_code == 403
+    # Владелец шага — не автор: тоже 403.
+    assert client.delete(f"/attachments/{attachment_id}", headers=buh_owner).status_code == 403
+    assert client.delete(f"/attachments/{attachment_id}", headers={}).status_code == 401
+    assert attachments_store.get(attachment_id) is not None
+
+
+def test_delete_missing_404(client, hr):
+    """Нет вложения — 404."""
+    assert client.delete("/attachments/9999", headers=hr).status_code == 404
+
+
+def test_delete_missing_file_still_204(client, hr, attachments_store):
+    """Файла уже нет, а мета есть — удаление меты всё равно 204."""
+    rid = _create(client, hr, steps=[{"owner_group": "SED_STEP_BUH"}])["id"]
+    record = attachments_store.create(
+        AttachmentRecord(
+            request_id=rid, file_path="/inmemory/attachments/missing.bin",
+            file_name="missing.bin", mime="application/pdf",
+            uploaded_by="ok.vymyshlennaya",
+        )
+    )
+    assert client.delete(f"/attachments/{record.id}", headers=hr).status_code == 204
+    assert attachments_store.get(record.id) is None
+
+
+def test_db_store_get_roundtrip(tmp_path):
+    """Регрессия 500 при скачивании/удалении: _SELECT_ONE обязан отдавать id для _build.
+
+    Гоняется на файловом sqlite (тот же SQL, живой Postgres не нужен).
+    """
+    from sqlalchemy import create_engine, text
+
+    db = tmp_path / "att.db"
+    engine = create_engine(f"sqlite:///{db}")
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE dismissal_requests (id INTEGER PRIMARY KEY, code TEXT UNIQUE)"))
+        conn.execute(
+            text(
+                "CREATE TABLE attachments (id INTEGER PRIMARY KEY, request_id INTEGER, "
+                "file_path TEXT, file_name TEXT, mime TEXT, size_bytes INTEGER, "
+                "uploaded_by TEXT, uploaded_at TIMESTAMP)"
+            )
+        )
+        conn.execute(text("INSERT INTO dismissal_requests (id, code) VALUES (7, 'REQ-0001')"))
+    engine.dispose()
+    store = DbAttachmentsStore(f"sqlite:///{db}")
+    created = store.create(
+        AttachmentRecord(
+            request_id="REQ-0001", file_path="/f/a.bin", file_name="a.bin",
+            mime="application/pdf", size_bytes=3, uploaded_by="ok.vymyshlennaya",
+        )
+    )
+    got = store.get(created.id)
+    assert got is not None and got.id == created.id and got.file_name == "a.bin"
+    assert [r.id for r in store.list_by_request("REQ-0001")] == [created.id]
+    store.delete(created.id)
+    assert store.get(created.id) is None

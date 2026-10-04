@@ -4,10 +4,12 @@
 // Данные — из реального API (requests-client); значения — из settings, хардкода нет.
 import { useEffect, useState } from "react";
 import type { ChangeEvent } from "react";
+import { me } from "./auth-client";
 import {
   addComment,
   base64ToBlob,
   decideStep,
+  deleteAttachment,
   deleteRequest,
   finishRequest,
   getAdGroupMembers,
@@ -39,7 +41,7 @@ import type {
   StepDecision,
 } from "./requests-client";
 import type { Role } from "./api-mock";
-import { employeeUrl, openPopup } from "./windows";
+import { attachmentUrl, employeeUrl, openPopup } from "./windows";
 
 interface RequestCardProps {
   // Идентификатор заявки (REQ-XXXX).
@@ -98,6 +100,10 @@ export function RequestCard(props: RequestCardProps) {
   const [attachments, setAttachments] = useState<AttachmentMeta[]>([]);
   const [attachmentsError, setAttachmentsError] = useState<string>("");
   const [uploadError, setUploadError] = useState<string>("");
+  const [attachmentDeleteError, setAttachmentDeleteError] = useState<string>("");
+  // Логин текущей сессии (GET /auth/me): нужен для кнопки «Удалить» у автора.
+  // Не загрузился — кнопок удаления у не-админов просто нет, карточка работает.
+  const [mySam, setMySam] = useState<string>("");
   // История изменений (GET /api/requests/{id}/history) и комментарии заявки.
   const [history, setHistory] = useState<RequestHistoryItem[]>([]);
   const [historyError, setHistoryError] = useState<string>("");
@@ -156,6 +162,21 @@ export function RequestCard(props: RequestCardProps) {
       alive = false;
     };
   }, [requestId]);
+
+  // Логин сессии для кнопки «Удалить» у автора вложения (прецедент — create-form).
+  useEffect(() => {
+    let alive = true;
+    me()
+      .then((user) => {
+        if (alive) setMySam(user.sam);
+      })
+      .catch(() => {
+        if (alive) setMySam("");
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   // Загрузка вложений (GET /api/requests/{id}/attachments).
   useEffect(() => {
@@ -526,8 +547,27 @@ export function RequestCard(props: RequestCardProps) {
     try {
       setAttachments(await getAttachments(requestId));
       setAttachmentsError("");
+      setAttachmentDeleteError("");
     } catch (e: unknown) {
       setAttachmentsError(e instanceof Error ? e.message : "Ошибка загрузки вложений");
+    }
+  }
+
+  // Удалять вложение могут автор (uploaded_by), admin и администратор СЭД.
+  function canDeleteAttachment(att: AttachmentMeta): boolean {
+    if (role === "admin" || (role as string) === "sed_admin") return true;
+    return mySam !== "" && att.uploaded_by === mySam;
+  }
+
+  // Удаление вложения с подтверждением (действие необратимо).
+  async function handleDeleteAttachment(att: AttachmentMeta): Promise<void> {
+    setAttachmentDeleteError("");
+    if (!window.confirm(`Удалить вложение ${att.file_name}? Действие необратимо.`)) return;
+    try {
+      await deleteAttachment(att.id);
+      await refreshAttachments();
+    } catch (err: unknown) {
+      setAttachmentDeleteError(err instanceof Error ? err.message : "Ошибка удаления файла");
     }
   }
 
@@ -651,19 +691,44 @@ export function RequestCard(props: RequestCardProps) {
                 <b>Вложения</b>
                 {attachmentsError && <div role="alert">{attachmentsError}</div>}
                 {uploadError && <div role="alert">{uploadError}</div>}
+                {attachmentDeleteError && <div role="alert">{attachmentDeleteError}</div>}
                 {attachments.length === 0 && !attachmentsError && (
                   <div className="sed-note">Вложений нет</div>
                 )}
                 <ul className="sed-list">
-                  {attachments.map((att) => (
-                    <li key={att.id}>
-                      {/* Фолбэки обязательны: одна битая запись не должна ронять
-                          всю карточку (раньше .slice по undefined давал пустой экран). */}
-                      {att.file_name ?? "Файл"} · {att.size_bytes ?? "—"} Б ·{" "}
-                      {(att.uploaded_at ?? "").slice(0, 10) || "—"} ·{" "}
-                      <a href={`/api/attachments/${encodeURIComponent(att.id)}/file`}>Скачать</a>
-                    </li>
-                  ))}
+                  {attachments.map((att) => {
+                    // Окно просмотра — по клику (иначе браузер блокирует popup).
+                    const url = attachmentUrl(att.id, att.file_name, att.mime);
+                    return (
+                      <li key={att.id}>
+                        {/* Фолбэки обязательны: одна битая запись не должна ронять
+                            всю карточку (раньше .slice по undefined давал пустой экран). */}
+                        {att.file_name ?? "Файл"} · {att.size_bytes ?? "—"} Б ·{" "}
+                        {(att.uploaded_at ?? "").slice(0, 10) || "—"} ·{" "}
+                        <a
+                          href={url}
+                          onClick={(e) => {
+                            e.preventDefault();
+                            openPopup(url, 1000, 800);
+                          }}
+                        >
+                          Открыть
+                        </a>
+                        {canDeleteAttachment(att) && (
+                          <>
+                            {" "}
+                            <button
+                              type="button"
+                              className="sed-btn sed-btn--danger"
+                              onClick={() => handleDeleteAttachment(att)}
+                            >
+                              Удалить
+                            </button>
+                          </>
+                        )}
+                      </li>
+                    );
+                  })}
                 </ul>
                 <label className="sed-field">
                   Загрузить скан

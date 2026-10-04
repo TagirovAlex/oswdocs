@@ -175,6 +175,10 @@ class AttachmentsStore(Protocol):
         """Вложение по id либо None."""
         ...  # pragma: no cover
 
+    def delete(self, attachment_id: int) -> None:
+        """Удалить мету вложения (файл зачищает вызывающий через FilesStore)."""
+        ...  # pragma: no cover
+
 
 class InMemoryAttachmentsStore:
     """Офлайн-хранилище мета (dict), интерфейс AttachmentsStore."""
@@ -201,6 +205,9 @@ class InMemoryAttachmentsStore:
 
     def get(self, attachment_id: int) -> AttachmentRecord | None:
         return self._records.get(attachment_id)
+
+    def delete(self, attachment_id: int) -> None:
+        self._records.pop(attachment_id, None)
 
 
 class DbAttachmentsStore:
@@ -238,11 +245,12 @@ class DbAttachmentsStore:
     )
     _SELECT_ONE = text(
         """
-        SELECT request_id, file_path, file_name, mime, size_bytes, uploaded_by, uploaded_at
+        SELECT id, request_id, file_path, file_name, mime, size_bytes, uploaded_by, uploaded_at
         FROM attachments
         WHERE id = :attachment_id
         """
     )
+    _DELETE = text("DELETE FROM attachments WHERE id = :attachment_id")
 
     def __init__(self, database_url: str) -> None:
         self._engine = create_engine(database_url, pool_pre_ping=True)
@@ -330,6 +338,16 @@ class DbAttachmentsStore:
             return None
         return self._build(row, request[0])
 
+    def delete(self, attachment_id: int) -> None:
+        try:
+            with self._session_factory() as session:
+                session.execute(self._DELETE, {"attachment_id": attachment_id})
+                session.commit()
+        except SQLAlchemyError as exc:
+            raise AttachmentsUnavailable(
+                f"Хранилище вложений недоступно: {exc}"
+            ) from exc
+
 
 _db_attachments_store: DbAttachmentsStore | None = None
 
@@ -360,6 +378,11 @@ def _can_access(request: object, user: CurrentUser) -> bool:
         s.owner_group in user.groups or (s.assignee and s.assignee == user.sam)
         for s in request.steps
     )
+
+
+def _can_delete(record: AttachmentRecord, user: CurrentUser) -> bool:
+    """Удаление вложения: автор (uploaded_by), админ или администратор СЭД."""
+    return user.role in ("admin", "sed_admin") or record.uploaded_by == user.sam
 
 
 def _safe_file_name(name: str | None) -> str:
@@ -572,3 +595,50 @@ def download_attachment(
         )
     )
     return Response(content=content, media_type=media_type)
+
+
+@router.delete("/attachments/{attachment_id}", status_code=204, response_model=None)
+def delete_attachment(
+    attachment_id: int,
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+    store: RequestsStore = Depends(get_requests_store),
+    att_store: AttachmentsStore = Depends(get_attachments_store),
+    files_store: FilesStore = Depends(get_files_store),
+) -> None:
+    """Удаление вложения: автор (uploaded_by), admin или sed_admin.
+
+    404 — вложения/заявки нет; 403 — чужое вложение. Файл зачищается
+    best-effort (его отсутствие удалению меты не мешает).
+    """
+    settings.ensure_read_only()
+    try:
+        record = att_store.get(attachment_id)
+    except AttachmentsUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if record is None:
+        raise HTTPException(status_code=404, detail="Вложение не найдено")
+    try:
+        _get_request_or_404(store, record.request_id)
+    except RequestsUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if not _can_delete(record, user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Удалять вложение может автор, админ или администратор СЭД",
+        )
+    files_store.delete(record.file_path)
+    try:
+        att_store.delete(attachment_id)
+    except AttachmentsUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    audit_log.append(
+        AuditEvent(
+            actor=user.sam,
+            action="attachment.delete",
+            entity="attachment",
+            entity_id=record.request_id,
+            detail=f"id={record.id}",
+        )
+    )
+    return None

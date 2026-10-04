@@ -302,6 +302,14 @@ def clean_links():
     get_memory_links_store().reset()
 
 
+@pytest.fixture(autouse=True)
+def memory_links_override():
+    """Эндпоинты идут через офлайн-хранилище (боевой БД в тестах нет)."""
+    app.dependency_overrides[get_links_store] = lambda: get_memory_links_store()
+    yield
+    app.dependency_overrides.pop(get_links_store, None)
+
+
 def test_endpoints_go_through_store(client, links_override):
     """Создание и чтение связки идут через зависимость get_links_store."""
     store = CountingLinksStore()
@@ -327,3 +335,63 @@ def test_endpoints_go_through_store(client, links_override):
         assert read.json()["link"]["verified"] is True
     finally:
         app.dependency_overrides.pop(get_links_store, None)
+
+
+def _seed_link(sam: str, tab_num: str = "001") -> str:
+    """Связка сотрудника со связкой АД-1С в офлайн-хранилище (без POST)."""
+    key = link_key(ENT, "zup_t1", tab_num)
+    get_memory_links_store().save(
+        LinkRecord(
+            enterprise=ENT,
+            base_code="zup_t1",
+            tab_num=tab_num,
+            key=key,
+            sam=sam,
+            by="root.adm",
+            at="2026-09-01T00:00:00+00:00",
+        )
+    )
+    return key
+
+
+# --- GET /link_1c_ad/mine (свои связки для ссылки инициатора) ---
+
+
+def test_mine_empty(client, links_override):
+    """Без связки — пустой список (фронт показывает инициатора текстом)."""
+    response = client.get("/link_1c_ad/mine", headers=_hr_headers())
+    assert response.status_code == 200
+    assert response.json() == {"items": []}
+
+
+def test_mine_returns_own_key(client, links_override):
+    """Одна связка — ключ своей карточки (enterprise/base_code/tab_num/key)."""
+    key = _seed_link("ok.ivnova")
+    response = client.get("/link_1c_ad/mine", headers=_hr_headers())
+    assert response.status_code == 200
+    items = response.json()["items"]
+    assert len(items) == 1
+    assert items[0]["key"] == key
+    assert items[0]["tab_num"] == "001"
+
+
+def test_mine_multiple_links(client, links_override):
+    """Несколько связок — все (фронт при неоднозначности показывает текст)."""
+    _seed_link("ok.ivnova", "001")
+    _seed_link("ok.ivnova", "002")
+    response = client.get("/link_1c_ad/mine", headers=_hr_headers())
+    assert response.status_code == 200
+    assert len(response.json()["items"]) == 2
+
+
+def test_mine_only_own_links(client, links_override):
+    """Чужие связки не отдаются (sam — только из сессии)."""
+    _seed_link("t.ivan", "001")
+    response = client.get("/link_1c_ad/mine", headers=_hr_headers())
+    assert response.status_code == 200
+    assert response.json() == {"items": []}
+
+
+def test_mine_unauthorized(client, links_override):
+    """Без логина — 401."""
+    assert client.get("/link_1c_ad/mine", headers={}).status_code == 401

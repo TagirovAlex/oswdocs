@@ -954,3 +954,10 @@ fieldset textarea {
   background: var(--sed-surface);
   color: var(--sed-text);
 }
+
+/* Печать вложения: панель кнопок не печатаем, только содержимое. */
+@media print {
+  .sed-previewbar {
+    display: none;
+  }
+}

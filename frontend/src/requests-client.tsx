@@ -469,6 +469,23 @@ export async function getAttachments(id: string): Promise<AttachmentMeta[]> {
   return requestJson<AttachmentMeta[]>(`/api/requests/${encodeURIComponent(id)}/attachments`);
 }
 
+// Связка текущего пользователя (GET /api/link_1c_ad/mine): ключ своей
+// карточки сотрудника (enterprise|base_code|tab_num) для ссылки инициатора.
+// Пусто — связки нет; несколько — неоднозначность (фронт показывает текст).
+export interface MyLink {
+  enterprise: string;
+  base_code: string;
+  tab_num: string;
+  key: string;
+  verified: boolean;
+}
+
+// GET /api/link_1c_ad/mine: свои связки АД-1С (sam — из сессии, не из параметров).
+export async function getMyLinks(): Promise<MyLink[]> {
+  const res = await requestJson<{ items: MyLink[] }>("/api/link_1c_ad/mine");
+  return res.items ?? [];
+}
+
 // POST /api/requests/{id}/attachments: загрузка скана (multipart).
 // 413 — больше лимита, 415 — тип вне allowlist, 409 — лимит не задан.
 export async function uploadAttachment(id: string, file: File): Promise<AttachmentMeta> {
@@ -478,6 +495,70 @@ export async function uploadAttachment(id: string, file: File): Promise<Attachme
     method: "POST",
     body: form,
   });
+}
+
+// GET /api/attachments/{id}/file: содержимое файла вложением (Blob).
+// Прямая ссылка в <a>/<iframe> не подходит: браузер не шлёт Bearer-токен
+// за субресурсами — качаем через fetch и показываем blob-адресом.
+export async function getAttachmentFile(id: number): Promise<Blob> {
+  const token = getToken();
+  if (!token) {
+    throw new ApiHttpError(401, "Нет токена");
+  }
+  let res: Response;
+  try {
+    res = await fetch(`/api/attachments/${encodeURIComponent(id)}/file`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+  } catch {
+    throw new Error("Сервис недоступен");
+  }
+  if (res.ok) return await res.blob();
+  const detail = await readDetail(res);
+  switch (res.status) {
+    case 401:
+      throw new ApiHttpError(401, detail ?? "Сессия истекла");
+    case 403:
+      throw new ApiHttpError(403, detail ?? "Доступ запрещён");
+    case 404:
+      throw new ApiHttpError(404, detail ?? "Не найдено");
+    case 503:
+      throw new ApiHttpError(503, detail ?? "Сервис недоступен");
+    default:
+      throw new ApiHttpError(res.status, detail ?? "Ошибка сервера");
+  }
+}
+
+// DELETE /api/attachments/{id}: удаление вложения (автор, admin, sed_admin).
+// Успех — 204 без тела, поэтому отдельный fetch без разбора JSON.
+export async function deleteAttachment(id: number): Promise<void> {
+  const token = getToken();
+  if (!token) {
+    throw new ApiHttpError(401, "Нет токена");
+  }
+  let res: Response;
+  try {
+    res = await fetch(`/api/attachments/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+  } catch {
+    throw new Error("Сервис недоступен");
+  }
+  if (res.ok) return;
+  const detail = await readDetail(res);
+  switch (res.status) {
+    case 401:
+      throw new ApiHttpError(401, detail ?? "Сессия истекла");
+    case 403:
+      throw new ApiHttpError(403, detail ?? "Доступ запрещён");
+    case 404:
+      throw new ApiHttpError(404, detail ?? "Не найдено");
+    case 503:
+      throw new ApiHttpError(503, detail ?? "Сервис недоступен");
+    default:
+      throw new ApiHttpError(res.status, detail ?? "Ошибка сервера");
+  }
 }
 
 // GET /api/employees: поиск сотрудников предприятия; без баз 1С — 503.

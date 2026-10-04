@@ -17,6 +17,15 @@ export function createUrl(): string {
   return "?view=create";
 }
 
+// URL просмотра вложения (?view=attachment&id=…&name=…&mime=…): отдельное окно
+// с предпросмотром и печатью. Мета едет параметрами — отдельного
+// GET одной меты у API нет, а качать весь список ради окна избыточно.
+export function attachmentUrl(id: number, fileName: string, mime?: string | null): string {
+  const params = new URLSearchParams({ id: String(id), name: fileName });
+  if (mime) params.set("mime", mime);
+  return `?view=attachment&${params.toString()}`;
+}
+
 // Открыть окно-попу: параметры браузера для отдельного окна.
 export function openPopup(url: string, width = 940, height = 720): void {
   window.open(url, "_blank", `popup,width=${width},height=${height},resizable=yes`);

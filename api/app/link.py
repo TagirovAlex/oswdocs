@@ -338,6 +338,53 @@ def sync_links_endpoint(
     }
 
 
+class MyLinkOut(BaseModel):
+    """Связка текущего пользователя (для ссылки инициатора на свою карточку).
+
+    Только свой ключ (табельный — свои ПДн, как ФИО в /auth/me); чужое
+    подставить нельзя — sam берётся из сессии, не из параметров.
+    """
+
+    enterprise: str
+    base_code: str
+    tab_num: str
+    key: str
+    verified: bool = False
+
+
+@router.get("/link_1c_ad/mine")
+def read_my_links(
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+    store: LinksStore = Depends(get_links_store),
+) -> dict:
+    """Связки текущего пользователя (инициатор → ссылка на свою карточку).
+
+    Пусто — связки нет, фронт показывает инициатора текстом; несколько —
+    неоднозначность (молчаливый выбор предприятия недопустим), фронт тоже
+    показывает текст. Высокочастотное UI-чтение своих данных — аудит не пишем.
+    """
+    settings.ensure_read_only()
+    try:
+        records = store.find_by_sam(user.sam)
+    except LinksUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    return {
+        "items": [
+            MyLinkOut(
+                enterprise=r.enterprise,
+                base_code=r.base_code,
+                tab_num=r.tab_num,
+                key=r.key,
+                verified=r.verified,
+            ).model_dump()
+            for r in records
+        ]
+    }
+
+
 @router.get("/link_1c_ad")
 def read_link(
     enterprise: str = Query(..., min_length=1),

@@ -7,7 +7,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiHttpError, me } from "./auth-client";
 import { CreateForm } from "./create-form";
-import { createRequest, getAdGroupMembers, getEmployeeCard, getEnterprises, getStepGroups, searchAd, searchEmployees, submitRequest } from "./requests-client";
+import { createRequest, getAdGroupMembers, getEmployeeCard, getEnterprises, getMyLinks, getStepGroups, searchAd, searchEmployees, submitRequest } from "./requests-client";
 import type { AdGroupMember } from "./requests-client";
 
 // Мок клиента заявок; чистые функции — реальные.
@@ -23,6 +23,7 @@ vi.mock("./requests-client", async (importOriginal) => {
     getAdGroupMembers: vi.fn(),
     createRequest: vi.fn(),
     submitRequest: vi.fn(),
+    getMyLinks: vi.fn(),
   };
 });
 
@@ -73,6 +74,9 @@ beforeEach(() => {
   vi.mocked(getAdGroupMembers).mockReset();
   vi.mocked(createRequest).mockReset();
   vi.mocked(submitRequest).mockReset();
+  vi.mocked(getMyLinks).mockReset();
+  // По умолчанию связки АД-1С нет: инициатор — readonly-текст (старое поведение).
+  vi.mocked(getMyLinks).mockResolvedValue([]);
   vi.mocked(me).mockReset();
   vi.mocked(me).mockResolvedValue({
     sam: "petrov.pp",
@@ -198,6 +202,74 @@ describe("CreateForm", () => {
     // Данные справочные: поля не редактируемые.
     expect(screen.queryByRole("textbox", { name: "ФИО" })).not.toBeInTheDocument();
     expect(screen.queryByRole("textbox", { name: "Табельный №" })).not.toBeInTheDocument();
+  });
+
+  // Выбранный сотрудник — текст-ссылка на карточку (окно-попап), рядом крестик
+  // очистки в ту же строку; крестик возвращает поиск.
+  it("выбранный сотрудник — ссылка на карточку, крестик возвращает поиск", async () => {
+    vi.mocked(searchEmployees).mockResolvedValue({
+      items: [
+        {
+          key: "ENT_PRIMER_1|zup_t1|Т-000201",
+          tab_num: "Т-000201",
+          fio: "Громов Игорь Олегович",
+          dept: "Цех № 1",
+          position: "Слесарь",
+          needs_manual_review: false,
+        },
+      ],
+    });
+    vi.mocked(getEmployeeCard).mockResolvedValue({
+      key: "ENT_PRIMER_1|zup_t1|Т-000201",
+      enterprise: "ENT_PRIMER_1",
+      base_code: "zup_t1",
+      tab_num: "Т-000201",
+      truth_source: "1c",
+      link: { linked: false },
+      divergences: [],
+      needs_manual_review: false,
+      fio: "Громов Игорь Олегович",
+      dept: "Цех № 1",
+      position: "Слесарь",
+    });
+
+    render(<CreateForm role="hr" />);
+    await waitFor(() => expect(screen.getByLabelText("Предприятие")).toBeInTheDocument());
+    fireEvent.change(screen.getByLabelText("Предприятие"), { target: { value: "ENT_PRIMER_1" } });
+    fireEvent.change(screen.getByLabelText("Поиск сотрудника"), { target: { value: "Громов" } });
+    await waitFor(() => expect(screen.getByText("Громов Игорь Олегович")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("Громов Игорь Олегович"));
+
+    // Вместо поля поиска — ссылка на карточку сотрудника.
+    const link = await screen.findByRole("link", { name: "Громов Игорь Олегович" });
+    expect(link.getAttribute("href")).toBe(
+      `?view=employee&key=${encodeURIComponent("ENT_PRIMER_1|zup_t1|Т-000201")}`,
+    );
+    expect(screen.queryByLabelText("Поиск сотрудника")).not.toBeInTheDocument();
+    // Крестик очистки — в той же строке, что ссылка.
+    const clear = screen.getByLabelText("Очистить выбор сотрудника");
+    expect(clear.closest(".sed-fieldrow")).toBe(link.closest(".sed-fieldrow"));
+    // Очистка возвращает поле поиска.
+    fireEvent.click(clear);
+    await waitFor(() => expect(screen.getByLabelText("Поиск сотрудника")).toBeInTheDocument());
+  });
+
+  // Кнопка «Закрыть» (окно): в том же тулбаре, что «Создать» — одна строка.
+  it("onClose: «Закрыть» в одной строке с «Создать»", async () => {
+    render(<CreateForm role="hr" onClose={() => undefined} />);
+    await waitFor(() => expect(screen.getByText("Создать")).toBeInTheDocument());
+    const close = screen.getByRole("button", { name: "Закрыть" });
+    const toolbar = close.closest(".sed-toolbar");
+    expect(toolbar).not.toBeNull();
+    expect(toolbar?.textContent).toContain("Создать");
+    expect(toolbar?.textContent).toContain("Отмена");
+  });
+
+  // Без onClose кнопки «Закрыть» в форме нет (старое поведение для тестов).
+  it("без onClose кнопки «Закрыть» нет", async () => {
+    render(<CreateForm role="hr" />);
+    await waitFor(() => expect(screen.getByText("Создать")).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Закрыть" })).not.toBeInTheDocument();
   });
 
   // Пагинация живого поиска: больше одной страницы → пейджер, навигация по total.
@@ -409,6 +481,50 @@ describe("CreateForm", () => {
     const initiator = await screen.findByLabelText("Инициатор");
     await waitFor(() => expect(initiator).toHaveValue("Петров Пётр Петрович"));
     expect(initiator).toHaveAttribute("readonly");
+  });
+
+  // Инициатор с однозначной связкой АД-1С: всё ФИО — ссылка на свою карточку.
+  it("инициатор со связкой — ссылка на свою карточку сотрудника", async () => {
+    vi.mocked(getMyLinks).mockResolvedValue([
+      {
+        enterprise: "ENT_PRIMER_1",
+        base_code: "zup_t1",
+        tab_num: "Т-000201",
+        key: "ENT_PRIMER_1|zup_t1|Т-000201",
+        verified: true,
+      },
+    ]);
+
+    render(<CreateForm role="hr" />);
+    const link = await screen.findByRole("link", { name: "Петров Пётр Петрович" });
+    expect(link.getAttribute("href")).toBe(
+      `?view=employee&key=${encodeURIComponent("ENT_PRIMER_1|zup_t1|Т-000201")}`,
+    );
+    expect(screen.queryByLabelText("Инициатор")).not.toBeInTheDocument();
+  });
+
+  // Инициатор с неоднозначной связкой (две карточки): ссылка не показывается.
+  it("инициатор с двумя связками — текст без ссылки", async () => {
+    vi.mocked(getMyLinks).mockResolvedValue([
+      {
+        enterprise: "ENT_PRIMER_1",
+        base_code: "zup_t1",
+        tab_num: "Т-000201",
+        key: "ENT_PRIMER_1|zup_t1|Т-000201",
+        verified: true,
+      },
+      {
+        enterprise: "ENT_PRIMER_1",
+        base_code: "zup_t2",
+        tab_num: "Т-000202",
+        key: "ENT_PRIMER_1|zup_t2|Т-000202",
+        verified: false,
+      },
+    ]);
+
+    render(<CreateForm role="hr" />);
+    const initiator = await screen.findByLabelText("Инициатор");
+    await waitFor(() => expect(initiator).toHaveValue("Петров Пётр Петрович"));
   });
 
   // Конструктор блоков — карточки «Рассмотрение»; ссылки задают режим блока.

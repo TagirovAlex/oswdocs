@@ -11,17 +11,20 @@ import { ThemeProvider } from "./theme";
 import { CreateWindow } from "./create-window";
 import { EmployeeWindow } from "./employee-window";
 import { RequestWindow } from "./request-window";
+import { AttachmentWindow } from "./attachment-view";
 
 const rootEl = document.getElementById("root");
 if (!rootEl) throw new Error("Нет корневого элемента #root");
 
 // Лёгкий роутинг окон (Задача 3): query-параметр ?view= без роутера.
 // view=request&id=… — карточка заявки; view=employee&key=… — карточка
-// сотрудника (enterprise|base_code|tab_num); view=create — создание заявки.
+// сотрудника (enterprise|base_code|tab_num); view=create — создание заявки;
+// view=attachment&id=…&name=…&mime=… — просмотр вложения с печатью.
 type View =
   | { view: "main" }
   | { view: "request"; id: string }
   | { view: "employee"; key: string }
+  | { view: "attachment"; id: string; name: string; mime: string | null }
   | { view: "create" };
 
 function parseView(): View {
@@ -34,6 +37,12 @@ function parseView(): View {
   if (view === "employee") {
     const key = params.get("key");
     if (key) return { view: "employee", key };
+  }
+  if (view === "attachment") {
+    const id = params.get("id");
+    if (id) {
+      return { view: "attachment", id, name: params.get("name") ?? "Файл", mime: params.get("mime") };
+    }
   }
   if (view === "create") return { view: "create" };
   return { view: "main" };
@@ -87,6 +96,9 @@ function App() {
   const route = parseView();
   if (route.view === "request") return <RequestWindow requestId={route.id} role={auth.role} />;
   if (route.view === "employee") return <EmployeeWindow employeeKey={route.key} role={auth.role} />;
+  if (route.view === "attachment") {
+    return <AttachmentWindow attachmentId={route.id} fileName={route.name} mime={route.mime} />;
+  }
   if (route.view === "create") return <CreateWindow role={auth.role} />;
   return <SedLayout role={auth.role} onLogout={handleLogout} />;
 }

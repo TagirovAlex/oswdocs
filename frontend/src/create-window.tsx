@@ -27,14 +27,9 @@ export function CreateWindow(props: CreateWindowProps) {
   return (
     <div className="sed-shell">
       <main className="sed-content sed-window">
-        <CreateForm role={role} onDirtyChange={setDirty} closeOnCreate />
-        {/* Кнопка «Закрыть» — внизу содержимого (как в карточке сотрудника),
-            не в верхней липкой полосе; при несохранённых данных — с подтверждением. */}
-        <div className="sed-toolbar sed-mt-12">
-          <button type="button" className="sed-btn" onClick={handleClose}>
-            Закрыть
-          </button>
-        </div>
+        {/* Кнопка «Закрыть» — в нижнем тулбаре самой формы, в одну строку
+            с Создать/Отмена; при несохранённых данных — с подтверждением. */}
+        <CreateForm role={role} onDirtyChange={setDirty} closeOnCreate onClose={handleClose} />
       </main>
     </div>
   );

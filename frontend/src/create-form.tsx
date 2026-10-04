@@ -13,6 +13,7 @@ import {
   getDocTypes,
   getEmployeeCard,
   getEnterprises,
+  getMyLinks,
   getStepGroups,
   searchAd,
   searchEmployees,
@@ -30,6 +31,9 @@ interface CreateFormProps {
   onDirtyChange?: (dirty: boolean) => void;
   // В окне-попе (?view=create): после успешного создания закрыть окно.
   closeOnCreate?: boolean;
+  // Закрытие окна из нижнего тулбара формы (кнопка «Закрыть» в одну строку
+  // с Создать/Отмена): обработчик с подтверждением при dirty — из окна.
+  onClose?: () => void;
 }
 
 // Тип исполнителя шага: конкретный сотрудник AD либо группа-владелец.
@@ -147,7 +151,7 @@ function PlusIcon() {
 
 // Форма создания: единый экран, блоки по зависимостям.
 export function CreateForm(props: CreateFormProps) {
-  const { role, onDirtyChange, closeOnCreate } = props;
+  const { role, onDirtyChange, closeOnCreate, onClose } = props;
   const [enterprises, setEnterprises] = useState<Enterprise[]>([]);
   const [enterprise, setEnterprise] = useState<string>("");
   const [loadError, setLoadError] = useState<string>("");
@@ -233,15 +237,26 @@ export function CreateForm(props: CreateFormProps) {
   // Инициатор для правой панели — из сессии (GET /auth/me), только чтение.
   // ФИО у владельца может отсутствовать (урезанная карточка) — тогда логин.
   const [initiator, setInitiator] = useState<string>("");
+  // Ключ своей карточки сотрудника (связка АД-1С, GET /link_1c_ad/mine):
+  // ровно одна связка — ФИО инициатора становится ссылкой на карточку,
+  // иначе (нет/несколько) — текст без ссылки. Связка — свои данные, как ФИО в me().
+  const [initiatorKey, setInitiatorKey] = useState<string>("");
   useEffect(() => {
     let alive = true;
     me()
       .then((user) => {
         if (alive) setInitiator(user.fio ?? user.sam);
+        return getMyLinks();
+      })
+      .then((links) => {
+        if (alive && links.length === 1) setInitiatorKey(links[0].key);
       })
       .catch(() => {
-        // Сессия недоступна — поле инициатора остаётся пустым («—»).
-        if (alive) setInitiator("");
+        // Сессия/связка недоступна — поле инициатора остаётся пустым («—»).
+        if (alive) {
+          setInitiator("");
+          setInitiatorKey("");
+        }
       });
     return () => {
       alive = false;
@@ -736,6 +751,34 @@ export function CreateForm(props: CreateFormProps) {
             <fieldset className="sed-fieldset sed-mt-12">
               <legend>Сотрудник</legend>
               <div className="sed-rel">
+                {empPicked && empKey !== "" ? (
+                  // Выбранный сотрудник — текст-ссылка на карточку (окно-попап)
+                  // и очистка выбора в одну строку; для нового поиска — крестик.
+                  <div className="sed-fieldrow">
+                    <span>
+                      <a
+                        href={employeeUrl(empKey)}
+                        onClick={(e) => {
+                          // Окно карточки сотрудника — по клику (иначе браузер
+                          // блокирует popup); default-переход не нужен.
+                          e.preventDefault();
+                          openPopup(employeeUrl(empKey));
+                        }}
+                      >
+                        {fio || empQuery}
+                      </a>
+                    </span>
+                    <button
+                      type="button"
+                      className="sed-roundbtn"
+                      aria-label="Очистить выбор сотрудника"
+                      title="Очистить выбор"
+                      onClick={clearEmployeePick}
+                    >
+                      <CrossIcon />
+                    </button>
+                  </div>
+                ) : (
                 <div className="sed-fieldrow">
                   <label className="sed-field">
                     Поиск сотрудника
@@ -771,6 +814,7 @@ export function CreateForm(props: CreateFormProps) {
                     </button>
                   )}
                 </div>
+                )}
                 {empListOpen && empHits.length > 0 && (
                   <ul className="sed-dropdown">
                     {empHits.map((h) => (
@@ -931,11 +975,30 @@ export function CreateForm(props: CreateFormProps) {
         </div>
 
         <div className="sed-panel">
-          {/* Инициатор — из сессии, только чтение. */}
-          <label className="sed-field">
-            Инициатор (ОК, только чтение)
-            <input aria-label="Инициатор" readOnly value={initiator} placeholder="—" />
-          </label>
+          {/* Инициатор — из сессии, только чтение. Есть однозначная связка
+              АД-1С — всё ФИО является ссылкой на свою карточку сотрудника,
+              иначе — readonly-текст как раньше. */}
+          {initiatorKey !== "" ? (
+            <div className="sed-field">
+              <span>Инициатор (ОК, только чтение)</span>
+              <a
+                href={employeeUrl(initiatorKey)}
+                onClick={(e) => {
+                  // Окно карточки сотрудника — по клику (иначе браузер
+                  // блокирует popup); default-переход не нужен.
+                  e.preventDefault();
+                  openPopup(employeeUrl(initiatorKey));
+                }}
+              >
+                {initiator || "—"}
+              </a>
+            </div>
+          ) : (
+            <label className="sed-field">
+              Инициатор (ОК, только чтение)
+              <input aria-label="Инициатор" readOnly value={initiator} placeholder="—" />
+            </label>
+          )}
           {/* Данные сотрудника из 1С — справочные (read-only); подразделение/
               должность могут быть пустыми («—»), создание допустимо без них. */}
           {!manualMode && enterprise !== "" && tabNum !== "" && (
@@ -1234,6 +1297,13 @@ export function CreateForm(props: CreateFormProps) {
         <button type="button" className="sed-btn sed-btn--neutral" onClick={handleCancel}>
           Отмена
         </button>
+        {/* Закрыть — в том же тулбаре (одна строка кнопок); рендерится только
+            в окне, где есть обработчик закрытия с подтверждением при dirty. */}
+        {onClose && (
+          <button type="button" className="sed-btn" onClick={onClose}>
+            Закрыть
+          </button>
+        )}
       </div>
       {createError && <div role="alert">{createError}</div>}
     </section>
