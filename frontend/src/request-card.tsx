@@ -407,18 +407,21 @@ export function RequestCard(props: RequestCardProps) {
     );
   }
 
-  // Персональный шаг — есть ФИО (owner_name); групповой — группа без ФИО
-  // (by_user без ФИО — персональный без имени, должность прочерком).
+  // Групповой шаг — без персонального исполнителя (assignee пуст);
+  // бэкенд может положить читаемое имя группы в owner_name, поэтому признак —
+  // только assignee/resolver, а не наличие owner_name. by_user без assignee —
+  // персональный без имени, должность прочерком.
   function isGroupStep(step: RequestStep): boolean {
-    return !step.owner_name && step.resolver !== "by_user";
+    return !step.assignee && step.resolver !== "by_user";
   }
 
   // Колонка «Должность / Группа»: персональным — должность из АД
   // (стыковочная таблица, иначе прочерк); групповым — читабельное название
-  // группы из настроек, иначе код как раньше.
+  // группы из настроек, затем имя от бэкенда, иначе код как раньше.
   function stepDutyCell(step: RequestStep): string {
     if (!isGroupStep(step)) return stepPositions[step.order] ?? "—";
     if (step.owner_group && groupNames[step.owner_group]) return groupNames[step.owner_group];
+    if (step.owner_name) return step.owner_name;
     return step.owner_group || "—";
   }
 
