@@ -505,6 +505,59 @@ a {
   padding: 16px;
 }
 
+/* Широкое окно карточки заявки: таблице рассмотрения (6 колонок + списки
+   участников) нужно больше места, иначе колонки сжимаются. */
+.sed-window--wide {
+  max-width: 1200px;
+}
+
+/* Таблица рассмотрения в карточке: фиксированный расклад колонок, чтобы
+   должность/группа и участники читались; при узком окне — скролл внутри блока. */
+.sed-blockcard {
+  overflow-x: auto;
+}
+
+.sed-table--review {
+  min-width: 880px;
+  table-layout: fixed;
+}
+
+.sed-table--review th:nth-child(1),
+.sed-table--review td:nth-child(1) {
+  width: 44px;
+}
+
+.sed-table--review th:nth-child(2),
+.sed-table--review td:nth-child(2) {
+  width: 180px;
+}
+
+.sed-table--review th:nth-child(4),
+.sed-table--review td:nth-child(4) {
+  width: 92px;
+}
+
+.sed-table--review th:nth-child(5),
+.sed-table--review td:nth-child(5) {
+  width: 104px;
+}
+
+.sed-table--review td {
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+/* Список участников группового шага: всех без сворачивания, компактно. */
+.sed-memberlist {
+  margin: 0;
+  padding-left: 16px;
+}
+
+.sed-memberlist li {
+  margin-bottom: 2px;
+  overflow-wrap: anywhere;
+}
+
 /* Кликабельная строка справочника (переход в карточку — клик по строке). */
 .sed-table--clickable tbody tr {
   cursor: pointer;

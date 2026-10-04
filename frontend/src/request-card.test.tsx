@@ -172,8 +172,9 @@ describe("RequestCard", () => {
     renderCard();
     await waitFor(() => expect(screen.getAllByLabelText("Шаги заявки").length).toBeGreaterThan(0));
     const steps = within(screen.getAllByLabelText("Шаги заявки")[0]);
-    expect(steps.getByText("SED_STEP_BUH")).toBeInTheDocument();
-    expect(steps.getByText("SED_STEP_OK")).toBeInTheDocument();
+    // Групповой шаг без состава: код виден и в «Должность / Группа», и в «Исполнитель».
+    expect(steps.getAllByText("SED_STEP_BUH").length).toBeGreaterThan(0);
+    expect(steps.getAllByText("SED_STEP_OK").length).toBeGreaterThan(0);
   });
 
   // Шаги с блоками: order кодирует блок/режим — «№» через stepLabel;
@@ -194,7 +195,7 @@ describe("RequestCard", () => {
     expect(steps.getByText("2.1")).toBeInTheDocument();
     expect(steps.getByText("2.2")).toBeInTheDocument();
     expect(steps.getByText("Петров Пётр Петрович")).toBeInTheDocument();
-    expect(steps.getByText("SED_STEP_OK")).toBeInTheDocument();
+    expect(steps.getAllByText("SED_STEP_OK").length).toBeGreaterThan(0);
     // Логин AD согласующего в карточке не выводится.
     expect(screen.queryByText(/petrov\.pp/)).not.toBeInTheDocument();
     // Предприятие — названием, а не кодом.
@@ -317,7 +318,7 @@ describe("RequestCard", () => {
     renderCard();
     await waitFor(() => expect(screen.getByLabelText("Шаги заявки")).toBeInTheDocument());
     const steps = within(screen.getByLabelText("Шаги заявки"));
-    expect(steps.getByText("SED_STEP_BUH")).toBeInTheDocument();
+    expect(steps.getAllByText("SED_STEP_BUH").length).toBeGreaterThan(0);
   });
 
   // Действия по шагу — строго по can_act: при can_act=false кнопок нет даже у владельца.

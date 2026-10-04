@@ -10,11 +10,14 @@ import {
   decideStep,
   deleteRequest,
   finishRequest,
+  getAdGroupMembers,
   getAttachments,
   getComments,
   getDocTypes,
+  getEmployeeCard,
   getHistory,
   getRequest,
+  getStepGroups,
   notifyRequestsChanged,
   printRequest,
   rollbackRequest,
@@ -26,6 +29,7 @@ import {
   withdrawRequest,
 } from "./requests-client";
 import type {
+  AdGroupMember,
   AttachmentMeta,
   DocType,
   RequestComment,
@@ -104,6 +108,15 @@ export function RequestCard(props: RequestCardProps) {
   // Вкладка карточки по образцу (doc.html): «Лист рассмотрения» (панели +
   // таблица шагов) либо «История» (история + комментарии). Только вид.
   const [cardTab, setCardTab] = useState<"sheet" | "history">("sheet");
+  // Наименования групп (GET /api/step-groups: id → name) для колонки
+  // «Должность / Группа» у групповых шагов; без наименования — код как раньше.
+  const [groupNames, setGroupNames] = useState<Record<string, string>>({});
+  // Состав групп AD (GET /api/ad/groups/{group}/members) для колонки
+  // «Исполнитель» у групповых шагов; показываем всех без сворачивания.
+  const [groupMembers, setGroupMembers] = useState<Record<string, AdGroupMember[]>>({});
+  // Должность персонального исполнителя из стыковочной таблицы 1С+АД
+  // (GET /api/employees/card по employee_key шага): приоритет — title из АД.
+  const [stepPositions, setStepPositions] = useState<Record<number, string>>({});
   // Панель администратора СЭД (роль sed_admin от бэкенда): правка полей и откат.
   const isSedAdmin = (role as string) === "sed_admin";
   const [sedDocTypes, setSedDocTypes] = useState<DocType[]>([]);
@@ -221,6 +234,62 @@ export function RequestCard(props: RequestCardProps) {
     };
   }, [isSedAdmin]);
 
+  // Наименования групп-владельцев (settings step-groups): id → читабельное
+  // название; недоступность — fallback на код группы в таблице.
+  useEffect(() => {
+    let alive = true;
+    getStepGroups()
+      .then((items) => {
+        if (!alive) return;
+        const names: Record<string, string> = {};
+        items.forEach((g) => {
+          if (g.name) names[g.id] = g.name;
+        });
+        setGroupNames(names);
+      })
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // Состав групповых шагов и должности персональных — из уже собранной
+  // стыковки 1С+АД (без новых эндпоинтов): члены группы — из AD-состава,
+  // должность исполнителя — из карточки сотрудника по employee_key шага.
+  useEffect(() => {
+    if (!card) return;
+    let alive = true;
+    const groups = new Set<string>();
+    card.steps.forEach((s) => {
+      if (!s.owner_name && s.resolver !== "by_user" && s.owner_group) groups.add(s.owner_group);
+    });
+    groups.forEach((group) => {
+      getAdGroupMembers(group)
+        .then((res) => {
+          if (alive) setGroupMembers((prev) => ({ ...prev, [group]: res }));
+        })
+        .catch(() => undefined);
+    });
+    card.steps.forEach((step) => {
+      if (!step.owner_name) return;
+      const enterprise = step.emp_enterprise ?? step.employee_key?.split("|")[0] ?? "";
+      const baseCode = step.emp_base_code ?? step.employee_key?.split("|")[1] ?? "";
+      const tabNum = step.emp_tab_num ?? step.employee_key?.split("|")[2] ?? "";
+      if (!enterprise || !baseCode || !tabNum) return;
+      getEmployeeCard(enterprise, baseCode, tabNum)
+        .then((data) => {
+          if (!alive) return;
+          const title =
+            data.ad?.title ?? data.snapshot_ad?.title ?? data.position ?? "";
+          if (title) setStepPositions((prev) => ({ ...prev, [step.order]: title }));
+        })
+        .catch(() => undefined);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [card]);
+
   // Инициализация полей панели админа СЭД данными карточки (смена заявки/роли).
   useEffect(() => {
     if (!card || !isSedAdmin) return;
@@ -335,6 +404,40 @@ export function RequestCard(props: RequestCardProps) {
       >
         {label}
       </a>
+    );
+  }
+
+  // Персональный шаг — есть ФИО (owner_name); групповой — группа без ФИО
+  // (by_user без ФИО — персональный без имени, должность прочерком).
+  function isGroupStep(step: RequestStep): boolean {
+    return !step.owner_name && step.resolver !== "by_user";
+  }
+
+  // Колонка «Должность / Группа»: персональным — должность из АД
+  // (стыковочная таблица, иначе прочерк); групповым — читабельное название
+  // группы из настроек, иначе код как раньше.
+  function stepDutyCell(step: RequestStep): string {
+    if (!isGroupStep(step)) return stepPositions[step.order] ?? "—";
+    if (step.owner_group && groupNames[step.owner_group]) return groupNames[step.owner_group];
+    return step.owner_group || "—";
+  }
+
+  // Колонка «Исполнитель»: персональным — ФИО как раньше; групповым — всех
+  // участников группы списком без сворачивания, при недоступности — группа.
+  function stepExecutorsNode(step: RequestStep) {
+    if (!isGroupStep(step)) return stepOwnerNode(step);
+    const members: AdGroupMember[] =
+      step.owner_group ? (groupMembers[step.owner_group] ?? []) : [];
+    if (members.length === 0) return stepOwnerNode(step);
+    return (
+      <ul aria-label={`Участники группы ${step.owner_group}`} className="sed-list sed-memberlist">
+        {members.map((m) => (
+          <li key={m.sam}>
+            {m.display_name}
+            {m.title ? ` · ${m.title}` : ""}
+          </li>
+        ))}
+      </ul>
     );
   }
 
@@ -681,10 +784,11 @@ export function RequestCard(props: RequestCardProps) {
                       {group.parallel ? "Параллельно" : "Последовательно"}
                     </span>
                   </div>
-                  <table className="sed-table" aria-label="Шаги заявки">
+                  <table className="sed-table sed-table--review" aria-label="Шаги заявки">
                     <thead>
                       <tr>
                         <th>№</th>
+                        <th>Должность / Группа</th>
                         <th>Исполнитель</th>
                         <th>Статус</th>
                         <th>Срок</th>
@@ -695,8 +799,9 @@ export function RequestCard(props: RequestCardProps) {
                       {group.steps.map((step) => (
                         <tr key={step.order}>
                           <td>{stepLabel(step.order)}</td>
+                          <td>{stepDutyCell(step)}</td>
                           <td>
-                            {stepOwnerNode(step)}
+                            {stepExecutorsNode(step)}
                           </td>
                           <td>{step.status}</td>
                           <td>{step.expires_at.slice(0, 10)}</td>

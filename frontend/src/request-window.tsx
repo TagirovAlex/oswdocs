@@ -12,7 +12,7 @@ export function RequestWindow(props: RequestWindowProps) {
   const { requestId, role } = props;
   return (
     <div className="sed-shell">
-      <main className="sed-content sed-window">
+      <main className="sed-content sed-window sed-window--wide">
         <RequestCard requestId={requestId} role={role} />
         {/* Кнопка «Закрыть» — внизу содержимого (как в карточке сотрудника),
             не в верхней липкой полосе. Несохранённых правок в карточке нет:
