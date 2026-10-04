@@ -485,24 +485,9 @@ export function SedLayout(props: SedLayoutProps) {
                     <td>
                       <span className="sed-regnum">{row.id}</span>
                     </td>
-                    <td>
-                      {empKey ? (
-                        <a
-                          href={employeeUrl(empKey)}
-                          onClick={(e) => {
-                            // Клик по ФИО открывает карточку сотрудника, а не
-                            // заявки: событие гасим (иначе откроется и то, и то).
-                            e.preventDefault();
-                            e.stopPropagation();
-                            openPopup(employeeUrl(empKey));
-                          }}
-                        >
-                          {row.fio}
-                        </a>
-                      ) : (
-                        row.fio
-                      )}
-                    </td>
+                      <td>
+                        {row.fio}
+                      </td>
                     {role !== "owner" && (
                       <>
                         <td>{row.enterprise}</td>
