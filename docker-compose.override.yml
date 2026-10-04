@@ -1,0 +1,18 @@
+# Локальная разработка: bind-mount исходников поверх образов, прод-путь не затрагивает.
+# Подхватывается автоматически вместе с docker-compose.yml, прод-конфиги и Dockerfile не меняет.
+# Правки кода и дизайна видны после перезапуска сервиса или пересборки dist без пересборки образов.
+services:
+  # Код бэкенда: в образе лежит копия ./api/app -> /app/app (см. api/Dockerfile).
+  # Монтирование убирает пересборку при правке питона и будущих шаблонов Jinja2 в app/.
+  api:
+    volumes:
+      - ./api/app:/app/app
+  # Тот же образ, что api, поэтому то же монтирование для консистентности.
+  worker:
+    volumes:
+      - ./api/app:/app/app
+  # Статика фронта: прод раздаёт именованный том frontend_dist:/usr/share/nginx/html.
+  # В dev поверх подкладывается локальный ./frontend/dist (npm run build на хосте).
+  proxy:
+    volumes:
+      - ./frontend/dist:/usr/share/nginx/html:ro
