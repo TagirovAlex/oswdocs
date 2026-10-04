@@ -27,7 +27,7 @@ import type { Role } from "./api-mock";
 import { useTheme } from "./theme";
 import { AdminSettings } from "./admin-settings";
 import { Directory } from "./directory";
-import { createUrl, employeeUrl, openPopup, requestUrl } from "./windows";
+import { createUrl, openPopup, requestUrl } from "./windows";
 
 // Вкладки скелета. «Создание» убрана: создание заявки — кнопка «Создать
 // заявку» (окно ?view=create), приватный маршрут создания сохранён.
@@ -477,17 +477,12 @@ export function SedLayout(props: SedLayoutProps) {
             </thead>
             <tbody>
               {sortedRows.map((row) => {
-                // Ключ карточки сотрудника (employee_key от бэкенда): есть — ФИО
-                // ссылка на карточку, иначе прежний текст.
-                const empKey = row.employeeKey;
                 return (
                   <tr key={row.id} onClick={() => openPopup(requestUrl(row.id))}>
                     <td>
                       <span className="sed-regnum">{row.id}</span>
                     </td>
-                      <td>
-                        {row.fio}
-                      </td>
+                    <td>{row.fio}</td>
                     {role !== "owner" && (
                       <>
                         <td>{row.enterprise}</td>
