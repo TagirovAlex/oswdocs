@@ -213,12 +213,16 @@ export interface DocumentMeta {
 // Решение владельца шага (контракт POST /requests/{id}/steps/{order}/decision).
 export type StepDecision = "approve" | "reject" | "return";
 
-// Мета вложения заявки (GET /api/requests/{id}/attachments).
+// Мета вложения заявки (GET /api/requests/{id}/attachments; контракт AttachmentOut
+// бэкенда: file_name/size_bytes/uploaded_at, без внутреннего file_path).
 export interface AttachmentMeta {
-  id: string;
-  filename: string;
-  size: number;
-  created_at: string;
+  id: number;
+  request_id: string;
+  file_name: string;
+  mime: string | null;
+  size_bytes: number | null;
+  uploaded_by: string;
+  uploaded_at: string | null;
 }
 
 // Комментарий заявки (таблица request_comments; GET/POST /api/requests/{id}/comments).

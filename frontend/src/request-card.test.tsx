@@ -431,14 +431,22 @@ describe("RequestCard", () => {
   it("карточка показывает мета вложений со ссылкой на скачивание", async () => {
     vi.mocked(getRequest).mockResolvedValue(requestWith("Громов Игорь Олегович", "На согласовании"));
     const attachments: AttachmentMeta[] = [
-      { id: "ATT-1", filename: "scan.pdf", size: 1024, created_at: "2026-09-29T10:00:00+00:00" },
+      {
+        id: 1,
+        request_id: "REQ-0001",
+        file_name: "scan.pdf",
+        mime: "application/pdf",
+        size_bytes: 1024,
+        uploaded_by: "ok.vymyshlennaya",
+        uploaded_at: "2026-09-29T10:00:00+00:00",
+      },
     ];
     vi.mocked(getAttachments).mockResolvedValue(attachments);
 
     renderCard();
     await waitFor(() => expect(screen.getByText(/scan\.pdf/)).toBeInTheDocument());
     expect(screen.getByRole("link", { name: "Скачать" }).getAttribute("href")).toBe(
-      "/api/attachments/ATT-1/file",
+      "/api/attachments/1/file",
     );
   });
 

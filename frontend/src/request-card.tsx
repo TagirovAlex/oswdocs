@@ -657,7 +657,10 @@ export function RequestCard(props: RequestCardProps) {
                 <ul className="sed-list">
                   {attachments.map((att) => (
                     <li key={att.id}>
-                      {att.filename} · {att.size} Б · {att.created_at.slice(0, 10)} ·{" "}
+                      {/* Фолбэки обязательны: одна битая запись не должна ронять
+                          всю карточку (раньше .slice по undefined давал пустой экран). */}
+                      {att.file_name ?? "Файл"} · {att.size_bytes ?? "—"} Б ·{" "}
+                      {(att.uploaded_at ?? "").slice(0, 10) || "—"} ·{" "}
                       <a href={`/api/attachments/${encodeURIComponent(att.id)}/file`}>Скачать</a>
                     </li>
                   ))}

@@ -77,6 +77,10 @@ class FilesStore(Protocol):
         """Сохранить содержимое, вернуть путь для мета."""
         ...  # pragma: no cover
 
+    def delete(self, file_path: str) -> None:
+        """Удалить файл (зачистка сироты при падении записи меты); best-effort."""
+        ...  # pragma: no cover
+
     def read(self, file_path: str) -> bytes | None:
         """Содержимое файла по пути из мета либо None (файла нет)."""
         ...  # pragma: no cover
@@ -101,6 +105,12 @@ class FilesystemFilesStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
         return str(path)
+
+    def delete(self, file_path: str) -> None:
+        try:
+            Path(file_path).unlink(missing_ok=True)
+        except OSError:
+            pass
 
     def read(self, file_path: str) -> bytes | None:
         path = Path(file_path)
@@ -130,6 +140,9 @@ class InMemoryFilesStore:
         path = f"/inmemory/attachments/{request_id}/{file_name}"
         self._files[path] = content
         return path
+
+    def delete(self, file_path: str) -> None:
+        self._files.pop(file_path, None)
 
     def read(self, file_path: str) -> bytes | None:
         return self._files.get(file_path)
@@ -435,7 +448,15 @@ def upload_attachment(
             detail=f"Скан больше лимита {max_mb} МБ",
         )
     file_name = _safe_file_name(file.filename)
-    stored_path = files_store.save(request.id, file_name, content)
+    try:
+        stored_path = files_store.save(request.id, file_name, content)
+    except OSError as exc:
+        # Нет прав на volume FILES_DIR/attachments либо диск переполнен:
+        # вместо необработанного 500 — понятный 503 (чинится на стороне ВМ).
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Хранилище файлов недоступно: {exc}",
+        ) from exc
     try:
         record = att_store.create(
             AttachmentRecord(
@@ -449,6 +470,8 @@ def upload_attachment(
             )
         )
     except AttachmentsUnavailable as exc:
+        # Мета не записалась — зачищаем файл-сироту, чтобы не копился мусор.
+        files_store.delete(stored_path)
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     audit_log.append(
         AuditEvent(
