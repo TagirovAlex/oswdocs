@@ -1495,7 +1495,8 @@ export function AdminSettings(props: AdminSettingsProps) {
     try {
       const result = await syncAdGroups();
       setGroupSyncStatus(
-        `Состав обновлён: групп ${result.synced_groups}, участников ${result.members}` +
+        `Состав обновлён: групп ${result.synced_groups}, участников ${result.members}, ` +
+        `должностей в справочнике ${result.titles}` +
         (result.errors.length > 0 ? `, ошибок ${result.errors.length}` : ""),
       );
     } catch (e: unknown) {

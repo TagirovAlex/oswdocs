@@ -48,7 +48,12 @@ class GroupsCacheStore(Protocol):
         ...  # pragma: no cover
 
     def titles(self) -> list[str]:
-        """Все должности (title) из кэша, уникальные, сортированные (для наборов)."""
+        """Должности справочника (для наборов бланков): уникальные, сортированные."""
+        ...  # pragma: no cover
+
+    def rebuild_directory(self) -> list[str]:
+        """Пересобрать справочник должностей по составу групп (после синка):
+        удаляет протухшие титулы. Возвращает итоговый список."""
         ...  # pragma: no cover
 
 
@@ -58,11 +63,13 @@ class InMemoryGroupsCacheStore:
     def __init__(self) -> None:
         self._members: dict[str, list[CachedMember]] = {}
         self._synced: set[str] = set()
+        self._directory: set[str] = set()
 
     def reset(self) -> None:
         """Сброс состояния. Только для изоляции pytest."""
         self._members.clear()
         self._synced.clear()
+        self._directory.clear()
 
     def load(self, group: str) -> tuple[bool, list[CachedMember]]:
         return group in self._synced, list(self._members.get(group, []))
@@ -70,11 +77,23 @@ class InMemoryGroupsCacheStore:
     def save(self, group: str, members: list[CachedMember]) -> None:
         self._members[group] = list(members)
         self._synced.add(group)
+        for title in self._titles_of(members):
+            self._directory.add(title)
+
+    @staticmethod
+    def _titles_of(members: list[CachedMember]) -> set[str]:
+        return {m.title.strip() for m in members if (m.title or "").strip()}
 
     def titles(self) -> list[str]:
-        return sorted(
-            {m.title.strip() for members in self._members.values() for m in members if (m.title or "").strip()}
-        )
+        return sorted(self._directory)
+
+    def rebuild_directory(self) -> list[str]:
+        self._directory = {
+            title
+            for members in self._members.values()
+            for title in self._titles_of(members)
+        }
+        return sorted(self._directory)
 
 
 class DbGroupsCacheStore:
@@ -113,11 +132,23 @@ class DbGroupsCacheStore:
             member_count = EXCLUDED.member_count
         """
     )
-    _SELECT_TITLES = text(
+    _SELECT_DIRECTORY = text(
+        "SELECT title FROM ad_position_directory ORDER BY title"
+    )
+    _DELETE_DIRECTORY = text("DELETE FROM ad_position_directory")
+    _REBUILD_DIRECTORY = text(
         """
-        SELECT DISTINCT title FROM ad_group_members
+        INSERT INTO ad_position_directory (title, updated_at)
+        SELECT DISTINCT title, :updated_at
+        FROM ad_group_members
         WHERE title IS NOT NULL AND title <> ''
-        ORDER BY title
+        """
+    )
+    _UPSERT_DIRECTORY_TITLE = text(
+        """
+        INSERT INTO ad_position_directory (title, updated_at)
+        VALUES (:title, :updated_at)
+        ON CONFLICT (title) DO NOTHING
         """
     )
 
@@ -178,6 +209,14 @@ class DbGroupsCacheStore:
                         "member_count": len(members),
                     },
                 )
+                moment = datetime.now(timezone.utc)
+                for member in members:
+                    title = (member.title or "").strip()
+                    if title:
+                        session.execute(
+                            self._UPSERT_DIRECTORY_TITLE,
+                            {"title": title, "updated_at": moment},
+                        )
                 session.commit()
         except SQLAlchemyError as exc:
             raise GroupsCacheUnavailable(
@@ -187,7 +226,23 @@ class DbGroupsCacheStore:
     def titles(self) -> list[str]:
         try:
             with self._session_factory() as session:
-                rows = session.execute(self._SELECT_TITLES).all()
+                rows = session.execute(self._SELECT_DIRECTORY).all()
+        except SQLAlchemyError as exc:
+            raise GroupsCacheUnavailable(
+                f"Хранилище состава групп недоступно: {exc}"
+            ) from exc
+        return [row[0] for row in rows]
+
+    def rebuild_directory(self) -> list[str]:
+        try:
+            with self._session_factory() as session:
+                session.execute(self._DELETE_DIRECTORY)
+                session.execute(
+                    self._REBUILD_DIRECTORY,
+                    {"updated_at": datetime.now(timezone.utc)},
+                )
+                session.commit()
+                rows = session.execute(self._SELECT_DIRECTORY).all()
         except SQLAlchemyError as exc:
             raise GroupsCacheUnavailable(
                 f"Хранилище состава групп недоступно: {exc}"
@@ -247,7 +302,15 @@ def sync_ad_group_members(reader, groups: list[str], cache: GroupsCacheStore) ->
         )
         synced_groups += 1
         members_total += len(users)
-    return {"synced_groups": synced_groups, "members": members_total, "errors": errors}
+    # Справочник должностей — по итогам синка (и авто, и ручного: обе точки
+    # идут через эту функцию).
+    titles = cache.rebuild_directory()
+    return {
+        "synced_groups": synced_groups,
+        "members": members_total,
+        "titles": len(titles),
+        "errors": errors,
+    }
 
 
 def maybe_sync_ad_groups_weekly(settings_store, cache_store, reader) -> bool:

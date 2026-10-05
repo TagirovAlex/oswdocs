@@ -304,6 +304,8 @@ export interface AdGroupsSyncResult {
   synced_groups: number;
   // Сколько участников записано в кэш.
   members: number;
+  // Сколько должностей в справочнике после пересборки.
+  titles: number;
   // Группы с ошибками (не найдены в AD / каталог недоступен).
   errors: string[];
 }

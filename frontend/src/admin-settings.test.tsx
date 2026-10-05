@@ -282,14 +282,14 @@ describe("AdminSettings", () => {
   // Ручной синк состава групп: кнопка вызывает syncAdGroups и показывает итог.
   it("обновляет состав групп из AD по кнопке", async () => {
     vi.mocked(getSettings).mockResolvedValue(settings);
-    vi.mocked(syncAdGroups).mockResolvedValue({ synced_groups: 2, members: 5, errors: [] });
+    vi.mocked(syncAdGroups).mockResolvedValue({ synced_groups: 2, members: 5, titles: 3, errors: [] });
 
     render(<AdminSettings role="admin" />);
     await waitFor(() => expect(screen.getByRole("button", { name: "Справочники" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Справочники" }));
     fireEvent.click(screen.getByRole("button", { name: "Обновить состав групп из AD" }));
     await waitFor(() =>
-      expect(screen.getByText("Состав обновлён: групп 2, участников 5")).toBeInTheDocument(),
+      expect(screen.getByText("Состав обновлён: групп 2, участников 5, должностей в справочнике 3")).toBeInTheDocument(),
     );
     expect(syncAdGroups).toHaveBeenCalledTimes(1);
   });

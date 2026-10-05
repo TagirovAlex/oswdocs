@@ -130,6 +130,9 @@ def test_db_store_roundtrip_empty_and_resync(tmp_path):
             "CREATE TABLE ad_group_sync_state (group_name TEXT PRIMARY KEY, "
             "synced_at TIMESTAMPTZ, member_count INTEGER NOT NULL DEFAULT 0)"
         ))
+        conn.execute(text(
+            "CREATE TABLE ad_position_directory (title TEXT PRIMARY KEY, updated_at TIMESTAMPTZ)"
+        ))
     engine.dispose()
     store = DbGroupsCacheStore(f"sqlite:///{db}")
     assert store.load("SED_STEP_BUH") == (False, [])
@@ -143,6 +146,8 @@ def test_db_store_roundtrip_empty_and_resync(tmp_path):
     assert synced is True and [m.sam for m in members] == ["a.b"]
     store.save("SED_STEP_BUH", [])
     assert store.load("SED_STEP_BUH") == (True, [])
+    assert store.rebuild_directory() == []
+    assert store.titles() == []
 
 
 # --- sync_ad_group_members ---
@@ -152,7 +157,7 @@ def test_sync_writes_cache_and_counts(cache_store):
     """Синк пишет состав в кэш: счётчики групп/участников, без ошибок."""
     reader = FakeAdReader({"SED_STEP_BUH": FAKE_MEMBERS, "SED_STEP_OK": []})
     result = sync_ad_group_members(reader, ["SED_STEP_BUH", "SED_STEP_OK"], cache_store)
-    assert result == {"synced_groups": 2, "members": 2, "errors": []}
+    assert result == {"synced_groups": 2, "members": 2, "titles": 2, "errors": []}
     synced, members = cache_store.load("SED_STEP_BUH")
     assert synced is True and [m.sam for m in members] == ["step.buhgalter", "step.kassir"]
     assert cache_store.load("SED_STEP_OK") == (True, [])
@@ -258,6 +263,25 @@ def test_members_group_not_allowed_403(client, hr_headers, cache_store, settings
 # --- POST /ad/groups/sync ---
 
 
+def test_rebuild_directory_drops_stale_titles(cache_store):
+    """Пересборка справочника убирает титулы ушедших участников."""
+    from app.ad_groups_cache import CachedMember
+
+    cache_store.save("SED_STEP_BUH", [
+        CachedMember(group_name="SED_STEP_BUH", sam="a.b", display_name="А Б", title="Бухгалтер"),
+        CachedMember(group_name="SED_STEP_BUH", sam="c.d", display_name="В Г", title="Кассир"),
+    ])
+    assert cache_store.titles() == ["Бухгалтер", "Кассир"]
+    cache_store.save("SED_STEP_BUH", [
+        CachedMember(group_name="SED_STEP_BUH", sam="a.b", display_name="А Б", title="Бухгалтер"),
+    ])
+    # Инкрементально справочник только растёт...
+    assert cache_store.titles() == ["Бухгалтер", "Кассир"]
+    # ...а пересборка после синка чистит протухшее.
+    assert cache_store.rebuild_directory() == ["Бухгалтер"]
+    assert cache_store.titles() == ["Бухгалтер"]
+
+
 def test_manual_sync_admin_200(client, admin_headers, cache_store, settings_store):
     """Ручной синк админа: 200, состав в кэше, счётчики в ответе."""
     from app.main import app
@@ -271,6 +295,7 @@ def test_manual_sync_admin_200(client, admin_headers, cache_store, settings_stor
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["synced_groups"] == 2 and body["members"] == 2 and body["errors"] == []
+    assert body["titles"] == 2
     assert "at" in body
     assert cache_store.load("SED_STEP_BUH")[0] is True
     assert cache_store.load("SED_STEP_OK") == (True, [])

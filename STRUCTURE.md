@@ -5,7 +5,7 @@
 ## Обзор
 - `api/` — FastAPI (Python 3.12), `app/` — код, `tests/` — pytest, `requirements.txt`.
 - `frontend/` — React SPA (Vite): `src/` — код, `public/` — статика, `dist/` — сборка.
-- `db/alembic/versions/` — миграции БД (0001..0006).
+- `db/alembic/versions/` — миграции БД (0001..0007).
 - `proxy/` — nginx. `deploy/` — компоуз/деплой. `samples/` — DESIGN.md + макет.
 - `script_local/`, `script_remote/` — инструментарий разработчика (gitignored).
 - `PLAN.md` — план/статус; `TEMPLATES.md` — переменные шаблонов; `task/` — исторические спеки (gitignored).
@@ -38,8 +38,10 @@
 - `audit.py` — журнал аудита (память + INSERT в БД).
 - `mailer.py` — письма (шаблоны, SMTP/файловая очередь).
 - `attachments.py` — вложения. `ad_groups_cache.py` — кэш состава групп AD
-  (таблицы ad_group_members/ad_group_sync_state из 0006; регламент worker +
-  ручной POST /api/ad/groups/sync; GET состава — из кэша). `worker.py` —
+  (таблицы ad_group_members/ad_group_sync_state из 0006) и справочник
+  должностей (ad_position_directory из 0007, пересборка после каждого синка;
+  регламент worker + ручной POST /api/ad/groups/sync; GET состава — из кэша,
+  GET /api/ad/titles — из справочника). `worker.py` —
   регламенты (просрочка, напоминания, синки, бэкапы).
 
 ## Frontend (frontend/src/)
@@ -61,7 +63,7 @@
 - `.docx`-файлов в репо нет (бланк = текст шаблона); вопрос «docx как шапка/строки/подвал + импорт/редактор» — PLAN.md блок H (обсуждается).
 
 ## БД (db/alembic/versions/)
-- 0001 initial (audit_log, requests, documents, settings, links), 0002 persist, 0003 doc_types/request_comments/поля карточки, 0004 employees, 0005 doc_types автонумерация, 0006 ad_group_members/ad_group_sync_state.
+- 0001 initial (audit_log, requests, documents, settings, links), 0002 persist, 0003 doc_types/request_comments/поля карточки, 0004 employees, 0005 doc_types автонумерация, 0006 ad_group_members/ad_group_sync_state, 0007 ad_position_directory.
 
 ## Сценарии ключевых функций
 - Создание: create-form → POST /requests → шаги; отметки: request-card → POST .../steps/{order}/decide; печать: POST /print (pdf_b64) → iframe; история: GET /history (audit_log); сотрудники: GET /employees (локальная таблица); бэкапы: /api/archive*; настройки: /api/settings.

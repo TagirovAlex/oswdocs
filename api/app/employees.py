@@ -717,12 +717,14 @@ def sync_ad_groups_endpoint(
             action="ad_groups.sync",
             entity="ad_group",
             entity_id="ad_groups",
-            detail="synced_groups=%d members=%d" % (result["synced_groups"], result["members"]),
+            detail="synced_groups=%d members=%d titles=%d"
+            % (result["synced_groups"], result["members"], result["titles"]),
         )
     )
     return {
         "synced_groups": result["synced_groups"],
         "members": result["members"],
+        "titles": result["titles"],
         "errors": result["errors"],
         "at": datetime.now(timezone.utc).isoformat(),
     }
