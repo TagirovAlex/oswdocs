@@ -1310,6 +1310,11 @@ def list_folders(
                 count=sum(1 for r in requests if r.status == REWORK),
             ),
             FolderOut(
+                id="execution",
+                title="К исполнению",
+                count=sum(1 for r in requests if r.status in (AGREED, TO_EXECUTION)),
+            ),
+            FolderOut(
                 id="done",
                 title="Завершённые",
                 count=sum(

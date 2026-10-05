@@ -27,7 +27,7 @@ export interface StepGroup {
 }
 
 // Идентификатор папки дерева (контракт GET /api/folders).
-export type FolderId = "agreement" | "revision" | "done" | "draft" | "mine";
+export type FolderId = "agreement" | "revision" | "execution" | "done" | "draft" | "mine";
 
 // Папка дерева со счётчиком. depth — уровень вложенности (задел под дерево).
 export interface Folder {
@@ -267,6 +267,7 @@ export const EMPTY_FILTERS: RequestFilters = { query: "", enterprise: "", status
 export const FOLDER_STATUSES: Record<FolderId, string[] | null> = {
   agreement: ["На согласовании"],
   revision: ["На доработке"],
+  execution: ["Согласовано", "К исполнению"],
   done: ["Завершено", "Отклонено", "Отозвано"],
   draft: ["Черновик"],
   mine: null,

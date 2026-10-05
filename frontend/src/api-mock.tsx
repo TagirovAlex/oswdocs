@@ -9,7 +9,7 @@
 export type Role = "hr" | "hr_admin" | "owner" | "admin" | "guest";
 
 // Идентификатор папки в дереве слева.
-export type FolderId = "agreement" | "revision" | "done" | "mine";
+export type FolderId = "agreement" | "revision" | "execution" | "done" | "mine";
 
 // Папка дерева со счётчиком.
 export interface Folder {
@@ -77,6 +77,7 @@ export const EMPTY_FILTERS: RequestFilters = { query: "", enterprise: "", status
 const MOCK_FOLDERS: Folder[] = [
   { id: "agreement", title: "На согласовании", count: 3 },
   { id: "revision", title: "На доработке", count: 1 },
+  { id: "execution", title: "К исполнению", count: 1 },
   { id: "done", title: "Завершённые", count: 5 },
   { id: "mine", title: "Мои задачи", count: 2 },
 ];

@@ -345,10 +345,12 @@ def test_folders_empty_counts(client, hr_headers, settings_override):
     """Пустое хранилище: счетчики нулевые, id/заголовки по контракту."""
     folders = client.get("/folders", headers=hr_headers).json()
     by_id = {f["id"]: f for f in folders}
-    assert set(by_id) == {"agreement", "revision", "done", "mine"}
+    assert set(by_id) == {"agreement", "revision", "execution", "done", "draft", "mine"}
     assert by_id["agreement"] == {"id": "agreement", "title": "На согласовании", "count": 0}
     assert by_id["revision"] == {"id": "revision", "title": "На доработке", "count": 0}
+    assert by_id["execution"] == {"id": "execution", "title": "К исполнению", "count": 0}
     assert by_id["done"] == {"id": "done", "title": "Завершённые", "count": 0}
+    assert by_id["draft"] == {"id": "draft", "title": "Черновики", "count": 0}
     assert by_id["mine"] == {"id": "mine", "title": "Мои задачи", "count": 0}
 
 
@@ -379,12 +381,27 @@ def test_folders_counts_by_status(
     d = _create(client, hr_headers).json()
     assert client.post(f"/requests/{d['id']}/submit", headers=hr_headers).status_code == 200
     assert client.post(f"/requests/{d['id']}/withdraw", headers=hr_headers).status_code == 200
+    # E — Согласовано (единственный шаг одобрен владельцем; маршрут задан
+    # блоками — у явного steps приоритет ниже шаблона).
+    e = _create(
+        client,
+        hr_headers,
+        blocks=[{"mode": "sequential", "steps": [{"owner_group": "SED_STEP_BUH"}]}],
+    ).json()
+    assert client.post(f"/requests/{e['id']}/submit", headers=hr_headers).status_code == 200
+    assert client.post(
+        f"/requests/{e['id']}/steps/1/decision",
+        json={"decision": "approve"},
+        headers=owner_headers,
+    ).status_code == 200
 
     folders = client.get("/folders", headers=hr_headers).json()
     by_id = {f["id"]: f for f in folders}
     assert by_id["agreement"]["count"] == 1
     # B и C — на доработке (возврат и отказ по первому шагу), A — на согласовании.
     assert by_id["revision"]["count"] == 2
+    # E — согласовано (папка «К исполнению»).
+    assert by_id["execution"]["count"] == 1
     # Завершённые: D — отозвано (статус «Отклонено» недостижим, отказ = возврат по маршруту).
     assert by_id["done"]["count"] == 1
     # У ОК нет шагов (группы SED_HR нет среди SED_STEP_*), поэтому mine=0.

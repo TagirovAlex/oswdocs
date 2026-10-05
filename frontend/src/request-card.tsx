@@ -490,6 +490,14 @@ export function RequestCard(props: RequestCardProps) {
     }
   }
 
+  // Завершающее действие в окне-попе: оповестить список (обновит счётчики
+  // папок в основном окне) и закрыть окно для скорости работы. Встроенная
+  // карточка (без opener) — только оповещение, window.close() там не работает.
+  function closeIfPopup(): void {
+    notifyRequestsChanged();
+    if (window.opener) window.close();
+  }
+
   async function handleDecision(order: number, decision: StepDecision): Promise<void> {
     const text = decisionComment.trim();
     if (decision !== "approve" && !text) {
@@ -505,17 +513,24 @@ export function RequestCard(props: RequestCardProps) {
       "Отметка сохранена",
     );
     setActStepHidden(false);
-    if (ok) setDecisionComment("");
+    if (!ok) return;
+    setDecisionComment("");
+    // Согласование завершает работу с карточкой — закрываем окно-попу.
+    if (decision === "approve") closeIfPopup();
   }
 
   async function handleSubmit(): Promise<void> {
     await runAction(() => submitRequest(requestId), "Заявка отправлена на согласование");
   }
   async function handleToExecution(): Promise<void> {
-    await runAction(() => toExecution(requestId), "Заявка отправлена к исполнению");
+    if (await runAction(() => toExecution(requestId), "Заявка отправлена к исполнению")) {
+      closeIfPopup();
+    }
   }
   async function handleFinish(): Promise<void> {
-    await runAction(() => finishRequest(requestId), "Заявка завершена");
+    if (await runAction(() => finishRequest(requestId), "Заявка завершена")) {
+      closeIfPopup();
+    }
   }
   async function handleWithdraw(): Promise<void> {
     await runAction(() => withdrawRequest(requestId), "Заявка отозвана");

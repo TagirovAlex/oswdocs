@@ -174,6 +174,27 @@ describe("SedLayout", () => {
     await waitFor(() => expect(screen.getByText("REQ-0001")).toBeInTheDocument());
   });
 
+  // Папка «К исполнению» (id=execution из GET /api/folders): статусы
+  // «Согласовано» и «К исполнению» видны только в ней.
+  it("папка «К исполнению» из API отображается и фильтрует согласованные", async () => {
+    vi.mocked(getFolders).mockResolvedValue([
+      { id: "agreement", title: "На согласовании", count: 0 },
+      { id: "execution", title: "К исполнению", count: 2 },
+    ]);
+    vi.mocked(getRequests).mockResolvedValue([
+      requestWith("Громов Игорь Олегович", "Согласовано", "REQ-0001"),
+      requestWith("Громов Игорь Олегович", "К исполнению", "REQ-0002"),
+    ]);
+
+    renderWithTheme("hr");
+    await waitFor(() => expect(screen.getByText("К исполнению")).toBeInTheDocument());
+    // В «На согласовании» их нет, после перехода в «К исполнению» — обе.
+    expect(screen.queryByText("REQ-0001")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText("К исполнению"));
+    await waitFor(() => expect(screen.getByText("REQ-0001")).toBeInTheDocument());
+    expect(screen.getByText("REQ-0002")).toBeInTheDocument();
+  });
+
   // Пустой список — «Заявок нет».
   it("пустой список показывает «Заявок нет»", async () => {
     vi.mocked(getFolders).mockResolvedValue(folders);

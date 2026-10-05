@@ -553,6 +553,36 @@ describe("RequestCard", () => {
     await waitFor(() => expect(screen.getByText("Отметка сохранена")).toBeInTheDocument());
   });
 
+  // Согласование в окне-попе: список оповещается, окно закрывается.
+  it("согласование в попапе закрывает окно и оповещает список", async () => {
+    vi.mocked(getRequest).mockResolvedValue(requestForAction(null));
+    vi.mocked(decideStep).mockResolvedValue(requestForAction(null));
+    const close = vi.spyOn(window, "close").mockImplementation(() => undefined);
+    setOpener({});
+
+    renderCard("REQ-0001", "owner");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Согласовать" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Согласовать" }));
+    await waitFor(() => expect(close).toHaveBeenCalled());
+    expect(window.localStorage.getItem("sed:requests-changed")).not.toBeNull();
+    clearOpener();
+  });
+
+  // Завершение в окне-попе: окно закрывается.
+  it("завершение в попапе закрывает окно", async () => {
+    vi.mocked(getRequest).mockResolvedValue(requestWith("Громов Игорь Олегович", "К исполнению"));
+    vi.mocked(finishRequest).mockResolvedValue(requestWith("Громов Игорь Олегович", "Завершено"));
+    const close = vi.spyOn(window, "close").mockImplementation(() => undefined);
+    setOpener({});
+
+    renderCard();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Завершить" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Завершить" }));
+    await waitFor(() => expect(close).toHaveBeenCalled());
+    expect(window.localStorage.getItem("sed:requests-changed")).not.toBeNull();
+    clearOpener();
+  });
+
   // Действие ОК: submit отправляет заявку и перезагружает карточку.
   it("hr отправляет заявку на согласование", async () => {
     vi.mocked(getRequest).mockResolvedValue(requestWith("Громов Игорь Олегович", "Черновик"));
