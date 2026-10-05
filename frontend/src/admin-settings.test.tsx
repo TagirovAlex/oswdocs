@@ -396,6 +396,43 @@ describe("AdminSettings", () => {
     expect(sent.position_sets?.[0]?.positions).toContain("Кассир");
   });
 
+  // Модалка должностей: пагинация, выбор сохраняется между страницами.
+  it("модалка: листание с сохранением выбора", async () => {
+    const titles = Array.from({ length: 60 }, (_, i) => `Должность ${String(i + 1).padStart(2, "0")}`);
+    vi.mocked(getSettings).mockResolvedValue({ ...settings, position_sets: [] });
+    vi.mocked(getAdTitles).mockResolvedValue(titles);
+    vi.mocked(saveSettings).mockImplementation(async (data) => data);
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Справочники" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Справочники" }));
+    fireEvent.click(screen.getByText("Добавить набор"));
+    await waitFor(() => expect(screen.getByLabelText("Название набора 1")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("Выбрать из справочника"));
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
+    // Страница 1: отмечаем первую, идём вперёд.
+    fireEvent.click(screen.getByRole("checkbox", { name: "Выбрать Должность 01" }));
+    fireEvent.click(screen.getByRole("button", { name: "Следующая страница" }));
+    await waitFor(() => expect(screen.getByText("Должность 51")).toBeInTheDocument());
+    // В таблице её больше нет (в нижней панели выбранных — осталась).
+    const grid = screen.getByRole("table", { name: "Должности справочника" });
+    expect(within(grid).queryByText("Должность 01")).not.toBeInTheDocument();
+    // Страница 2: отмечаем, возвращаемся — выбор первой на месте.
+    fireEvent.click(screen.getByRole("checkbox", { name: "Выбрать Должность 51" }));
+    fireEvent.click(screen.getByRole("button", { name: "Предыдущая страница" }));
+    const gridBack = await screen.findByRole("table", { name: "Должности справочника" });
+    await waitFor(() => expect(within(gridBack).getByText("Должность 01")).toBeInTheDocument());
+    expect(screen.getByRole("checkbox", { name: "Выбрать Должность 01" })).toBeChecked();
+    // ОК добавляет обе разом.
+    fireEvent.click(screen.getByRole("button", { name: "ОК" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    fireEvent.click(screen.getByText("Сохранить"));
+
+    await waitFor(() => expect(vi.mocked(saveSettings)).toHaveBeenCalled());
+    const sent = vi.mocked(saveSettings).mock.calls[0][0];
+    expect(sent.position_sets?.[0]?.positions).toEqual(["Должность 01", "Должность 51"]);
+  });
+
   // Модалка должностей: Отмена закрывает без добавления.
   it("модалка должностей: Отмена без добавления", async () => {
     vi.mocked(getSettings).mockResolvedValue(settings);

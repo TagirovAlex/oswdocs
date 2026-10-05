@@ -677,10 +677,12 @@ function PositionSetsEditor(props: {
   onChange: (v: PositionSet[]) => void;
 }) {
   const { value, titles, onChange } = props;
-  // Модалка выбора: индекс набора, строка поиска, отмеченные (порядок кликов).
+  // Модалка выбора: индекс набора, строка поиска, отмеченные (порядок кликов),
+  // страница (выбор сохраняется при листании — один проход на всё).
   const [modalSet, setModalSet] = useState<number | null>(null);
   const [modalQuery, setModalQuery] = useState<string>("");
   const [modalChecked, setModalChecked] = useState<string[]>([]);
+  const [modalPage, setModalPage] = useState<number>(1);
   function updateSet(index: number, patch: Partial<PositionSet>): void {
     onChange(value.map((s, i) => (i === index ? { ...s, ...patch } : s)));
   }
@@ -688,11 +690,13 @@ function PositionSetsEditor(props: {
     setModalSet(index);
     setModalQuery("");
     setModalChecked([]);
+    setModalPage(1);
   }
   function closeModal(): void {
     setModalSet(null);
     setModalQuery("");
     setModalChecked([]);
+    setModalPage(1);
   }
   function toggleModalChecked(title: string): void {
     setModalChecked((prev) =>
@@ -714,12 +718,18 @@ function PositionSetsEditor(props: {
     updateSet(modalSet, { positions: merged });
     closeModal();
   }
-  // Поиск по справочнику (регистр не важен); выдачу ограничиваем.
-  const MODAL_LIMIT = 200;
+  // Поиск по справочнику (регистр не важен) + пагинация: выбор живёт
+  // между страницами, за один проход отмечается всё нужное.
+  const MODAL_PAGE_SIZE = 50;
   const modalMatches = titles.filter((t) =>
     t.toLowerCase().includes(modalQuery.trim().toLowerCase()),
   );
-  const modalShown = modalMatches.slice(0, MODAL_LIMIT);
+  const modalPages = Math.max(1, Math.ceil(modalMatches.length / MODAL_PAGE_SIZE));
+  const modalPageSafe = Math.min(modalPage, modalPages);
+  const modalShown = modalMatches.slice(
+    (modalPageSafe - 1) * MODAL_PAGE_SIZE,
+    modalPageSafe * MODAL_PAGE_SIZE,
+  );
   return (
     <fieldset>
       <legend>Наборы должностей (для бланков)</legend>
@@ -825,14 +835,53 @@ function PositionSetsEditor(props: {
                 aria-label="Поиск должности"
                 placeholder="Должность"
                 value={modalQuery}
-                onChange={(e) => setModalQuery(e.target.value)}
+                onChange={(e) => {
+                  setModalQuery(e.target.value);
+                  setModalPage(1);
+                }}
               />
             </label>
-            {modalMatches.length > MODAL_LIMIT && (
-              <div className="sed-note">
-                Показаны первые {MODAL_LIMIT} — уточните поиск
-              </div>
-            )}
+            <div className="sed-pager" aria-label="Пагинация должностей">
+              <button
+                type="button"
+                className="sed-btn"
+                aria-label="Первая страница"
+                disabled={modalPageSafe <= 1}
+                onClick={() => setModalPage(1)}
+              >
+                Первая
+              </button>
+              <button
+                type="button"
+                className="sed-btn"
+                aria-label="Предыдущая страница"
+                disabled={modalPageSafe <= 1}
+                onClick={() => setModalPage(modalPageSafe - 1)}
+              >
+                ← Назад
+              </button>
+              <span role="status">
+                стр {modalPageSafe} из {modalPages}
+              </span>
+              <button
+                type="button"
+                className="sed-btn"
+                aria-label="Следующая страница"
+                disabled={modalPageSafe >= modalPages}
+                onClick={() => setModalPage(modalPageSafe + 1)}
+              >
+                Вперёд →
+              </button>
+              <button
+                type="button"
+                className="sed-btn"
+                aria-label="Последняя страница"
+                disabled={modalPageSafe >= modalPages}
+                onClick={() => setModalPage(modalPages)}
+              >
+                Последняя
+              </button>
+            </div>
             {modalShown.length > 0 && (
               <table className="sed-table" aria-label="Должности справочника">
                 <thead>

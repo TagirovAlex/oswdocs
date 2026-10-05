@@ -166,6 +166,18 @@ def test_sync_writes_cache_and_counts(cache_store):
     assert result == {"synced_groups": 2, "members": 2, "titles": 2, "errors": []}
 
 
+def test_merge_skips_case_duplicates(cache_store):
+    """Слияние не плодит регистровые дубликаты."""
+    from app.ad_groups_cache import CachedMember
+
+    cache_store.save("SED_STEP_BUH", [
+        CachedMember(group_name="SED_STEP_BUH", sam="a.b",
+                     display_name="А Б", title="Бухгалтер"),
+    ])
+    assert cache_store.merge_titles(["бухгалтер", " Кассир "]) == ["Бухгалтер", "Кассир"]
+    assert cache_store.titles() == ["Бухгалтер", "Кассир"]
+
+
 def test_sync_merges_full_enumeration(cache_store):
     """Сплошное перечисление титулов добирается в справочник (вне групп)."""
     reader = FakeAdReader(

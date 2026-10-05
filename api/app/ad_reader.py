@@ -647,21 +647,26 @@ class AdReader:
 
         Только чтение; приоритет справочника — AD (см. ad_groups_cache).
         Отключённые учётки исключаются, как в search_users; пустые титулы —
-        пропускаются; итог — уникальные, сортированные. Сбой каталога —
-        AdUnavailable.
+        пропускаются; точное написание схлопывается без учёта регистра
+        (первый вариант); итог — сортированный. Сбой каталога — AdUnavailable.
         """
         try:
             rows = self._gateway.list_user_titles()
         except Exception as exc:
             raise AdUnavailable(f"AD недоступен (перечисление должностей): {exc}") from exc
-        titles = set()
+        seen: set[str] = set()
+        titles: List[str] = []
         for row in rows:
             title = str((row or {}).get("title") or "").strip()
             if not title:
                 continue
             if not _parse_enabled(row):
                 continue
-            titles.add(title)
+            key = title.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            titles.append(title)
         return sorted(titles)
 
     # -- manager-цепочка -------------------------------------------------------

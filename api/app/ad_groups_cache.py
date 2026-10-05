@@ -106,10 +106,12 @@ class InMemoryGroupsCacheStore:
         return sorted(self._directory)
 
     def merge_titles(self, titles: list[str]) -> list[str]:
+        known = {t.lower() for t in self._directory}
         for title in titles or []:
             clean = (title or "").strip()
-            if clean:
+            if clean and clean.lower() not in known:
                 self._directory.add(clean)
+                known.add(clean.lower())
         return sorted(self._directory)
 
 
@@ -269,14 +271,19 @@ class DbGroupsCacheStore:
     def merge_titles(self, titles: list[str]) -> list[str]:
         try:
             with self._session_factory() as session:
+                known = {
+                    str(row[0]).lower()
+                    for row in session.execute(self._SELECT_DIRECTORY).all()
+                }
                 moment = datetime.now(timezone.utc)
                 for title in titles or []:
                     clean = (title or "").strip()
-                    if clean:
+                    if clean and clean.lower() not in known:
                         session.execute(
                             self._UPSERT_DIRECTORY_TITLE,
                             {"title": clean, "updated_at": moment},
                         )
+                        known.add(clean.lower())
                 session.commit()
                 rows = session.execute(self._SELECT_DIRECTORY).all()
         except SQLAlchemyError as exc:

@@ -501,6 +501,17 @@ def test_list_all_titles_sorted_unique_enabled_only():
     assert reader.list_all_titles() == ["Бухгалтер", "Кассир"]
 
 
+def test_list_all_titles_case_insensitive_collapse():
+    """Точное написание схлопывается без учёта регистра (первый вариант)."""
+    gateway = _TitlesGateway([
+        {"title": "бухгалтер", "userAccountControl": 512},
+        {"title": "Бухгалтер", "userAccountControl": 512},
+        {"title": "  БУХГАЛТЕР  ", "userAccountControl": 512},
+    ])
+    reader = AdReader(_settings(), gateway, InMemoryCache())
+    assert reader.list_all_titles() == ["бухгалтер"]
+
+
 def test_list_all_titles_failure():
     """Сбой перечисления — AdUnavailable (справочник не роняет синк молча)."""
     gateway = _TitlesGateway(fail=TimeoutError("ldap timeout"))
