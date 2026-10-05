@@ -527,18 +527,26 @@ a {
   width: 44px;
 }
 
+/* Вид рассмотрения: всего два значения — узкая колонка без переносов;
+   высвобожденное место отдано Сотруднику. */
 .sed-table--review th:nth-child(2),
 .sed-table--review td:nth-child(2) {
-  width: 180px;
+  width: 132px;
+  white-space: nowrap;
 }
 
 .sed-table--review th:nth-child(4),
 .sed-table--review td:nth-child(4) {
-  width: 92px;
+  width: 140px;
 }
 
 .sed-table--review th:nth-child(5),
 .sed-table--review td:nth-child(5) {
+  width: 92px;
+}
+
+.sed-table--review th:nth-child(6),
+.sed-table--review td:nth-child(6) {
   width: 104px;
 }
 

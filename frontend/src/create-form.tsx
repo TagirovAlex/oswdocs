@@ -1007,12 +1007,12 @@ export function CreateForm(props: CreateFormProps) {
         </div>
 
         <div className="sed-panel">
-          {/* Инициатор — из сессии, только чтение. Есть однозначная связка
-              АД-1С — всё ФИО является ссылкой на свою карточку сотрудника,
-              иначе — readonly-текст как раньше. */}
+          {/* Инициатор — из сессии, только чтение: жирный ярлык + всё ФИО
+              ссылкой на свою карточку (есть связка АД-1С), иначе
+              readonly-текст. Пояснение «только чтение» убрано — и так видно. */}
           {initiatorKey !== "" ? (
             <div className="sed-field">
-              <span>Инициатор (ОК, только чтение)</span>
+              <strong>Инициатор</strong>{" "}
               <a
                 href={employeeUrl(initiatorKey)}
                 onClick={(e) => {
@@ -1027,7 +1027,7 @@ export function CreateForm(props: CreateFormProps) {
             </div>
           ) : (
             <label className="sed-field">
-              Инициатор (ОК, только чтение)
+              <strong>Инициатор</strong>
               <input aria-label="Инициатор" readOnly value={initiator} placeholder="—" />
             </label>
           )}
@@ -1066,12 +1066,13 @@ export function CreateForm(props: CreateFormProps) {
             </fieldset>
           )}
 
-          {/* Комментарий к заявке (правая панель макета). */}
+          {/* Комментарий к заявке (правая панель макета): поле повыше,
+              на всю ширину панели. */}
           <label className="sed-field">
             Комментарий
             <textarea
               aria-label="Комментарий"
-              rows={3}
+              rows={5}
               value={comment}
               onChange={(e) => {
                 markTouched();
