@@ -547,6 +547,17 @@ a {
   min-width: 0;
 }
 
+/* Таблица рассмотрения — полная сетка как в образце: внешняя рамка и все
+   границы ячеек (базовый .sed-table даёт только нижние линии). */
+.sed-table--review {
+  border: 1px solid var(--sed-border);
+}
+
+.sed-table--review th,
+.sed-table--review td {
+  border: 1px solid var(--sed-border);
+}
+
 /* Список участников группового шага: всех без сворачивания, компактно. */
 .sed-memberlist {
   margin: 0;
