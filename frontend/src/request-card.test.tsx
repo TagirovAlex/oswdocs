@@ -13,6 +13,7 @@ import {
   finishRequest,
   getAttachments,
   getRequest,
+  getStepGroups,
   printRequest,
   submitRequest,
   toExecution,
@@ -37,6 +38,7 @@ vi.mock("./requests-client", async (importOriginal) => {
     uploadAttachment: vi.fn(),
     deleteAttachment: vi.fn(),
     printRequest: vi.fn(),
+    getStepGroups: vi.fn(),
   };
 });
 
@@ -131,6 +133,9 @@ beforeEach(() => {
   vi.mocked(uploadAttachment).mockReset();
   vi.mocked(deleteAttachment).mockReset();
   vi.mocked(printRequest).mockReset();
+  vi.mocked(getStepGroups).mockReset();
+  // Справочник групп по умолчанию пуст: в должности — код группы.
+  vi.mocked(getStepGroups).mockResolvedValue([]);
   vi.mocked(me).mockReset();
   // По умолчанию сессии нет: кнопок удаления у не-админов нет (старое поведение).
   vi.mocked(me).mockRejectedValue(new ApiHttpError(401, "Нет токена"));
@@ -176,7 +181,7 @@ describe("RequestCard", () => {
     await waitFor(() => expect(screen.getByText("Печать доступна только ОК")).toBeInTheDocument());
   });
 
-  // Карточка показывает шаги выбранной заявки (по блокам карточками).
+  // Карточка показывает шаги выбранной заявки (одна таблица рассмотрения).
   it("карточка показывает шаги заявки", async () => {
     vi.mocked(getRequest).mockResolvedValue({
       ...requestWith("Громов Игорь Олегович", "На согласовании"),
@@ -218,6 +223,41 @@ describe("RequestCard", () => {
     // Предприятие — названием, а не кодом.
     expect(screen.getByText(/Предприятие «Пример-1»/)).toBeInTheDocument();
     expect(screen.queryByText(/ENT_PRIMER_1/)).not.toBeInTheDocument();
+  });
+
+  // Рассмотрение — одна сетка на все шаги: шапка Вид/Должность/Сотрудник,
+  // вид блока с номером при нескольких блоках.
+  it("рассмотрение — одна таблица с видом блоков", async () => {
+    vi.mocked(getRequest).mockResolvedValue({
+      ...requestWith("Громов Игорь Олегович", "На согласовании"),
+      steps: [
+        { order: 1, owner_group: "SED_STEP_BUH", resolver: "by_group", can_act: false, status: "ожидает", expires_at: "2026-10-05T10:00:00+00:00" },
+        { order: 1101, owner_group: "SED_STEP_OK", resolver: "by_group", can_act: false, status: "ожидает", expires_at: "2026-10-08T10:00:00+00:00" },
+      ],
+    });
+
+    renderCard();
+    await waitFor(() => expect(screen.getByLabelText("Шаги заявки")).toBeInTheDocument());
+    // Одна таблица на все шаги, а не карточка на блок.
+    expect(screen.getAllByLabelText("Шаги заявки")).toHaveLength(1);
+    const table = screen.getByLabelText("Шаги заявки");
+    expect(within(table).getByText("Вид рассмотрения")).toBeInTheDocument();
+    expect(within(table).getByText("Должность")).toBeInTheDocument();
+    expect(within(table).getByText("Сотрудник")).toBeInTheDocument();
+    expect(within(table).getByText("Последовательно · Блок 1")).toBeInTheDocument();
+    expect(within(table).getByText("Параллельно · Блок 2")).toBeInTheDocument();
+  });
+
+  // Должность — читаемое наименование группы из справочника настроек.
+  it("должность — наименование группы из справочника", async () => {
+    vi.mocked(getStepGroups).mockResolvedValue([
+      { id: "SED_STEP_BUH", name: "Бухгалтерия" },
+    ]);
+    vi.mocked(getRequest).mockResolvedValue(requestWith("Громов Игорь Олегович", "На согласовании"));
+
+    renderCard();
+    await waitFor(() => expect(screen.getByLabelText("Шаги заявки")).toBeInTheDocument());
+    expect(screen.getByText("Бухгалтерия")).toBeInTheDocument();
   });
 
   // Регресс ревью: персональный шаг «замена руководителя»

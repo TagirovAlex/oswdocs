@@ -810,79 +810,58 @@ export function RequestCard(props: RequestCardProps) {
             </div>
           )}
 
-          {/* Рассмотрение (низ образца): шаги маршрута по блокам карточками,
-              как в создании. Группировка — по коду order (блок*1000 + режим +
-              позиция, см. stepLabel): order<1000 — один общий блок. Логин AD
-              согласующего (assignee) в UI не выводится — только ФИО (owner_name)
-              для персональных шагов либо название группы. */}
+          {/* Рассмотрение (низ образца): ВСЕ шаги одной сеткой-таблицей —
+              Вид рассмотрения | Должность | Сотрудник | Статус | Срок |
+              Комментарий. Вид — тип блока шага (код order: блок*1000 + режим +
+              позиция, см. stepLabel): order<1000 — общий последовательный блок;
+              номер блока — при нескольких блоках. Должность — читаемое
+              наименование группы из справочника настроек, Сотрудник — весь
+              состав группы (для персональных — ФИО). Логин AD (assignee)
+              не выводится. */}
           <div className="sed-review">
             <b>Рассмотрение</b>
             {(() => {
-              // Группы шагов по блокам с сохранением порядка из API.
-              const groups: { key: string; title: string; parallel: boolean; steps: RequestStep[] }[] = [];
-              const indexByKey = new Map<string, number>();
-              card.steps.forEach((step) => {
+              // Номер блока и режим каждого шага; число блоков — для подписи.
+              const info = card.steps.map((step) => {
                 const coded = step.order >= 1000;
-                const blockNo = coded ? Math.floor(step.order / 1000) + 1 : 1;
-                const parallel = coded && Math.floor((step.order % 1000) / 100) === 1;
-                const key = coded ? `b${blockNo}` : "b1";
-                let idx = indexByKey.get(key);
-                if (idx === undefined) {
-                  idx = groups.length;
-                  indexByKey.set(key, idx);
-                  groups.push({
-                    key,
-                    title: `Блок ${blockNo}`,
-                    parallel,
-                    steps: [],
-                  });
-                }
-                groups[idx].steps.push(step);
+                return {
+                  step,
+                  blockNo: coded ? Math.floor(step.order / 1000) + 1 : 1,
+                  parallel: coded && Math.floor((step.order % 1000) / 100) === 1,
+                };
               });
-              return groups.map((group) => (
-                <section
-                  key={group.key}
-                  aria-label={`${group.title} рассмотрения`}
-                  className={
-                    group.parallel
-                      ? "sed-blockcard sed-blockcard--parallel"
-                      : "sed-blockcard sed-blockcard--sequential"
-                  }
-                >
-                  <div className="sed-blockcard__head">
-                    <span className="sed-blockcard__title">{group.title}</span>
-                    <span className="sed-blockcard__type">
-                      {group.parallel ? "Параллельно" : "Последовательно"}
-                    </span>
-                  </div>
-                  <table className="sed-table sed-table--review" aria-label="Шаги заявки">
-                    <thead>
-                      <tr>
-                        <th>№</th>
-                        <th>Должность / Группа</th>
-                        <th>Исполнитель</th>
-                        <th>Статус</th>
-                        <th>Срок</th>
-                        <th>Комментарий</th>
+              const blockCount = new Set(info.map((i) => i.blockNo)).size;
+              return (
+                <table className="sed-table sed-table--review" aria-label="Шаги заявки">
+                  <thead>
+                    <tr>
+                      <th>№</th>
+                      <th>Вид рассмотрения</th>
+                      <th>Должность</th>
+                      <th>Сотрудник</th>
+                      <th>Статус</th>
+                      <th>Срок</th>
+                      <th>Комментарий</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {info.map(({ step, blockNo, parallel }) => (
+                      <tr key={step.order}>
+                        <td>{stepLabel(step.order)}</td>
+                        <td>
+                          {parallel ? "Параллельно" : "Последовательно"}
+                          {blockCount > 1 ? ` · Блок ${blockNo}` : ""}
+                        </td>
+                        <td>{stepDutyCell(step)}</td>
+                        <td>{stepExecutorsNode(step)}</td>
+                        <td>{step.status}</td>
+                        <td>{step.expires_at.slice(0, 10)}</td>
+                        <td>{step.comment ?? "—"}</td>
                       </tr>
-                    </thead>
-                    <tbody>
-                      {group.steps.map((step) => (
-                        <tr key={step.order}>
-                          <td>{stepLabel(step.order)}</td>
-                          <td>{stepDutyCell(step)}</td>
-                          <td>
-                            {stepExecutorsNode(step)}
-                          </td>
-                          <td>{step.status}</td>
-                          <td>{step.expires_at.slice(0, 10)}</td>
-                          <td>{step.comment ?? "—"}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </section>
-              ));
+                    ))}
+                  </tbody>
+                </table>
+              );
             })()}
           </div>
 

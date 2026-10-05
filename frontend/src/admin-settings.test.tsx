@@ -170,8 +170,9 @@ describe("AdminSettings", () => {
     await waitFor(() => expect(screen.getByLabelText("Код предприятия 1")).toBeInTheDocument());
     expect(screen.getByLabelText("Код предприятия 1")).toHaveValue("OOO_ALFA");
     expect(screen.getByLabelText("Название предприятия 1")).toHaveValue("ООО Альфа");
-    expect(screen.getByLabelText("Группа доступа 1")).toHaveValue("SED_Vlastelcy");
-    expect(screen.getByLabelText("Группа доступа 2")).toHaveValue("SED_HR");
+    expect(screen.getByLabelText("ID группы 1")).toHaveValue("SED_Vlastelcy");
+    expect(screen.getByLabelText("Наименование группы 1")).toHaveValue("SED_Vlastelcy");
+    expect(screen.getByLabelText("ID группы 2")).toHaveValue("SED_HR");
     expect(screen.getByLabelText("Должность 1")).toHaveValue("Руководитель");
     expect(screen.getByLabelText("Категория 1")).toHaveValue("Руководители");
   });
@@ -236,21 +237,45 @@ describe("AdminSettings", () => {
     expect(screen.getByText("не задано")).toBeInTheDocument();
   });
 
-  // Группы доступа: добавление и удаление строк.
+  // Группы доступа: добавление и удаление строк (ID + наименование).
   it("добавляет и удаляет группы доступа", async () => {
     vi.mocked(getSettings).mockResolvedValue(settings);
 
     render(<AdminSettings role="admin" />);
     await waitFor(() => expect(screen.getByRole("button", { name: "Справочники" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Справочники" }));
-    await waitFor(() => expect(screen.getByLabelText("Группа доступа 1")).toBeInTheDocument());
+    // Старый формат (строки) читается как id=name.
+    await waitFor(() => expect(screen.getByLabelText("ID группы 1")).toBeInTheDocument());
+    expect(screen.getByLabelText("ID группы 1")).toHaveValue("SED_Vlastelcy");
+    expect(screen.getByLabelText("Наименование группы 1")).toHaveValue("SED_Vlastelcy");
 
     fireEvent.click(screen.getByText("Добавить группу"));
-    await waitFor(() => expect(screen.getByLabelText("Группа доступа 3")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByLabelText("ID группы 3")).toBeInTheDocument());
 
     fireEvent.click(screen.getAllByText("Удалить группу")[0]);
-    await waitFor(() => expect(screen.queryByLabelText("Группа доступа 3")).not.toBeInTheDocument());
-    expect(screen.getByLabelText("Группа доступа 1")).toHaveValue("SED_HR");
+    await waitFor(() => expect(screen.queryByLabelText("ID группы 3")).not.toBeInTheDocument());
+    expect(screen.getByLabelText("ID группы 1")).toHaveValue("SED_HR");
+  });
+
+  // Группы доступа: наименование сохраняется и уходит в PUT объектами {id, name}.
+  it("сохраняет наименование группы объектами", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+    vi.mocked(saveSettings).mockImplementation(async (data) => data);
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Справочники" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Справочники" }));
+    await waitFor(() => expect(screen.getByLabelText("ID группы 1")).toBeInTheDocument());
+
+    fireEvent.change(screen.getByLabelText("Наименование группы 1"), {
+      target: { value: "Владельцы (вымышленные)" },
+    });
+    fireEvent.click(screen.getByText("Сохранить"));
+
+    await waitFor(() => expect(vi.mocked(saveSettings)).toHaveBeenCalled());
+    const sent = vi.mocked(saveSettings).mock.calls[0][0];
+    expect(sent.allowed_ad_groups).toContainEqual({ id: "SED_Vlastelcy", name: "Владельцы (вымышленные)" });
+    expect(sent.allowed_ad_groups).toContainEqual({ id: "SED_HR", name: "SED_HR" });
   });
 
   // Сбой сервера при загрузке — понятный alert.

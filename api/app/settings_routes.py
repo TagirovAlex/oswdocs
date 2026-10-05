@@ -517,6 +517,16 @@ class EnterpriseItem(BaseModel):
     name: str = Field(description="Название предприятия")
 
 
+class StepGroupItem(BaseModel):
+    """Группа-владелец шагов справочника: пара id+name (формат ключа allowed_ad_groups).
+
+    Старый формат (строки) на чтении понимается как id=name (см. _groups_with_names).
+    """
+
+    id: str = Field(description="Имя группы AD (owner_group шагов)")
+    name: str = Field(default="", description="Читаемое наименование (пусто — равно id)")
+
+
 class TemplateStepItem(BaseModel):
     """Шаг шаблона маршрута (контракт B2: группа + опциональные резолвер/флаг)."""
 
@@ -721,8 +731,9 @@ class SettingsPayload(BaseModel):
     enterprises: list[EnterpriseItem] | None = Field(
         default=None, description="Предприятия (код+название)"
     )
-    allowed_ad_groups: list[str] | None = Field(
-        default=None, description="Группы ручного конструктора шагов"
+    allowed_ad_groups: list[str | StepGroupItem] | None = Field(
+        default=None,
+        description="Группы ручного конструктора шагов (id либо {id, name})",
     )
     position_to_category: dict[str, str] | None = Field(
         default=None, description="Должность 1С → категория"
@@ -775,8 +786,9 @@ class ContentSettingsPayload(BaseModel):
     enterprises: list[EnterpriseItem] | None = Field(
         default=None, description="Предприятия (код+название)"
     )
-    allowed_ad_groups: list[str] | None = Field(
-        default=None, description="Группы ручного конструктора шагов"
+    allowed_ad_groups: list[str | StepGroupItem] | None = Field(
+        default=None,
+        description="Группы ручного конструктора шагов (id либо {id, name})",
     )
     position_to_category: dict[str, str] | None = Field(
         default=None, description="Должность 1С → категория"

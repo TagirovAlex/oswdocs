@@ -9,6 +9,14 @@ export interface SettingsEnterprise {
   name: string;
 }
 
+// Группа-владелец шагов (settings.allowed_ad_groups): id группы AD +
+// читаемое наименование для карточки заявки (старый формат — строки,
+// читаются как id=name).
+export interface StepGroupRef {
+  id: string;
+  name: string;
+}
+
 // Шаг шаблона маршрута (settings.templates[].steps[]).
 export interface SettingsTemplateStep {
   owner_group: string;
@@ -129,8 +137,9 @@ export interface SettingsData {
   require_comment: boolean | null;
   // Предприятия (enterprises).
   enterprises: SettingsEnterprise[] | null;
-  // Группы доступа — владельцы шагов (allowed_ad_groups).
-  allowed_ad_groups: string[] | null;
+  // Группы доступа — владельцы шагов (allowed_ad_groups): id группы AD
+  // либо пара {id, name} с читаемым наименованием для карточки заявки.
+  allowed_ad_groups: (string | StepGroupRef)[] | null;
   // Должность → категория (position_to_category).
   position_to_category: Record<string, string> | null;
   // Эскалация по должностям, часов (position_escalation).
@@ -174,8 +183,9 @@ export interface ContentSettingsData {
   require_paper_signature: boolean | null;
   // Предприятия (enterprises).
   enterprises: SettingsEnterprise[] | null;
-  // Группы доступа — владельцы шагов (allowed_ad_groups).
-  allowed_ad_groups: string[] | null;
+  // Группы доступа — владельцы шагов (allowed_ad_groups): id группы AD
+  // либо пара {id, name} с читаемым наименованием для карточки заявки.
+  allowed_ad_groups: (string | StepGroupRef)[] | null;
   // Должность → категория (position_to_category).
   position_to_category: Record<string, string> | null;
   // Эскалация по должностям, часов (position_escalation).

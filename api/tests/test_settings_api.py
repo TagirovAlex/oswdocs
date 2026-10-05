@@ -704,6 +704,40 @@ def test_settings_content_put_admin_200(client, admin_headers, mock_store):
     assert mock_store._data["session_ttl_minutes"] == "600"
 
 
+def test_settings_content_put_groups_with_names_200(client, hr_admin_headers, mock_store):
+    """Наименования групп: PUT объектов {id, name} (и строк) — 200, /step-groups отдаёт имена."""
+    groups = [
+        {"id": "SED_STEP_BUH", "name": "Бухгалтерия"},
+        "SED_STEP_OK",
+        {"id": "SED_STEP_EMPTY", "name": ""},
+    ]
+    response = client.put(
+        "/settings/content", json={"allowed_ad_groups": groups}, headers=hr_admin_headers
+    )
+    assert response.status_code == 200, response.text
+    assert json.loads(mock_store._data["allowed_ad_groups"]) == groups
+    assert response.json()["allowed_ad_groups"] == groups
+    step_groups = client.get("/step-groups", headers=hr_admin_headers).json()
+    by_id = {g["id"]: g["name"] for g in step_groups}
+    assert by_id["SED_STEP_BUH"] == "Бухгалтерия"
+    assert by_id["SED_STEP_OK"] == "SED_STEP_OK"
+    assert by_id["SED_STEP_EMPTY"] == "SED_STEP_EMPTY"
+
+
+def test_settings_put_groups_with_names_422(client, admin_headers, mock_store):
+    """Битые элементы групп (не строка/объект, объект без id) — 422, в БД не пишется."""
+    before = mock_store._data["allowed_ad_groups"]
+    assert client.put(
+        "/settings", json={"allowed_ad_groups": ["SED_HR", 123]}, headers=admin_headers
+    ).status_code == 422
+    assert client.put(
+        "/settings/content",
+        json={"allowed_ad_groups": [{"name": "Без кода"}]},
+        headers=admin_headers,
+    ).status_code == 422
+    assert mock_store._data["allowed_ad_groups"] == before
+
+
 def test_settings_content_put_ignores_infra_keys(client, hr_admin_headers, mock_store):
     """Чужие (инфра) ключи в теле контента игнорируются: не 422, в БД не пишутся."""
     response = client.put(

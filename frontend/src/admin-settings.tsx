@@ -37,6 +37,7 @@ import type {
   SettingsOnecBase,
   SettingsTemplate,
   SettingsTemplateStep,
+  StepGroupRef,
 } from "./settings-client";
 import type { Role } from "./api-mock";
 
@@ -126,19 +127,52 @@ function EnterprisesEditor(props: { value: SettingsEnterprise[]; onChange: (v: S
   );
 }
 
-// Редактор групп доступа (владельцев шагов): список строк, добавить/удалить.
-function GroupsEditor(props: { value: string[]; onChange: (v: string[]) => void }) {
+// Нормализация справочника групп из GET: строки старого формата читаются
+// как id=name (как на бэкенде _groups_with_names); пустые id отбрасываются.
+export function toStepGroupRefs(raw: (string | StepGroupRef)[]): StepGroupRef[] {
+  const refs: StepGroupRef[] = [];
+  raw.forEach((item) => {
+    if (typeof item === "string") {
+      const id = item.trim();
+      if (id) refs.push({ id, name: id });
+    } else if (item && typeof item.id === "string" && item.id.trim()) {
+      refs.push({
+        id: item.id.trim(),
+        name: typeof item.name === "string" && item.name.trim() ? item.name.trim() : item.id.trim(),
+      });
+    }
+  });
+  return refs;
+}
+
+// Редактор групп доступа (владельцев шагов): пары ID группы AD +
+// читаемое наименование для карточки заявки; добавить/удалить.
+function GroupsEditor(props: { value: StepGroupRef[]; onChange: (v: StepGroupRef[]) => void }) {
   const { value, onChange } = props;
   return (
     <fieldset>
       <legend>Группы доступа (владельцы шагов)</legend>
+      <div className="sed-note">
+        Наименование показывается в карточке заявки вместо кода группы.
+      </div>
       {value.length === 0 && <div className="sed-note">не задано</div>}
       {value.map((group, i) => (
         <div key={i} className="sed-editor-row sed-editor-row--center">
           <input
-            aria-label={`Группа доступа ${i + 1}`}
-            value={group}
-            onChange={(e) => onChange(value.map((g, j) => (j === i ? e.target.value : g)))}
+            aria-label={`ID группы ${i + 1}`}
+            placeholder="ID группы AD"
+            value={group.id}
+            onChange={(e) =>
+              onChange(value.map((g, j) => (j === i ? { ...g, id: e.target.value } : g)))
+            }
+          />
+          <input
+            aria-label={`Наименование группы ${i + 1}`}
+            placeholder="Читаемое наименование"
+            value={group.name}
+            onChange={(e) =>
+              onChange(value.map((g, j) => (j === i ? { ...g, name: e.target.value } : g)))
+            }
           />
           <button
             type="button"
@@ -150,7 +184,7 @@ function GroupsEditor(props: { value: string[]; onChange: (v: string[]) => void 
         </div>
       ))}
       <div className="sed-toolbar sed-mt-12">
-        <button type="button" className="sed-btn" onClick={() => onChange([...value, ""])}>
+        <button type="button" className="sed-btn" onClick={() => onChange([...value, { id: "", name: "" }])}>
           Добавить группу
         </button>
       </div>
@@ -1152,7 +1186,7 @@ export function AdminSettings(props: AdminSettingsProps) {
   const [smtpPasswordSet, setSmtpPasswordSet] = useState<boolean>(false);
   const [requireComment, setRequireComment] = useState<boolean | null>(null);
   const [enterprises, setEnterprises] = useState<SettingsEnterprise[]>([]);
-  const [adGroups, setAdGroups] = useState<string[]>([]);
+  const [adGroups, setAdGroups] = useState<StepGroupRef[]>([]);
   const [positionCategory, setPositionCategory] = useState<PositionCategoryPair[]>([]);
   const [templates, setTemplates] = useState<SettingsTemplate[]>([]);
   const [docTemplates, setDocTemplates] = useState<SettingsDocTemplate[]>([]);
@@ -1218,7 +1252,7 @@ export function AdminSettings(props: AdminSettingsProps) {
         setPaperRequired(data.require_paper_signature);
         setRequireComment(data.require_comment);
         setEnterprises(data.enterprises ?? []);
-        setAdGroups(data.allowed_ad_groups ?? []);
+        setAdGroups(toStepGroupRefs(data.allowed_ad_groups ?? []));
         setPositionCategory(pairsFromRecord(data.position_to_category));
         setPositionEscalation(data.position_escalation);
         setTemplates(data.templates ?? []);
