@@ -260,6 +260,14 @@ def _set_positions(position_sets: object, set_name: object) -> list[str]:
     return []
 
 
+def _matches_field(entry_value: object, request_value: object) -> bool:
+    """Совпадение поля бланка: пустое в записи — wildcard (любое значение)."""
+    entry = str(entry_value or "").strip()
+    if not entry:
+        return True
+    return entry == str(request_value or "").strip()
+
+
 def find_doc_template(
     templates: object,
     service: str,
@@ -269,19 +277,20 @@ def find_doc_template(
 ) -> dict | None:
     """Подбор шаблона бегунка: служба+категория (поля 1С), затем набор должностей.
 
-    Среди подходящих по службе+категории (с непустым body/file) приоритет —
-    бланку, чей набор (position_set) содержит должность сотрудника; иначе —
-    бланк без набора (по умолчанию); иначе None. Без должности — прежнее
-    поведение (первый подходящий).
+    Пустые служба/категория в записи — wildcard (бланк только по набору:
+    ручные заявки часто без категории). Среди подходящих (с непустым
+    body/file) приоритет — бланку, чей набор (position_set) содержит должность
+    сотрудника; иначе — бланк без набора (по умолчанию); иначе None.
+    Без должности — первый подходящий (прежнее поведение).
     """
-    if not category or not isinstance(templates, list):
+    if not isinstance(templates, list):
         return None
     matched = [
         item
         for item in templates
         if isinstance(item, dict)
-        and item.get("service") == service
-        and item.get("category") == category
+        and _matches_field(item.get("service"), service)
+        and _matches_field(item.get("category"), category)
         and ((item.get("body") or "").strip() or (item.get("file") or "").strip())
     ]
     if not matched:

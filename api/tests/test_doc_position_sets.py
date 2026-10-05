@@ -50,6 +50,23 @@ def test_no_default_no_match():
 def test_legacy_behavior_without_positions():
     """Без должности/наборов — прежнее поведение (первый подходящий)."""
     assert find_doc_template([TPL_LINE, TPL_DEFAULT], "Цех", "линейный")["body"] == "линия"
-    assert find_doc_template([TPL_LINE], "Цех", "") is None
     assert find_doc_template([TPL_OTHER], "Цех", "линейный") is None
     assert find_doc_template("не список", "Цех", "линейный") is None
+
+
+def test_wildcard_empty_service_category():
+    """Пустые служба/категория в записи — wildcard (бланк только по набору)."""
+    tpl_set_only = {"service": "", "category": "", "body": "по набору",
+                    "position_set": "Линейные"}
+    tpl_default = {"service": "", "category": "", "body": "дефолт"}
+    # Ручная заявка без категории: подбор идёт по набору.
+    found = find_doc_template([tpl_set_only, tpl_default], "Цех № 1", "",
+                              "Грузчик", SETS)
+    assert found is not None and found["body"] == "по набору"
+    # Должность вне наборов — дефолтный.
+    found = find_doc_template([tpl_set_only, tpl_default], "Цех № 1", "",
+                              "Сторож", SETS)
+    assert found is not None and found["body"] == "дефолт"
+    # Запись с заполненной службой чужому цеху не подходит.
+    tpl_other = {"service": "Офис", "category": "", "body": "чужой"}
+    assert find_doc_template([tpl_other], "Цех № 1", "", "Грузчик", SETS) is None
