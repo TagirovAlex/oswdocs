@@ -475,12 +475,14 @@ export async function getAttachments(id: string): Promise<AttachmentMeta[]> {
 // Связка текущего пользователя (GET /api/link_1c_ad/mine): ключ своей
 // карточки сотрудника (enterprise|base_code|tab_num) для ссылки инициатора.
 // Пусто — связки нет; несколько — неоднозначность (фронт показывает текст).
+// is_current — работает сейчас (правило задачи K для дублей).
 export interface MyLink {
   enterprise: string;
   base_code: string;
   tab_num: string;
   key: string;
   verified: boolean;
+  is_current: boolean | null;
 }
 
 // GET /api/link_1c_ad/mine: свои связки АД-1С (sam — из сессии, не из параметров).

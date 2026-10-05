@@ -594,6 +594,7 @@ describe("CreateForm", () => {
         tab_num: "Т-000201",
         key: "ENT_PRIMER_1|zup_t1|Т-000201",
         verified: true,
+        is_current: true,
       },
     ]);
 
@@ -614,6 +615,7 @@ describe("CreateForm", () => {
         tab_num: "Т-000201",
         key: "ENT_PRIMER_1|zup_t1|Т-000201",
         verified: true,
+        is_current: null,
       },
       {
         enterprise: "ENT_PRIMER_1",
@@ -621,12 +623,42 @@ describe("CreateForm", () => {
         tab_num: "Т-000202",
         key: "ENT_PRIMER_1|zup_t2|Т-000202",
         verified: false,
+        is_current: null,
       },
     ]);
 
     render(<CreateForm role="hr" />);
     const initiator = await screen.findByLabelText("Инициатор");
     await waitFor(() => expect(initiator).toHaveValue("Петров Пётр Петрович"));
+  });
+
+  // Инициатор с двумя связками, одна — текущее место работы: ссылка сразу,
+  // без выбора предприятия (правило задачи K).
+  it("инициатор с текущей связкой — ссылка без выбора предприятия", async () => {
+    vi.mocked(getMyLinks).mockResolvedValue([
+      {
+        enterprise: "ENT_PRIMER_1",
+        base_code: "zup_t1",
+        tab_num: "Т-000201",
+        key: "ENT_PRIMER_1|zup_t1|Т-000201",
+        verified: true,
+        is_current: true,
+      },
+      {
+        enterprise: "ENT_OTHER",
+        base_code: "zup",
+        tab_num: "00ЗП-02642",
+        key: "ENT_OTHER|zup|00ЗП-02642",
+        verified: true,
+        is_current: false,
+      },
+    ]);
+
+    render(<CreateForm role="hr" />);
+    const link = await screen.findByRole("link", { name: "Петров Пётр Петрович" });
+    expect(link.getAttribute("href")).toBe(
+      `?view=employee&key=${encodeURIComponent("ENT_PRIMER_1|zup_t1|Т-000201")}`,
+    );
   });
 
   // Инициатор с двумя связками: после выбора предприятия ссылка ведёт
@@ -639,6 +671,7 @@ describe("CreateForm", () => {
         tab_num: "Т-000201",
         key: "ENT_PRIMER_1|zup_t1|Т-000201",
         verified: true,
+        is_current: false,
       },
       {
         enterprise: "ENT_OTHER",
@@ -646,6 +679,7 @@ describe("CreateForm", () => {
         tab_num: "00ЗП-02642",
         key: "ENT_OTHER|zup|00ЗП-02642",
         verified: true,
+        is_current: null,
       },
     ]);
 

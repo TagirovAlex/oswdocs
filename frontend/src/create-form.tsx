@@ -267,9 +267,14 @@ export function CreateForm(props: CreateFormProps) {
     };
   }, []);
 
-  // Ключ карточки инициатора: пересчитывается при смене предприятия в форме.
+  // Ключ карточки инициатора: одна связка — она; из нескольких — место
+  // текущей работы (is_current, правило задачи K), иначе совпадение
+  // с выбранным в форме предприятием; иначе — текста без ссылки.
+  // Пересчитывается при смене предприятия в форме.
   function initiatorKeyFor(links: MyLink[], selectedEnterprise: string): string {
     if (links.length === 1) return links[0].key;
+    const current = links.filter((l) => l.is_current === true);
+    if (current.length === 1) return current[0].key;
     if (selectedEnterprise === "") return "";
     const matched = links.filter((l) => l.enterprise === selectedEnterprise);
     return matched.length === 1 ? matched[0].key : "";

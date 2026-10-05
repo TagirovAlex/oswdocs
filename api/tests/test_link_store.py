@@ -395,3 +395,67 @@ def test_mine_only_own_links(client, links_override):
 def test_mine_unauthorized(client, links_override):
     """Без логина — 401."""
     assert client.get("/link_1c_ad/mine", headers={}).status_code == 401
+
+
+class FakeOnecClient:
+    """Мок клиента 1С: dismissal_date по (base_code, tab_num), исключение — сбой."""
+
+    def __init__(self, cards):
+        self._cards = dict(cards)
+
+    def get_employee(self, base_code, tab_num, enterprise):
+        from types import SimpleNamespace
+
+        key = (base_code, tab_num)
+        if key not in self._cards:
+            from app.onec_client import OneCNotFound
+
+            raise OneCNotFound("Сотрудник не найден (тест)")
+        value = self._cards[key]
+        if isinstance(value, Exception):
+            raise value
+        return SimpleNamespace(enterprise=enterprise, dismissal_date=value)
+
+
+def _override_onec(cards):
+    from app.employees import get_onec_client
+
+    app.dependency_overrides[get_onec_client] = lambda: FakeOnecClient(cards)
+
+
+def test_mine_is_current_from_dismissal(client, links_override):
+    """is_current: без даты увольнения — True, с датой — False (правило задачи K)."""
+    _seed_link("ok.ivnova", "001")
+    get_memory_links_store().save(
+        LinkRecord(
+            enterprise=ENT,
+            base_code="zup_t1",
+            tab_num="002",
+            key=link_key(ENT, "zup_t1", "002"),
+            sam="ok.ivnova",
+            by="root.adm",
+            at="2026-09-01T00:00:00+00:00",
+        )
+    )
+    _override_onec({("zup_t1", "001"): "", ("zup_t1", "002"): "2025-01-15"})
+    try:
+        items = client.get("/link_1c_ad/mine", headers=_hr_headers()).json()["items"]
+    finally:
+        from app.employees import get_onec_client
+
+        app.dependency_overrides.pop(get_onec_client, None)
+    by_tab = {item["tab_num"]: item["is_current"] for item in items}
+    assert by_tab == {"001": True, "002": False}
+
+
+def test_mine_is_current_none_when_1c_down(client, links_override):
+    """1С недоступна — is_current None у всех (fail-soft, старое правило фронта)."""
+    _seed_link("ok.ivnova", "001")
+    _override_onec({})
+    try:
+        items = client.get("/link_1c_ad/mine", headers=_hr_headers()).json()["items"]
+    finally:
+        from app.employees import get_onec_client
+
+        app.dependency_overrides.pop(get_onec_client, None)
+    assert [item["is_current"] for item in items] == [None]

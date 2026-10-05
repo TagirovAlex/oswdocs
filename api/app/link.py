@@ -339,10 +339,12 @@ def sync_links_endpoint(
 
 
 class MyLinkOut(BaseModel):
-    """Связка текущего пользователя (для ссылки инициатора на свою карточку).
+    """Связка текущего пользователя для ссылки инициатора на свою карточку.
 
     Только свой ключ (табельный — свои ПДн, как ФИО в /auth/me); чужое
     подставить нельзя — sam берётся из сессии, не из параметров.
+    is_current — работает ли сотрудник сейчас (нет dismissal_date в 1С):
+    правило задачи K для дублей (несколько мест работы).
     """
 
     enterprise: str
@@ -350,6 +352,44 @@ class MyLinkOut(BaseModel):
     tab_num: str
     key: str
     verified: bool = False
+    is_current: bool | None = Field(
+        default=None,
+        description="Работает сейчас (True), уволен (False), неизвестно (None)",
+    )
+
+
+def _resolve_onec_client(settings, settings_store):
+    """Клиент 1С для проверки текущей работы (is_current): подмена из
+    dependency_overrides (тесты), иначе боевой; не настроен — None (fail-soft,
+    is_current у всех связок будет None)."""
+    from .employees import get_onec_client
+    from .main import app  # локально против циклического импорта
+
+    override = app.dependency_overrides.get(get_onec_client)
+    if override is not None:
+        try:
+            return override()
+        except Exception:
+            return None
+    try:
+        return get_onec_client(settings, settings_store)
+    except Exception:
+        return None
+
+
+def _is_currently_employed(client, enterprise: str, base_code: str, tab_num: str) -> bool | None:
+    """Работает ли сотрудник сейчас: карточка 1С без dismissal_date — True,
+    с датой увольнения — False. Карточки нет/1С недоступна/чужое предприятие —
+    None (неизвестно, fail-soft: фронт откатится на старое правило)."""
+    if client is None:
+        return None
+    try:
+        card = client.get_employee(base_code, tab_num, enterprise)
+    except Exception:
+        return None
+    if card.enterprise != enterprise:
+        return None
+    return not (card.dismissal_date or "").strip()
 
 
 @router.get("/link_1c_ad/mine")
@@ -357,6 +397,7 @@ def read_my_links(
     user: CurrentUser = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
     store: LinksStore = Depends(get_links_store),
+    settings_store: DbSettingsStore | None = Depends(get_settings_store),
 ) -> dict:
     """Связки текущего пользователя (инициатор → ссылка на свою карточку).
 
@@ -371,6 +412,7 @@ def read_my_links(
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
+    onec = _resolve_onec_client(settings, settings_store)
     return {
         "items": [
             MyLinkOut(
@@ -379,6 +421,9 @@ def read_my_links(
                 tab_num=r.tab_num,
                 key=r.key,
                 verified=r.verified,
+                is_current=_is_currently_employed(
+                    onec, r.enterprise, r.base_code, r.tab_num
+                ),
             ).model_dump()
             for r in records
         ]
