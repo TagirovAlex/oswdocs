@@ -13,6 +13,13 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
+from .ad_groups_cache import (
+    CachedMember,
+    GroupsCacheStore,
+    GroupsCacheUnavailable,
+    get_groups_cache_store,
+    sync_ad_group_members,
+)
 from .ad_reader import AdNotFound, AdReader, AdUnavailable, build_snapshot
 from .ad_sync import compute_ad_status, find_unique_ad_match
 from .audit import AuditEvent, audit_log
@@ -43,6 +50,7 @@ from .resolver import (
 )
 from .settings_routes import (
     DbSettingsStore,
+    SettingsUnavailable,
     get_settings_store,
     is_group_allowed_with_settings,
     read_setting_value,
@@ -547,22 +555,32 @@ def ad_group_members(
     settings: Settings = Depends(get_settings),
     store: DbSettingsStore | None = Depends(get_settings_store),
     reader: AdReader | None = Depends(get_ad_reader),
+    cache_store: GroupsCacheStore = Depends(get_groups_cache_store),
 ) -> dict:
-    """Активные участники группы AD для конструктора маршрута: только ОК,
-    руководитель ОК и админ.
+    """Активные участники группы AD для конструктора маршрута и карточки
+    заявки: ОК, руководитель ОК, админ и владельцы шагов (согласующие).
+
+    Владельцам состав открыт решением владельца процесса: заявки запускает ОК,
+    у согласующих доступ к данным по должности — иначе в карточке виден
+    только код/название группы. Вход в систему уже требует членства
+    в разрешённых группах, посторонних здесь нет.
 
     Группа обязана быть группой ручного конструктора шагов
     (is_group_allowed_with_settings: контент-ключ allowed_ad_groups либо
     префикс владельцев шагов STEP_GROUP_PREFIX) — иначе 403. Ключ
-    access_groups (группы входа в систему) состав шага НЕ открывает. Ридер AD
-    не настроен/сбой каталога — 503 (не 500), группа не найдена — 404. Набор
-    полей тот же, что в /ad/search (sam/ФИО/депт/должность/mail). Только
-    чтение AD."""
+    access_groups (группы входа в систему) состав шага НЕ открывает.
+
+    Состав берётся из локального кэша (таблица ad_group_members, синк —
+    регламент worker + ручной POST /api/ad/groups/sync): каталог на чтение
+    карточки не дёргается. Группы нет в кэше — живое чтение AD с записью
+    в кэш (группа не найдена — 404); ридер AD не настроен/сбой каталога —
+    503 (не 500). Набор полей тот же, что в /ad/search
+    (sam/ФИО/депт/должность/mail). Записей в AD/1С нет, только чтение."""
     settings.ensure_read_only()
-    if not is_privileged(user):
+    if not (is_privileged(user) or user.role == "owner"):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Состав группы AD доступен ОК и админу",
+            detail="Состав группы AD доступен участникам процесса",
         )
     name = (group or "").strip()
     if not is_group_allowed_with_settings(settings, store, name):
@@ -570,21 +588,49 @@ def ad_group_members(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Группа не разрешена настройками (allowed_ad_groups — группы ручного конструктора шагов)",
         )
-    if reader is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Ридер AD не настроен (в offline — подмена фейковым шлюзом)",
-        )
     try:
-        members = reader.group_members(name)
-    except AdNotFound as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
-        ) from exc
-    except AdUnavailable as exc:
+        synced, cached = cache_store.load(name)
+    except GroupsCacheUnavailable as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
+    if synced:
+        members = cached
+    else:
+        if reader is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Ридер AD не настроен (в offline — подмена фейковым шлюзом)",
+            )
+        try:
+            live = reader.group_members(name)
+        except AdNotFound as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+            ) from exc
+        except AdUnavailable as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+            ) from exc
+        members = live
+        try:
+            # Кэш пишем из уже прочитанного (без второго чтения AD).
+            cache_store.save(
+                name,
+                [
+                    CachedMember(
+                        group_name=name,
+                        sam=u.sam,
+                        display_name=u.display_name or "",
+                        department=u.department or None,
+                        title=u.title or None,
+                        mail=u.mail or None,
+                    )
+                    for u in live
+                ],
+            )
+        except GroupsCacheUnavailable:
+            pass  # кэш не записался — отдаём живое, следующий запрос повторит
     return {
         "items": [
             {
@@ -596,6 +642,69 @@ def ad_group_members(
             }
             for u in members
         ]
+    }
+
+
+@router.post("/ad/groups/sync")
+def sync_ad_groups_endpoint(
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+    settings_store: DbSettingsStore = Depends(get_settings_store),
+    reader: AdReader | None = Depends(get_ad_reader),
+    cache_store: GroupsCacheStore = Depends(get_groups_cache_store),
+) -> dict:
+    """Принудительная синхронизация состава групп AD в локальный кэш: только admin.
+
+    Группы — справочник allowed_ad_groups из settings (пусто — 503 «группы не
+    настроены»); ридер AD не настроен — 503 (не 500); успех —
+    {"synced_groups": N, "members": M, "errors": [...], "at": ISO}. Запись —
+    только в наши таблицы ad_group_members/ad_group_sync_state, AD — только
+    чтение."""
+    settings.ensure_read_only()
+    if user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Синхронизацию состава групп запускает только админ",
+        )
+    if reader is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Ридер AD не настроен (в offline — подмена фейковым шлюзом)",
+        )
+    from .settings_routes import _groups_with_names
+
+    try:
+        raw = read_setting_value(settings_store, "allowed_ad_groups")
+    except SettingsUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    groups = [item["id"] for item in _groups_with_names(raw)] if isinstance(raw, list) else []
+    if not groups:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Группы не настроены: заполните справочник групп",
+        )
+    try:
+        result = sync_ad_group_members(reader, groups, cache_store)
+    except GroupsCacheUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    audit_log.append(
+        AuditEvent(
+            actor=user.sam,
+            action="ad_groups.sync",
+            entity="ad_group",
+            entity_id="ad_groups",
+            detail="synced_groups=%d members=%d" % (result["synced_groups"], result["members"]),
+        )
+    )
+    return {
+        "synced_groups": result["synced_groups"],
+        "members": result["members"],
+        "errors": result["errors"],
+        "at": datetime.now(timezone.utc).isoformat(),
     }
 
 

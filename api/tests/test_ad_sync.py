@@ -432,10 +432,16 @@ def test_ad_group_members_hr_allowed(client, hr_headers, sync_mocks):
     assert [i["sam"] for i in response.json()["items"]] == ["t.ivan"]
 
 
-def test_ad_group_members_owner_403(client, owner_headers, sync_mocks):
-    """Владельцу состав группы AD закрыт (ПДн)."""
+def test_ad_group_members_owner_allowed(client, owner_headers, sync_mocks):
+    """Владелец шага (согласующий) видит состав: доступ по должности
+    (решение владельца процесса), вход уже требует разрешённой группы."""
+    entries = _ad_entries()
+    app.dependency_overrides[get_ad_reader] = lambda: _group_reader(
+        {"SED_STEP_BUH": [_dn_of("t.ivan", entries)]}, entries
+    )
     response = client.get("/ad/groups/SED_STEP_BUH/members", headers=owner_headers)
-    assert response.status_code == 403
+    assert response.status_code == 200
+    assert [i["sam"] for i in response.json()["items"]] == ["t.ivan"]
 
 
 def test_ad_group_members_noauth_401(client, noauth_headers, sync_mocks):

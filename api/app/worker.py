@@ -291,6 +291,33 @@ def main() -> None:
     except Exception:
         pass
 
+    # Регламентный синк состава групп AD в локальный кэш: тихо, толерантность
+    # как у автосвязки; запись — только наши таблицы ad_group_members/
+    # ad_group_sync_state; при реальном проходе — уведомление по расписанию
+    # schedule_ad_groups_sync.
+    try:
+        from .ad_groups_cache import (
+            get_groups_cache_store,
+            maybe_sync_ad_groups_weekly,
+        )
+        from .employees import get_ad_reader
+
+        if maybe_sync_ad_groups_weekly(
+            settings_store,
+            get_groups_cache_store(settings),
+            get_ad_reader(),
+        ):
+            print("sync: состав групп AD синхронизирован")
+            notify_schedule(
+                settings_store,
+                mail_queue,
+                "schedule_ad_groups_sync",
+                smtp_from,
+                "состав групп AD обновлён",
+            )
+    except Exception:
+        pass
+
     # Регламентный бэкап БД: тихо (сбой не валит проход), как у прочих
     # регламентов; расписание/каталог/шаблон/копии — из settings архивации
     # (archive_schedule/archive_backup_dir/archive_name_template/archive_keep_copies).

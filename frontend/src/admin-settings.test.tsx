@@ -20,6 +20,7 @@ import {
   saveArchiveSettings,
   saveSettings,
   saveSettingsContent,
+  syncAdGroups,
   syncEnterprises,
   uploadDocTemplateFile,
 } from "./settings-client";
@@ -32,6 +33,7 @@ vi.mock("./settings-client", () => ({
   getSettingsContent: vi.fn(),
   saveSettingsContent: vi.fn(),
   syncEnterprises: vi.fn(),
+  syncAdGroups: vi.fn(),
   getArchiveSettings: vi.fn(),
   saveArchiveSettings: vi.fn(),
   listBackups: vi.fn(),
@@ -131,6 +133,7 @@ beforeEach(() => {
   vi.mocked(getSettingsContent).mockReset();
   vi.mocked(saveSettingsContent).mockReset();
   vi.mocked(syncEnterprises).mockReset();
+  vi.mocked(syncAdGroups).mockReset();
   vi.mocked(getArchiveSettings).mockReset();
   vi.mocked(saveArchiveSettings).mockReset();
   vi.mocked(listBackups).mockReset();
@@ -268,6 +271,35 @@ describe("AdminSettings", () => {
     expect(within(table).getByText("ID группы AD")).toBeInTheDocument();
     expect(within(table).getByText("Наименование")).toBeInTheDocument();
     expect(within(table).getByText("Действие")).toBeInTheDocument();
+  });
+
+  // Ручной синк состава групп: кнопка вызывает syncAdGroups и показывает итог.
+  it("обновляет состав групп из AD по кнопке", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+    vi.mocked(syncAdGroups).mockResolvedValue({ synced_groups: 2, members: 5, errors: [] });
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Справочники" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Справочники" }));
+    fireEvent.click(screen.getByRole("button", { name: "Обновить состав групп из AD" }));
+    await waitFor(() =>
+      expect(screen.getByText("Состав обновлён: групп 2, участников 5")).toBeInTheDocument(),
+    );
+    expect(syncAdGroups).toHaveBeenCalledTimes(1);
+  });
+
+  // Ручной синк состава групп: ошибка API — понятный текст.
+  it("ошибка синка состава групп показывает текст", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+    vi.mocked(syncAdGroups).mockRejectedValue(new ApiHttpError(503, "AD или справочник групп недоступен"));
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Справочники" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Справочники" }));
+    fireEvent.click(screen.getByRole("button", { name: "Обновить состав групп из AD" }));
+    await waitFor(() =>
+      expect(screen.getByText("AD или справочник групп недоступен")).toBeInTheDocument(),
+    );
   });
 
   // Группы доступа: наименование сохраняется и уходит в PUT объектами {id, name}.

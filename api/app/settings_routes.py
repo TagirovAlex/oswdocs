@@ -92,13 +92,15 @@ INFRA_KEYS: tuple[str, ...] = (
     "onec_bases",
     "onec_enterprises_synced_at",
     "ad_links_synced_at",
+    "ad_groups_synced_at",
     "schedule_enterprises_sync",
     "schedule_ad_links_sync",
+    "schedule_ad_groups_sync",
 )
 
-# SETTINGS_KEYS: полный набор (контент + инфра). Поля onec_enterprises_synced_at
-# и ad_links_synced_at читаются GET /settings (read-only, пишут только
-# синхронизации) — в SettingsPayload их НЕТ, админ изменить не может.
+# SETTINGS_KEYS: полный набор (контент + инфра). Поля onec_enterprises_synced_at,
+# ad_links_synced_at и ad_groups_synced_at читаются GET /settings (read-only,
+# пишут только синхронизации) — в SettingsPayload их НЕТ, админ изменить не может.
 SETTINGS_KEYS: tuple[str, ...] = CONTENT_KEYS + INFRA_KEYS
 
 # Ключи групп ролей: значение из БД — единственный источник, ключа нет или БД

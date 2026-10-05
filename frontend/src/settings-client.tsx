@@ -285,6 +285,41 @@ export async function syncEnterprises(): Promise<EnterprisesSyncResult> {
   return (await res.json()) as EnterprisesSyncResult;
 }
 
+// Итог ручной синхронизации состава групп AD (POST /api/ad/groups/sync).
+export interface AdGroupsSyncResult {
+  // Сколько групп синхронизировано.
+  synced_groups: number;
+  // Сколько участников записано в кэш.
+  members: number;
+  // Группы с ошибками (не найдены в AD / каталог недоступен).
+  errors: string[];
+}
+
+// POST /api/ad/groups/sync: принудительная синхронизация состава групп AD
+// в локальный кэш (только админ). Ошибки: 401/403/503 — понятным текстом.
+export async function syncAdGroups(): Promise<AdGroupsSyncResult> {
+  const token = getToken();
+  if (!token) {
+    throw new ApiHttpError(401, "Нет токена");
+  }
+  let res: Response;
+  try {
+    res = await fetch("/api/ad/groups/sync", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+  } catch {
+    throw new Error("Сервис недоступен");
+  }
+  if (res.status === 401) throw new ApiHttpError(401, "Сессия истекла");
+  if (res.status === 403) throw new ApiHttpError(403, "Синхронизация — только админам");
+  if (res.status === 503) throw new ApiHttpError(503, "AD или справочник групп недоступен");
+  if (!res.ok) {
+    throw new ApiHttpError(res.status, "Ошибка синхронизации состава групп");
+  }
+  return (await res.json()) as AdGroupsSyncResult;
+}
+
 // Запрос к /api/doc-types с Bearer-токеном (POST/PATCH/DELETE — только админ).
 // Ответ может быть пустым (204 при удалении) — отдаём пустой объект.
 async function requestDocType<T>(path: string, method: "POST" | "PATCH" | "DELETE", data?: unknown): Promise<T> {

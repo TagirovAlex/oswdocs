@@ -244,8 +244,8 @@ describe("RequestCard", () => {
     expect(within(table).getByText("Вид рассмотрения")).toBeInTheDocument();
     expect(within(table).getByText("Должность")).toBeInTheDocument();
     expect(within(table).getByText("Сотрудник")).toBeInTheDocument();
-    expect(within(table).getByText("Последовательно · Блок 1")).toBeInTheDocument();
-    expect(within(table).getByText("Параллельно · Блок 2")).toBeInTheDocument();
+    expect(within(table).getByText("Последовательно")).toBeInTheDocument();
+    expect(within(table).getByText("Параллельно")).toBeInTheDocument();
   });
 
   // Должность — читаемое наименование группы из справочника настроек.
@@ -288,6 +288,30 @@ describe("RequestCard", () => {
     expect(steps.queryByText("SED_STEP_BUH")).not.toBeInTheDocument();
     // Логин AD замены руководителя в карточке не выводится.
     expect(screen.queryByText(/sidorova\.as/)).not.toBeInTheDocument();
+  });
+
+  // Должность персонального шага — owner_duty от бэкенда (без прочерка).
+  it("должность персонального шага — owner_duty от бэкенда", async () => {
+    vi.mocked(getRequest).mockResolvedValue({
+      ...requestWith("Громов Игорь Олегович", "На согласовании"),
+      steps: [
+        {
+          order: 1,
+          owner_group: "petrov.pp",
+          resolver: "by_user",
+          assignee: "petrov.pp",
+          owner_name: "Петров Пётр Петрович",
+          owner_duty: "Главный бухгалтер",
+          can_act: false,
+          status: "ожидает",
+          expires_at: "2026-10-05T10:00:00+00:00",
+        },
+      ],
+    });
+
+    renderCard();
+    await waitFor(() => expect(screen.getByLabelText("Шаги заявки")).toBeInTheDocument());
+    expect(screen.getByText("Главный бухгалтер")).toBeInTheDocument();
   });
 
   // Ключ карточки сотрудника резолвит бэкенд (только привилегированным).

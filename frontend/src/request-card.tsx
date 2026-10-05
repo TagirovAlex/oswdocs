@@ -436,11 +436,12 @@ export function RequestCard(props: RequestCardProps) {
     return !step.assignee && step.resolver !== "by_user";
   }
 
-  // Колонка «Должность / Группа»: персональным — должность из АД
-  // (стыковочная таблица, иначе прочерк); групповым — читабельное название
-  // группы из настроек, затем имя от бэкенда, иначе код как раньше.
+  // Колонка «Должность»: персональным — должность от бэкенда (из той же
+  // AD-карточки, что ФИО), затем из стыковочной таблицы, иначе прочерк;
+  // групповым — читабельное название группы из настроек, затем имя от
+  // бэкенда, иначе код как раньше.
   function stepDutyCell(step: RequestStep): string {
-    if (!isGroupStep(step)) return stepPositions[step.order] ?? "—";
+    if (!isGroupStep(step)) return step.owner_duty ?? stepPositions[step.order] ?? "—";
     if (step.owner_group && groupNames[step.owner_group]) return groupNames[step.owner_group];
     if (step.owner_name) return step.owner_name;
     return step.owner_group || "—";
@@ -821,16 +822,14 @@ export function RequestCard(props: RequestCardProps) {
           <div className="sed-review">
             <b>Рассмотрение</b>
             {(() => {
-              // Номер блока и режим каждого шага; число блоков — для подписи.
+              // Режим каждого шага из кода order (блок*1000 + режим + позиция).
               const info = card.steps.map((step) => {
                 const coded = step.order >= 1000;
                 return {
                   step,
-                  blockNo: coded ? Math.floor(step.order / 1000) + 1 : 1,
                   parallel: coded && Math.floor((step.order % 1000) / 100) === 1,
                 };
               });
-              const blockCount = new Set(info.map((i) => i.blockNo)).size;
               return (
                 <table className="sed-table sed-table--review" aria-label="Шаги заявки">
                   <thead>
@@ -845,13 +844,11 @@ export function RequestCard(props: RequestCardProps) {
                     </tr>
                   </thead>
                   <tbody>
-                    {info.map(({ step, blockNo, parallel }) => (
+                    {info.map(({ step, parallel }) => (
                       <tr key={step.order}>
                         <td>{stepLabel(step.order)}</td>
-                        <td>
-                          {parallel ? "Параллельно" : "Последовательно"}
-                          {blockCount > 1 ? ` · Блок ${blockNo}` : ""}
-                        </td>
+                        {/* Номер блока закодирован в № (2.1 — блок 2), дублировать не нужно. */}
+                        <td>{parallel ? "Параллельно" : "Последовательно"}</td>
                         <td>{stepDutyCell(step)}</td>
                         <td>{stepExecutorsNode(step)}</td>
                         <td>{step.status}</td>

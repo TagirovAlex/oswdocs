@@ -177,11 +177,13 @@ def hr_step_owner() -> dict:
 class FakeAdReader:
     """Мок AdReader (только чтение): ФИО по sAMAccountName из вымышленных записей.
 
-    raise_exc=True — AD недоступен (любой вызов get_user падает)."""
+    raise_exc=True — AD недоступен (любой вызов get_user падает); titles —
+    должности (title) по логинам, без записи — пусто (как старые записи)."""
 
-    def __init__(self, entries: dict, raise_exc: bool = False):
+    def __init__(self, entries: dict, raise_exc: bool = False, titles: dict | None = None):
         self._entries = entries
         self._raise = raise_exc
+        self._titles = titles or {}
 
     def get_user(self, sam: str):
         if self._raise:
@@ -191,6 +193,7 @@ class FakeAdReader:
         return SimpleNamespace(
             sam=sam,
             display_name=self._entries[sam],
+            title=self._titles.get(sam, ""),
             mail="%s@example.local" % sam,
         )
 
@@ -743,6 +746,42 @@ def test_owner_name_none_when_ad_raises(
         app.dependency_overrides.pop(get_ad_reader, None)
     assert response.status_code == 200
     assert response.json()["steps"][0]["owner_name"] is None
+
+
+# --- owner_duty: должность персонального исполнителя из AD (fail-soft) ---
+
+
+def test_owner_duty_resolved_from_ad_for_assignee(
+    client, hr, buh_owner, test_settings_override, route_override, settings_store
+):
+    """Шаг с персональным исполнителем: owner_duty — должность (title) из AD."""
+    rid = _with_assignee(client, hr, BUH_SAM)
+    app.dependency_overrides[get_ad_reader] = lambda: FakeAdReader(
+        {BUH_SAM: FAKE_OWNER_FIO}, titles={BUH_SAM: "Вымышленный Бухгалтер"}
+    )
+    try:
+        step = client.get(f"/requests/{rid}", headers=buh_owner).json()["steps"][0]
+    finally:
+        app.dependency_overrides.pop(get_ad_reader, None)
+    assert step["owner_name"] == FAKE_OWNER_FIO
+    assert step["owner_duty"] == "Вымышленный Бухгалтер"
+
+
+def test_owner_duty_none_for_group_step_and_no_reader(
+    client, hr, buh_owner, requests_store, test_settings_override, route_override, settings_store
+):
+    """Групповой шаг — owner_duty None; без ридера у персонального — тоже None."""
+    rid = _create_and_submit(client, hr)
+    step = client.get(f"/requests/{rid}", headers=buh_owner).json()["steps"][0]
+    assert step["assignee"] is None
+    assert step["owner_duty"] is None
+    rid = _with_assignee(client, hr, BUH_SAM)
+    app.dependency_overrides[get_ad_reader] = lambda: None
+    try:
+        step = client.get(f"/requests/{rid}", headers=buh_owner).json()["steps"][0]
+    finally:
+        app.dependency_overrides.pop(get_ad_reader, None)
+    assert step["owner_duty"] is None
 
 
 # --- assignee (это sAMAccountName): непривилегированному не-владельцу скрывается ---

@@ -131,8 +131,10 @@ CONTRACT_VALUES = {
     "onec_bases": [],
     "onec_enterprises_synced_at": None,
     "ad_links_synced_at": None,
+    "ad_groups_synced_at": None,
     "schedule_enterprises_sync": None,
     "schedule_ad_links_sync": None,
+    "schedule_ad_groups_sync": None,
 }
 
 # Контент-часть контракта: только ключи CONTENT_KEYS (для GET/PUT /settings/content).
@@ -200,8 +202,10 @@ UPDATED_VALUES = {
     ],
     "onec_enterprises_synced_at": None,
     "ad_links_synced_at": None,
+    "ad_groups_synced_at": None,
     "schedule_enterprises_sync": None,
     "schedule_ad_links_sync": None,
+    "schedule_ad_groups_sync": None,
 }
 
 

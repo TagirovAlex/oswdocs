@@ -21,6 +21,7 @@ import {
   saveArchiveSettings,
   saveSettings,
   saveSettingsContent,
+  syncAdGroups,
   syncEnterprises,
   updateDocType,
   uploadDocTemplateFile,
@@ -1221,6 +1222,8 @@ export function AdminSettings(props: AdminSettingsProps) {
   // Статус принудительной синхронизации предприятий из баз 1С.
   const [syncStatus, setSyncStatus] = useState<string>("");
   const [syncError, setSyncError] = useState<string>("");
+  const [groupSyncStatus, setGroupSyncStatus] = useState<string>("");
+  const [groupSyncError, setGroupSyncError] = useState<string>("");
   // Эскалация в форме не редактируется (отдельная волна), передаём как загружено.
   const [positionEscalation, setPositionEscalation] = useState<Record<string, number> | null>(null);
   // Группы входа и роли (access_groups/admin_groups/hr_groups/hr_admin_groups) —
@@ -1361,6 +1364,23 @@ export function AdminSettings(props: AdminSettingsProps) {
     }
   }
 
+  // Принудительная синхронизация состава групп AD в локальный кэш
+  // (POST /api/ad/groups/sync, только админ): после неё карточка показывает
+  // состав без чтения каталога.
+  async function handleSyncAdGroups(): Promise<void> {
+    setGroupSyncError("");
+    setGroupSyncStatus("");
+    try {
+      const result = await syncAdGroups();
+      setGroupSyncStatus(
+        `Состав обновлён: групп ${result.synced_groups}, участников ${result.members}` +
+        (result.errors.length > 0 ? `, ошибок ${result.errors.length}` : ""),
+      );
+    } catch (e: unknown) {
+      setGroupSyncError(e instanceof Error ? e.message : "Ошибка синхронизации состава групп");
+    }
+  }
+
   // Принудительная синхронизация предприятий из 1С (POST /settings/enterprises/sync).
   async function handleSyncEnterprises(): Promise<void> {
     setSyncError("");
@@ -1433,6 +1453,16 @@ export function AdminSettings(props: AdminSettingsProps) {
         <>
           <EnterprisesEditor value={enterprises} onChange={setEnterprises} />
           <GroupsEditor value={adGroups} onChange={setAdGroups} />
+          {/* Ручной синк состава групп AD в кэш — только админ (эндпоинт 403 остальным). */}
+          {isAdmin && (
+            <div className="sed-toolbar sed-mt-8">
+              <button type="button" className="sed-btn" onClick={handleSyncAdGroups}>
+                Обновить состав групп из AD
+              </button>
+              {groupSyncStatus && <span role="status">{groupSyncStatus}</span>}
+              {groupSyncError && <span role="alert">{groupSyncError}</span>}
+            </div>
+          )}
           <PositionCategoryEditor value={positionCategory} onChange={setPositionCategory} />
           {/* Виды документов — таблица doc_types; только админ (не контент-ключ settings). */}
           {isAdmin && <DocTypesEditor />}

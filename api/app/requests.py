@@ -261,6 +261,10 @@ class StepOut(BaseModel):
             "групповой — наименование группы из settings (если известно)"
         ),
     )
+    owner_duty: str | None = Field(
+        default=None,
+        description="Должность персонального исполнителя из AD (title); у группового — None",
+    )
     employee_key: str | None = Field(
         default=None,
         description="Составной ключ сотрудника шага (enterprise|base_code|tab_num), только привилегированным",
@@ -604,6 +608,22 @@ def _owner_display_name(ad_reader: object | None, assignee: str | None) -> str |
     return (getattr(card, "display_name", None) or "").strip() or None
 
 
+def _owner_duty(ad_reader: object | None, assignee: str | None) -> str | None:
+    """Должность согласующего по данным AD (title из той же карточки, что ФИО).
+
+    Тот же fail-soft и та же видимость по ролям, что у owner_name (должность —
+    данные того же уровня, что ФИО). Групповой шаг — None (должность там —
+    наименование группы из settings).
+    """
+    if not assignee or ad_reader is None:
+        return None
+    try:
+        card = ad_reader.get_user(assignee)
+    except Exception:
+        return None
+    return (getattr(card, "title", None) or "").strip() or None
+
+
 def _enterprise_names_map() -> dict[str, str]:
     """Карта «код предприятия → название» из ключа настроек enterprises.
 
@@ -815,7 +835,8 @@ def _public_view(
 
     ПДн по ролям: enterprise_name (как enterprise/tab_num/fio) — только
     привилегированным, остальным None; owner_name (ФИО согласующего/наименование
-    группы) — всем авторизованным, сотруднику полезно видеть, кто согласует;
+    группы) и owner_duty (должность персонального исполнителя) — всем
+    авторизованным, сотруднику полезно видеть, кто согласует;
     assignee, created_by и done_by — это sAMAccountName, поэтому скрываются всем,
     кроме привилегированных (assignee владельцу шага остаётся — это его собственный
     логин); can_act считается всегда и для всех ролей. Ключи сотрудников
@@ -844,6 +865,7 @@ def _public_view(
                 resolver=s.resolver,
                 assignee=s.assignee if privileged or _owns_step(s, user) else None,
                 owner_name=_step_owner_name(reader, s.assignee, groups, s.owner_group),
+                owner_duty=_owner_duty(reader, s.assignee),
                 employee_key=emp.get("employee_key"),
                 emp_enterprise=emp.get("emp_enterprise"),
                 emp_base_code=emp.get("emp_base_code"),
