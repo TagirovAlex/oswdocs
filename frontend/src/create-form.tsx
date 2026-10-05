@@ -19,7 +19,7 @@ import {
   searchEmployees,
   submitRequest,
 } from "./requests-client";
-import type { AdCandidate, AdGroupMember, DocType, EmployeeHit, Enterprise, StepGroup } from "./requests-client";
+import type { AdCandidate, AdGroupMember, DocType, EmployeeHit, Enterprise, MyLink, StepGroup } from "./requests-client";
 import type { Role } from "./api-mock";
 import { employeeUrl, openPopup } from "./windows";
 
@@ -206,6 +206,9 @@ export function CreateForm(props: CreateFormProps) {
   const [adCandidates, setAdCandidates] = useState<AdCandidate[]>([]);
   const [adSearching, setAdSearching] = useState<boolean>(false);
   const [adSearchError, setAdSearchError] = useState<string>("");
+  // Отмеченные чекбоксами кандидаты модалки (сохраняются между поисками
+  // в пределах одной открытой модалки, сбрасываются при открытии/закрытии).
+  const [adSelected, setAdSelected] = useState<AdCandidate[]>([]);
   // Порядковый номер поиска AD: устаревшие ответы отбрасываем.
   const adSeq = useRef(0);
 
@@ -237,10 +240,11 @@ export function CreateForm(props: CreateFormProps) {
   // Инициатор для правой панели — из сессии (GET /auth/me), только чтение.
   // ФИО у владельца может отсутствовать (урезанная карточка) — тогда логин.
   const [initiator, setInitiator] = useState<string>("");
-  // Ключ своей карточки сотрудника (связка АД-1С, GET /link_1c_ad/mine):
-  // ровно одна связка — ФИО инициатора становится ссылкой на карточку,
-  // иначе (нет/несколько) — текст без ссылки. Связка — свои данные, как ФИО в me().
-  const [initiatorKey, setInitiatorKey] = useState<string>("");
+  // Свои связки АД-1С (GET /link_1c_ad/mine) для ссылки инициатора.
+  // Связки — свои данные, как ФИО в me(). Ключ выбирается так: ровно одна
+  // связка — она; несколько — та, что на выбранное в форме предприятие
+  // (молчаливый выбор предприятия недопустим); иначе — текста без ссылки.
+  const [initiatorLinks, setInitiatorLinks] = useState<MyLink[]>([]);
   useEffect(() => {
     let alive = true;
     me()
@@ -249,19 +253,28 @@ export function CreateForm(props: CreateFormProps) {
         return getMyLinks();
       })
       .then((links) => {
-        if (alive && links.length === 1) setInitiatorKey(links[0].key);
+        if (alive) setInitiatorLinks(links);
       })
       .catch(() => {
         // Сессия/связка недоступна — поле инициатора остаётся пустым («—»).
         if (alive) {
           setInitiator("");
-          setInitiatorKey("");
+          setInitiatorLinks([]);
         }
       });
     return () => {
       alive = false;
     };
   }, []);
+
+  // Ключ карточки инициатора: пересчитывается при смене предприятия в форме.
+  function initiatorKeyFor(links: MyLink[], selectedEnterprise: string): string {
+    if (links.length === 1) return links[0].key;
+    if (selectedEnterprise === "") return "";
+    const matched = links.filter((l) => l.enterprise === selectedEnterprise);
+    return matched.length === 1 ? matched[0].key : "";
+  }
+  const initiatorKey = initiatorKeyFor(initiatorLinks, enterprise);
 
   // Предприятия — только из API.
   useEffect(() => {
@@ -554,6 +567,7 @@ export function CreateForm(props: CreateFormProps) {
     setAdQuery("");
     setAdCandidates([]);
     setAdSearchError("");
+    setAdSelected([]);
   }
 
   function closeAdPanel(): void {
@@ -562,10 +576,23 @@ export function CreateForm(props: CreateFormProps) {
     setAdCandidates([]);
     setAdQuery("");
     setAdSearchError("");
+    setAdSelected([]);
   }
 
-  // Добавление выбранного из AD исполнителя в текущий блок.
-  function addStepToBlock(blockId: string, cand: AdCandidate): void {
+  // Переключение чекбокса кандидата в модалке (выбор сохраняется между
+  // поисками, пока модалка открыта).
+  function toggleAdSelected(cand: AdCandidate): void {
+    setAdSelected((prev) =>
+      prev.some((c) => c.sam === cand.sam)
+        ? prev.filter((c) => c.sam !== cand.sam)
+        : [...prev, cand],
+    );
+  }
+
+  // Добавление отмеченных в модалке исполнителей из AD в текущий блок.
+  function confirmAdSelected(): void {
+    const blockId = adPanelBlock;
+    if (blockId === null || adSelected.length === 0) return;
     markTouched();
     setBlocks((prev) =>
       prev.map((b) =>
@@ -574,12 +601,12 @@ export function CreateForm(props: CreateFormProps) {
               ...b,
               steps: [
                 ...b.steps,
-                {
-                  kind: "user",
+                ...adSelected.map((cand) => ({
+                  kind: "user" as const,
                   sam: cand.sam,
                   display_name: cand.display_name,
                   resolver: "by_user",
-                },
+                })),
               ],
             }
           : b,
@@ -1196,52 +1223,16 @@ export function CreateForm(props: CreateFormProps) {
                         ))}
                       </ul>
                       {block.kind === "user" && (
-                        <>
-                          <button
-                            type="button"
-                            className="sed-btn sed-delbtn"
-                            aria-label="Добавить исполнителя"
-                            title="Добавить исполнителя"
-                            onClick={() => openAdPanel(block.id)}
-                          >
-                            <PlusIcon />
-                            Добавить
-                          </button>
-                          {adPanelBlock === block.id && (
-                            <div className="sed-mt-8 sed-rel">
-                              <label className="sed-field">
-                                Поиск в AD
-                                <input
-                                  aria-label="Поиск в AD"
-                                  placeholder="ФИО в AD"
-                                  value={adQuery}
-                                  onChange={(e) => setAdQuery(e.target.value)}
-                                  onKeyDown={(e) => {
-                                    if (e.key === "Escape") closeAdPanel();
-                                  }}
-                                />
-                              </label>
-                              {adSearching && <div className="sed-note">Поиск в AD…</div>}
-                              {adSearchError && <div className="sed-note">{adSearchError}</div>}
-                              {adCandidates.length > 0 && (
-                                <ul className="sed-dropdown">
-                                  {adCandidates.map((c) => (
-                                    <li key={c.sam}>
-                                      <button type="button" className="sed-dropdown__item" onClick={() => addStepToBlock(block.id, c)}>
-                                        <strong>{c.display_name}</strong> · {c.sam}
-                                        {(c.department || c.title) && (
-                                          <div className="sed-sub">
-                                            {[c.department, c.title].filter(Boolean).join(" · ")}
-                                          </div>
-                                        )}
-                                      </button>
-                                    </li>
-                                  ))}
-                                </ul>
-                              )}
-                            </div>
-                          )}
-                        </>
+                        <button
+                          type="button"
+                          className="sed-btn sed-delbtn"
+                          aria-label="Добавить исполнителя"
+                          title="Добавить исполнителя"
+                          onClick={() => openAdPanel(block.id)}
+                        >
+                          <PlusIcon />
+                          Добавить
+                        </button>
                       )}
                     </td>
                     {/* Комментарий к блоку: пока не сохраняется в маршруте (пустая ячейка). */}
@@ -1275,6 +1266,116 @@ export function CreateForm(props: CreateFormProps) {
           </div>
         </fieldset>
       )}
+
+      {/* Модальный выбор исполнителей из AD (кнопка «+ Добавить» в блоке):
+          поиск + чекбоксы + нижняя панель выбранных (порядок кликов) +
+          Очистить/ОК/Отмена. В последовательный блок встанут в порядке выбора,
+          в параллельный — все разом в блок. */}
+      {adPanelBlock !== null && (() => {
+        const blockIndex = blocks.findIndex((b) => b.id === adPanelBlock);
+        return (
+          <div className="sed-modal-backdrop" onClick={closeAdPanel}>
+            <div
+              className="sed-modal"
+              role="dialog"
+              aria-modal="true"
+              aria-label={`Выбор исполнителей${blockIndex >= 0 ? ` — Блок ${blockIndex + 1}` : ""}`}
+              onClick={(e) => e.stopPropagation()}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") closeAdPanel();
+              }}
+            >
+              <h4>Выбор исполнителей{blockIndex >= 0 ? ` — Блок ${blockIndex + 1}` : ""}</h4>
+              <label className="sed-field">
+                Поиск в AD
+                <input
+                  autoFocus
+                  aria-label="Поиск в AD"
+                  placeholder="ФИО в AD"
+                  value={adQuery}
+                  onChange={(e) => setAdQuery(e.target.value)}
+                />
+              </label>
+              {adSearching && <div className="sed-note">Поиск в AD…</div>}
+              {adSearchError && <div role="alert">{adSearchError}</div>}
+              {adCandidates.length > 0 && (
+                <table className="sed-table" aria-label="Найденные сотрудники">
+                  <thead>
+                    <tr>
+                      <th scope="col">
+                        <span className="sed-hidden">Выбор</span>
+                      </th>
+                      <th scope="col">ФИО</th>
+                      <th scope="col">Должность</th>
+                      <th scope="col">Подразделение</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {adCandidates.map((c) => (
+                      <tr key={c.sam}>
+                        <td>
+                          <input
+                            type="checkbox"
+                            aria-label={`Выбрать ${c.display_name}`}
+                            checked={adSelected.some((s) => s.sam === c.sam)}
+                            onChange={() => toggleAdSelected(c)}
+                          />
+                        </td>
+                        <td>{c.display_name}</td>
+                        <td>{c.title || "—"}</td>
+                        <td>{c.department || "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+              {/* Выбранные (низ модалки, в порядке кликов): крестик убирает,
+                  Очистить — всех; ОК переносит в блок в этом порядке. */}
+              <div className="sed-block" aria-label="Выбранные исполнители">
+                {adSelected.length === 0 && <div className="sed-note">Не выбрано</div>}
+                <ul className="sed-list">
+                  {adSelected.map((c) => (
+                    <li key={c.sam}>
+                      {c.display_name} ({c.sam})
+                      <button
+                        type="button"
+                        aria-label={`Убрать ${c.display_name}`}
+                        title="Убрать из выбранных"
+                        onClick={() => toggleAdSelected(c)}
+                        className="sed-roundbtn sed-ml-8"
+                      >
+                        <CrossIcon />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+              <div className="sed-toolbar sed-mt-8">
+                <button
+                  type="button"
+                  className="sed-btn sed-btn--ghost"
+                  onClick={() => setAdSelected([])}
+                  disabled={adSelected.length === 0}
+                >
+                  Очистить
+                </button>
+                <span className="sed-toolbar__spacer" />
+                <button
+                  type="button"
+                  className="sed-btn"
+                  onClick={confirmAdSelected}
+                  disabled={adSelected.length === 0}
+                >
+                  ОК
+                </button>
+                <button type="button" className="sed-btn sed-btn--ghost" onClick={closeAdPanel}>
+                  Отмена
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       <div className="sed-toolbar sed-mt-12">
         <button

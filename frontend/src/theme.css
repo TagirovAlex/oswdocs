@@ -961,3 +961,39 @@ fieldset textarea {
     display: none;
   }
 }
+
+/* Модальный выбор исполнителей из AD: затемнение + карточка поверх страницы. */
+.sed-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.sed-modal {
+  background: var(--sed-surface);
+  color: var(--sed-text);
+  border: 1px solid var(--sed-border);
+  border-radius: 8px;
+  padding: 16px;
+  width: min(720px, 92vw);
+  max-height: 86vh;
+  overflow: auto;
+}
+
+/* Распорка тулбара модалки (Очистить слева, ОК/Отмена справа). */
+.sed-toolbar__spacer {
+  flex: 1;
+}
+
+/* Визуально скрытая подпись (заголовок колонки чекбоксов — только для SR). */
+.sed-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+}

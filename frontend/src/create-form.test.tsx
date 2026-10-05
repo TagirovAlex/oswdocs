@@ -3,7 +3,7 @@
 // Сотрудник — живой поиск (debounce), данные из 1С справочные; маршрут —
 // конструктор блоков с исполнителями из AD. Сеть не нужна: модуль
 // requests-client мокается (как в admin-settings.test.tsx).
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiHttpError, me } from "./auth-client";
 import { CreateForm } from "./create-form";
@@ -110,13 +110,16 @@ async function fillEmployeeManually(): Promise<void> {
   await waitFor(() => expect(screen.getByText("Маршрут согласования")).toBeInTheDocument());
 }
 
-// Добавление исполнителя из AD в первый блок конструктора маршрута.
+// Добавление исполнителя из AD в первый блок конструктора маршрута:
+// модалка (кнопка «+ Добавить») → поиск → чекбокс → ОК.
 async function addAdExecutor(): Promise<void> {
   fireEvent.click(screen.getByText("Добавить последовательный блок"));
   fireEvent.click(screen.getByRole("button", { name: "Добавить исполнителя" }));
+  await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
   fireEvent.change(screen.getByLabelText("Поиск в AD"), { target: { value: "Петров" } });
   await waitFor(() => expect(screen.getByText("Петров Пётр Петрович")).toBeInTheDocument());
-  fireEvent.click(screen.getByText("Петров Пётр Петрович"));
+  fireEvent.click(screen.getByRole("checkbox", { name: "Выбрать Петров Пётр Петрович" }));
+  fireEvent.click(screen.getByRole("button", { name: "ОК" }));
 }
 
 describe("CreateForm", () => {
@@ -446,12 +449,15 @@ describe("CreateForm", () => {
     expect(screen.getByText("Блок 1")).toBeInTheDocument();
     expect(screen.getByText("Создать")).toBeDisabled();
 
-    // Панель AD: живой поиск → кандидат → клик добавляет исполнителя.
+    // Модалка AD: живой поиск → чекбокс → ОК добавляет исполнителя.
     fireEvent.click(screen.getByRole("button", { name: "Добавить исполнителя" }));
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
     fireEvent.change(screen.getByLabelText("Поиск в AD"), { target: { value: "Петров" } });
     await waitFor(() => expect(searchAd).toHaveBeenCalled());
     await waitFor(() => expect(screen.getByText("Петров Пётр Петрович")).toBeInTheDocument());
-    fireEvent.click(screen.getByText("Петров Пётр Петрович"));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Выбрать Петров Пётр Петрович" }));
+    fireEvent.click(screen.getByRole("button", { name: "ОК" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     expect(screen.getByText(/petrov\.pp/)).toBeInTheDocument();
     expect(screen.getByText("Создать")).toBeEnabled();
 
@@ -463,6 +469,102 @@ describe("CreateForm", () => {
     fireEvent.click(screen.getByLabelText("Удалить исполнителя Петров Пётр Петрович"));
     await waitFor(() => expect(screen.queryByText(/petrov\.pp/)).not.toBeInTheDocument());
     expect(screen.getByText("Создать")).toBeDisabled();
+  });
+
+  // Модалка AD: несколько чекбоксов → нижняя панель в порядке кликов → ОК
+  // добавляет всех в том же порядке.
+  it("модалка: выбор нескольких и ОК в порядке кликов", async () => {
+    const second = {
+      sam: "sidorova.as",
+      display_name: "Сидорова Анна Сергеевна",
+      department: "Бухгалтерия",
+      title: "Главный бухгалтер",
+      mail: "sidorova.as@example.test",
+    };
+    vi.mocked(searchAd).mockResolvedValue([adCandidate, second]);
+    vi.mocked(searchEmployees).mockRejectedValue(new ApiHttpError(503, "Клиент 1С не настроен"));
+
+    render(<CreateForm role="hr" />);
+    await fillEmployeeManually();
+    fireEvent.click(screen.getByText("Добавить последовательный блок"));
+    fireEvent.click(screen.getByRole("button", { name: "Добавить исполнителя" }));
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
+    fireEvent.change(screen.getByLabelText("Поиск в AD"), { target: { value: "о" } });
+    await waitFor(() => expect(screen.getByText("Сидорова Анна Сергеевна")).toBeInTheDocument());
+    // Порядок кликов: сначала Сидорова, потом Петров.
+    fireEvent.click(screen.getByRole("checkbox", { name: "Выбрать Сидорова Анна Сергеевна" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Выбрать Петров Пётр Петрович" }));
+    // Нижняя панель модалки — в порядке кликов.
+    const panel = screen.getByLabelText("Выбранные исполнители");
+    const picked = within(panel).getAllByRole("listitem").map((li) => li.textContent);
+    expect(picked[0]).toContain("Сидорова Анна Сергеевна");
+    expect(picked[1]).toContain("Петров Пётр Петрович");
+    fireEvent.click(screen.getByRole("button", { name: "ОК" }));
+    // В блок встали в том же порядке.
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    const items = screen.getAllByText(/petrov\.pp|sidorova\.as/);
+    expect(items[0].textContent).toContain("sidorova.as");
+    expect(items[1].textContent).toContain("petrov.pp");
+  });
+
+  // Модалка AD: Отмена закрывает без добавления.
+  it("модалка: Отмена закрывает без добавления", async () => {
+    vi.mocked(searchAd).mockResolvedValue([adCandidate]);
+    vi.mocked(searchEmployees).mockRejectedValue(new ApiHttpError(503, "Клиент 1С не настроен"));
+
+    render(<CreateForm role="hr" />);
+    await fillEmployeeManually();
+    fireEvent.click(screen.getByText("Добавить последовательный блок"));
+    fireEvent.click(screen.getByRole("button", { name: "Добавить исполнителя" }));
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
+    fireEvent.change(screen.getByLabelText("Поиск в AD"), { target: { value: "Петров" } });
+    await waitFor(() => expect(screen.getByText("Петров Пётр Петрович")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("checkbox", { name: "Выбрать Петров Пётр Петрович" }));
+    // «Отмена» модалки (внизу формы своя кнопка с тем же именем — берём в диалоге).
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Отмена" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(screen.queryByText(/petrov\.pp/)).not.toBeInTheDocument();
+  });
+
+  // Модалка AD: Escape закрывает без добавления.
+  it("модалка: Escape закрывает без добавления", async () => {
+    vi.mocked(searchAd).mockResolvedValue([adCandidate]);
+    vi.mocked(searchEmployees).mockRejectedValue(new ApiHttpError(503, "Клиент 1С не настроен"));
+
+    render(<CreateForm role="hr" />);
+    await fillEmployeeManually();
+    fireEvent.click(screen.getByText("Добавить последовательный блок"));
+    fireEvent.click(screen.getByRole("button", { name: "Добавить исполнителя" }));
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(screen.queryByText(/petrov\.pp/)).not.toBeInTheDocument();
+  });
+
+  // Модалка AD: крестик в нижней панели убирает, Очистить — всех; ОК без
+  // выбора недоступна.
+  it("модалка: крестик и Очистить управляют выбором", async () => {
+    vi.mocked(searchAd).mockResolvedValue([adCandidate]);
+    vi.mocked(searchEmployees).mockRejectedValue(new ApiHttpError(503, "Клиент 1С не настроен"));
+
+    render(<CreateForm role="hr" />);
+    await fillEmployeeManually();
+    fireEvent.click(screen.getByText("Добавить последовательный блок"));
+    fireEvent.click(screen.getByRole("button", { name: "Добавить исполнителя" }));
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "ОК" })).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("Поиск в AD"), { target: { value: "Петров" } });
+    await waitFor(() => expect(screen.getByText("Петров Пётр Петрович")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("checkbox", { name: "Выбрать Петров Пётр Петрович" }));
+    expect(screen.getByRole("button", { name: "ОК" })).toBeEnabled();
+    // Крестик в нижней панели убирает одного.
+    fireEvent.click(screen.getByRole("button", { name: "Убрать Петров Пётр Петрович" }));
+    expect(screen.getByRole("button", { name: "ОК" })).toBeDisabled();
+    // Повторный выбор + Очистить — всех.
+    fireEvent.click(screen.getByRole("checkbox", { name: "Выбрать Петров Пётр Петрович" }));
+    fireEvent.click(screen.getByRole("button", { name: "Очистить" }));
+    expect(screen.getByRole("button", { name: "ОК" })).toBeDisabled();
+    expect(screen.queryByRole("checkbox", { name: "Выбрать Петров Пётр Петрович" })).not.toBeChecked();
   });
 
   // Без предприятия/сотрудника/маршрута «Создать» недоступен.
@@ -525,6 +627,38 @@ describe("CreateForm", () => {
     render(<CreateForm role="hr" />);
     const initiator = await screen.findByLabelText("Инициатор");
     await waitFor(() => expect(initiator).toHaveValue("Петров Пётр Петрович"));
+  });
+
+  // Инициатор с двумя связками: после выбора предприятия ссылка ведёт
+  // на карточку в этом предприятии (молчаливого выбора нет — решает форма).
+  it("инициатор с двумя связками — ссылка после выбора предприятия", async () => {
+    vi.mocked(getMyLinks).mockResolvedValue([
+      {
+        enterprise: "ENT_PRIMER_1",
+        base_code: "zup_t1",
+        tab_num: "Т-000201",
+        key: "ENT_PRIMER_1|zup_t1|Т-000201",
+        verified: true,
+      },
+      {
+        enterprise: "ENT_OTHER",
+        base_code: "zup",
+        tab_num: "00ЗП-02642",
+        key: "ENT_OTHER|zup|00ЗП-02642",
+        verified: true,
+      },
+    ]);
+
+    render(<CreateForm role="hr" />);
+    // Без предприятия — текст без ссылки.
+    const initiator = await screen.findByLabelText("Инициатор");
+    await waitFor(() => expect(initiator).toHaveValue("Петров Пётр Петрович"));
+    // Выбираем предприятие первой связки — ФИО становится ссылкой на неё.
+    fireEvent.change(screen.getByLabelText("Предприятие"), { target: { value: "ENT_PRIMER_1" } });
+    const link = await screen.findByRole("link", { name: "Петров Пётр Петрович" });
+    expect(link.getAttribute("href")).toBe(
+      `?view=employee&key=${encodeURIComponent("ENT_PRIMER_1|zup_t1|Т-000201")}`,
+    );
   });
 
   // Конструктор блоков — карточки «Рассмотрение»; ссылки задают режим блока.
@@ -1038,6 +1172,7 @@ describe("CreateForm", () => {
     // Персональный сценарий конструктора продолжает работать.
     fireEvent.click(screen.getByText("Добавить последовательный блок"));
     fireEvent.click(screen.getByRole("button", { name: "Добавить исполнителя" }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
     expect(screen.getByLabelText("Поиск в AD")).toBeInTheDocument();
   });
 });
