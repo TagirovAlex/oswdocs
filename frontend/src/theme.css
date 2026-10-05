@@ -942,6 +942,13 @@ fieldset textarea {
   flex-wrap: wrap;
 }
 
+/* Пейджер модалки: всё в один ряд без переноса (при узком окне — скролл). */
+.sed-pager--single {
+  flex-wrap: nowrap;
+  gap: 6px;
+  overflow-x: auto;
+}
+
 .sed-pager select {
   border: 1px solid var(--sed-border);
   border-radius: 4px;

@@ -739,6 +739,15 @@ function PositionSetsEditor(props: {
     }
     return out;
   }
+  // Выбрать все / отменить все на текущей странице модалки.
+  function toggleModalPageAll(pageTitles: string[], allChecked: boolean): void {
+    if (allChecked) {
+      const page = new Set(pageTitles);
+      setModalChecked((prev) => prev.filter((t) => !page.has(t)));
+    } else {
+      setModalChecked((prev) => [...prev, ...pageTitles.filter((t) => !prev.includes(t))]);
+    }
+  }
   // Поиск по справочнику (регистр не важен) + пагинация: выбор живёт
   // между страницами, за один проход отмечается всё нужное.
   const MODAL_PAGE_SIZE = 50;
@@ -751,6 +760,9 @@ function PositionSetsEditor(props: {
     (modalPageSafe - 1) * MODAL_PAGE_SIZE,
     modalPageSafe * MODAL_PAGE_SIZE,
   );
+  // Шапка «выбрать все»: отмечены ли все строки текущей страницы.
+  const modalPageChecked =
+    modalShown.length > 0 && modalShown.every((t) => modalChecked.includes(t));
   return (
     <fieldset>
       <legend>Наборы должностей (для бланков)</legend>
@@ -849,20 +861,31 @@ function PositionSetsEditor(props: {
             }}
           >
             <h4>Выбор должностей{value[modalSet].name ? ` — ${value[modalSet].name}` : ""}</h4>
-            <label className="sed-field">
-              Поиск по справочнику
-              <input
-                autoFocus
-                aria-label="Поиск должности"
-                placeholder="Должность"
-                value={modalQuery}
-                onChange={(e) => {
-                  setModalQuery(e.target.value);
-                  setModalPage(1);
-                }}
-              />
-            </label>
-            <div className="sed-pager" aria-label="Пагинация должностей">
+            <div className="sed-fieldrow">
+              <label className="sed-field">
+                Поиск по справочнику
+                <input
+                  autoFocus
+                  aria-label="Поиск должности"
+                  placeholder="Должность"
+                  value={modalQuery}
+                  onChange={(e) => {
+                    setModalQuery(e.target.value);
+                    setModalPage(1);
+                  }}
+                />
+              </label>
+              <button
+                type="button"
+                className="sed-btn sed-btn--ghost"
+                onClick={() => setModalChecked([])}
+                disabled={modalChecked.length === 0}
+                title="Снять все отметки"
+              >
+                Очистить
+              </button>
+            </div>
+            <div className="sed-pager sed-pager--single" aria-label="Пагинация должностей">
               <button
                 type="button"
                 className="sed-btn"
@@ -927,7 +950,12 @@ function PositionSetsEditor(props: {
                 <thead>
                   <tr>
                     <th scope="col">
-                      <span className="sed-hidden">Выбор</span>
+                      <input
+                        type="checkbox"
+                        aria-label="Выбрать все на странице"
+                        checked={modalPageChecked}
+                        onChange={() => toggleModalPageAll(modalShown, modalPageChecked)}
+                      />
                     </th>
                     <th scope="col">Должность</th>
                   </tr>

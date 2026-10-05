@@ -456,6 +456,32 @@ describe("AdminSettings", () => {
     await waitFor(() => expect(screen.getByText("Должность 600")).toBeInTheDocument());
   });
 
+  // Модалка должностей: шапка выбирает/снимает всю страницу, верхняя
+  // кнопка Очистить дублирует нижнюю.
+  it("модалка: выбрать все на странице и верхняя Очистить", async () => {
+    const titles = Array.from({ length: 60 }, (_, i) => `Должность ${String(i + 1).padStart(2, "0")}`);
+    vi.mocked(getSettings).mockResolvedValue({ ...settings, position_sets: [] });
+    vi.mocked(getAdTitles).mockResolvedValue(titles);
+    vi.mocked(saveSettings).mockImplementation(async (data) => data);
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Справочники" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Справочники" }));
+    fireEvent.click(screen.getByText("Добавить набор"));
+    await waitFor(() => expect(screen.getByLabelText("Название набора 1")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("Выбрать из справочника"));
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
+    // Шапка отмечает всю страницу разом.
+    fireEvent.click(screen.getByRole("checkbox", { name: "Выбрать все на странице" }));
+    expect(screen.getByRole("checkbox", { name: "Выбрать Должность 01" })).toBeChecked();
+    // Верхняя Очистить (дубль нижней) снимает всё.
+    const clears = screen.getAllByRole("button", { name: "Очистить" });
+    expect(clears.length).toBe(2);
+    fireEvent.click(clears[0]);
+    expect(screen.getByRole("checkbox", { name: "Выбрать Должность 01" })).not.toBeChecked();
+    expect(screen.getByRole("button", { name: "ОК" })).toBeDisabled();
+  });
+
   // Модалка должностей: Отмена закрывает без добавления.
   it("модалка должностей: Отмена без добавления", async () => {
     vi.mocked(getSettings).mockResolvedValue(settings);
