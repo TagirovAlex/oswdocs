@@ -387,7 +387,8 @@ describe("AdminSettings", () => {
     await waitFor(() => expect(screen.getByText("Кассир")).toBeInTheDocument());
     expect(screen.queryByText("Сторож")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("checkbox", { name: "Выбрать Кассир" }));
-    fireEvent.click(screen.getByRole("button", { name: "ОК" }));
+    // Верхняя ОК (дубль нижней) подтверждает выбор.
+    fireEvent.click(screen.getAllByRole("button", { name: "ОК" })[0]);
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     fireEvent.click(screen.getByText("Сохранить"));
 
@@ -423,8 +424,8 @@ describe("AdminSettings", () => {
     const gridBack = await screen.findByRole("table", { name: "Должности справочника" });
     await waitFor(() => expect(within(gridBack).getByText("Должность 01")).toBeInTheDocument());
     expect(screen.getByRole("checkbox", { name: "Выбрать Должность 01" })).toBeChecked();
-    // ОК добавляет обе разом.
-    fireEvent.click(screen.getByRole("button", { name: "ОК" }));
+    // ОК добавляет обе разом (нижняя кнопка).
+    fireEvent.click(screen.getAllByRole("button", { name: "ОК" })[1]);
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     fireEvent.click(screen.getByText("Сохранить"));
 
@@ -479,7 +480,10 @@ describe("AdminSettings", () => {
     expect(clears.length).toBe(2);
     fireEvent.click(clears[0]);
     expect(screen.getByRole("checkbox", { name: "Выбрать Должность 01" })).not.toBeChecked();
-    expect(screen.getByRole("button", { name: "ОК" })).toBeDisabled();
+    // Обе ОК недоступны без выбора.
+    for (const ok of screen.getAllByRole("button", { name: "ОК" })) {
+      expect(ok).toBeDisabled();
+    }
   });
 
   // Модалка должностей: Отмена закрывает без добавления.

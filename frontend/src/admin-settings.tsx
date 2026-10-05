@@ -875,6 +875,16 @@ function PositionSetsEditor(props: {
                   }}
                 />
               </label>
+              {/* ОК сверху (дубль нижней): при большом выборе не нужно мотать вниз. */}
+              <button
+                type="button"
+                className="sed-btn"
+                onClick={confirmModalChecked}
+                disabled={modalChecked.length === 0}
+                title="Добавить выбранные в набор"
+              >
+                ОК
+              </button>
               <button
                 type="button"
                 className="sed-btn sed-btn--ghost"
@@ -923,9 +933,6 @@ function PositionSetsEditor(props: {
                   </button>
                 ),
               )}
-              <span role="status">
-                стр {modalPageSafe} из {modalPages}
-              </span>
               <button
                 type="button"
                 className="sed-btn"
@@ -944,6 +951,9 @@ function PositionSetsEditor(props: {
               >
                 Последняя
               </button>
+              <span role="status">
+                стр {modalPageSafe} из {modalPages}
+              </span>
             </div>
             {modalShown.length > 0 && (
               <table className="sed-table" aria-label="Должности справочника">

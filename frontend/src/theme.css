@@ -949,6 +949,20 @@ fieldset textarea {
   overflow-x: auto;
 }
 
+/* Кнопки-номера пейджера модалки: одинаковые квадраты, ровный ряд. */
+.sed-pager--single button[aria-label^="Страница"] {
+  min-width: 32px;
+  padding-left: 6px;
+  padding-right: 6px;
+  text-align: center;
+}
+
+/* Счётчик страниц — в конце ряда, не разбивает кнопки. */
+.sed-pager--single [role="status"] {
+  white-space: nowrap;
+  margin-left: auto;
+}
+
 .sed-pager select {
   border: 1px solid var(--sed-border);
   border-radius: 4px;
