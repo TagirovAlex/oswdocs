@@ -450,8 +450,9 @@ export function RequestCard(props: RequestCardProps) {
     return step.owner_group || "—";
   }
 
-  // Колонка «Исполнитель»: персональным — ФИО как раньше; групповым — всех
-  // участников группы списком без сворачивания, при недоступности — группа.
+  // Колонка «Сотрудник»: персональным — ФИО как раньше; групповым — только
+  // ФИО участников списком без сворачивания (должность — в колонке
+  // «Должность», у участников её не дублируем); при недоступности — группа.
   function stepExecutorsNode(step: RequestStep) {
     if (!isGroupStep(step)) return stepOwnerNode(step);
     const members: AdGroupMember[] =
@@ -460,10 +461,7 @@ export function RequestCard(props: RequestCardProps) {
     return (
       <ul aria-label={`Участники группы ${step.owner_group}`} className="sed-list sed-memberlist">
         {members.map((m) => (
-          <li key={m.sam}>
-            {m.display_name}
-            {m.title ? ` · ${m.title}` : ""}
-          </li>
+          <li key={m.sam}>{m.display_name}</li>
         ))}
       </ul>
     );

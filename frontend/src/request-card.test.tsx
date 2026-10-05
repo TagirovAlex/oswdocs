@@ -294,7 +294,7 @@ describe("RequestCard", () => {
       { id: "SED_STEP_BUH", name: "Бухгалтерия" },
     ]);
     vi.mocked(getAdGroupMembers).mockResolvedValue([
-      { sam: "step.buhgalter", display_name: "Вымышленный Бухгалтер", mail: "", department: "", title: "" },
+      { sam: "step.buhgalter", display_name: "Вымышленный Бухгалтер", mail: "", department: "", title: "Бухгалтер" },
     ]);
     vi.mocked(getRequest).mockResolvedValue({
       ...requestWith("Громов Игорь Олегович", "На согласовании"),
@@ -315,6 +315,8 @@ describe("RequestCard", () => {
     await waitFor(() => expect(screen.getByLabelText("Шаги заявки")).toBeInTheDocument());
     expect(vi.mocked(getAdGroupMembers)).toHaveBeenCalledWith("SED_STEP_BUH");
     await waitFor(() => expect(screen.getByText("Вымышленный Бухгалтер")).toBeInTheDocument());
+    // Должность участника в списке не дублируется (она — в колонке «Должность»).
+    expect(screen.queryByText("Бухгалтер")).not.toBeInTheDocument();
   });
 
   // Регресс ревью: персональный шаг «замена руководителя»
