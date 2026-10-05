@@ -11,6 +11,7 @@ import {
   deleteAttachment,
   deleteRequest,
   finishRequest,
+  getAdGroupMembers,
   getAttachments,
   getRequest,
   getStepGroups,
@@ -39,6 +40,7 @@ vi.mock("./requests-client", async (importOriginal) => {
     deleteAttachment: vi.fn(),
     printRequest: vi.fn(),
     getStepGroups: vi.fn(),
+    getAdGroupMembers: vi.fn(),
   };
 });
 
@@ -136,6 +138,9 @@ beforeEach(() => {
   vi.mocked(getStepGroups).mockReset();
   // Справочник групп по умолчанию пуст: в должности — код группы.
   vi.mocked(getStepGroups).mockResolvedValue([]);
+  vi.mocked(getAdGroupMembers).mockReset();
+  // Состав по умолчанию недоступен: в сотруднике — название/код группы.
+  vi.mocked(getAdGroupMembers).mockRejectedValue(new ApiHttpError(503, "AD недоступен"));
   vi.mocked(me).mockReset();
   // По умолчанию сессии нет: кнопок удаления у не-админов нет (старое поведение).
   vi.mocked(me).mockRejectedValue(new ApiHttpError(401, "Нет токена"));
@@ -280,6 +285,36 @@ describe("RequestCard", () => {
     renderCard();
     await waitFor(() => expect(screen.getByLabelText("Шаги заявки")).toBeInTheDocument());
     expect(screen.getByText("Бухгалтерия")).toBeInTheDocument();
+  });
+
+  // Сотрудник — состав группы из AD, даже когда наименование группы известно
+  // (регрессия: условие !owner_name пропускало загрузку состава).
+  it("сотрудник — состав группы при известном наименовании", async () => {
+    vi.mocked(getStepGroups).mockResolvedValue([
+      { id: "SED_STEP_BUH", name: "Бухгалтерия" },
+    ]);
+    vi.mocked(getAdGroupMembers).mockResolvedValue([
+      { sam: "step.buhgalter", display_name: "Вымышленный Бухгалтер", mail: "", department: "", title: "" },
+    ]);
+    vi.mocked(getRequest).mockResolvedValue({
+      ...requestWith("Громов Игорь Олегович", "На согласовании"),
+      steps: [
+        {
+          order: 1,
+          owner_group: "SED_STEP_BUH",
+          resolver: "by_group",
+          owner_name: "Бухгалтерия",
+          can_act: false,
+          status: "ожидает",
+          expires_at: "2026-10-05T10:00:00+00:00",
+        },
+      ],
+    });
+
+    renderCard();
+    await waitFor(() => expect(screen.getByLabelText("Шаги заявки")).toBeInTheDocument());
+    expect(vi.mocked(getAdGroupMembers)).toHaveBeenCalledWith("SED_STEP_BUH");
+    await waitFor(() => expect(screen.getByText("Вымышленный Бухгалтер")).toBeInTheDocument());
   });
 
   // Регресс ревью: персональный шаг «замена руководителя»

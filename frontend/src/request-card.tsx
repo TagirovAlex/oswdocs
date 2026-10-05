@@ -277,12 +277,15 @@ export function RequestCard(props: RequestCardProps) {
   // Состав групповых шагов и должности персональных — из уже собранной
   // стыковки 1С+АД (без новых эндпоинтов): члены группы — из AD-состава,
   // должность исполнителя — из карточки сотрудника по employee_key шага.
+  // Состав запрашиваем для ВСЕХ групповых шагов (критерий — как в isGroupStep):
+  // наличие owner_name (наименования из справочника) его не отменяет, иначе
+  // в «Сотруднике» остаётся название группы вместо людей.
   useEffect(() => {
     if (!card) return;
     let alive = true;
     const groups = new Set<string>();
     card.steps.forEach((s) => {
-      if (!s.owner_name && s.resolver !== "by_user" && s.owner_group) groups.add(s.owner_group);
+      if (!s.assignee && s.resolver !== "by_user" && s.owner_group) groups.add(s.owner_group);
     });
     groups.forEach((group) => {
       getAdGroupMembers(group)
