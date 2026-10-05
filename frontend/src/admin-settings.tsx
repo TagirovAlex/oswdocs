@@ -669,15 +669,57 @@ function DocTemplatesEditor(props: {
 
 // Редактор наборов должностей (position_sets): именованный набор + список
 // должностей; подсказки — титулы AD из кэша (datalist); добавить/удалить.
+// Массовый выбор — модалка «Выбрать из справочника» (поиск + чекбоксы,
+// нижняя панель выбранных, ОК добавляет всех; как выбор исполнителей).
 function PositionSetsEditor(props: {
   value: PositionSet[];
   titles: string[];
   onChange: (v: PositionSet[]) => void;
 }) {
   const { value, titles, onChange } = props;
+  // Модалка выбора: индекс набора, строка поиска, отмеченные (порядок кликов).
+  const [modalSet, setModalSet] = useState<number | null>(null);
+  const [modalQuery, setModalQuery] = useState<string>("");
+  const [modalChecked, setModalChecked] = useState<string[]>([]);
   function updateSet(index: number, patch: Partial<PositionSet>): void {
     onChange(value.map((s, i) => (i === index ? { ...s, ...patch } : s)));
   }
+  function openModal(index: number): void {
+    setModalSet(index);
+    setModalQuery("");
+    setModalChecked([]);
+  }
+  function closeModal(): void {
+    setModalSet(null);
+    setModalQuery("");
+    setModalChecked([]);
+  }
+  function toggleModalChecked(title: string): void {
+    setModalChecked((prev) =>
+      prev.includes(title) ? prev.filter((t) => t !== title) : [...prev, title],
+    );
+  }
+  // ОК модалки: добавить отмеченные в набор (без дублей), закрыть.
+  function confirmModalChecked(): void {
+    if (modalSet === null || modalChecked.length === 0) return;
+    const set = value[modalSet];
+    if (!set) {
+      closeModal();
+      return;
+    }
+    const merged = [...set.positions];
+    modalChecked.forEach((title) => {
+      if (!merged.includes(title)) merged.push(title);
+    });
+    updateSet(modalSet, { positions: merged });
+    closeModal();
+  }
+  // Поиск по справочнику (регистр не важен); выдачу ограничиваем.
+  const MODAL_LIMIT = 200;
+  const modalMatches = titles.filter((t) =>
+    t.toLowerCase().includes(modalQuery.trim().toLowerCase()),
+  );
+  const modalShown = modalMatches.slice(0, MODAL_LIMIT);
   return (
     <fieldset>
       <legend>Наборы должностей (для бланков)</legend>
@@ -721,12 +763,23 @@ function PositionSetsEditor(props: {
             </div>
           ))}
           <div className="sed-toolbar sed-mt-8">
+            <button type="button" className="sed-btn" onClick={() => openModal(i)}>
+              Выбрать из справочника
+            </button>
             <button
               type="button"
               className="sed-btn"
               onClick={() => updateSet(i, { positions: [...set.positions, ""] })}
             >
               Добавить должность
+            </button>
+            <button
+              type="button"
+              className="sed-btn sed-btn--ghost"
+              onClick={() => updateSet(i, { positions: [] })}
+              disabled={set.positions.length === 0}
+            >
+              Очистить список
             </button>
             <button
               type="button"
@@ -752,6 +805,108 @@ function PositionSetsEditor(props: {
           Добавить набор
         </button>
       </div>
+      {modalSet !== null && value[modalSet] && (
+        <div className="sed-modal-backdrop" onClick={closeModal}>
+          <div
+            className="sed-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Выбор должностей — ${value[modalSet].name || "набор"}`}
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") closeModal();
+            }}
+          >
+            <h4>Выбор должностей{value[modalSet].name ? ` — ${value[modalSet].name}` : ""}</h4>
+            <label className="sed-field">
+              Поиск по справочнику
+              <input
+                autoFocus
+                aria-label="Поиск должности"
+                placeholder="Должность"
+                value={modalQuery}
+                onChange={(e) => setModalQuery(e.target.value)}
+              />
+            </label>
+            {modalMatches.length > MODAL_LIMIT && (
+              <div className="sed-note">
+                Показаны первые {MODAL_LIMIT} — уточните поиск
+              </div>
+            )}
+            {modalShown.length > 0 && (
+              <table className="sed-table" aria-label="Должности справочника">
+                <thead>
+                  <tr>
+                    <th scope="col">
+                      <span className="sed-hidden">Выбор</span>
+                    </th>
+                    <th scope="col">Должность</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {modalShown.map((title) => (
+                    <tr key={title}>
+                      <td>
+                        <input
+                          type="checkbox"
+                          aria-label={`Выбрать ${title}`}
+                          checked={modalChecked.includes(title)}
+                          onChange={() => toggleModalChecked(title)}
+                        />
+                      </td>
+                      <td>{title}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+            {modalShown.length === 0 && (
+              <div className="sed-note">Ничего не найдено</div>
+            )}
+            <div className="sed-block" aria-label="Выбранные должности">
+              {modalChecked.length === 0 && <div className="sed-note">Не выбрано</div>}
+              <ul className="sed-list">
+                {modalChecked.map((title) => (
+                  <li key={title}>
+                    {title}{" "}
+                    <button
+                      type="button"
+                      aria-label={`Убрать ${title}`}
+                      title="Убрать из выбранных"
+                      onClick={() => toggleModalChecked(title)}
+                      className="sed-btn sed-btn--ghost"
+                    >
+                      Убрать
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+            <div className="sed-toolbar sed-mt-8">
+              <button
+                type="button"
+                className="sed-btn sed-btn--ghost"
+                onClick={() => setModalChecked([])}
+                disabled={modalChecked.length === 0}
+              >
+                Очистить
+              </button>
+              <span className="sed-toolbar__spacer" />
+              <button
+                type="button"
+                className="sed-btn"
+                onClick={confirmModalChecked}
+                disabled={modalChecked.length === 0}
+              >
+                ОК
+              </button>
+              <button type="button" className="sed-btn sed-btn--ghost" onClick={closeModal}>
+                Отмена
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </fieldset>
   );
 }

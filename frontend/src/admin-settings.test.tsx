@@ -354,6 +354,72 @@ describe("AdminSettings", () => {
     expect(sent.doc_templates?.[0]?.position_set).toBe("Руководители");
   });
 
+  // Кнопка очистки списка должностей набора.
+  it("очищает список должностей набора", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+    vi.mocked(saveSettings).mockImplementation(async (data) => data);
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Справочники" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Справочники" }));
+    await waitFor(() => expect(screen.getByLabelText("Название набора 1")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("Очистить список"));
+    fireEvent.click(screen.getByText("Сохранить"));
+
+    await waitFor(() => expect(vi.mocked(saveSettings)).toHaveBeenCalled());
+    const sent = vi.mocked(saveSettings).mock.calls[0][0];
+    expect(sent.position_sets?.[0]?.positions).toEqual([]);
+  });
+
+  // Модалка должностей: поиск, чекбоксы, ОК добавляет выбранные в набор.
+  it("модалка добавляет должности из справочника в набор", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+    vi.mocked(getAdTitles).mockResolvedValue(["Бухгалтер", "Кассир", "Сторож"]);
+    vi.mocked(saveSettings).mockImplementation(async (data) => data);
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Справочники" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Справочники" }));
+    await waitFor(() => expect(screen.getByLabelText("Название набора 1")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("Выбрать из справочника"));
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
+    fireEvent.change(screen.getByLabelText("Поиск должности"), { target: { value: "ир" } });
+    await waitFor(() => expect(screen.getByText("Кассир")).toBeInTheDocument());
+    expect(screen.queryByText("Сторож")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Выбрать Кассир" }));
+    fireEvent.click(screen.getByRole("button", { name: "ОК" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    fireEvent.click(screen.getByText("Сохранить"));
+
+    await waitFor(() => expect(vi.mocked(saveSettings)).toHaveBeenCalled());
+    const sent = vi.mocked(saveSettings).mock.calls[0][0];
+    expect(sent.position_sets?.[0]?.positions).toContain("Кассир");
+  });
+
+  // Модалка должностей: Отмена закрывает без добавления.
+  it("модалка должностей: Отмена без добавления", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+    vi.mocked(getAdTitles).mockResolvedValue(["Бухгалтер"]);
+    vi.mocked(saveSettings).mockImplementation(async (data) => data);
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Справочники" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Справочники" }));
+    await waitFor(() => expect(screen.getByLabelText("Название набора 1")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("Выбрать из справочника"));
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("checkbox", { name: "Выбрать Бухгалтер" }));
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: "Отмена" }),
+    );
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    fireEvent.click(screen.getByText("Сохранить"));
+
+    await waitFor(() => expect(vi.mocked(saveSettings)).toHaveBeenCalled());
+    const sent = vi.mocked(saveSettings).mock.calls[0][0];
+    expect(sent.position_sets?.[0]?.positions).toEqual(["Директор"]);
+  });
+
   // Ручной синк состава групп: ошибка API — понятный текст.
   it("ошибка синка состава групп показывает текст", async () => {
     vi.mocked(getSettings).mockResolvedValue(settings);
