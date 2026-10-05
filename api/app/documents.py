@@ -273,11 +273,17 @@ def _can_view(request: object, user: CurrentUser) -> bool:
     )
 
 
-def _bypass_body(request: object, doc_templates: object) -> tuple[str | None, str | None]:
+def _bypass_body(
+    request: object, doc_templates: object, position_sets: object = None
+) -> tuple[str | None, str | None]:
     """(тело, имя .docx-файла) бегунка: шаблон doc_templates по службе+категории
-    (body — текстовый фолбэк, file — настоящий .docx-шаблон), иначе ручной
-    конструктор из шагов; нет шаблона и нет шагов — (None, None) (422)."""
-    template = find_doc_template(doc_templates, request.department, request.category)
+    и набору должностей сотрудника (body — текстовый фолбэк, file — настоящий
+    .docx-шаблон), иначе ручной конструктор из шагов; нет шаблона и нет шагов —
+    (None, None) (422)."""
+    template = find_doc_template(
+        doc_templates, request.department, request.category,
+        getattr(request, "position", None), position_sets,
+    )
     if template is not None:
         return (template.get("body") or ""), (template.get("file") or None)
     if not request.steps:
@@ -304,11 +310,12 @@ def print_bypass(
     try:
         request = _get_request_or_404(store, request_id)
         doc_templates = read_setting_value(settings_store, "doc_templates")
+        position_sets = read_setting_value(settings_store, "position_sets")
     except RequestsUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except SettingsUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    body, template_file = _bypass_body(request, doc_templates)
+    body, template_file = _bypass_body(request, doc_templates, position_sets)
     if body is None and template_file is None:
         raise HTTPException(
             status_code=422,

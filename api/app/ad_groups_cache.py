@@ -47,6 +47,10 @@ class GroupsCacheStore(Protocol):
         """Перезаписать состав группы целиком (метка синка — сейчас)."""
         ...  # pragma: no cover
 
+    def titles(self) -> list[str]:
+        """Все должности (title) из кэша, уникальные, сортированные (для наборов)."""
+        ...  # pragma: no cover
+
 
 class InMemoryGroupsCacheStore:
     """Офлайн-хранилище состава (dict), интерфейс GroupsCacheStore."""
@@ -66,6 +70,11 @@ class InMemoryGroupsCacheStore:
     def save(self, group: str, members: list[CachedMember]) -> None:
         self._members[group] = list(members)
         self._synced.add(group)
+
+    def titles(self) -> list[str]:
+        return sorted(
+            {m.title.strip() for members in self._members.values() for m in members if (m.title or "").strip()}
+        )
 
 
 class DbGroupsCacheStore:
@@ -102,6 +111,13 @@ class DbGroupsCacheStore:
         ON CONFLICT (group_name) DO UPDATE SET
             synced_at = EXCLUDED.synced_at,
             member_count = EXCLUDED.member_count
+        """
+    )
+    _SELECT_TITLES = text(
+        """
+        SELECT DISTINCT title FROM ad_group_members
+        WHERE title IS NOT NULL AND title <> ''
+        ORDER BY title
         """
     )
 
@@ -167,6 +183,16 @@ class DbGroupsCacheStore:
             raise GroupsCacheUnavailable(
                 f"Хранилище состава групп недоступно: {exc}"
             ) from exc
+
+    def titles(self) -> list[str]:
+        try:
+            with self._session_factory() as session:
+                rows = session.execute(self._SELECT_TITLES).all()
+        except SQLAlchemyError as exc:
+            raise GroupsCacheUnavailable(
+                f"Хранилище состава групп недоступно: {exc}"
+            ) from exc
+        return [row[0] for row in rows]
 
 
 _db_groups_cache_store: DbGroupsCacheStore | None = None

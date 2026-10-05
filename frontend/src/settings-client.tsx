@@ -39,6 +39,15 @@ export interface SettingsDocTemplate {
   body: string;
   // Имя .docx-файла бланка в FILES_DIR/templates/; null/отсутствует — текстовый body.
   file?: string | null;
+  // Набор должностей (position_sets): бланк для этих должностей;
+  // null/пусто — бланк по умолчанию.
+  position_set?: string | null;
+}
+
+// Именованный набор должностей (settings.position_sets): название + титулы AD.
+export interface PositionSet {
+  name: string;
+  positions: string[];
 }
 
 // Шаблон письма (settings.mail_templates[]): код события + тема + HTML-тело.
@@ -150,6 +159,8 @@ export interface SettingsData {
   doc_templates: SettingsDocTemplate[] | null;
   // Шаблоны писем (mail_templates).
   mail_templates: SettingsMailTemplate[] | null;
+  // Именованные наборы должностей для привязки бланков (position_sets).
+  position_sets: PositionSet[] | null;
   // Подключения к базам 1С (onec_bases; пароль маскируется в GET).
   onec_bases: SettingsOnecBase[] | null;
   // Дата/время последней синхронизации предприятий (read-only, пишет синхронизация).
@@ -196,6 +207,8 @@ export interface ContentSettingsData {
   doc_templates: SettingsDocTemplate[] | null;
   // Шаблоны писем (mail_templates).
   mail_templates: SettingsMailTemplate[] | null;
+  // Именованные наборы должностей для привязки бланков (position_sets).
+  position_sets: PositionSet[] | null;
   // Сколько сотрудников на страницу справочника (directory_page_size).
   directory_page_size?: number | null;
 }
@@ -318,6 +331,29 @@ export async function syncAdGroups(): Promise<AdGroupsSyncResult> {
     throw new ApiHttpError(res.status, "Ошибка синхронизации состава групп");
   }
   return (await res.json()) as AdGroupsSyncResult;
+}
+
+// GET /api/ad/titles: должности (title) из кэша состава групп AD —
+// подсказки для наборов должностей бланков (руководитель ОК + админ).
+export async function getAdTitles(): Promise<string[]> {
+  const token = getToken();
+  if (!token) {
+    throw new ApiHttpError(401, "Нет токена");
+  }
+  let res: Response;
+  try {
+    res = await fetch("/api/ad/titles", {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+  } catch {
+    throw new Error("Сервис недоступен");
+  }
+  if (res.status === 401) throw new ApiHttpError(401, "Сессия истекла");
+  if (res.status === 403) throw new ApiHttpError(403, "Доступ запрещён");
+  if (res.status === 503) throw new ApiHttpError(503, "Сервис недоступен");
+  if (!res.ok) throw new ApiHttpError(res.status, "Ошибка загрузки должностей");
+  const data = (await res.json()) as { items?: unknown };
+  return Array.isArray(data.items) ? data.items.filter((t): t is string => typeof t === "string") : [];
 }
 
 // Запрос к /api/doc-types с Bearer-токеном (POST/PATCH/DELETE — только админ).

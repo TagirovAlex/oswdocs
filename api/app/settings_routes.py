@@ -72,6 +72,7 @@ CONTENT_KEYS: tuple[str, ...] = (
     "templates",
     "doc_templates",
     "mail_templates",
+    "position_sets",
 )
 
 INFRA_KEYS: tuple[str, ...] = (
@@ -559,6 +560,20 @@ class DocTemplateItem(BaseModel):
         default=None,
         description="Имя .docx-файла шаблона в FILES_DIR/templates/ (необязательно)",
     )
+    position_set: str | None = Field(
+        default=None,
+        description="Набор должностей (position_sets) — бланк для этих должностей; пусто — по умолчанию",
+    )
+
+
+class PositionSetItem(BaseModel):
+    """Именованный набор должностей для привязки бланков: название + титулы
+    AD (как в кэше ad_group_members; сравнение — без учёта регистра/пробелов)."""
+
+    name: str = Field(description="Название набора (ссылка из бланка)")
+    positions: list[str] = Field(
+        default_factory=list, description="Должности (title из AD)"
+    )
 
 
 class MailTemplateItem(BaseModel):
@@ -752,6 +767,9 @@ class SettingsPayload(BaseModel):
     mail_templates: list[MailTemplateItem] | None = Field(
         default=None, description="Шаблоны писем (код события→тема+HTML-тело)"
     )
+    position_sets: list[PositionSetItem] | None = Field(
+        default=None, description="Наборы должностей для привязки бланков"
+    )
     onec_bases: list[OnecBaseItem] | None = Field(
         default=None, description="Подключения к базам 1С (OData, пароль маскируется)"
     )
@@ -806,6 +824,9 @@ class ContentSettingsPayload(BaseModel):
     )
     mail_templates: list[MailTemplateItem] | None = Field(
         default=None, description="Шаблоны писем (код события→тема+HTML-тело)"
+    )
+    position_sets: list[PositionSetItem] | None = Field(
+        default=None, description="Наборы должностей для привязки бланков"
     )
 
 

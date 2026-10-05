@@ -26,7 +26,8 @@
   `search_enterprise_page` (страница + total по базам).
 - `employee_sync.py` — локальная таблица сотрудников (миграция 0004), синк постранично.
 - `ad_reader.py` / `ad_sync.py` / `link.py` / `link_store.py` — AD (LDAP), связка 1С↔AD.
-- `settings_routes.py` — настройки (GET/PUT /settings, /settings/content), doc_types CRUD, step-groups;
+- `settings_routes.py` — настройки (GET/PUT /settings, /settings/content), doc_types CRUD, step-groups,
+  именованные наборы должностей (`position_sets`) и привязка бланков (`DocTemplateItem.position_set`);
   файлы шаблонов бегунков (задача H): `POST/GET/DELETE /settings/doc-templates/files/{upload|download|delete|preview}`,
   хранение `FILES_DIR/templates/`, `DocTemplateItem.file` (имя .docx, необязательно).
 - `documents.py` — печать бегунка (вариант 1, pdf_b64), документы; `_bypass_body` возвращает

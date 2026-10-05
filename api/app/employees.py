@@ -51,6 +51,7 @@ from .resolver import (
 from .settings_routes import (
     DbSettingsStore,
     SettingsUnavailable,
+    _require_content_admin,
     get_settings_store,
     is_group_allowed_with_settings,
     read_setting_value,
@@ -643,6 +644,25 @@ def ad_group_members(
             for u in members
         ]
     }
+
+
+@router.get("/ad/titles")
+def ad_titles(
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+    cache_store: GroupsCacheStore = Depends(get_groups_cache_store),
+) -> dict:
+    """Должности из кэша состава групп (для наборов должностей бланков):
+    руководитель ОК + админ. Пусто — синк состава ещё не выполнялся."""
+    settings.ensure_read_only()
+    _require_content_admin(user)
+    try:
+        items = cache_store.titles()
+    except GroupsCacheUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    return {"items": items}
 
 
 @router.post("/ad/groups/sync")

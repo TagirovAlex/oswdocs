@@ -102,6 +102,7 @@ CONTRACT_VALUES = {
         {"code": "ENT_PRIMER_2", "name": "Предприятие Пример-2"},
     ],
     "allowed_ad_groups": ["SED_HR", "SED_ADMINS", "SED_STEP_EXEC"],
+    "position_sets": None,
     "position_to_category": {"Старший вымышленный кассир": "линейный"},
     "position_escalation": {},
     "templates": [
@@ -206,6 +207,9 @@ UPDATED_VALUES = {
     "schedule_enterprises_sync": None,
     "schedule_ad_links_sync": None,
     "schedule_ad_groups_sync": None,
+    "position_sets": [
+        {"name": "Руководители", "positions": ["Директор"]},
+    ],
 }
 
 
@@ -740,6 +744,20 @@ def test_settings_put_groups_with_names_422(client, admin_headers, mock_store):
         headers=admin_headers,
     ).status_code == 422
     assert mock_store._data["allowed_ad_groups"] == before
+
+
+def test_settings_content_put_position_sets_200(client, hr_admin_headers, mock_store):
+    """Наборы должностей: PUT объектов {name, positions} — 200, в БД сид-формат."""
+    sets = [
+        {"name": "Руководители", "positions": ["Директор", "Главный бухгалтер"]},
+        {"name": "Линейные", "positions": []},
+    ]
+    response = client.put(
+        "/settings/content", json={"position_sets": sets}, headers=hr_admin_headers
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["position_sets"] == sets
+    assert json.loads(mock_store._data["position_sets"]) == sets
 
 
 def test_settings_content_put_ignores_infra_keys(client, hr_admin_headers, mock_store):

@@ -17,6 +17,7 @@ import {
   getSettingsContent,
   listBackups,
   previewDocTemplateFile,
+  getAdTitles,
   runBackup,
   saveArchiveSettings,
   saveSettings,
@@ -30,6 +31,7 @@ import type {
   ArchiveSettingsData,
   BackupFile,
   ContentSettingsData,
+  PositionSet,
   ScheduleReglament,
   SettingsData,
   SettingsDocTemplate,
@@ -449,8 +451,12 @@ function TemplatesEditor(props: { value: SettingsTemplate[]; onChange: (v: Setti
 // (Jinja, текстовый фолбэк, когда file не задан), либо .docx-файл (загрузка/
 // скачивание/замена/удаление + предпросмотр рендера на тестовых данных).
 // Файл — в FILES_DIR/templates/, в settings хранится только имя (file).
-function DocTemplatesEditor(props: { value: SettingsDocTemplate[]; onChange: (v: SettingsDocTemplate[]) => void }) {
-  const { value, onChange } = props;
+function DocTemplatesEditor(props: {
+  value: SettingsDocTemplate[];
+  positionSets: PositionSet[];
+  onChange: (v: SettingsDocTemplate[]) => void;
+}) {
+  const { value, positionSets, onChange } = props;
   // Скрытые input-ы загрузки .docx (по индексу карточки): общие для «Загрузить
   // .docx» и «Заменить» (в один момент в карточке видна одна из кнопок).
   const fileInputs = useRef<(HTMLInputElement | null)[]>([]);
@@ -543,6 +549,21 @@ function DocTemplatesEditor(props: { value: SettingsDocTemplate[]; onChange: (v:
                 value={doc.category}
                 onChange={(e) => update(i, { category: e.target.value })}
               />
+            </label>
+            <label className="sed-field">
+              Набор должностей
+              <select
+                aria-label={`Набор должностей бланка ${i + 1}`}
+                value={doc.position_set ?? ""}
+                onChange={(e) => update(i, { position_set: e.target.value || null })}
+              >
+                <option value="">— по умолчанию —</option>
+                {positionSets.map((s) => (
+                  <option key={s.name} value={s.name}>
+                    {s.name || "— без названия —"}
+                  </option>
+                ))}
+              </select>
             </label>
             {fileName ? (
               <div className="sed-mt-8">
@@ -640,6 +661,95 @@ function DocTemplatesEditor(props: { value: SettingsDocTemplate[]; onChange: (v:
           onClick={() => onChange([...value, { service: "", category: "", body: "" }])}
         >
           Добавить бланк
+        </button>
+      </div>
+    </fieldset>
+  );
+}
+
+// Редактор наборов должностей (position_sets): именованный набор + список
+// должностей; подсказки — титулы AD из кэша (datalist); добавить/удалить.
+function PositionSetsEditor(props: {
+  value: PositionSet[];
+  titles: string[];
+  onChange: (v: PositionSet[]) => void;
+}) {
+  const { value, titles, onChange } = props;
+  function updateSet(index: number, patch: Partial<PositionSet>): void {
+    onChange(value.map((s, i) => (i === index ? { ...s, ...patch } : s)));
+  }
+  return (
+    <fieldset>
+      <legend>Наборы должностей (для бланков)</legend>
+      <div className="sed-note">
+        Бланк ссылается на набор по названию; должность сотрудника ищется
+        в наборе без учёта регистра. Пустой набор ничему не соответствует.
+      </div>
+      {value.length === 0 && <div className="sed-note">не задано</div>}
+      {value.map((set, i) => (
+        <div key={i} className="sed-editor-card">
+          <label className="sed-field">
+            Название набора
+            <input
+              aria-label={`Название набора ${i + 1}`}
+              value={set.name}
+              onChange={(e) => updateSet(i, { name: e.target.value })}
+            />
+          </label>
+          {set.positions.map((pos, j) => (
+            <div key={j} className="sed-editor-row sed-editor-row--center">
+              <input
+                aria-label={`Должность ${i + 1}.${j + 1}`}
+                placeholder="Должность (title из AD)"
+                list="sed-ad-titles"
+                value={pos}
+                onChange={(e) =>
+                  updateSet(i, {
+                    positions: set.positions.map((p, k) => (k === j ? e.target.value : p)),
+                  })
+                }
+              />
+              <button
+                type="button"
+                className="sed-btn sed-btn--ghost"
+                onClick={() =>
+                  updateSet(i, { positions: set.positions.filter((_, k) => k !== j) })
+                }
+              >
+                Удалить должность
+              </button>
+            </div>
+          ))}
+          <div className="sed-toolbar sed-mt-8">
+            <button
+              type="button"
+              className="sed-btn"
+              onClick={() => updateSet(i, { positions: [...set.positions, ""] })}
+            >
+              Добавить должность
+            </button>
+            <button
+              type="button"
+              className="sed-btn sed-btn--ghost"
+              onClick={() => onChange(value.filter((_, k) => k !== i))}
+            >
+              Удалить набор
+            </button>
+          </div>
+        </div>
+      ))}
+      <datalist id="sed-ad-titles">
+        {titles.map((t) => (
+          <option key={t} value={t} />
+        ))}
+      </datalist>
+      <div className="sed-toolbar sed-mt-12">
+        <button
+          type="button"
+          className="sed-btn"
+          onClick={() => onChange([...value, { name: "", positions: [] }])}
+        >
+          Добавить набор
         </button>
       </div>
     </fieldset>
@@ -1211,6 +1321,9 @@ export function AdminSettings(props: AdminSettingsProps) {
   const [templates, setTemplates] = useState<SettingsTemplate[]>([]);
   const [docTemplates, setDocTemplates] = useState<SettingsDocTemplate[]>([]);
   const [mailTemplates, setMailTemplates] = useState<SettingsMailTemplate[]>([]);
+  // Наборы должностей для привязки бланков + титулы AD для подсказок.
+  const [positionSets, setPositionSets] = useState<PositionSet[]>([]);
+  const [adTitles, setAdTitles] = useState<string[]>([]);
   // Базы 1С: поля формы + параллельный признак «пароль задан» для placeholder.
   const [onecBases, setOnecBases] = useState<SettingsOnecBase[]>([]);
   const [onecBasesSet, setOnecBasesSet] = useState<boolean[]>([]);
@@ -1280,6 +1393,14 @@ export function AdminSettings(props: AdminSettingsProps) {
         setTemplates(data.templates ?? []);
         setDocTemplates(data.doc_templates ?? []);
         setMailTemplates(data.mail_templates ?? []);
+        setPositionSets(data.position_sets ?? []);
+        getAdTitles()
+          .then((titles) => {
+            if (alive) setAdTitles(titles);
+          })
+          .catch(() => {
+            if (alive) setAdTitles([]);
+          });
         setError("");
       })
       .catch((e: unknown) => {
@@ -1319,6 +1440,7 @@ export function AdminSettings(props: AdminSettingsProps) {
       templates,
       doc_templates: docTemplates,
       mail_templates: mailTemplates,
+      position_sets: positionSets,
     };
     setBusy(true);
     try {
@@ -1453,6 +1575,7 @@ export function AdminSettings(props: AdminSettingsProps) {
         <>
           <EnterprisesEditor value={enterprises} onChange={setEnterprises} />
           <GroupsEditor value={adGroups} onChange={setAdGroups} />
+          <PositionSetsEditor value={positionSets} titles={adTitles} onChange={setPositionSets} />
           {/* Ручной синк состава групп AD в кэш — только админ (эндпоинт 403 остальным). */}
           {isAdmin && (
             <div className="sed-toolbar sed-mt-8">
@@ -1472,7 +1595,7 @@ export function AdminSettings(props: AdminSettingsProps) {
       {activeTab === "Шаблоны" && (
         <>
           <TemplatesEditor value={templates} onChange={setTemplates} />
-          <DocTemplatesEditor value={docTemplates} onChange={setDocTemplates} />
+          <DocTemplatesEditor value={docTemplates} positionSets={positionSets} onChange={setDocTemplates} />
           <MailTemplatesEditor value={mailTemplates} onChange={setMailTemplates} />
         </>
       )}

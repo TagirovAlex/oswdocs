@@ -236,19 +236,64 @@ class BypassResult:
     qr_payload: str = ""
 
 
-def find_doc_template(
-    templates: object, service: str, category: str | None
-) -> dict | None:
-    """Подбор шаблона бегунка по службе+категории (поля 1С); нет — None."""
-    if not category or not isinstance(templates, list):
-        return None
-    for item in templates:
+def _norm_position(value: object) -> str:
+    """Должность к сравнению: регистр/пробелы не различаются (как _norm ФИО)."""
+    return " ".join(str(value or "").strip().lower().split())
+
+
+def _set_positions(position_sets: object, set_name: object) -> list[str]:
+    """Должности именованного набора (position_sets): нормализованные, без пустых."""
+    if not set_name or not isinstance(position_sets, list):
+        return []
+    wanted = _norm_position(set_name)
+    for item in position_sets:
         if (
             isinstance(item, dict)
-            and item.get("service") == service
-            and item.get("category") == category
-            and ((item.get("body") or "").strip() or (item.get("file") or "").strip())
+            and _norm_position(item.get("name")) == wanted
+            and isinstance(item.get("positions"), list)
         ):
+            return [
+                norm
+                for norm in (_norm_position(p) for p in item["positions"])
+                if norm
+            ]
+    return []
+
+
+def find_doc_template(
+    templates: object,
+    service: str,
+    category: str | None,
+    position: object = None,
+    position_sets: object = None,
+) -> dict | None:
+    """Подбор шаблона бегунка: служба+категория (поля 1С), затем набор должностей.
+
+    Среди подходящих по службе+категории (с непустым body/file) приоритет —
+    бланку, чей набор (position_set) содержит должность сотрудника; иначе —
+    бланк без набора (по умолчанию); иначе None. Без должности — прежнее
+    поведение (первый подходящий).
+    """
+    if not category or not isinstance(templates, list):
+        return None
+    matched = [
+        item
+        for item in templates
+        if isinstance(item, dict)
+        and item.get("service") == service
+        and item.get("category") == category
+        and ((item.get("body") or "").strip() or (item.get("file") or "").strip())
+    ]
+    if not matched:
+        return None
+    wanted = _norm_position(position)
+    if not wanted:
+        return matched[0]
+    for item in matched:
+        if wanted in _set_positions(position_sets, item.get("position_set")):
+            return item
+    for item in matched:
+        if not (item.get("position_set") or "").strip():
             return item
     return None
 

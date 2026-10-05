@@ -187,10 +187,11 @@ describe("SedLayout", () => {
     ]);
 
     renderWithTheme("hr");
-    await waitFor(() => expect(screen.getByText("К исполнению")).toBeInTheDocument());
+    const tree = await screen.findByLabelText("Папки заявок");
+    await waitFor(() => expect(within(tree).getByText("К исполнению")).toBeInTheDocument());
     // В «На согласовании» их нет, после перехода в «К исполнению» — обе.
     expect(screen.queryByText("REQ-0001")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByText("К исполнению"));
+    fireEvent.click(within(tree).getByText("К исполнению"));
     await waitFor(() => expect(screen.getByText("REQ-0001")).toBeInTheDocument());
     expect(screen.getByText("REQ-0002")).toBeInTheDocument();
   });

@@ -11,6 +11,7 @@ import {
   deleteDocTemplateFile,
   downloadBackup,
   downloadDocTemplateFile,
+  getAdTitles,
   getArchiveSettings,
   getSettings,
   getSettingsContent,
@@ -34,6 +35,7 @@ vi.mock("./settings-client", () => ({
   saveSettingsContent: vi.fn(),
   syncEnterprises: vi.fn(),
   syncAdGroups: vi.fn(),
+  getAdTitles: vi.fn(),
   getArchiveSettings: vi.fn(),
   saveArchiveSettings: vi.fn(),
   listBackups: vi.fn(),
@@ -70,6 +72,7 @@ const settings: SettingsData = {
       steps: [{ owner_group: "SED_HR" }, { owner_group: "SED_Vlastelcy", require_comment: true }],
     },
   ],
+  position_sets: [{ name: "Руководители", positions: ["Директор"] }],
   doc_templates: [
     { service: "Бухгалтерия", category: "Увольнение", body: "Бегунок: {{ fio }}" },
   ],
@@ -109,6 +112,7 @@ const contentOnly: SettingsData = {
   allowed_ad_groups: ["SED_HR"],
   position_to_category: { "Руководитель": "Руководители" },
   position_escalation: {},
+  position_sets: [],
   templates: [],
   doc_templates: [],
   mail_templates: [],
@@ -134,6 +138,8 @@ beforeEach(() => {
   vi.mocked(saveSettingsContent).mockReset();
   vi.mocked(syncEnterprises).mockReset();
   vi.mocked(syncAdGroups).mockReset();
+  vi.mocked(getAdTitles).mockReset();
+  vi.mocked(getAdTitles).mockResolvedValue([]);
   vi.mocked(getArchiveSettings).mockReset();
   vi.mocked(saveArchiveSettings).mockReset();
   vi.mocked(listBackups).mockReset();
@@ -286,6 +292,66 @@ describe("AdminSettings", () => {
       expect(screen.getByText("Состав обновлён: групп 2, участников 5")).toBeInTheDocument(),
     );
     expect(syncAdGroups).toHaveBeenCalledTimes(1);
+  });
+
+  // Наборы должностей: добавление набора и должности уходит в PUT.
+  it("добавляет набор должностей и должность", async () => {
+    vi.mocked(getSettings).mockResolvedValue({ ...settings, position_sets: [] });
+    vi.mocked(saveSettings).mockImplementation(async (data) => data);
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Справочники" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Справочники" }));
+    fireEvent.click(screen.getByText("Добавить набор"));
+    await waitFor(() => expect(screen.getByLabelText("Название набора 1")).toBeInTheDocument());
+
+    fireEvent.change(screen.getByLabelText("Название набора 1"), { target: { value: "Линейные" } });
+    fireEvent.click(screen.getByText("Добавить должность"));
+    await waitFor(() => expect(screen.getByLabelText("Должность 1.1")).toBeInTheDocument());
+    fireEvent.change(screen.getByLabelText("Должность 1.1"), { target: { value: "Слесарь" } });
+    fireEvent.click(screen.getByText("Сохранить"));
+
+    await waitFor(() => expect(vi.mocked(saveSettings)).toHaveBeenCalled());
+    const sent = vi.mocked(saveSettings).mock.calls[0][0];
+    expect(sent.position_sets).toEqual([{ name: "Линейные", positions: ["Слесарь"] }]);
+  });
+
+  // Наборы должностей: удаление должности и набора.
+  it("удаляет должность и набор", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Справочники" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Справочники" }));
+    await waitFor(() => expect(screen.getByLabelText("Название набора 1")).toBeInTheDocument());
+    expect(screen.getByLabelText("Название набора 1")).toHaveValue("Руководители");
+
+    fireEvent.click(screen.getByText("Добавить должность"));
+    await waitFor(() => expect(screen.getByLabelText("Должность 1.2")).toBeInTheDocument());
+    fireEvent.click(screen.getAllByText("Удалить должность")[0]);
+    await waitFor(() => expect(screen.queryByLabelText("Должность 1.2")).not.toBeInTheDocument());
+
+    fireEvent.click(screen.getByText("Удалить набор"));
+    await waitFor(() => expect(screen.queryByLabelText("Название набора 1")).not.toBeInTheDocument());
+  });
+
+  // Бланк ссылается на набор должностей: выбор уходит в PUT.
+  it("бланк привязывается к набору должностей", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+    vi.mocked(saveSettings).mockImplementation(async (data) => data);
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Шаблоны" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Шаблоны" }));
+    await waitFor(() => expect(screen.getByLabelText("Набор должностей бланка 1")).toBeInTheDocument());
+    fireEvent.change(screen.getByLabelText("Набор должностей бланка 1"), {
+      target: { value: "Руководители" },
+    });
+    fireEvent.click(screen.getByText("Сохранить"));
+
+    await waitFor(() => expect(vi.mocked(saveSettings)).toHaveBeenCalled());
+    const sent = vi.mocked(saveSettings).mock.calls[0][0];
+    expect(sent.doc_templates?.[0]?.position_set).toBe("Руководители");
   });
 
   // Ручной синк состава групп: ошибка API — понятный текст.

@@ -27,6 +27,7 @@ from app.main import app  # noqa: E402
 TEST_ALLOWED = "SED_HR,SED_ADMINS"
 TEST_ADMINS = "SED_ADMINS"
 TEST_HR = "SED_HR"
+TEST_HR_ADMIN = "SED_HR_ADMIN"
 TEST_STEP_PREFIX = "SED_STEP_"
 
 FAKE_MEMBERS = [
@@ -73,6 +74,7 @@ def settings_override():
         ALLOWED_AD_GROUPS=TEST_ALLOWED,
         ADMIN_GROUPS=TEST_ADMINS,
         HR_GROUPS=TEST_HR,
+        HR_ADMIN_GROUPS=TEST_HR_ADMIN,
         STEP_GROUP_PREFIX=TEST_STEP_PREFIX,
     )
     app.dependency_overrides[get_settings] = lambda: settings
@@ -284,3 +286,33 @@ def test_manual_sync_roles_403(client, hr_headers, owner_headers, cache_store, s
 def test_manual_sync_no_reader_503(client, admin_headers, cache_store, settings_store):
     """Ручной синк без ридера AD — 503."""
     assert client.post("/ad/groups/sync", headers=admin_headers).status_code == 503
+
+
+# --- GET /ad/titles (должности из кэша для наборов бланков) ---
+
+
+def test_titles_from_cache(client, admin_headers, cache_store):
+    """Титулы из кэша: уникальные, сортированные."""
+    from app.ad_groups_cache import CachedMember
+
+    cache_store.save("SED_STEP_BUH", [
+        CachedMember(group_name="SED_STEP_BUH", sam="a.b",
+                     display_name="А Б", title="Бухгалтер"),
+        CachedMember(group_name="SED_STEP_BUH", sam="c.d",
+                     display_name="В Г", title="Бухгалтер"),
+        CachedMember(group_name="SED_STEP_BUH", sam="e.f",
+                     display_name="Д Е", title="Кассир"),
+        CachedMember(group_name="SED_STEP_BUH", sam="g.h",
+                     display_name="Ж З"),
+    ])
+    response = client.get("/ad/titles", headers=admin_headers)
+    assert response.status_code == 200, response.text
+    assert response.json() == {"items": ["Бухгалтер", "Кассир"]}
+
+
+def test_titles_roles(client, hr_headers, hr_admin_headers, owner_headers, cache_store):
+    """Титулы — контент-админам (admin/hr_admin); ОК и владелец — 403."""
+    assert client.get("/ad/titles", headers=hr_headers).status_code == 403
+    assert client.get("/ad/titles", headers=owner_headers).status_code == 403
+    assert client.get("/ad/titles", headers={}).status_code == 401
+    assert client.get("/ad/titles", headers=hr_admin_headers).status_code == 200
