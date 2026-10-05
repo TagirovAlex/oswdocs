@@ -813,22 +813,27 @@ export function RequestCard(props: RequestCardProps) {
 
           {/* Рассмотрение (низ образца): ВСЕ шаги одной сеткой-таблицей —
               Вид рассмотрения | Должность | Сотрудник | Статус | Срок |
-              Комментарий. Вид — тип блока шага (код order: блок*1000 + режим +
-              позиция, см. stepLabel): order<1000 — общий последовательный блок;
-              номер блока — при нескольких блоках. Должность — читаемое
-              наименование группы из справочника настроек, Сотрудник — весь
-              состав группы (для персональных — ФИО). Логин AD (assignee)
-              не выводится. */}
+              Комментарий. Вид пишется один раз на весь блок (rowSpan по строкам
+              блока, как в образце): код order — блок*1000 + режим + позиция
+              (см. stepLabel), order<1000 — общий последовательный блок.
+              Должность — читаемое наименование группы из справочника настроек,
+              Сотрудник — весь состав группы (для персональных — ФИО).
+              Логин AD (assignee) не выводится. */}
           <div className="sed-review">
             <b>Рассмотрение</b>
             {(() => {
-              // Режим каждого шага из кода order (блок*1000 + режим + позиция).
-              const info = card.steps.map((step) => {
+              // Блоки в порядке шагов: номер и режим из кода order.
+              const blocks: { blockNo: number; parallel: boolean; steps: RequestStep[] }[] = [];
+              card.steps.forEach((step) => {
                 const coded = step.order >= 1000;
-                return {
-                  step,
-                  parallel: coded && Math.floor((step.order % 1000) / 100) === 1,
-                };
+                const blockNo = coded ? Math.floor(step.order / 1000) + 1 : 1;
+                const parallel = coded && Math.floor((step.order % 1000) / 100) === 1;
+                const last = blocks[blocks.length - 1];
+                if (last && last.blockNo === blockNo) {
+                  last.steps.push(step);
+                } else {
+                  blocks.push({ blockNo, parallel, steps: [step] });
+                }
               });
               return (
                 <table className="sed-table sed-table--review" aria-label="Шаги заявки">
@@ -844,18 +849,23 @@ export function RequestCard(props: RequestCardProps) {
                     </tr>
                   </thead>
                   <tbody>
-                    {info.map(({ step, parallel }) => (
-                      <tr key={step.order}>
-                        <td>{stepLabel(step.order)}</td>
-                        {/* Номер блока закодирован в № (2.1 — блок 2), дублировать не нужно. */}
-                        <td>{parallel ? "Параллельно" : "Последовательно"}</td>
-                        <td>{stepDutyCell(step)}</td>
-                        <td>{stepExecutorsNode(step)}</td>
-                        <td>{step.status}</td>
-                        <td>{step.expires_at.slice(0, 10)}</td>
-                        <td>{step.comment ?? "—"}</td>
-                      </tr>
-                    ))}
+                    {blocks.map((block) =>
+                      block.steps.map((step, si) => (
+                        <tr key={step.order}>
+                          <td>{stepLabel(step.order)}</td>
+                          {si === 0 && (
+                            <td rowSpan={block.steps.length}>
+                              {block.parallel ? "Параллельно" : "Последовательно"}
+                            </td>
+                          )}
+                          <td>{stepDutyCell(step)}</td>
+                          <td>{stepExecutorsNode(step)}</td>
+                          <td>{step.status}</td>
+                          <td>{step.expires_at.slice(0, 10)}</td>
+                          <td>{step.comment ?? "—"}</td>
+                        </tr>
+                      )),
+                    )}
                   </tbody>
                 </table>
               );

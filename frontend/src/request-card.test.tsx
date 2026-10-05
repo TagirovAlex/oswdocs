@@ -248,6 +248,28 @@ describe("RequestCard", () => {
     expect(within(table).getByText("Параллельно")).toBeInTheDocument();
   });
 
+  // Вид рассмотрения пишется один раз на блок (rowSpan по строкам блока).
+  it("вид рассмотрения объединён на весь блок", async () => {
+    vi.mocked(getRequest).mockResolvedValue({
+      ...requestWith("Громов Игорь Олегович", "На согласовании"),
+      steps: [
+        { order: 1101, owner_group: "SED_STEP_BUH", resolver: "by_group", can_act: false, status: "ожидает", expires_at: "2026-10-05T10:00:00+00:00" },
+        { order: 1102, owner_group: "SED_STEP_OK", resolver: "by_group", can_act: false, status: "ожидает", expires_at: "2026-10-08T10:00:00+00:00" },
+        { order: 2, owner_group: "SED_STEP_OK", resolver: "by_group", can_act: false, status: "ожидает", expires_at: "2026-10-08T10:00:00+00:00" },
+      ],
+    });
+
+    renderCard();
+    await waitFor(() => expect(screen.getByLabelText("Шаги заявки")).toBeInTheDocument());
+    const table = screen.getByLabelText("Шаги заявки");
+    // Параллельный блок из двух шагов — одна ячейка вида на две строки.
+    const parallel = within(table).getByText("Параллельно");
+    expect(parallel.getAttribute("rowspan")).toBe("2");
+    // Последовательный шаг — вид без объединения.
+    const sequential = within(table).getByText("Последовательно");
+    expect(sequential.getAttribute("rowspan")).toBe("1");
+  });
+
   // Должность — читаемое наименование группы из справочника настроек.
   it("должность — наименование группы из справочника", async () => {
     vi.mocked(getStepGroups).mockResolvedValue([
