@@ -2,7 +2,7 @@
 // (settings-client). Сеть не нужна: модуль settings-client мокается,
 // сценарии — загрузка полного объекта, сохранение, добавление/удаление
 // предприятий и групп, рендер шаблонов, успех/ошибка/403.
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AdminSettings } from "./admin-settings";
 import { ApiHttpError } from "./auth-client";
@@ -255,6 +255,19 @@ describe("AdminSettings", () => {
     fireEvent.click(screen.getAllByText("Удалить группу")[0]);
     await waitFor(() => expect(screen.queryByLabelText("ID группы 3")).not.toBeInTheDocument());
     expect(screen.getByLabelText("ID группы 1")).toHaveValue("SED_HR");
+  });
+
+  // Группы доступа: таблица с подписанными колонками ID и наименования.
+  it("справочник групп — таблица с подписями колонок", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Справочники" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Справочники" }));
+    const table = await screen.findByRole("table", { name: "Группы доступа" });
+    expect(within(table).getByText("ID группы AD")).toBeInTheDocument();
+    expect(within(table).getByText("Наименование")).toBeInTheDocument();
+    expect(within(table).getByText("Действие")).toBeInTheDocument();
   });
 
   // Группы доступа: наименование сохраняется и уходит в PUT объектами {id, name}.

@@ -156,33 +156,52 @@ function GroupsEditor(props: { value: StepGroupRef[]; onChange: (v: StepGroupRef
         Наименование показывается в карточке заявки вместо кода группы.
       </div>
       {value.length === 0 && <div className="sed-note">не задано</div>}
-      {value.map((group, i) => (
-        <div key={i} className="sed-editor-row sed-editor-row--center">
-          <input
-            aria-label={`ID группы ${i + 1}`}
-            placeholder="ID группы AD"
-            value={group.id}
-            onChange={(e) =>
-              onChange(value.map((g, j) => (j === i ? { ...g, id: e.target.value } : g)))
-            }
-          />
-          <input
-            aria-label={`Наименование группы ${i + 1}`}
-            placeholder="Читаемое наименование"
-            value={group.name}
-            onChange={(e) =>
-              onChange(value.map((g, j) => (j === i ? { ...g, name: e.target.value } : g)))
-            }
-          />
-          <button
-            type="button"
-            className="sed-btn sed-btn--ghost"
-            onClick={() => onChange(value.filter((_, j) => j !== i))}
-          >
-            Удалить группу
-          </button>
-        </div>
-      ))}
+      {value.length > 0 && (
+        <table className="sed-table" aria-label="Группы доступа">
+          <thead>
+            <tr>
+              <th scope="col">ID группы AD</th>
+              <th scope="col">Наименование</th>
+              <th scope="col">Действие</th>
+            </tr>
+          </thead>
+          <tbody>
+            {value.map((group, i) => (
+              <tr key={i}>
+                <td>
+                  <input
+                    aria-label={`ID группы ${i + 1}`}
+                    placeholder="ID группы AD"
+                    value={group.id}
+                    onChange={(e) =>
+                      onChange(value.map((g, j) => (j === i ? { ...g, id: e.target.value } : g)))
+                    }
+                  />
+                </td>
+                <td>
+                  <input
+                    aria-label={`Наименование группы ${i + 1}`}
+                    placeholder="Читаемое наименование"
+                    value={group.name}
+                    onChange={(e) =>
+                      onChange(value.map((g, j) => (j === i ? { ...g, name: e.target.value } : g)))
+                    }
+                  />
+                </td>
+                <td>
+                  <button
+                    type="button"
+                    className="sed-btn sed-btn--ghost"
+                    onClick={() => onChange(value.filter((_, j) => j !== i))}
+                  >
+                    Удалить группу
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
       <div className="sed-toolbar sed-mt-12">
         <button type="button" className="sed-btn" onClick={() => onChange([...value, { id: "", name: "" }])}>
           Добавить группу
