@@ -5,6 +5,11 @@
 # Хранилище — зависимость get_groups_cache_store: in-memory в тестах,
 # Postgres (DbGroupsCacheStore) на стенде; падение БД — GroupsCacheUnavailable
 # -> роутер отвечает 503 (не 500).
+#
+# ПРИОРИТЕТ ИСТОЧНИКОВ ДОЛЖНОСТЕЙ (исключение!): в справочнике должностей
+# для бланков сначала AD (перечисление всех титулов + состав групп), затем —
+# только для непокрытых — 1С (distinct из локального справочника employees).
+# Везде иначе истина — 1С; обратный приоритет действует ТОЛЬКО здесь.
 
 from __future__ import annotations
 
@@ -56,6 +61,11 @@ class GroupsCacheStore(Protocol):
         удаляет протухшие титулы. Возвращает итоговый список."""
         ...  # pragma: no cover
 
+    def merge_titles(self, titles: list[str]) -> list[str]:
+        """Добавить титулы в справочник (без удаления; дубликаты схлопываются).
+        Возвращает итоговый список."""
+        ...  # pragma: no cover
+
 
 class InMemoryGroupsCacheStore:
     """Офлайн-хранилище состава (dict), интерфейс GroupsCacheStore."""
@@ -93,6 +103,13 @@ class InMemoryGroupsCacheStore:
             for members in self._members.values()
             for title in self._titles_of(members)
         }
+        return sorted(self._directory)
+
+    def merge_titles(self, titles: list[str]) -> list[str]:
+        for title in titles or []:
+            clean = (title or "").strip()
+            if clean:
+                self._directory.add(clean)
         return sorted(self._directory)
 
 
@@ -249,6 +266,25 @@ class DbGroupsCacheStore:
             ) from exc
         return [row[0] for row in rows]
 
+    def merge_titles(self, titles: list[str]) -> list[str]:
+        try:
+            with self._session_factory() as session:
+                moment = datetime.now(timezone.utc)
+                for title in titles or []:
+                    clean = (title or "").strip()
+                    if clean:
+                        session.execute(
+                            self._UPSERT_DIRECTORY_TITLE,
+                            {"title": clean, "updated_at": moment},
+                        )
+                session.commit()
+                rows = session.execute(self._SELECT_DIRECTORY).all()
+        except SQLAlchemyError as exc:
+            raise GroupsCacheUnavailable(
+                f"Хранилище состава групп недоступно: {exc}"
+            ) from exc
+        return [row[0] for row in rows]
+
 
 _db_groups_cache_store: DbGroupsCacheStore | None = None
 
@@ -268,11 +304,14 @@ def get_groups_cache_store(settings: Settings = Depends(get_settings)) -> Groups
 def sync_ad_group_members(reader, groups: list[str], cache: GroupsCacheStore) -> dict:
     """Синхронизировать состав групп из AD в кэш (ручной и регламентный синк).
 
-    reader — AdReader (только чтение group_members); groups — имена групп
-    (пустые отбрасываются). Группа не найдена в AD (AdNotFound) — ошибка
-    в errors, метка синка НЕ ставится (эндпоинт, как раньше, отдаст 404
-    живым чтением). Сбой каталога (AdUnavailable) — ошибка в errors, метка
-    тоже не ставится. Возврат: {synced_groups, members, errors}.
+    reader — AdReader (только чтение group_members + перечисление титулов);
+    groups — имена групп (пустые отбрасываются). Группа не найдена в AD
+    (AdNotFound) — ошибка в errors, метка синка НЕ ставится (эндпоинт, как
+    раньше, отдаст 404 живым чтением). Сбой каталога (AdUnavailable) — ошибка
+    в errors, метка тоже не ставится. В конце — пересборка справочника
+    должностей из состава групп + сплошное перечисление титулов AD
+    (1С-добор — на чтении /api/ad/titles). Возврат: {synced_groups, members,
+    titles, errors}.
     """
     synced_groups = 0
     members_total = 0
@@ -303,8 +342,14 @@ def sync_ad_group_members(reader, groups: list[str], cache: GroupsCacheStore) ->
         synced_groups += 1
         members_total += len(users)
     # Справочник должностей — по итогам синка (и авто, и ручного: обе точки
-    # идут через эту функцию).
+    # идут через эту функцию): сначала строгая пересборка из состава групп
+    # (чистит протухшее), затем слияние сплошного перечисления титулов AD.
+    # Перечисление best-effort (сбой не валит синк групп).
     titles = cache.rebuild_directory()
+    try:
+        titles = cache.merge_titles(reader.list_all_titles())
+    except Exception:
+        pass
     return {
         "synced_groups": synced_groups,
         "members": members_total,

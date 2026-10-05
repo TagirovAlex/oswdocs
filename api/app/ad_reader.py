@@ -121,6 +121,13 @@ class LdapGateway(Protocol):
         """Сырые записи по подстроке displayName либо []. Живой поиск — на стенде."""
         ...  # pragma: no cover
 
+    def list_user_titles(self) -> List[Dict]:
+        """Сырые записи всех пользователей (title + userAccountControl) либо [].
+
+        Лёгкий запрос для справочника должностей (полные карточки не нужны).
+        Живое перечисление — на стенде (постранично)."""
+        ...  # pragma: no cover
+
     def search_group_by_cn(self, cn: str) -> Optional[Dict]:
         """Сырая запись группы по CN (cn + member) либо None. Только чтение."""
         ...  # pragma: no cover
@@ -252,6 +259,58 @@ class Ldap3Gateway:
         for entry in self._conn.entries:
             return self._group_to_raw(entry)
         return None
+
+    #: Атрибуты лёгкого перечисления для справочника должностей.
+    TITLE_ATTRS = ("title", "userAccountControl")
+
+    def list_user_titles(self) -> List[Dict]:
+        """Все пользователи каталога (title + userAccountControl), постранично.
+
+        Только чтение; фильтр — люди с заполненным title (компьютеры и записи
+        без должности не нужны справочнику). Сбой каталога — AdUnavailable.
+        Постраничность — cookie ldap3 (лимит сервера обычно 1000): без неё
+        выгрузка обрезалась бы первой тысячей.
+        """
+        if self._conn is None:
+            self.bind()
+        rows: List[Dict] = []
+        cookie = None
+        try:
+            while True:
+                self._conn.search(
+                    search_base=self._settings.base_dn,
+                    search_filter="(&(objectClass=user)(!(objectClass=computer))(title=*))",
+                    search_scope=self._ldap3.SUBTREE,
+                    attributes=list(self.TITLE_ATTRS),
+                    paged_size=1000,
+                    paged_cookie=cookie,
+                )
+                rows.extend(self._to_raw_title(entry) for entry in self._conn.entries)
+                result = getattr(self._conn, "result", None) or {}
+                controls = result.get("controls", {}) or {}
+                paged = controls.get("1.2.840.113556.1.4.319", {}) or {}
+                cookie = (paged.get("value", {}) or {}).get("cookie")
+                if not cookie:
+                    break
+        except Exception as exc:
+            raise AdUnavailable(f"AD недоступен (перечисление должностей): {exc}") from exc
+        return rows
+
+    @staticmethod
+    def _to_raw_title(entry: object) -> Dict:
+        """Перевод ldap3-Entry в {title, userAccountControl} (как _to_raw)."""
+        attrs = getattr(entry, "entry_attributes_as_dict", None)
+        if not isinstance(attrs, dict):
+            attrs = getattr(entry, "entry_attributes", {}) or {}
+        if not isinstance(attrs, dict):
+            attrs = {}
+        title = attrs.get("title")
+        if isinstance(title, (list, tuple)):
+            title = title[0] if title else ""
+        uac = attrs.get("userAccountControl")
+        if isinstance(uac, (list, tuple)):
+            uac = uac[0] if uac else ""
+        return {"title": str(title) if title else "", "userAccountControl": uac}
 
     def _search(self, base_dn: str, filter_str: str, scope: object) -> Optional[Dict]:
         rows = self._search_many(base_dn, filter_str, scope)
@@ -582,6 +641,28 @@ class AdReader:
         """Кнопка «обновить»: сбросить кэш и перечитать."""
         self._cache.invalidate(self._cache_key(sam))
         return self.get_user(sam)
+
+    def list_all_titles(self) -> List[str]:
+        """Все должности каталога (title активных учёток) для справочника.
+
+        Только чтение; приоритет справочника — AD (см. ad_groups_cache).
+        Отключённые учётки исключаются, как в search_users; пустые титулы —
+        пропускаются; итог — уникальные, сортированные. Сбой каталога —
+        AdUnavailable.
+        """
+        try:
+            rows = self._gateway.list_user_titles()
+        except Exception as exc:
+            raise AdUnavailable(f"AD недоступен (перечисление должностей): {exc}") from exc
+        titles = set()
+        for row in rows:
+            title = str((row or {}).get("title") or "").strip()
+            if not title:
+                continue
+            if not _parse_enabled(row):
+                continue
+            titles.add(title)
+        return sorted(titles)
 
     # -- manager-цепочка -------------------------------------------------------
     def resolve_manager_chain(self, sam: str) -> List[AdUser]:

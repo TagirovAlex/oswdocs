@@ -473,3 +473,37 @@ def test_get_user_by_dn_does_not_cache_missing():
     with pytest.raises(AdNotFound):
         reader.get_user_by_dn("CN=Нет Такого,OU=SED,DC=example,DC=local")
     assert gateway.search_calls == 2
+
+
+class _TitlesGateway:
+    """Шлюз-заглушка перечисления титулов (сырые записи title+uac)."""
+
+    def __init__(self, rows=None, fail=None):
+        self._rows = rows or []
+        self._fail = fail
+
+    def list_user_titles(self):
+        if self._fail is not None:
+            raise self._fail
+        return self._rows
+
+
+def test_list_all_titles_sorted_unique_enabled_only():
+    """Титулы: уникальные, сортированные; отключённые и пустые — мимо."""
+    gateway = _TitlesGateway([
+        {"title": "Кассир", "userAccountControl": 512},
+        {"title": "Бухгалтер", "userAccountControl": 512},
+        {"title": "Бухгалтер", "userAccountControl": 512},
+        {"title": "", "userAccountControl": 512},
+        {"title": "Уволенный", "userAccountControl": 514},
+    ])
+    reader = AdReader(_settings(), gateway, InMemoryCache())
+    assert reader.list_all_titles() == ["Бухгалтер", "Кассир"]
+
+
+def test_list_all_titles_failure():
+    """Сбой перечисления — AdUnavailable (справочник не роняет синк молча)."""
+    gateway = _TitlesGateway(fail=TimeoutError("ldap timeout"))
+    reader = AdReader(_settings(), gateway, InMemoryCache())
+    with pytest.raises(AdUnavailable):
+        reader.list_all_titles()

@@ -453,3 +453,59 @@ def test_search_group_cn_is_escaped():
     gw.bind()
     gw.search_group_by_cn("(evil)")
     assert fake.searches[-1]["filter"] == "(&(objectClass=group)(cn=\\28evil\\29))"
+
+
+class _PagedConn:
+    """Фейк соединения ldap3 с постраничной выдачей (cookie в result)."""
+
+    def __init__(self, pages):
+        self._pages = [list(p) for p in pages]
+        self.entries = []
+        self.result = {}
+        self.calls = []
+
+    def search(self, search_base, search_filter, search_scope, attributes,
+               paged_size=None, paged_cookie=None):
+        self.calls.append({
+            "base": search_base,
+            "filter": search_filter,
+            "scope": search_scope,
+            "attributes": list(attributes),
+            "paged_size": paged_size,
+            "paged_cookie": paged_cookie,
+        })
+        page = self._pages.pop(0) if self._pages else []
+        self.entries = page
+        cookie = "next" if self._pages else None
+        self.result = {
+            "controls": {"1.2.840.113556.1.4.319": {"value": {"cookie": cookie}}}
+        }
+
+
+def _paged_gateway(pages):
+    import types
+
+    ldap3_stub = types.SimpleNamespace(SUBTREE="SUBTREE")
+    gw = Ldap3Gateway(_settings(), ldap3_module=ldap3_stub)
+    gw._conn = _PagedConn(pages)
+    return gw
+
+
+def _title_entry(title, uac=512):
+    return _FakeEntry(
+        "CN=%s,OU=OSWDOCS,DC=FIDELIO,DC=LOCAL" % title,
+        {"title": [title], "userAccountControl": [str(uac)]},
+    )
+
+
+def test_list_user_titles_paged():
+    """Перечисление титулов идёт постранично (cookie) до пустого cookie."""
+    gw = _paged_gateway([
+        [_title_entry("Бухгалтер"), _title_entry("Кассир")],
+        [_title_entry("Бухгалтер")],
+    ])
+    rows = gw.list_user_titles()
+    assert len(gw._conn.calls) == 2
+    assert gw._conn.calls[0]["paged_size"] == 1000
+    assert "(title=*)" in gw._conn.calls[0]["filter"]
+    assert [r["title"] for r in rows] == ["Бухгалтер", "Кассир", "Бухгалтер"]

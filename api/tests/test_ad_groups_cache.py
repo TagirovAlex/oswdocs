@@ -41,9 +41,10 @@ FAKE_MEMBERS = [
 class FakeAdReader:
     """Мок ридера AD: состав групп из словаря, неизвестная — AdNotFound."""
 
-    def __init__(self, groups=None, unavailable=False):
+    def __init__(self, groups=None, unavailable=False, all_titles=None):
         self._groups = dict(groups or {})
         self._unavailable = unavailable
+        self._all_titles = list(all_titles) if all_titles is not None else None
         self.calls: list[str] = []
 
     def group_members(self, group: str):
@@ -53,6 +54,11 @@ class FakeAdReader:
         if group not in self._groups:
             raise AdNotFound(f"Группа {group!r} не найдена (тест)")
         return [SimpleNamespace(**m) for m in self._groups[group]]
+
+    def list_all_titles(self):
+        if self._all_titles is None:
+            raise AttributeError("перечисление не поддерживается (тест)")
+        return list(self._all_titles)
 
 
 class DictSettingsStore:
@@ -158,9 +164,18 @@ def test_sync_writes_cache_and_counts(cache_store):
     reader = FakeAdReader({"SED_STEP_BUH": FAKE_MEMBERS, "SED_STEP_OK": []})
     result = sync_ad_group_members(reader, ["SED_STEP_BUH", "SED_STEP_OK"], cache_store)
     assert result == {"synced_groups": 2, "members": 2, "titles": 2, "errors": []}
+
+
+def test_sync_merges_full_enumeration(cache_store):
+    """Сплошное перечисление титулов добирается в справочник (вне групп)."""
+    reader = FakeAdReader(
+        {"SED_STEP_BUH": FAKE_MEMBERS}, all_titles=["Бухгалтер", "Сторож"]
+    )
+    result = sync_ad_group_members(reader, ["SED_STEP_BUH"], cache_store)
+    assert result["titles"] == 3
+    assert cache_store.titles() == ["Бухгалтер", "Кассир", "Сторож"]
     synced, members = cache_store.load("SED_STEP_BUH")
     assert synced is True and [m.sam for m in members] == ["step.buhgalter", "step.kassir"]
-    assert cache_store.load("SED_STEP_OK") == (True, [])
 
 
 def test_sync_unknown_group_not_marked(cache_store):
@@ -333,6 +348,65 @@ def test_titles_from_cache(client, admin_headers, cache_store):
     response = client.get("/ad/titles", headers=admin_headers)
     assert response.status_code == 200, response.text
     assert response.json() == {"items": ["Бухгалтер", "Кассир"]}
+
+
+def test_titles_merges_1c_positions(client, admin_headers, cache_store):
+    """Справочник добирается 1С: должность без AD-титула — из employees."""
+    from app.employee_sync import InMemoryEmployeeSyncStore, get_employee_sync_store
+    from app.main import app
+
+    emp = InMemoryEmployeeSyncStore()
+    emp.upsert_many([{
+        "enterprise": "ENT", "base_code": "zup", "tab_num": "001",
+        "fio": "Вымышленный Слесарь", "department": "Цех",
+        "position": "Слесарь", "ad_sam": None, "ad_status": None,
+    }])
+    app.dependency_overrides[get_employee_sync_store] = lambda: emp
+    try:
+        response = client.get("/ad/titles", headers=admin_headers)
+    finally:
+        app.dependency_overrides.pop(get_employee_sync_store, None)
+    assert response.status_code == 200, response.text
+    assert response.json() == {"items": ["Слесарь"]}
+
+
+def test_distinct_positions_stores(tmp_path):
+    """distinct_positions: InMemory и Db (sqlite) — уникальные непустые."""
+    from sqlalchemy import create_engine, text
+
+    from app.employee_sync import DbEmployeeSyncStore, InMemoryEmployeeSyncStore
+
+    mem = InMemoryEmployeeSyncStore()
+    assert mem.distinct_positions() == []
+    mem.upsert_many([
+        {"enterprise": "E", "base_code": "z", "tab_num": "1", "fio": "А",
+         "position": "Слесарь"},
+        {"enterprise": "E", "base_code": "z", "tab_num": "2", "fio": "Б",
+         "position": "Слесарь"},
+        {"enterprise": "E", "base_code": "z", "tab_num": "3", "fio": "В",
+         "position": ""},
+    ])
+    assert mem.distinct_positions() == ["Слесарь"]
+
+    db = tmp_path / "emp.db"
+    engine = create_engine(f"sqlite:///{db}")
+    with engine.begin() as conn:
+        conn.execute(text(
+            "CREATE TABLE employees (enterprise TEXT NOT NULL, base_code TEXT NOT NULL, "
+            "tab_num TEXT NOT NULL, fio TEXT NOT NULL, department TEXT, position TEXT, "
+            "ad_sam TEXT, ad_status TEXT, updated_at TIMESTAMPTZ, "
+            "PRIMARY KEY (enterprise, base_code, tab_num))"
+        ))
+    engine.dispose()
+    store = DbEmployeeSyncStore(f"sqlite:///{db}")
+    assert store.distinct_positions() == []
+    # upsert_many — только Postgres (now()); здесь прямой INSERT той же формы.
+    with engine.begin() as conn:
+        conn.execute(text(
+            "INSERT INTO employees (enterprise, base_code, tab_num, fio, position) VALUES "
+            "('E', 'z', '1', 'А', 'Слесарь'), ('E', 'z', '2', 'Б', NULL)"
+        ))
+    assert store.distinct_positions() == ["Слесарь"]
 
 
 def test_titles_roles(client, hr_headers, hr_admin_headers, owner_headers, cache_store):

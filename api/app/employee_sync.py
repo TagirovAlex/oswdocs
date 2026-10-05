@@ -77,6 +77,13 @@ class EmployeeSyncStore(Protocol):
         """Записать строки (upsert по составному ключу), вернуть число строк."""
         ...
 
+    def distinct_positions(self) -> list[str]:
+        """Все должности справочника (position), уникальные, сортированные.
+
+        Пустые/NULL пропускаются. Источник добора 1С для справочника должностей
+        бланков (приоритет — AD, см. ad_groups_cache)."""
+        ...
+
 
 class InMemoryEmployeeSyncStore:
     """Офлайн-хранилище справочника (тесты/локаль без БД), интерфейс EmployeeSyncStore."""
@@ -134,6 +141,12 @@ class InMemoryEmployeeSyncStore:
             key = (row["enterprise"], row["base_code"], row["tab_num"])
             self._rows[key] = dict(row)
         return len(rows)
+
+    def distinct_positions(self) -> list[str]:
+        return sorted(
+            {str(row.get("position") or "").strip() for row in self._rows.values()}
+            - {""}
+        )
 
 
 class DbEmployeeSyncStore:
@@ -311,6 +324,24 @@ class DbEmployeeSyncStore:
                 "Справочник сотрудников недоступен: %s" % exc
             ) from exc
         return len(rows)
+
+    _POSITIONS_SQL = text(
+        """
+        SELECT DISTINCT position FROM employees
+        WHERE position IS NOT NULL AND position <> ''
+        ORDER BY position
+        """
+    )
+
+    def distinct_positions(self) -> list[str]:
+        try:
+            with self._session_factory() as session:
+                rows = session.execute(self._POSITIONS_SQL).all()
+        except SQLAlchemyError as exc:
+            raise EmployeeSyncUnavailable(
+                "Справочник сотрудников недоступен: %s" % exc
+            ) from exc
+        return [row[0] for row in rows]
 
 
 _db_employee_store: DbEmployeeSyncStore | None = None

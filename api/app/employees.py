@@ -651,9 +651,15 @@ def ad_titles(
     user: CurrentUser = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
     cache_store: GroupsCacheStore = Depends(get_groups_cache_store),
+    emp_store: EmployeeSyncStore = Depends(get_employee_sync_store),
 ) -> dict:
-    """Должности из кэша состава групп (для наборов должностей бланков):
-    руководитель ОК + админ. Пусто — синк состава ещё не выполнялся."""
+    """Должности для наборов бланков: руководитель ОК + админ.
+
+    Приоритет источников — ОБРАТНЫЙ общему правилу (истина — 1С) и действует
+    ТОЛЬКО здесь: сначала AD (справочник из синка состава + сплошное
+    перечисление титулов), затем — только непокрытые — 1С (distinct из
+    локального справочника employees; ручной ввод в редакторе — всегда).
+    Пусто — синки ещё не выполнялись."""
     settings.ensure_read_only()
     _require_content_admin(user)
     try:
@@ -662,7 +668,11 @@ def ad_titles(
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
-    return {"items": items}
+    try:
+        from_1c = emp_store.distinct_positions()
+    except EmployeeSyncUnavailable:
+        from_1c = []
+    return {"items": sorted(set(items) | set(from_1c))}
 
 
 @router.post("/ad/groups/sync")

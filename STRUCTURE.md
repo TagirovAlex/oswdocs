@@ -41,8 +41,9 @@
   (таблицы ad_group_members/ad_group_sync_state из 0006) и справочник
   должностей (ad_position_directory из 0007, пересборка после каждого синка;
   регламент worker + ручной POST /api/ad/groups/sync; GET состава — из кэша,
-  GET /api/ad/titles — из справочника). `worker.py` —
-  регламенты (просрочка, напоминания, синки, бэкапы).
+  GET /api/ad/titles — справочник + distinct из employees).
+  Приоритет должностей AD→1С — только здесь (исключение; везде иначе истина — 1С).
+  `worker.py` — регламенты (просрочка, напоминания, синки, бэкапы).
 
 ## Frontend (frontend/src/)
 - `main.tsx` — точка входа, роутинг `?view=`.
