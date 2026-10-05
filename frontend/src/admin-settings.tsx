@@ -718,6 +718,27 @@ function PositionSetsEditor(props: {
     updateSet(modalSet, { positions: merged });
     closeModal();
   }
+  // Номера страниц модалки: при >10 — первые пять и последние пять
+  // с разрывом, иначе все подряд (как пейджер конструктора).
+  function modalPagerPages(current: number, total: number): Array<number | "…"> {
+    if (total <= 1) return [1];
+    const set = new Set<number>();
+    if (total <= 10) {
+      for (let i = 1; i <= total; i++) set.add(i);
+    } else {
+      for (let i = 1; i <= 5; i++) set.add(i);
+      for (let i = Math.max(1, total - 4); i <= total; i++) set.add(i);
+    }
+    const sorted = [...set].sort((a, b) => a - b);
+    const out: Array<number | "…"> = [];
+    let prev = 0;
+    for (const page of sorted) {
+      if (prev !== 0 && page - prev > 1) out.push("…");
+      out.push(page);
+      prev = page;
+    }
+    return out;
+  }
   // Поиск по справочнику (регистр не важен) + пагинация: выбор живёт
   // между страницами, за один проход отмечается всё нужное.
   const MODAL_PAGE_SIZE = 50;
@@ -860,6 +881,25 @@ function PositionSetsEditor(props: {
               >
                 ← Назад
               </button>
+              {modalPagerPages(modalPageSafe, modalPages).map((page, index) =>
+                page === "…" ? (
+                  <span key={`ell-${index}`} aria-hidden="true">
+                    …
+                  </span>
+                ) : (
+                  <button
+                    key={page}
+                    type="button"
+                    className="sed-btn"
+                    aria-label={`Страница ${page}`}
+                    aria-current={page === modalPageSafe ? "page" : undefined}
+                    disabled={page === modalPageSafe}
+                    onClick={() => setModalPage(page)}
+                  >
+                    {page}
+                  </button>
+                ),
+              )}
               <span role="status">
                 стр {modalPageSafe} из {modalPages}
               </span>
@@ -1776,11 +1816,11 @@ export function AdminSettings(props: AdminSettingsProps) {
         </fieldset>
       )}
 
+      {/* Порядок: часто меняемое — сверху; предприятия — последними
+          (меняются и используются реже всего). */}
       {activeTab === "Справочники" && (
         <>
-          <EnterprisesEditor value={enterprises} onChange={setEnterprises} />
           <GroupsEditor value={adGroups} onChange={setAdGroups} />
-          <PositionSetsEditor value={positionSets} titles={adTitles} onChange={setPositionSets} />
           {/* Ручной синк состава групп AD в кэш — только админ (эндпоинт 403 остальным). */}
           {isAdmin && (
             <div className="sed-toolbar sed-mt-8">
@@ -1791,9 +1831,11 @@ export function AdminSettings(props: AdminSettingsProps) {
               {groupSyncError && <span role="alert">{groupSyncError}</span>}
             </div>
           )}
+          <PositionSetsEditor value={positionSets} titles={adTitles} onChange={setPositionSets} />
           <PositionCategoryEditor value={positionCategory} onChange={setPositionCategory} />
           {/* Виды документов — таблица doc_types; только админ (не контент-ключ settings). */}
           {isAdmin && <DocTypesEditor />}
+          <EnterprisesEditor value={enterprises} onChange={setEnterprises} />
         </>
       )}
 

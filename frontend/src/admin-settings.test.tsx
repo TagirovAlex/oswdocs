@@ -433,6 +433,29 @@ describe("AdminSettings", () => {
     expect(sent.position_sets?.[0]?.positions).toEqual(["Должность 01", "Должность 51"]);
   });
 
+  // Модалка должностей: при >10 страниц — первые пять и последние пять.
+  it("модалка: номера первых и последних пяти страниц", async () => {
+    const titles = Array.from({ length: 600 }, (_, i) => `Должность ${String(i + 1).padStart(3, "0")}`);
+    vi.mocked(getSettings).mockResolvedValue({ ...settings, position_sets: [] });
+    vi.mocked(getAdTitles).mockResolvedValue(titles);
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Справочники" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Справочники" }));
+    fireEvent.click(screen.getByText("Добавить набор"));
+    await waitFor(() => expect(screen.getByLabelText("Название набора 1")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("Выбрать из справочника"));
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
+    // Первые пять и последние пять, середина скрыта.
+    for (const page of [1, 2, 3, 4, 5, 8, 9, 10, 11, 12]) {
+      expect(screen.getByRole("button", { name: `Страница ${page}` })).toBeInTheDocument();
+    }
+    expect(screen.queryByRole("button", { name: "Страница 6" })).not.toBeInTheDocument();
+    // Переход на последнюю — последние записи.
+    fireEvent.click(screen.getByRole("button", { name: "Страница 12" }));
+    await waitFor(() => expect(screen.getByText("Должность 600")).toBeInTheDocument());
+  });
+
   // Модалка должностей: Отмена закрывает без добавления.
   it("модалка должностей: Отмена без добавления", async () => {
     vi.mocked(getSettings).mockResolvedValue(settings);
