@@ -836,6 +836,27 @@ def _auto_route(
     Повторный вызов на тех же данных детерминирован (app.routing — чистая)."""
     department = _ad_or_body((card or {}).get("dept_ad"), body.department)
     position = _ad_or_body((card or {}).get("title_ad"), body.position)
+    # Без карточки AD маршрут по профилю не собрать: профиль по умолчанию здесь
+    # был бы молчаливой подменой. Служба пустая при живой карточке — тоже: подбор
+    # идёт по службе. В обоих случаях ОК должен увидеть, что делать.
+    if card is None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Сотрудник не найден в AD — маршрут по профилю службы собрать нельзя. "
+                "Оформите связь 1С↔AD (Настройки → «Связи 1С↔AD») или переключите "
+                "режим на «Вручную» и задайте маршрут самостоятельно."
+            ),
+        )
+    if not department.strip():
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Служба сотрудника не определена в AD — маршрут по профилю собрать "
+                "нельзя. Заполните подразделение в AD или переключите режим на "
+                "«Вручную»."
+            ),
+        )
     services = store.list_services()
     profiles = store.list_profiles()
     picked = pick_profile(department, services, profiles, [])
@@ -1707,6 +1728,9 @@ class RoutePreviewOut(BaseModel):
     reason: str = Field(description="Причина подбора (reason из app.routing)")
     stages: list[RoutePreviewStageOut] = Field(default_factory=list)
     blank: str | None = Field(default=None, description="Вид бланка печати (office/line)")
+    # Пояснение для ОК: например, сотрудник не найден в AD (карточки нет —
+    # служба неизвестна, бланк печати пойдёт по умолчанию). Пусто — всё в порядке.
+    notice: str | None = Field(default=None, description="Предупреждение для ОК")
 
 
 class _FioResolver:
@@ -1821,6 +1845,14 @@ def _route_preview(body: RoutePreviewIn, ad_reader: object | None) -> RoutePrevi
     sam = _employee_sam(body)
     card = store.user_card(sam) if sam else None
     department = _ad_or_body((card or {}).get("dept_ad"), body.department or "")
+    # Нет карточки AD или пустая служба — маршрут по профилю службы не собрать:
+    # объясняем это в предпросмотре (создание в auto вернёт 422, см. _auto_route).
+    notice = None
+    if card is None or not department.strip():
+        notice = (
+            "Сотрудник не найден в AD (нет карточки или не указана служба): маршрут по "
+            "службе не подбирается, печать пойдёт бланком по умолчанию."
+        )
     services = store.list_services()
     profiles = store.list_profiles()
     picked = pick_profile(department, services, profiles, [])
@@ -1878,6 +1910,7 @@ def _route_preview(body: RoutePreviewIn, ad_reader: object | None) -> RoutePrevi
             fio_resolver,
         ),
         blank=blank,
+        notice=notice,
     )
 
 

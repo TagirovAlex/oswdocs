@@ -326,25 +326,65 @@ def _blank_kind(request: object, routing_store: object | None) -> str | None:
     return None
 
 
+def _fill_step_fio(context: dict, routing_store: object | None) -> None:
+    """Подставить ФИО персональных исполнителей шагов (из зеркала AD users).
+
+    На бланке колонка «Должность/ФИО»: должность берётся из этапа, ФИО — логин
+    исполнителя, разложенный здесь. Пустой assignee (групповой этап) — ФИО нет:
+    на бумаге его пишут от руки, как в исходных бланках. Зеркало недоступно или
+    логина нет в users — оставляем пустым (печать не падает)."""
+    if routing_store is None:
+        return
+    for step in context.get("steps") or []:
+        sam = str(step.get("assignee") or "").strip()
+        if not sam or step.get("fio"):
+            continue
+        try:
+            card = routing_store.user_card(sam)
+        except Exception:
+            card = None
+        name = str((card or {}).get("fio_full") or "").strip()
+        step["fio"] = name or sam
+
+
 def _bypass_body(
     request: object, doc_templates: object, position_sets: object = None,
     routing_store: object | None = None,
-) -> tuple[str | None, str | None]:
-    """(тело, имя .docx-файла) бегунка: шаблон doc_templates по службе+категории
-    и набору должностей сотрудника (body — текстовый фолбэк, file — настоящий
-    .docx-шаблон), иначе ручной конструктор из шагов; нет шаблона и нет шагов —
-    (None, None) (422)."""
+) -> tuple[tuple[str | None, str | None], str | None]:
+    """((тело, имя .docx-файла), вид бланка) для печати бегунка.
+
+    Шаблон doc_templates по службе+категории и набору должностей сотрудника
+    (body — текстовый фолбэк, file — настоящий .docx-шаблон), иначе ручной
+    конструктор из шагов; нет шаблона и нет шагов — (None, None) (422).
+
+    Служба заявки неизвестна (нет blank_kind) — печатаем бланк по умолчанию
+    (office) и возвращаем вид бланка: бумага ОК нужна всегда, а молчаливый
+    текстовый фолбэк выглядел бы как поломка. Если и office-бланка нет —
+    отдаём текстовый конструктор из шагов, как раньше."""
+    kind = _blank_kind(request, routing_store) or request.category
     template = find_doc_template(
-        doc_templates, request.department,
-        _blank_kind(request, routing_store) or request.category,
+        doc_templates, request.department, kind,
         getattr(request, "position", None), position_sets,
     )
+    fallback = False
+    if template is None and not kind and _blank_kind(request, routing_store) is None:
+        # Служба не определена — пробуем офисный бланк по умолчанию.
+        template = find_doc_template(
+            doc_templates, request.department, "office",
+            getattr(request, "position", None), position_sets,
+        )
+        fallback = template is not None
     if template is not None:
-        return (template.get("body") or ""), (template.get("file") or None)
+        # Вид бланка: из найденного шаблона (service/category пустой = wildcard),
+        # иначе — из признака службы/категории заявки.
+        kind_out = str(template.get("category") or kind or "").strip() or None
+        return (
+            template.get("body") or "",
+            template.get("file") or None,
+        ), kind_out
     if not request.steps:
-        return None, None
-    return manual_bypass_body(request), None
-
+        return (None, None), None
+    return (manual_bypass_body(request), None), None
 
 @router.post("/requests/{request_id}/print")
 def print_bypass(
@@ -370,7 +410,7 @@ def print_bypass(
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except SettingsUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    body, template_file = _bypass_body(
+    (body, template_file), blank_kind = _bypass_body(
         request, doc_templates, position_sets, _routing_store_or_none()
     )
     if body is None and template_file is None:
@@ -380,6 +420,8 @@ def print_bypass(
         )
     # Фиксированная метка временных файлов — не версия документа.
     context = build_bypass_context(request)
+    # ФИО исполнителей этагов подставляем из зеркала AD (в колонку «Должность/ФИО»).
+    _fill_step_fio(context, _routing_store_or_none())
     # Предприятие — названием из справочника (код 1С в бланке нечитаем).
     context["enterprise"] = _enterprise_name(settings_store, request.enterprise)
     result = generate_bypass(
@@ -421,6 +463,8 @@ def print_bypass(
         "generated": True,
         "reason": None,
         "pdf_b64": base64.b64encode(pdf_bytes).decode("ascii"),
+        # Вид напечатанного бланка (office/line) — для UI и разбора «почему тот бланок».
+        "blank_kind": blank_kind,
     }
 
 

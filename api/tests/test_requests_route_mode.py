@@ -378,12 +378,42 @@ def test_auto_route_profile_not_found_422(
 def test_auto_route_service_not_registered_422(
     client, hr, settings_override, route_override, requests_store, routing_store
 ):
-    """Служба не задана и профиля по умолчанию нет — 422 «служба не заведена»."""
+    """Карточка AD есть, службы и профиля по умолчанию нет — 422 с причиной."""
+    routing_store.services = []
     routing_store.profiles = []
-    response = _create(client, hr, department="", ad_sam="")
+    response = _create(client, hr)
     assert response.status_code == 422
-    assert "служба не заведена" in response.text
-    assert "service_not_registered" in response.text
+    assert "profile_not_found" in response.text
+
+
+def test_auto_route_service_not_defined_422(
+    client, hr, settings_override, route_override, requests_store, routing_store
+):
+    """Карточка AD есть, но служба в ней пустая — 422 с понятным действием."""
+    routing_store.cards = {
+        sam: {key: value for key, value in card.items() if key != "dept_ad"}
+        for sam, card in routing_store.cards.items()
+    }
+    response = _create(client, hr, department="")
+    assert response.status_code == 422
+    assert "Служба сотрудника не определена в AD" in response.text
+    assert not requests_store.list_all()
+
+
+def test_auto_route_employee_not_in_ad_422(
+    client, hr, settings_override, route_override, requests_store, routing_store
+):
+    """Сотрудник не связан с AD (карточки нет) — 422 с понятным действием.
+
+    Раньше такой случай молча уходил на профиль по умолчанию: заявка получала
+    чужой маршрут и печаталась без бланка. Теперь причина называется прямо.
+    """
+    routing_store.cards = {}
+    response = _create(client, hr, ad_sam="")
+    assert response.status_code == 422
+    assert "не найден в AD" in response.text
+    assert "Вручную" in response.text
+    assert not requests_store.list_all()
 
 
 def test_auto_route_manager_stage_without_manager_422(

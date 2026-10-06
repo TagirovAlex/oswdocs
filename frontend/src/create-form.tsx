@@ -258,6 +258,9 @@ export function CreateForm(props: CreateFormProps) {
   const [managerHits, setManagerHits] = useState<AdCandidate[]>([]);
   const [managerSearching, setManagerSearching] = useState<boolean>(false);
   const [managerError, setManagerError] = useState<string>("");
+  // Порядковый номер поиска руководителя: устаревший ответ по прежнему запросу
+  // не должен затирать результаты текущего (как adSeq для панели AD).
+  const managerSeq = useRef(0);
   // Порядковый номер предпросмотра: устаревший ответ по прежнему сотруднику
   // не должен затирать текущий.
   const previewSeq = useRef(0);
@@ -617,6 +620,9 @@ export function CreateForm(props: CreateFormProps) {
   // этап не закрывается, если не нашли.
   const managerStage =
     preview?.stages.find((s) => s.owner_kind === "manager_ad") ?? null;
+  // Панель подбора открыта, если её открыл пользователь или этап заблокирован
+  // (тогда замену нужно подобрать сразу).
+  const managerPanelOpen = managerPickOpen || managerStage?.blocked_reason != null;
   const routeReady =
     routeMode === "auto"
       ? preview !== null && preview.stages.length > 0
@@ -703,31 +709,44 @@ export function CreateForm(props: CreateFormProps) {
     setManagerHits([]);
     setManagerSearching(false);
     setManagerError("");
+    managerSeq.current++;
   }
 
-  // Поиск руководителя в AD по ФИО: кнопка (без автопоиска на каждый ввод,
-  // чтобы не спрашивать каталог лишний раз).
-  function searchManager(): void {
+  // Живой поиск руководителя в AD: запрос на каждое изменение поля, ответы
+  // приходят не по порядку — актуальный отсекается по managerSeq. Пустой
+  // запрос — пустой список без обращения к каталогу. Панель подбора может быть
+  // открыта пользователем или из-за заблокированного этапа.
+  const managerPanel = managerPickOpen || preview?.stages.some(
+    (s) => s.owner_kind === "manager_ad" && s.blocked_reason != null,
+  ) === true;
+  useEffect(() => {
     const q = managerQuery.trim();
-    if (q === "") {
+    if (!managerPanel || q === "") {
+      managerSeq.current++;
       setManagerHits([]);
-      setManagerError("Введите ФИО руководителя");
+      setManagerSearching(false);
+      setManagerError("");
       return;
     }
+    const seq = ++managerSeq.current;
     setManagerSearching(true);
     setManagerError("");
-    searchAd(q)
-      .then((items) => {
-        setManagerHits(items);
-        setManagerSearching(false);
-        if (items.length === 0) setManagerError("Ничего не найдено в AD");
-      })
-      .catch((e: unknown) => {
-        setManagerHits([]);
-        setManagerSearching(false);
-        setManagerError(e instanceof Error ? e.message : "Ошибка поиска в AD");
-      });
-  }
+    const timer = setTimeout(() => {
+      searchAd(q)
+        .then((items) => {
+          if (seq !== managerSeq.current) return;
+          setManagerHits(items);
+          setManagerSearching(false);
+        })
+        .catch((e: unknown) => {
+          if (seq !== managerSeq.current) return;
+          setManagerHits([]);
+          setManagerSearching(false);
+          setManagerError(e instanceof Error ? e.message : "Ошибка поиска в AD");
+        });
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [managerQuery, managerPanel]);
 
   function pickManager(cand: AdCandidate): void {
     markTouched();
@@ -1447,18 +1466,13 @@ export function CreateForm(props: CreateFormProps) {
                       <input
                         aria-label="ФИО руководителя"
                         value={managerQuery}
-                        placeholder="ФИО руководителя"
+                        placeholder="ФИО руководителя — поиск идёт по мере набора"
                         onChange={(e) => setManagerQuery(e.target.value)}
                       />
-                      <button
-                        type="button"
-                        className="sed-btn"
-                        aria-label="Найти руководителя"
-                        disabled={managerSearching}
-                        onClick={searchManager}
-                      >
-                        {managerSearching ? "Ищем…" : "Найти"}
-                      </button>
+                      {managerSearching && <span className="sed-note">Ищем…</span>}
+                      {!managerSearching && managerQuery.trim() !== "" && managerHits.length === 0 && (
+                        <span className="sed-note">Ничего не найдено в AD</span>
+                      )}
                       {managerError && <span className="sed-note">{managerError}</span>}
                     </div>
                   )}
@@ -1481,8 +1495,16 @@ export function CreateForm(props: CreateFormProps) {
                   )}
                 </div>
               )}
-              {/* Этапы: по умолчанию все включены; снятая галочка — код в
-                  dismissed_stages. optional=false — этап обязательный. */}
+                  {/* Предупреждение бэкенда: например, сотрудник не найден в AD —
+                      маршрут по службе не подобрался, печать пойдёт бланком по
+                      умолчанию. Показываем до подробностей подбора. */}
+                  {preview && preview.notice && (
+                    <div role="alert" className="sed-note">
+                      {preview.notice}
+                    </div>
+                  )}
+                  {/* Этапы: по умолчанию все включены; снятая галочка — код в
+                      dismissed_stages. optional=false — этап обязательный. */}
               {preview && preview.stages.length === 0 && (
                 <div className="sed-note">Этапы не подобраны.</div>
               )}

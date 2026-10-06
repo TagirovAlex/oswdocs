@@ -208,6 +208,9 @@ export interface RoutePreview {
   reason: string;
   stages: RoutePreviewStage[];
   blank: string | null;
+  // Предупреждение для ОК: например, сотрудник не найден в AD — маршрут по
+  // службе не подбирается, печать пойдёт бланком по умолчанию.
+  notice?: string | null;
 }
 
 // Этап справочника маршрутов (GET /api/settings/routing/catalogs → stages).

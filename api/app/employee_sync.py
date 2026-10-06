@@ -156,11 +156,16 @@ class DbEmployeeSyncStore:
     в settings_routes.py. Полный round-trip проверяется на стенде (qa-sed)."""
 
     _COUNT_SQL = text("SELECT count(*) FROM employees")
+    # В выборку справочника попадают только сотрудники, связанные с AD
+    # (ad_sam): у остальных нет AD-карточки — нечем подтвердить службу и
+    # руководителя, и маршрут согласования не собрать. Отсекает архив и
+    # уволенных, учётки которых уже отключены в AD.
     _SEARCH_SQL = text(
         """
         SELECT enterprise, base_code, tab_num, fio, department, position, ad_sam, ad_status
         FROM employees
         WHERE enterprise = :enterprise
+          AND ad_sam IS NOT NULL
           AND (:q = ''
                OR fio ILIKE '%' || :q || '%'
                OR tab_num ILIKE '%' || :q || '%'
@@ -174,6 +179,7 @@ class DbEmployeeSyncStore:
         """
         SELECT count(*) FROM employees
         WHERE enterprise = :enterprise
+          AND ad_sam IS NOT NULL
           AND (:q = ''
                OR fio ILIKE '%' || :q || '%'
                OR tab_num ILIKE '%' || :q || '%'

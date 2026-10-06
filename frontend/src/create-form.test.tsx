@@ -845,8 +845,8 @@ describe("CreateForm", () => {
     // Блок «Руководитель»: этап заблокирован — подбор замены открыт сразу.
     expect(screen.getByRole("checkbox", { name: "Выбрать руководителя вручную" })).toBeDisabled();
     expect(screen.getByText(/не определён в AD/)).toBeInTheDocument();
+    // Живой поиск: результаты приходят по мере ввода, без кнопки.
     fireEvent.change(screen.getByLabelText("ФИО руководителя"), { target: { value: "Петров" } });
-    fireEvent.click(screen.getByRole("button", { name: "Найти руководителя" }));
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "Выбрать руководителя Петров Пётр Петрович" })).toBeInTheDocument(),
     );

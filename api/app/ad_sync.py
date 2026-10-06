@@ -53,6 +53,33 @@ def _norm(text: str) -> str:
     return " ".join(text.strip().lower().split())
 
 
+def _matches_ad_profile(card: object, ad_user: object) -> bool:
+    """Совпадает ли карточка 1С с кандидатом AD по должности или службе.
+
+    Нужна для дублей ФИО в 1С (у человека две карточки — например, старая и
+    новая): одна совпадает с должностью/службой из AD, другая — нет. Только
+    совпадение по ФИО для склейки недостаточно, это разные учётные записи."""
+    pairs = (
+        (getattr(card, "position", ""), getattr(ad_user, "title", "")),
+        (getattr(card, "dept", ""), getattr(ad_user, "department", "")),
+    )
+    for one_c_value, ad_value in pairs:
+        left = _norm(str(one_c_value or ""))
+        right = _norm(str(ad_value or ""))
+        if left and right and left == right:
+            return True
+    return False
+
+
+def _pick_duplicate_card(cards: list, ad_user: object) -> object | None:
+    """Карточка 1С среди дублей ФИО, однозначно подходящая под кандидата AD.
+
+    Ровно одно совпадение по должности или службе — берём его; 0 или больше
+    одного — None (остаёмся на ручной сверке, как раньше)."""
+    matched = [card for card in cards if _matches_ad_profile(card, ad_user)]
+    return matched[0] if len(matched) == 1 else None
+
+
 def _list_enterprise(
     client: OneCClient,
     reader: AdReader,
@@ -67,11 +94,13 @@ def _list_enterprise(
     cards: List = []
     for base_code in client.bases_for_enterprise(enterprise):
         cards.extend(_list_all(client, base_code, enterprise, result))
-    # Дубли ФИО в пределах предприятия — ручная сверка (автосклейки нет).
-    counts: dict[str, int] = {}
+    # Дубли ФИО в пределах предприятия: группируем карточки, чтобы при совпадении
+    # должности/службы с AD связать нужную (см. _pick_duplicate_card).
+    groups: dict[str, list] = {}
     for card in cards:
-        key = _norm(card.fio)
-        counts[key] = counts.get(key, 0) + 1
+        groups.setdefault(_norm(card.fio), []).append(card)
+    counts: dict[str, int] = {key: len(items) for key, items in groups.items()}
+    duplicates: dict[str, list] = {key: items for key, items in groups.items() if len(items) > 1}
     for card in cards:
         result.scanned += 1
         key = link_key(card.enterprise, card.base_code, card.tab_num)
@@ -82,9 +111,10 @@ def _list_enterprise(
         except Exception:  # падение БД связок — ошибка уровня, не пропуск
             raise
         wanted = _norm(card.fio)
-        if not wanted or counts.get(wanted, 0) > 1:
+        if not wanted:
             result.skipped_1c_duplicates += 1
             continue
+        is_duplicate = counts.get(wanted, 0) > 1
         try:
             candidates = reader.search_users(card.fio)
         except AdUnavailable as exc:
@@ -93,12 +123,24 @@ def _list_enterprise(
             continue
         exact = [u for u in candidates if _norm(u.display_name) == wanted]
         if not exact:
-            result.skipped_ad_no_match += 1
+            # Дублей нет — человек просто не заведён в AD. Дубли ФИО в 1С — это
+            # другая причина (разбор по ручной сверке), счётчик прежний.
+            if is_duplicate:
+                result.skipped_1c_duplicates += 1
+            else:
+                result.skipped_ad_no_match += 1
             continue
         if len(exact) > 1:
             result.skipped_ad_duplicates += 1
             continue
         ad_user = exact[0]
+        if is_duplicate:
+            # Дубли ФИО в 1С: связываем только ту карточку, чья должность или
+            # служба совпадает с AD. Без этого у человека не будет AD-карточки,
+            # а значит — ни службы, ни руководителя (маршрут не соберётся).
+            if _pick_duplicate_card(duplicates.get(wanted, []), ad_user) is not card:
+                result.skipped_1c_duplicates += 1
+                continue
         # Зеркала ссылок связки в НАШИХ таблицах (one_c_bases/employee_base_map/
         # users) — нужны для внешних ключей link_1c_ad. В AD/1С не пишем.
         try:

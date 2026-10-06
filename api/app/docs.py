@@ -348,9 +348,9 @@ def build_bypass_context(request: object) -> Dict[str, object]:
 
     По каждому шагу отдаём снимок этапа из справочников (position/stage_lines)
     и отметку (done_at): бланк печатается по маршруту, собранному из этапов.
-    ФИО исполнителя (fio) здесь пустое намеренно: ФИО подставляет documents.py,
-    где ридер AD уже подключён, — docs.py про requests.py не знает (импорт
-    был бы циклическим, его не делаем)."""
+    ФИО исполнителя (fio) здесь пустое намеренно: ФИО подставляет documents.py
+    по логину исполнителя (assignee) из зеркала AD — docs.py про хранилище
+    заявок не знает (импорт был бы циклическим, его не делаем)."""
     steps = []
     for step in sorted(request.steps, key=lambda s: s.order):
         owner = getattr(step, "assignee", None) or step.owner_group
@@ -365,6 +365,9 @@ def build_bypass_context(request: object) -> Dict[str, object]:
                 "owner": owner,
                 "status": step.status,
                 "position": str(getattr(step, "stage_title", None) or step.owner_group or ""),
+                # Логин персонального исполнителя: documents.py по нему подставит
+                # ФИО из AD (в бланке колонка «Должность/ФИО»).
+                "assignee": getattr(step, "assignee", None) or "",
                 "fio": "",
                 "stage_lines": stage_lines or [owner],
                 "done_at": _step_done_text(getattr(step, "done_at", None)),
