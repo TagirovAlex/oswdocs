@@ -421,6 +421,34 @@ def test_distinct_positions_stores(tmp_path):
     assert store.distinct_positions() == ["Слесарь"]
 
 
+def test_employee_store_count_without_bind_params(tmp_path):
+    """count() — счётчик всех строк без параметров предприятия/поиска.
+
+    Раньше count() выполнял запрос с bind-параметрами, не передавая их: ошибка
+    уходила в исключение, а /employees тихо уходил в живой поиск 1С вместо
+    локального справочника (и фильтр «только связанные с AD» не действовал)."""
+    from sqlalchemy import create_engine, text
+
+    from app.employee_sync import DbEmployeeSyncStore
+
+    db = tmp_path / "emp_count.db"
+    engine = create_engine(f"sqlite:///{db}")
+    with engine.begin() as conn:
+        conn.execute(text(
+            "CREATE TABLE employees (enterprise TEXT NOT NULL, base_code TEXT NOT NULL, "
+            "tab_num TEXT NOT NULL, fio TEXT NOT NULL, department TEXT, position TEXT, "
+            "ad_sam TEXT, ad_status TEXT, updated_at TIMESTAMPTZ, "
+            "PRIMARY KEY (enterprise, base_code, tab_num))"
+        ))
+        conn.execute(text(
+            "INSERT INTO employees (enterprise, base_code, tab_num, fio) "
+            "VALUES ('E', 'z', '1', 'А')"
+        ))
+    engine.dispose()
+    store = DbEmployeeSyncStore(f"sqlite:///{db}")
+    assert store.count() == 1
+
+
 def test_titles_roles(client, hr_headers, hr_admin_headers, owner_headers, cache_store):
     """Титулы — контент-админам (admin/hr_admin); ОК и владелец — 403."""
     assert client.get("/ad/titles", headers=hr_headers).status_code == 403

@@ -155,7 +155,8 @@ class DbEmployeeSyncStore:
     Ошибки БД оборачиваются в EmployeeSyncUnavailable (503), как DbSettingsStore
     в settings_routes.py. Полный round-trip проверяется на стенде (qa-sed)."""
 
-    _COUNT_SQL = text("SELECT count(*) FROM employees")
+    # Все строки справочника (0 = синк не прошёл, нужен фолбэк на живой 1С).
+    _COUNT_ALL_SQL = text("SELECT count(*) FROM employees")
     # В выборку справочника попадают только сотрудники, связанные с AD
     # (ad_sam): у остальных нет AD-карточки — нечем подтвердить службу и
     # руководителя, и маршрут согласования не собрать. Отсекает архив и
@@ -175,7 +176,7 @@ class DbEmployeeSyncStore:
         LIMIT :limit OFFSET :offset
         """
     )
-    _COUNT_SQL = text(
+    _COUNT_MATCHING_SQL = text(
         """
         SELECT count(*) FROM employees
         WHERE enterprise = :enterprise
@@ -237,7 +238,7 @@ class DbEmployeeSyncStore:
     def count(self) -> int:
         try:
             with self._session_factory() as session:
-                value = session.execute(self._COUNT_SQL).scalar()
+                value = session.execute(self._COUNT_ALL_SQL).scalar()
         except SQLAlchemyError as exc:
             raise EmployeeSyncUnavailable(
                 "Справочник сотрудников недоступен: %s" % exc
@@ -268,7 +269,7 @@ class DbEmployeeSyncStore:
         try:
             with self._session_factory() as session:
                 value = session.execute(
-                    self._COUNT_SQL,
+                    self._COUNT_MATCHING_SQL,
                     {"enterprise": enterprise, "q": (q or "").strip()},
                 ).scalar()
         except SQLAlchemyError as exc:
