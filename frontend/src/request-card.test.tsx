@@ -277,6 +277,20 @@ describe("RequestCard", () => {
     expect(sequential.getAttribute("rowspan")).toBe("1");
   });
 
+  // Ширины колонок — через colgroup (по колонкам, не nth-child): в строках
+  // 2+ блока нет ячейки с rowSpan, и позиционные селекторы давят не те ячейки.
+  it("ширины колонок рассмотрения — colgroup на 6 колонок", async () => {
+    vi.mocked(getRequest).mockResolvedValue(requestWith("Громов Игорь Олегович", "На согласовании"));
+
+    renderCard();
+    await waitFor(() => expect(screen.getByLabelText("Шаги заявки")).toBeInTheDocument());
+    const table = screen.getByLabelText("Шаги заявки");
+    const cols = table.querySelectorAll("colgroup > col");
+    expect(cols).toHaveLength(6);
+    expect(cols[0].getAttribute("class")).toContain("sed-review__col-kind");
+    expect(cols[1].getAttribute("class")).toContain("sed-review__col-duty");
+  });
+
   // Должность — читаемое наименование группы из справочника настроек.
   it("должность — наименование группы из справочника", async () => {
     vi.mocked(getStepGroups).mockResolvedValue([

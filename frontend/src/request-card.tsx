@@ -862,6 +862,17 @@ export function RequestCard(props: RequestCardProps) {
               });
               return (
                 <table className="sed-table sed-table--review" aria-label="Шаги заявки">
+                  {/* Ширины — через colgroup (классы колонок), а не nth-child:
+                      в строках 2+ нет ячейки с rowSpan, номера td в строке
+                      съезжают и nth-child давит не те колонки. */}
+                  <colgroup>
+                    <col className="sed-review__col-kind" />
+                    <col className="sed-review__col-duty" />
+                    <col className="sed-review__col-members" />
+                    <col className="sed-review__col-status" />
+                    <col className="sed-review__col-deadline" />
+                    <col className="sed-review__col-comment" />
+                  </colgroup>
                   <thead>
                     <tr>
                       <th>Вид рассмотрения</th>
@@ -877,7 +888,7 @@ export function RequestCard(props: RequestCardProps) {
                       block.steps.map((step, si) => (
                         <tr key={step.order}>
                           {si === 0 && (
-                            <td rowSpan={block.steps.length}>
+                            <td rowSpan={block.steps.length} className="sed-review__kind">
                               {block.parallel ? "Параллельно" : "Последовательно"}
                             </td>
                           )}

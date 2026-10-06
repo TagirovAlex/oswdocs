@@ -526,27 +526,28 @@ a {
 }
 
 /* Таблица рассмотрения — 6 колонок (без «№»):
-   Вид | Должность | Сотрудник | Статус | Срок | Комментарий. */
+   Вид | Должность | Сотрудник | Статус | Срок | Комментарий.
+   Ширины заданы классами colgroup (по колонкам): nth-child здесь нельзя —
+   в строках 2+ блока нет ячейки с rowSpan, и номера td в строке съезжают. */
 /* Вид рассмотрения: всего два значения — узкая колонка без переносов;
    высвобожденное место отдано Должности и Сотруднику. */
-.sed-table--review th:nth-child(1),
-.sed-table--review td:nth-child(1) {
+.sed-review__col-kind {
   width: 132px;
+}
+
+.sed-review__kind {
   white-space: nowrap;
 }
 
-.sed-table--review th:nth-child(3),
-.sed-table--review td:nth-child(3) {
+.sed-review__col-members {
   width: 140px;
 }
 
-.sed-table--review th:nth-child(4),
-.sed-table--review td:nth-child(4) {
+.sed-review__col-status {
   width: 92px;
 }
 
-.sed-table--review th:nth-child(5),
-.sed-table--review td:nth-child(5) {
+.sed-review__col-deadline {
   width: 104px;
 }
 
