@@ -791,6 +791,13 @@ class SettingsPayload(BaseModel):
             "mode interval/daily, уведомление notify/recipients/subject/body"
         ),
     )
+    schedule_hr_dismissals_sync: dict | None = Field(
+        default=None,
+        description=(
+            "Расписание прохода по регистру кадровых данных 1С (регламент worker): "
+            "mode interval/daily; без расписания — раз в 7 дней"
+        ),
+    )
 
 
 class ContentSettingsPayload(BaseModel):

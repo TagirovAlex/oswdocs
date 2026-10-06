@@ -217,6 +217,25 @@ UPDATED_VALUES = {
 }
 
 
+def test_settings_put_persists_hr_dismissals_schedule(client, admin_headers, mock_store):
+    """Расписание прохода по регистру кадровых данных админ выставляет через PUT.
+
+    Без этого ключа в модели тело PUT игнорировало бы поле, а регламентный проход
+    падал бы на «раз в 7 дней» вместо ежедневного."""
+    schedule = {"mode": "interval", "interval_hours": 24}
+    payload = dict(UPDATED_VALUES)
+    payload["schedule_hr_dismissals_sync"] = schedule
+    response = client.put("/settings", json=payload, headers=admin_headers)
+    assert response.status_code == 200, response.text
+    stored = json.loads(mock_store.get("schedule_hr_dismissals_sync"))
+    assert stored == schedule
+    # Синхронизация читает расписание этим же ключом: due_schedule должен признать
+    # проход «пора» (ежедневный интервал, метки ещё не было).
+    from app.onec_sync import due_schedule
+
+    assert due_schedule(stored, None) is True
+
+
 class InMemorySettingsStore:
     """Мок хранилища настроек: dict вместо Postgres, формат значений — сид-формат."""
 

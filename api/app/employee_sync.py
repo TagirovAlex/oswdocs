@@ -26,10 +26,26 @@ from .settings_routes import read_setting_value
 LIST_PAGE = 500
 # Размер страницы регистра кадровых данных (тот же лимит OData).
 HR_PAGE = 500
+# Порция строк в одном UPDATE дат увольнения (длина запроса к Postgres).
+DISMISSAL_BATCH = 1000
 
 
 class EmployeeSyncUnavailable(Exception):
     """Локальный справочник сотрудников недоступен (нет баз/предприятий/БД) — 503."""
+
+
+def _as_date(value: object) -> date | None:
+    """Дата из строки 1С (ISO «2026-04-14T00:00:00») в date; пусто/битое — None.
+
+    None = увольнения не было: прежнюю дату нужно очистить, чтобы
+    восстановленного сотрудника вернуло в выдачу справочника."""
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        return date.fromisoformat(raw[:10])
+    except ValueError:
+        return None
 
 
 def _dismissed(row: dict, today: date | None = None) -> bool:
@@ -253,16 +269,16 @@ class DbEmployeeSyncStore:
             updated_at = now()
         """
     )
-    # Даты увольнения пачкой: VALUES из bindparam(expanding=True) — psycopg ждёт
-    # список значений, кортеж из скаляров не подойдёт.
-    _UPDATE_DISMISSALS_SQL = text(
-        """
-        UPDATE employees e
-        SET dismissal_date = v.dismissal_date, hr_synced_at = now()
-        FROM (VALUES :rows) AS v(ref_key, dismissal_date)
-        WHERE e.base_code = :base_code
-          AND e.ref_key = v.ref_key
-        """
+    # Порция обновления дат увольнения. VALUES перечисляем текстом с нумерованными
+    # параметрами (bindparam(expanding=True) с multi-column VALUES не собирает
+    # пары, psycopg получает dict вместо строки) — порциями по DISMISSAL_BATCH
+    # строк, иначе запрос разрастается на весь регистр базы.
+    _UPDATE_DISMISSALS_SQL_TMPL = (
+        "UPDATE employees e "
+        "SET dismissal_date = v.dismissal_date::date, hr_synced_at = now() "
+        "FROM (VALUES {values}) AS v(ref_key, dismissal_date) "
+        "WHERE e.base_code = :base_code "
+        "AND e.ref_key = v.ref_key"
     )
     # Шаблон точного пакетного поиска: условие по логинам/табельным номерам
     # собирается в методе (пустые списки в IN не подставляются), параметры
@@ -395,30 +411,39 @@ class DbEmployeeSyncStore:
         return len(rows)
 
     def update_dismissals(self, base_code: str, rows: list[dict]) -> int:
-        params = [
-            {
-                "ref_key": str(row.get("ref_key") or "").strip(),
-                # None = увольнения не было (регистр есть, дата пустая) — очищаем
-                # прежнюю дату, чтобы восстановленного сотрудника вернуло в выдачу.
-                "dismissal_date": row.get("dismissal_date") or None,
-            }
+        pairs = [
+            (
+                str(row.get("ref_key") or "").strip(),
+                _as_date(row.get("dismissal_date")),
+            )
             for row in rows
             if str(row.get("ref_key") or "").strip()
         ]
-        if not params:
+        if not pairs:
             return 0
-        statement = self._UPDATE_DISMISSALS_SQL.bindparams(
-            bindparam("rows", expanding=True)
-        )
+        updated = 0
         try:
             with self._session_factory() as session:
-                result = session.execute(statement, {"base_code": base_code, "rows": params})
+                for start in range(0, len(pairs), DISMISSAL_BATCH):
+                    chunk = pairs[start : start + DISMISSAL_BATCH]
+                    values = ", ".join(["(:r%d, :d%d)" % (i, i) for i in range(len(chunk))])
+                    params = {"base_code": base_code}
+                    params.update(
+                        {"r%d" % i: ref for i, (ref, _) in enumerate(chunk)}
+                    )
+                    params.update(
+                        {"d%d" % i: value for i, (_, value) in enumerate(chunk)}
+                    )
+                    result = session.execute(
+                        text(self._UPDATE_DISMISSALS_SQL_TMPL.format(values=values)), params
+                    )
+                    updated += int(result.rowcount or 0)
                 session.commit()
         except SQLAlchemyError as exc:
             raise EmployeeSyncUnavailable(
                 "Справочник сотрудников недоступен: %s" % exc
             ) from exc
-        return int(result.rowcount or 0)
+        return updated
 
     _POSITIONS_SQL = text(
         """
