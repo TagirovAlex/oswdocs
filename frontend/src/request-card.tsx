@@ -829,9 +829,10 @@ export function RequestCard(props: RequestCardProps) {
 
           {/* Рассмотрение (низ образца): ВСЕ шаги одной сеткой-таблицей —
               Вид рассмотрения | Должность | Сотрудник | Статус | Срок |
-              Комментарий. Вид пишется один раз на весь блок (rowSpan по строкам
-              блока, как в образце): код order — блок*1000 + режим + позиция
-              (см. stepLabel), order<1000 — общий последовательный блок.
+              Комментарий. Колонки «№» нет по требованию владельца.
+              Вид пишется один раз на весь блок (rowSpan по строкам
+              блока, как в образце): код order — блок*1000 + режим + позиция,
+              order<1000 — общий последовательный блок.
               Должность — читаемое наименование группы из справочника настроек,
               Сотрудник — весь состав группы (для персональных — ФИО).
               Логин AD (assignee) не выводится. */}
@@ -855,7 +856,6 @@ export function RequestCard(props: RequestCardProps) {
                 <table className="sed-table sed-table--review" aria-label="Шаги заявки">
                   <thead>
                     <tr>
-                      <th>№</th>
                       <th>Вид рассмотрения</th>
                       <th>Должность</th>
                       <th>Сотрудник</th>
@@ -868,7 +868,6 @@ export function RequestCard(props: RequestCardProps) {
                     {blocks.map((block) =>
                       block.steps.map((step, si) => (
                         <tr key={step.order}>
-                          <td>{stepLabel(step.order)}</td>
                           {si === 0 && (
                             <td rowSpan={block.steps.length}>
                               {block.parallel ? "Параллельно" : "Последовательно"}

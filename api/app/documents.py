@@ -273,6 +273,24 @@ def _can_view(request: object, user: CurrentUser) -> bool:
     )
 
 
+def _enterprise_name(settings_store: DbSettingsStore, code: object) -> str:
+    """Название предприятия из справочника settings.enterprises (для бланка).
+
+    Нет справочника/кода в нём — сам код (бланк не должен пустовать).
+    """
+    try:
+        raw = read_setting_value(settings_store, "enterprises")
+    except SettingsUnavailable:
+        return str(code or "")
+    if isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, dict) and str(item.get("code") or "") == str(code or ""):
+                name = str(item.get("name") or "").strip()
+                if name:
+                    return name
+    return str(code or "")
+
+
 def _bypass_body(
     request: object, doc_templates: object, position_sets: object = None
 ) -> tuple[str | None, str | None]:
@@ -322,11 +340,14 @@ def print_bypass(
             detail="Нет шаблона бегунка и нет шагов: задайте doc_templates или маршрут",
         )
     # Фиксированная метка временных файлов — не версия документа.
+    context = build_bypass_context(request)
+    # Предприятие — названием из справочника (код 1С в бланке нечитаем).
+    context["enterprise"] = _enterprise_name(settings_store, request.enterprise)
     result = generate_bypass(
         request_id=request.id,
         version="current",
         template_body=body or "",
-        context=build_bypass_context(request),
+        context=context,
         base_url=settings.APP_BASE_URL,
         files_dir=settings.FILES_DIR,
         template_file=template_file,

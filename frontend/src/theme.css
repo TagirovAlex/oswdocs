@@ -483,6 +483,9 @@ a {
   padding: 7px 8px;
   text-align: left;
   vertical-align: top;
+  /* Длинные должности/названия переносятся, а не наезжают на соседние колонки. */
+  overflow-wrap: anywhere;
+  min-width: 0;
 }
 
 .sed-table th {

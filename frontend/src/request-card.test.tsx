@@ -204,9 +204,9 @@ describe("RequestCard", () => {
     expect(steps.getAllByText("SED_STEP_OK").length).toBeGreaterThan(0);
   });
 
-  // Шаги с блоками: order кодирует блок/режим — «№» через stepLabel;
-  // персональный исполнитель — ФИО (owner_name), логин AD не выводится.
-  it("шаги с блоками: «№» через stepLabel, персональный исполнитель — ФИО без логина", async () => {
+  // Шаги с блоками: колонки «№» нет; персональный исполнитель — ФИО
+  // (owner_name), логин AD не выводится.
+  it("шаги с блоками: без колонки «№», персональный исполнитель — ФИО без логина", async () => {
     vi.mocked(getRequest).mockResolvedValue({
       ...requestWith("Громов Игорь Олегович", "На согласовании"),
       enterprise_name: "Предприятие «Пример-1» (вымышленное)",
@@ -219,8 +219,10 @@ describe("RequestCard", () => {
     renderCard();
     await waitFor(() => expect(screen.getByLabelText("Шаги заявки")).toBeInTheDocument());
     const steps = within(screen.getAllByLabelText("Шаги заявки")[0]);
-    expect(steps.getByText("2.1")).toBeInTheDocument();
-    expect(steps.getByText("2.2")).toBeInTheDocument();
+    // Колонки «№» нет: номеров шагов в таблице рассмотрения нет.
+    expect(steps.queryByText("№")).not.toBeInTheDocument();
+    expect(steps.queryByText("2.1")).not.toBeInTheDocument();
+    expect(steps.queryByText("2.2")).not.toBeInTheDocument();
     expect(steps.getByText("Петров Пётр Петрович")).toBeInTheDocument();
     expect(steps.getAllByText("SED_STEP_OK").length).toBeGreaterThan(0);
     // Логин AD согласующего в карточке не выводится.
