@@ -375,6 +375,35 @@ describe("RequestCard", () => {
     expect(screen.getByText("Главный бухгалтер")).toBeInTheDocument();
   });
 
+  // Неразрывные пробелы из 1С/AD в должности нормализуем в обычные,
+  // иначе браузер не переносит строку и она вылезает из колонки.
+  it("должность с неразрывными пробелами — переносимая", async () => {
+    vi.mocked(getRequest).mockResolvedValue({
+      ...requestWith("Громов Игорь Олегович", "На согласовании"),
+      steps: [
+        {
+          order: 1,
+          owner_group: "petrov.pp",
+          resolver: "by_user",
+          assignee: "petrov.pp",
+          owner_name: "Петров Пётр Петрович",
+          owner_duty: "Заместитель\u00a0директора\u00a0по\u00a0информационным\u00a0технологиям",
+          can_act: false,
+          status: "ожидает",
+          expires_at: "2026-10-05T10:00:00+00:00",
+        },
+      ],
+    });
+
+    renderCard();
+    await waitFor(() => expect(screen.getByLabelText("Шаги заявки")).toBeInTheDocument());
+    const table = screen.getByLabelText("Шаги заявки");
+    const dutyCell = within(table).getByText(/Заместитель/);
+    // Неразрывных пробелов в ячейке не осталось — только обычные.
+    expect(dutyCell.textContent).not.toContain("\u00a0");
+    expect(dutyCell.textContent).toContain("Заместитель директора по ");
+  });
+
   // Ключ карточки сотрудника резолвит бэкенд (только привилегированным).
   // С ним ФИО исполнителя в таблице шагов — ссылка на карточку сотрудника.
   it("шаг с employee_key: ФИО исполнителя — ссылка на карточку сотрудника", async () => {

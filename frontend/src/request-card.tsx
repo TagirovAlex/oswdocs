@@ -442,12 +442,20 @@ export function RequestCard(props: RequestCardProps) {
   // Колонка «Должность»: персональным — должность от бэкенда (из той же
   // AD-карточки, что ФИО), затем из стыковочной таблицы, иначе прочерк;
   // групповым — читабельное название группы из настроек, затем имя от
-  // бэкенда, иначе код как раньше.
+  // бэкенда, иначе код как раньше. Неразрывные пробелы из 1С/AD нормализуем:
+  // браузер по ним не переносит, и длинная должность вылезает из колонки.
   function stepDutyCell(step: RequestStep): string {
-    if (!isGroupStep(step)) return step.owner_duty ?? stepPositions[step.order] ?? "—";
-    if (step.owner_group && groupNames[step.owner_group]) return groupNames[step.owner_group];
-    if (step.owner_name) return step.owner_name;
-    return step.owner_group || "—";
+    let text: string;
+    if (!isGroupStep(step)) {
+      text = step.owner_duty ?? stepPositions[step.order] ?? "—";
+    } else if (step.owner_group && groupNames[step.owner_group]) {
+      text = groupNames[step.owner_group];
+    } else if (step.owner_name) {
+      text = step.owner_name;
+    } else {
+      text = step.owner_group || "—";
+    }
+    return text.replace(/[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]/g, " ");
   }
 
   // Колонка «Сотрудник»: персональным — ФИО как раньше; групповым — только
