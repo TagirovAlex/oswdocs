@@ -9,6 +9,7 @@ import json
 import os
 import re
 import sys
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -92,6 +93,13 @@ def _ad_entry(sam, fio):
     }
 
 
+def _ad_entry_as(sam, fio, title, department):
+    entry = _ad_entry(sam, fio)
+    entry["title"] = title
+    entry["department"] = department
+    return entry
+
+
 def _ad_entries():
     return [
         _ad_entry("t.ivan", FIO_IVAN),
@@ -148,6 +156,72 @@ def _client() -> OneCClient:
     return OneCClient(_bases(), transport=FakeTransport())
 
 
+# Кадровые данные дублей ФИО: 003 — «Инженер-тест» (совпадёт с AD), 004 — профиль,
+# которого в AD нет. У 004 регистр пуст (уволен — записи нет).
+_HR_ROWS = {
+    "ref-003": {
+        "Сотрудник_Key": "ref-003",
+        "ТекущееПодразделение": {"Description": "Цех Тестовый"},
+        "ТекущаяДолжность": {"Description": "Инженер-тест"},
+        "ДатаПриема": "2020-01-01",
+    },
+    "ref-004": {
+        "Сотрудник_Key": "ref-004",
+        "ТекущееПодразделение": {"Description": "Склад"},
+        "ТекущаяДолжность": {"Description": "Кладовщик"},
+        "ДатаПриема": "2019-05-05",
+    },
+}
+
+
+class HrTransport(FakeTransport):
+    """Мок-HTTP 1С: справочник, карточка по таб.№ и регистр кадровых данных."""
+
+    def get(self, url, headers, timeout):
+        self.calls += 1
+        if "/t1/" not in url:
+            return HttpResult(status=500, body="down")
+        query = urllib.parse.unquote(url)  # фильтры приходят percent-encoded
+        if "InformationRegister_" in query:
+            match = re.search(r"guid'([^']+)'", query)
+            ref = match.group(1) if match else ""
+            row = _HR_ROWS.get(ref)
+            if row is None:
+                return HttpResult(status=200, body=json.dumps({"value": []}))
+            return HttpResult(
+                status=200, body=json.dumps({"value": [row]}, ensure_ascii=False)
+            )
+        tab_match = re.search(r"Code eq '([^']+)'", query)
+        if tab_match is not None:  # карточка одного сотрудника
+            row = _rows().get(tab_match.group(1))
+            if row is None:
+                return HttpResult(status=404, body="not found")
+            return HttpResult(
+                status=200, body=json.dumps({"value": [row]}, ensure_ascii=False)
+            )
+        return HttpResult(
+            status=200,
+            body=json.dumps({"value": list(_rows().values())}, ensure_ascii=False),
+        )
+
+
+class NoHrTransport(HrTransport):
+    """Регистр кадровых данных недоступен — должности дублей неизвестны."""
+
+    def get(self, url, headers, timeout):
+        if "InformationRegister_" in url:
+            return HttpResult(status=500, body="register down")
+        return FakeTransport.get(self, url, headers, timeout)
+
+
+def _hr_client() -> OneCClient:
+    return OneCClient(_bases(), transport=HrTransport())
+
+
+def _no_hr_client() -> OneCClient:
+    return OneCClient(_bases(), transport=NoHrTransport())
+
+
 # ---------------------------------------------------------------------------
 # Движок run_ad_sync
 # ---------------------------------------------------------------------------
@@ -181,6 +255,48 @@ def test_sync_skips_ad_duplicates():
     assert result.skipped_ad_duplicates == 1  # 002: два AD с этим ФИО
     assert result.skipped_1c_duplicates == 2  # 003/004: дубль ФИО в 1С
     assert result.skipped_ad_no_match == 1  # 005: в AD нет
+
+
+def test_sync_resolves_duplicate_fio_by_hr_position():
+    """Дубли ФИО в 1С, но одна карточка совпадает с AD по должности.
+
+    Справочник 1С отдаёт только ФИО и таб.№, должность приходит из регистра
+    текущих кадровых данных. Связаться должна именно та карточка — иначе у
+    человека не будет AD-карточки, а значит, ни службы, ни руководителя."""
+    store = get_memory_links_store()
+    clear_for_tests()
+    reader = _reader(
+        [
+            _ad_entry_as("t.dubl", FIO_1C_DUBL, "Инженер-тест", "Цех Тестовый"),
+            _ad_entry("t.ivan", FIO_IVAN),
+        ]
+    )
+    result = run_ad_sync(_hr_client(), reader, store, [ENT])
+    # 003 — в AD «Инженер-тест» (совпало), 004 — «Кладовщик» (не совпало).
+    assert result.created == 2
+    linked = store.find("|".join([ENT, "zup_t1", "003"]))
+    assert linked is not None
+    assert linked.sam == "t.dubl"
+    assert store.find("|".join([ENT, "zup_t1", "004"])) is None
+    assert result.skipped_1c_duplicates == 1
+    # Связанная карточка сохраняется с должностью/службой из регистра.
+    assert store._employees["|".join([ENT, "zup_t1", "003"])]["position_1c"] == "Инженер-тест"
+
+
+def test_sync_duplicate_without_hr_match_stays_manual():
+    """Совпадения по должности/службе нет — дубль остаётся на ручную сверку."""
+    store = get_memory_links_store()
+    clear_for_tests()
+    reader = _reader(
+        [
+            _ad_entry_as("t.dubl", FIO_1C_DUBL, "Инженер-тест", "Цех Тестовый"),
+            _ad_entry("t.ivan", FIO_IVAN),
+        ]
+    )
+    result = run_ad_sync(_no_hr_client(), reader, store, [ENT])
+    assert result.created == 1  # только уникальное ФИО
+    assert store.find("|".join([ENT, "zup_t1", "003"])) is None
+    assert result.skipped_1c_duplicates == 2
 
 
 def test_sync_keeps_existing_link():

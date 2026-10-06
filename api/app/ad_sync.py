@@ -71,6 +71,28 @@ def _matches_ad_profile(card: object, ad_user: object) -> bool:
     return False
 
 
+def _enrich_duplicate_cards(client, cards: list) -> list:
+    """Догрузить должность/службу карточек-дублей из регистра кадровых данных.
+
+    Справочник 1С (list_employees) отдаёт только ФИО и табельный номер — dept и
+    position пустые, а без них дубли ФИО не различить: у человека две карточки
+    (старая и новая) и обе подходят по ФИО. Нужные поля приходят только из
+    регистра текущих кадровых данных (OneCClient.get_employee enrich).
+
+    Обогащаем по одному разу на группу ФИО и только когда без этого не обойтись
+    (найден единственный кандидат в AD), иначе проход станет слишком долгим.
+    Ответ 1С здесь — лучшее усилие: при ошибке остаётся карточка из справочника."""
+    enriched: list = []
+    for card in cards:
+        try:
+            enriched.append(
+                client.get_employee(card.base_code, card.tab_num, card.enterprise)
+            )
+        except Exception:  # 1С не ответила — работаем на данных справочника
+            enriched.append(card)
+    return enriched
+
+
 def _pick_duplicate_card(cards: list, ad_user: object) -> object | None:
     """Карточка 1С среди дублей ФИО, однозначно подходящая под кандидата AD.
 
@@ -101,6 +123,7 @@ def _list_enterprise(
         groups.setdefault(_norm(card.fio), []).append(card)
     counts: dict[str, int] = {key: len(items) for key, items in groups.items()}
     duplicates: dict[str, list] = {key: items for key, items in groups.items() if len(items) > 1}
+    enriched: dict[str, list] = {}  # дублей, догруженных из регистра 1С
     for card in cards:
         result.scanned += 1
         key = link_key(card.enterprise, card.base_code, card.tab_num)
@@ -138,9 +161,20 @@ def _list_enterprise(
             # Дубли ФИО в 1С: связываем только ту карточку, чья должность или
             # служба совпадает с AD. Без этого у человека не будет AD-карточки,
             # а значит — ни службы, ни руководителя (маршрут не соберётся).
-            if _pick_duplicate_card(duplicates.get(wanted, []), ad_user) is not card:
+            # Справочник 1С не отдаёт должность и службу, поэтому карточки группы
+            # догружаем из регистра кадровых данных (по одному разу на ФИО).
+            if wanted not in enriched:
+                enriched[wanted] = _enrich_duplicate_cards(
+                    client, duplicates.get(wanted, [])
+                )
+            picked = _pick_duplicate_card(enriched[wanted], ad_user)
+            if picked is None:
                 result.skipped_1c_duplicates += 1
                 continue
+            if link_key(picked.enterprise, picked.base_code, picked.tab_num) != key:
+                result.skipped_1c_duplicates += 1
+                continue
+            card = picked  # связываем и сохраняем карточку с должностью/службой
         # Зеркала ссылок связки в НАШИХ таблицах (one_c_bases/employee_base_map/
         # users) — нужны для внешних ключей link_1c_ad. В AD/1С не пишем.
         try:
