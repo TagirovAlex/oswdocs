@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Protocol
 
@@ -185,6 +186,21 @@ def req_id_to_number(request_id: str) -> int:
     return int(digits)
 
 
+def _stage_lines_value(value: object) -> list:
+    """stage_lines шага из БД: jsonb приходит списком, из строки JSON — разбираем,
+    мусор — пустой список (снимок этапа не должен ронять выдачу заявки)."""
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except ValueError:
+            return []
+        if isinstance(parsed, list):
+            return [str(item) for item in parsed]
+    return []
+
+
 class InMemoryRequestsStore:
     """Офлайн-хранилище заявок (словарь процесса), интерфейс RequestsStore."""
 
@@ -282,11 +298,15 @@ class InMemoryRequestsStore:
 
 
 class DbRequestsStore:
-    """Хранилище заявок в Postgres (таблицы 0001, дополнены миграцией 0002).
+    """Хранилище заявок в Postgres (таблицы 0001, дополнены миграциями 0002 и 0008).
 
     Схема 0002 добавила под модель заявки: код REQ-XXXX (code), fio,
     department/position/category/escalation_hours; у шагов — resolver/assignee/
     require_comment; base_code nullable без FK (в модели _Request его нет).
+    Миграция 0008 (справочники маршрута) добавила снимок подбора: у заявки —
+    profile_id/service_id/service_name, у шага — stage_id/stage_code/
+    stage_title/stage_lines (jsonb)/profile_step_id. Снимок пишется и читается
+    на обоих путях (create и update — шаги перезаписываются целиком).
     Статусы и route_origin в БД — кодами ('draft'/'manual'), в модели — русскими
     строками контракта ('Черновик'/'custom'); маппинг — словарями выше.
     Ошибки БД оборачиваются в RequestsUnavailable (503), как DbSettingsStore
@@ -296,7 +316,8 @@ class DbRequestsStore:
     _REQUEST_COLUMNS = (
         "id, code, enterprise, tab_num, initiated_by_hr, route_origin, status, "
         "fio, department, position, category, escalation_hours, "
-        "subject, content, doc_type_code"
+        "subject, content, doc_type_code, "
+        "profile_id, service_id, service_name"
     )
 
     _SELECT_REQUESTS = text(
@@ -322,12 +343,14 @@ class DbRequestsStore:
           code, enterprise, base_code, tab_num, initiated_by_hr, route_origin,
           status, fio, department, position, category, escalation_hours,
           subject, content, doc_type_code,
+          profile_id, service_id, service_name,
           created_at, updated_at
         )
         VALUES (
           :code, :enterprise, :base_code, :tab_num, :created_by, :route_origin,
           :status, :fio, :department, :position, :category, :escalation_hours,
           :subject, :content, :doc_type_code,
+          :profile_id, :service_id, :service_name,
           :created_at, :updated_at
         )
         RETURNING id
@@ -346,6 +369,9 @@ class DbRequestsStore:
             subject = :subject,
             content = :content,
             doc_type_code = :doc_type_code,
+            profile_id = :profile_id,
+            service_id = :service_id,
+            service_name = :service_name,
             updated_at = :updated_at
         WHERE code = :code
         """
@@ -360,7 +386,8 @@ class DbRequestsStore:
 
     _STEP_COLUMNS = (
         "request_id, step_order, owner_group, done_by, status, resolver, "
-        "assignee, require_comment, done_at, expires_at, comment"
+        "assignee, require_comment, done_at, expires_at, comment, "
+        "stage_id, stage_code, stage_title, stage_lines, profile_step_id"
     )
     _SELECT_STEPS_BY_REQUEST = text(
         f"""
@@ -381,11 +408,14 @@ class DbRequestsStore:
         """
         INSERT INTO request_steps (
           request_id, step_order, owner_group, done_by, status, resolver,
-          assignee, require_comment, done_at, expires_at, comment
+          assignee, require_comment, done_at, expires_at, comment,
+          stage_id, stage_code, stage_title, stage_lines, profile_step_id
         )
         VALUES (
           :request_id, :step_order, :owner_group, :done_by, :status, :resolver,
-          :assignee, :require_comment, :done_at, :expires_at, :comment
+          :assignee, :require_comment, :done_at, :expires_at, :comment,
+          :stage_id, :stage_code, :stage_title, CAST(:stage_lines AS jsonb),
+          :profile_step_id
         )
         """
     )
@@ -445,7 +475,7 @@ class DbRequestsStore:
         )
 
     def _step_params(self, request_id: int, step: _Step) -> dict:
-        """Параметры вставки шага (статус/resolver — кодами БД)."""
+        """Параметры вставки шага (статус/resolver — кодами БД, stage_lines — jsonb)."""
         return {
             "request_id": request_id,
             "step_order": step.order,
@@ -458,6 +488,32 @@ class DbRequestsStore:
             "done_at": step.done_at,
             "expires_at": step.expires_at,
             "comment": step.comment,
+            "stage_id": step.stage_id,
+            "stage_code": step.stage_code,
+            "stage_title": step.stage_title,
+            "stage_lines": json.dumps(step.stage_lines or [], ensure_ascii=False),
+            "profile_step_id": step.profile_step_id,
+        }
+
+    @staticmethod
+    def _request_params(request: _Request) -> dict:
+        """Общие поля заявки для INSERT/UPDATE (снимок подбора маршрута
+        profile_id/service_id/service_name пишется на обоих путях)."""
+        return {
+            "code": request.id,
+            "status": request_status_to_db(request.status),
+            "route_origin": route_origin_to_db(request.route_origin),
+            "fio": request.fio,
+            "department": request.department,
+            "position": request.position,
+            "category": request.category,
+            "escalation_hours": request.escalation_hours,
+            "subject": request.subject,
+            "content": request.content,
+            "doc_type_code": request.doc_type_code,
+            "profile_id": request.profile_id,
+            "service_id": request.service_id,
+            "service_name": request.service_name,
         }
 
     def _build_request(self, row, step_rows: list) -> _Request:
@@ -481,6 +537,9 @@ class DbRequestsStore:
             content=row.content,
             doc_type_code=row.doc_type_code,
             created_by=row.initiated_by_hr,
+            profile_id=row.profile_id,
+            service_id=row.service_id,
+            service_name=row.service_name,
             steps=[
                 _StepModel(
                     order=step_row.step_order,
@@ -493,6 +552,11 @@ class DbRequestsStore:
                     done_by=step_row.done_by,
                     done_at=step_row.done_at,
                     comment=step_row.comment,
+                    stage_id=step_row.stage_id,
+                    stage_code=step_row.stage_code,
+                    stage_title=step_row.stage_title,
+                    stage_lines=_stage_lines_value(step_row.stage_lines),
+                    profile_step_id=step_row.profile_step_id,
                 )
                 for step_row in step_rows
             ],
@@ -505,28 +569,18 @@ class DbRequestsStore:
         try:
             with self._session_factory() as session:
                 now = datetime.now(timezone.utc)
-                row = session.execute(
-                    self._INSERT_REQUEST,
+                params = self._request_params(request)
+                params.update(
                     {
-                        "code": request.id,
                         "enterprise": request.enterprise,
                         "base_code": None,
                         "tab_num": request.tab_num,
                         "created_by": request.created_by,
-                        "route_origin": route_origin_to_db(request.route_origin),
-                        "status": request_status_to_db(request.status),
-                        "fio": request.fio,
-                        "department": request.department,
-                        "position": request.position,
-                        "category": request.category,
-                        "escalation_hours": request.escalation_hours,
-                        "subject": request.subject,
-                        "content": request.content,
-                        "doc_type_code": request.doc_type_code,
                         "created_at": now,
                         "updated_at": now,
-                    },
-                ).first()
+                    }
+                )
+                row = session.execute(self._INSERT_REQUEST, params).first()
                 for step in request.steps:
                     session.execute(
                         self._INSERT_STEP, self._step_params(row.id, step)
@@ -581,23 +635,9 @@ class DbRequestsStore:
                         f"Заявка {request.id} не найдена в хранилище"
                     )
                 now = datetime.now(timezone.utc)
-                session.execute(
-                    self._UPDATE_REQUEST,
-                    {
-                        "code": request.id,
-                        "status": request_status_to_db(request.status),
-                        "route_origin": route_origin_to_db(request.route_origin),
-                        "fio": request.fio,
-                        "department": request.department,
-                        "position": request.position,
-                        "category": request.category,
-                        "escalation_hours": request.escalation_hours,
-                        "subject": request.subject,
-                        "content": request.content,
-                        "doc_type_code": request.doc_type_code,
-                        "updated_at": now,
-                    },
-                )
+                params = self._request_params(request)
+                params["updated_at"] = now
+                session.execute(self._UPDATE_REQUEST, params)
                 session.execute(self._DELETE_STEPS, {"request_id": internal.id})
                 for step in request.steps:
                     session.execute(

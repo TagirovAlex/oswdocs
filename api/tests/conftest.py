@@ -24,6 +24,7 @@ from app.audit import audit_log  # noqa: E402
 from app.employee_sync import InMemoryEmployeeSyncStore, get_employee_sync_store  # noqa: E402
 from app.employees import get_ad_reader  # noqa: E402
 from app.main import app  # noqa: E402
+from app.routing_store import get_routing_store  # noqa: E402
 from app.settings_routes import get_settings_store  # noqa: E402
 
 # --- Вымышленные пользователи (не реальные ФИО/логины) ---
@@ -113,22 +114,61 @@ class OfflineSettingsStore:
         self.values.update(values)
 
 
+class OfflineRoutingStore:
+    """Пустой справочник маршрута для офлайн-прогонов (без Postgres).
+
+    Контракт DbRoutingStore на чтении: пустые списки справочников, отсутствующая
+    карточка сотрудника/руководителя. Офлайн это значит «профилей нет» — подбор
+    маршрута route_mode=auto отвечает 422 с причиной, а живая БД не запрашивается."""
+
+    def list_services(self, active_only: bool = False) -> list[dict]:
+        return []
+
+    def list_profiles(self, active_only: bool = False) -> list[dict]:
+        return []
+
+    def list_stages(self, active_only: bool = False) -> list[dict]:
+        return []
+
+    def list_profile_steps(self, profile_id: int) -> list[dict]:
+        return []
+
+    def list_all_profile_steps(self) -> list[dict]:
+        return []
+
+    def list_stage_assignees(self, stage_id: int, active_only: bool = True) -> list[dict]:
+        return []
+
+    def user_card(self, sam: str) -> dict | None:
+        return None
+
+    def is_manager(self, sam: str) -> bool:
+        return False
+
+    def manager_sam_by_dn(self, manager_dn: str) -> str | None:
+        return None
+
+
 # Границы, которые по умолчанию не должны ходить в живую БД/AD (заметка B2 ревью):
 # привилегированные эндпоинты заявок резолвят карту предприятий
 # (_enterprise_names_map -> get_settings_store) и ридер AD, поэтому без подмен
-# весь набор pytest зависал на несуществующем Postgres.
+# весь набор pytest зависал на несуществующем Postgres. Справочники маршрута
+# (get_routing_store) — по той же причине: подбор маршрута auto и состав этапа
+# читаются при создании заявки и выдаче карточки.
 OFFLINE_BOUNDARIES = (
     get_settings_store,
     get_ad_reader,
     get_employee_sync_store,
     get_groups_cache_store,
+    get_routing_store,
 )
 
 
 @pytest.fixture(autouse=True)
 def offline_boundaries(monkeypatch):
     """Подменить живые границы офлайн-прогонов: настройки — пусто, AD — None,
-    локальный справочник — пустой (фолбэк поиска на живой 1С).
+    локальный справочник — пустой (фолбэк поиска на живой 1С), справочники
+    маршрута — пустые.
 
     Тесты со своими override'ами перебивают эти значения своими (override ставится
     после autouse-фикстуры); для юнит-тестов ветки боевого кода без подмен —
@@ -137,6 +177,7 @@ def offline_boundaries(monkeypatch):
     app.dependency_overrides[get_ad_reader] = lambda: None
     app.dependency_overrides[get_employee_sync_store] = lambda: InMemoryEmployeeSyncStore()
     app.dependency_overrides[get_groups_cache_store] = lambda: InMemoryGroupsCacheStore()
+    app.dependency_overrides[get_routing_store] = lambda: OfflineRoutingStore()
     # Персистентный аудит (INSERT в audit_log) — best-effort, но офлайн Postgres
     # нет: отключаем БД-хранилище, журнал остаётся in-memory (контракт прежний).
     monkeypatch.setattr(audit_module, "_get_db_store", lambda: None)

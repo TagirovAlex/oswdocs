@@ -3,8 +3,9 @@
 // маршрут → «Создать»; невалидное — недоступно (кнопка «Создать» disabled).
 // Предприятия — только из API (settings БД), хардкода нет (AGENTS.md п.3).
 // Сотрудник: живой поиск в 1С (GET /api/employees); без баз (503) — ручной ввод.
-// Маршрут: конструктор блоков (последовательный/параллельный) с исполнителями
-// из AD (GET /api/ad/search); телом создания идут blocks, не группы (steps).
+// Маршрут: по профилю службы сотрудника (POST /api/requests/route/preview,
+// route_mode=auto) либо ручной конструктор блоков с исполнителями из AD
+// (route_mode=custom; телом создания идут blocks, не группы steps).
 import { useEffect, useRef, useState } from "react";
 import { ApiHttpError, me } from "./auth-client";
 import {
@@ -14,12 +15,26 @@ import {
   getEmployeeCard,
   getEnterprises,
   getMyLinks,
+  getRoutingCatalogs,
   getStepGroups,
+  previewRoute,
   searchAd,
   searchEmployees,
   submitRequest,
 } from "./requests-client";
-import type { AdCandidate, AdGroupMember, DocType, EmployeeHit, Enterprise, MyLink, StepGroup } from "./requests-client";
+import type {
+  AdCandidate,
+  AdGroupMember,
+  CreateRequestBody,
+  DocType,
+  EmployeeHit,
+  Enterprise,
+  MyLink,
+  RouteMode,
+  RoutePreview,
+  RoutingCatalogStage,
+  StepGroup,
+} from "./requests-client";
 import type { Role } from "./api-mock";
 import { employeeUrl, openPopup } from "./windows";
 
@@ -77,6 +92,32 @@ const EMPTY_GROUP_MEMBERS: GroupMembersState = {
 // Размер страницы живого поиска сотрудника в форме создания: совпадает с
 // дефолтом сервера (page_size /api/employees); пагинация — по total ответа.
 const EMP_SEARCH_PAGE_SIZE = 50;
+
+// Причины подбора маршрута (reason из предпросмотра) — тексты по-русски.
+// Базовый признак отделён от пометок («+»), их не показываем.
+const ROUTE_REASON_TEXT: Record<string, string> = {
+  service_profile: "профиль службы",
+  default_profile: "профиль по умолчанию",
+  profile_not_found: "профиль не найден",
+  service_not_registered: "служба не заведена",
+};
+
+// Причины, при которых маршрут НЕ подобрался (профиля нет): показываем
+// предупреждение, а не тихо пустой список этапов.
+const ROUTE_REASON_MISSED = ["profile_not_found", "service_not_registered"];
+
+// Текст причины подбора из reason предпросмотра («+»-пометки отбрасываем).
+function routeReasonText(reason: string): string {
+  const base = reason.split("+")[0] ?? "";
+  return ROUTE_REASON_TEXT[base] ?? base;
+}
+
+// Источник исполнителя этапа (owner_kind) — текстом по-русски.
+const OWNER_KIND_TEXT: Record<string, string> = {
+  manager_ad: "руководитель из AD",
+  ad_group: "группа AD",
+  stage_roster: "состав этапа",
+};
 
 // Состояние блока без указанного ключа: удалённый блок не должен оставлять в
 // состоянии формы свою группу и её состав.
@@ -191,6 +232,29 @@ export function CreateForm(props: CreateFormProps) {
   const [position, setPosition] = useState<string>("");
   // Порядковый номер поиска сотрудника: устаревшие ответы отбрасываем.
   const searchSeq = useRef(0);
+
+  // Маршрут по профилю (auto, по умолчанию) либо ручной конструктор (custom).
+  const [routeMode, setRouteMode] = useState<RouteMode>("auto");
+  // Предпросмотр маршрута: профиль/служба/этапы + текст ошибки (422/503).
+  const [preview, setPreview] = useState<RoutePreview | null>(null);
+  const [previewError, setPreviewError] = useState<string>("");
+  const [previewLoading, setPreviewLoading] = useState<boolean>(false);
+  // Правки маршрута ОК: снятые и добавленные этапы (коды) — уходят и в
+  // предпросмотр, и в создание.
+  const [dismissedStages, setDismissedStages] = useState<string[]>([]);
+  const [addedStages, setAddedStages] = useState<string[]>([]);
+  // Справочник этапов для «Добавить этап» (админский GET /settings/routing/
+  // catalogs). Не-админу 403 — добавление необязательно, кнопки нет.
+  const [catalogStages, setCatalogStages] = useState<RoutingCatalogStage[] | null>(null);
+  // Раскрыт ли список доступных этапов (кнопка «Добавить этап»).
+  const [addStageOpen, setAddStageOpen] = useState<boolean>(false);
+  // Порядковый номер предпросмотра: устаревший ответ по прежнему сотруднику
+  // не должен затирать текущий.
+  const previewSeq = useRef(0);
+  // Код базы 1С и логин AD выбранного сотрудника (часть ключа hit.key) —
+  // источник карточки для подбора маршрута.
+  const [baseCode, setBaseCode] = useState<string>("");
+  const [adSam, setAdSam] = useState<string>("");
 
   // Конструктор маршрута: блоки (последовательный/параллельный) и панель AD.
   const [blocks, setBlocks] = useState<RouteBlock[]>([]);
@@ -336,6 +400,72 @@ export function CreateForm(props: CreateFormProps) {
     };
   }, []);
 
+  // Справочник этапов маршрута для добавления (только админ; 403 у остальных —
+  // кнопка «Добавить этап» не показывается, деградация без ошибки).
+  useEffect(() => {
+    let alive = true;
+    getRoutingCatalogs()
+      .then((catalogs) => {
+        if (alive) setCatalogStages((catalogs.stages ?? []).filter((s) => s.active));
+      })
+      .catch(() => {
+        // Справочник недоступен (403/503) — добавление этапов недоступно.
+        if (alive) setCatalogStages(null);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // Предпросмотр маршрута по профилю службы: как только известны предприятие и
+  // табельный номер (или выбран сотрудник). Перезапрашивается при смене
+  // сотрудника и при правке снятых/добавленных этапов. Устаревшие ответы
+  // отбрасываем по previewSeq. 422/503 — текст ошибки, создание в custom
+  // остаётся доступным (пользователь может переключиться вручную).
+  useEffect(() => {
+    if (routeMode !== "auto" || enterprise === "" || tabNum.trim() === "") {
+      previewSeq.current++;
+      setPreview(null);
+      setPreviewError("");
+      setPreviewLoading(false);
+      return;
+    }
+    const seq = ++previewSeq.current;
+    setPreviewLoading(true);
+    setPreviewError("");
+    previewRoute({
+      enterprise,
+      tab_num: tabNum.trim(),
+      ...(baseCode !== "" ? { base_code: baseCode } : {}),
+      ...(adSam !== "" ? { ad_sam: adSam } : {}),
+      ...(department !== "" ? { department } : {}),
+      ...(position !== "" ? { position } : {}),
+      dismissed_stages: dismissedStages,
+      added_stages: addedStages,
+    })
+      .then((data) => {
+        if (previewSeq.current !== seq) return;
+        setPreview(data);
+        setPreviewLoading(false);
+      })
+      .catch((e: unknown) => {
+        if (previewSeq.current !== seq) return;
+        setPreview(null);
+        setPreviewLoading(false);
+        setPreviewError(e instanceof Error ? e.message : "Ошибка предпросмотра маршрута");
+      });
+  }, [
+    routeMode,
+    enterprise,
+    tabNum,
+    baseCode,
+    adSam,
+    department,
+    position,
+    dismissedStages,
+    addedStages,
+  ]);
+
   // Состав группы из AD: счётчик + раскрываемый список (ФИО/почта). Состав хранится
   // по id блока. Ошибка или недоступность AD — текст, форма не падает.
   function patchGroupMembers(blockId: string, patch: Partial<GroupMembersState>): void {
@@ -469,13 +599,18 @@ export function CreateForm(props: CreateFormProps) {
   // данных) — для создания они необязательны.
   const empTotalPages = empTotal > 0 ? Math.max(1, Math.ceil(empTotal / EMP_SEARCH_PAGE_SIZE)) : 0;
   const employeeReady = fio.trim() !== "" && tabNum.trim() !== "";
+  // Готовность маршрута: в auto — этапы подобраны (blocks не отправляются),
+  // в custom — заполнены блоки конструктора, как раньше.
+  const routeReady =
+    routeMode === "auto"
+      ? preview !== null && preview.stages.length > 0
+      : blocks.length > 0 && blocks.every((b) => b.steps.length > 0);
   const canCreate =
     enterprise !== "" &&
     employeeReady &&
     subject.trim() !== "" &&
     content.trim() !== "" &&
-    blocks.length > 0 &&
-    blocks.every((b) => b.steps.length > 0) &&
+    routeReady &&
     !busy;
 
   // Выбор сотрудника из списка 1С заполняет справочные поля заявки.
@@ -493,7 +628,12 @@ export function CreateForm(props: CreateFormProps) {
     setEmpPicked(true);
     // Ключ карточки сотрудника: enterprise|base_code|tab_num (hit.key).
     setEmpKey(hit.key);
+    // Код базы 1С и логин AD — источник карточки для подбора маршрута.
     const parts = hit.key.split("|");
+    setBaseCode(parts.length >= 2 ? parts[1] : "");
+    setAdSam(hit.ad_sam ?? "");
+    setDismissedStages([]);
+    setAddedStages([]);
     if (parts.length < 3) {
       return; // битый ключ — подразделение/должность останутся пустыми («—»)
     }
@@ -525,6 +665,40 @@ export function CreateForm(props: CreateFormProps) {
     setTabNum("");
     setDepartment("");
     setPosition("");
+    setBaseCode("");
+    setAdSam("");
+    setDismissedStages([]);
+    setAddedStages([]);
+    setPreview(null);
+    setPreviewError("");
+    setAddStageOpen(false);
+  }
+
+  // Снятие/возврат этапа маршрута (auto): optional=false — этап обязательный,
+  // снять его нельзя (чекбокс неактивен).
+  function toggleStage(code: string, optional: boolean): void {
+    if (!optional || code === "") return;
+    markTouched();
+    setDismissedStages((prev) =>
+      prev.includes(code) ? prev.filter((c) => c !== code) : [...prev, code],
+    );
+  }
+
+  // Добавление этапа в конец маршрута (auto): код уходит в added_stages.
+  function addStage(code: string): void {
+    if (code === "") return;
+    markTouched();
+    setAddedStages((prev) => (prev.includes(code) ? prev : [...prev, code]));
+    setAddStageOpen(false);
+  }
+
+  // Переключение режима маршрута: в custom предпросмотр не нужен.
+  function changeRouteMode(mode: RouteMode): void {
+    markTouched();
+    setRouteMode(mode);
+    if (mode === "custom") setAddStageOpen(false);
+    // Модалка AD — часть ручного конструктора: в auto её закрываем.
+    if (mode === "auto" && adPanelBlock !== null) closeAdPanel();
   }
 
   // Конструктор маршрута: добавление/удаление блоков и шагов (→ dirty).
@@ -667,6 +841,16 @@ export function CreateForm(props: CreateFormProps) {
     setComment("");
     setDocTypeCode(docTypes.length > 0 ? docTypes[0].code : "");
     setBlocks([]);
+    setRouteMode("auto");
+    setPreview(null);
+    setPreviewError("");
+    setPreviewLoading(false);
+    setDismissedStages([]);
+    setAddedStages([]);
+    setAddStageOpen(false);
+    setBaseCode("");
+    setAdSam("");
+    previewSeq.current++;
     // blockSeq НЕ обнуляем: счётчик монотонно растёт, поэтому id блоков
     // уникальны в пределах жизненного цикла формы. Иначе первый блок новой
     // формы получил бы тот же blk-N, счётчик groupSeq (обнуляемый ниже) сбился
@@ -699,7 +883,7 @@ export function CreateForm(props: CreateFormProps) {
     setCreated("");
     setBusy(true);
     try {
-      const payload = {
+      const payload: CreateRequestBody = {
         enterprise,
         tab_num: tabNum,
         department,
@@ -708,15 +892,23 @@ export function CreateForm(props: CreateFormProps) {
         subject,
         content,
         ...(docTypeCode !== "" ? { doc_type_code: docTypeCode } : {}),
-        blocks: blocks.map((b) => ({
-          mode: b.mode,
-          // Шаг-группа уходит owner_group + by_group; шаг-сотрудник — sam.
-          steps: b.steps.map((s) =>
-            s.kind === "group"
-              ? { owner_group: s.owner_group ?? s.display_name, resolver: s.resolver }
-              : { sam: s.sam },
-          ),
-        })),
+        ...(baseCode !== "" ? { base_code: baseCode } : {}),
+        ...(adSam !== "" ? { ad_sam: adSam } : {}),
+        route_mode: routeMode,
+        // auto: маршрут собирает бэкенд из профиля — блоки НЕ отправляются.
+        ...(routeMode === "auto"
+          ? { dismissed_stages: dismissedStages, added_stages: addedStages }
+          : {
+              blocks: blocks.map((b) => ({
+                mode: b.mode,
+                // Шаг-группа уходит owner_group + by_group; шаг-сотрудник — sam.
+                steps: b.steps.map((s) =>
+                  s.kind === "group"
+                    ? { owner_group: s.owner_group ?? s.display_name, resolver: s.resolver }
+                    : { sam: s.sam },
+                ),
+              })),
+            }),
       };
       // Повтор «Отправить» после сбоя submit переиспользует тот же черновик,
       // ТОЛЬКО если данные формы не изменились. При правках создаём новый
@@ -1083,11 +1275,161 @@ export function CreateForm(props: CreateFormProps) {
         </div>
       </div>
 
-      {/* Маршрут: конструктор блоков (последовательный/параллельный); исполнители
-          — сотрудник (поиск AD) либо группа (список групп + состав из AD). */}
+      {/* Маршрут согласования: режим auto — подбор по профилю службы с
+          предпросмотром этапов; режим custom — конструктор блоков
+          (последовательный/параллельный) с исполнителями из AD или группами. */}
       {enterprise && employeeReady && (
         <fieldset className="sed-fieldset sed-mt-12">
           <legend>Маршрут согласования</legend>
+          <div className="sed-fieldrow" role="radiogroup" aria-label="Режим маршрута">
+            <label className="sed-field">
+              <input
+                type="radio"
+                name="route-mode"
+                aria-label="По профилю (рекомендуется)"
+                checked={routeMode === "auto"}
+                onChange={() => changeRouteMode("auto")}
+              />
+              {" "}По профилю (рекомендуется)
+            </label>
+            <label className="sed-field">
+              <input
+                type="radio"
+                name="route-mode"
+                aria-label="Вручную"
+                checked={routeMode === "custom"}
+                onChange={() => changeRouteMode("custom")}
+              />
+              {" "}Вручную
+            </label>
+          </div>
+
+          {/* Автоматический маршрут: предпросмотр (профиль, служба, этапы).
+              Ошибка предпросмотра (422/503) — текстом; ручной режим при этом
+              остаётся доступен (переключение выше). */}
+          {routeMode === "auto" && (
+            <div>
+              {previewLoading && <div className="sed-note">Подбор маршрута…</div>}
+              {previewError && (
+                <div role="alert">
+                  Маршрут: {previewError}. Переключите режим на «Вручную», чтобы задать маршрут самостоятельно.
+                </div>
+              )}
+              {preview && (
+                <>
+                  <div className="sed-block">
+                    Профиль: <strong>{preview.profile?.name ?? "—"}</strong>
+                  </div>
+                  <div className="sed-block">
+                    Служба: <strong>{preview.service?.dept_name ?? "—"}</strong>
+                  </div>
+                  <div className="sed-block">
+                    Причина подбора: <strong>{routeReasonText(preview.reason)}</strong>
+                  </div>
+                  {/* Маршрут не подобрался (профиля/службы нет) — предупреждение:
+                      заявку в этом режиме создать нельзя, нужен ручной маршрут. */}
+                  {ROUTE_REASON_MISSED.includes(preview.reason.split("+")[0] ?? "") && (
+                    <div className="sed-note">
+                      Маршрут не подобрался: {routeReasonText(preview.reason)}. Задайте маршрут вручную.
+                    </div>
+                  )}
+                </>
+              )}
+              {/* Этапы: по умолчанию все включены; снятая галочка — код в
+                  dismissed_stages. optional=false — этап обязательный. */}
+              {preview && preview.stages.length === 0 && (
+                <div className="sed-note">Этапы не подобраны.</div>
+              )}
+              {preview && preview.stages.length > 0 && (
+                <table className="sed-table" aria-label="Этапы маршрута">
+                  <thead>
+                    <tr>
+                      <th scope="col">
+                        <span className="sed-hidden">Включён</span>
+                      </th>
+                      <th scope="col">Этап</th>
+                      <th scope="col">Исполнитель</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {preview.stages.map((stage) => {
+                      const code = stage.code ?? "";
+                      const title = stage.title || code;
+                      return (
+                        <tr key={code !== "" ? code : `stage-${stage.stage_id ?? title}`}>
+                          <td>
+                            <input
+                              type="checkbox"
+                              aria-label={`Этап ${title}`}
+                              checked={!dismissedStages.includes(code)}
+                              disabled={!stage.optional}
+                              title={stage.optional ? "Снять этап из маршрута" : "Этап обязательный"}
+                              onChange={() => toggleStage(code, stage.optional)}
+                            />
+                          </td>
+                          <td>
+                            {title}
+                            {!stage.optional && <span className="sed-sub"> (обязательный)</span>}
+                            {stage.stage_lines.length > 0 && (
+                              <div className="sed-sub">{stage.stage_lines.join(" · ")}</div>
+                            )}
+                            {/* Причина блокировки этапа (важно для ОК: этап
+                                нельзя закрыть — например, не найден руководитель). */}
+                            {stage.blocked_reason && (
+                              <div className="sed-note">{stage.blocked_reason}</div>
+                            )}
+                          </td>
+                          <td>
+                            {stage.owner_name ?? stage.owner_group ?? "—"}
+                            <div className="sed-sub">
+                              {OWNER_KIND_TEXT[stage.owner_kind] ?? stage.owner_kind}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+              {/* Добавление этапа: справочник админский — при 403 кнопки нет. */}
+              {catalogStages !== null && catalogStages.length > 0 && (
+                <div className="sed-toolbar sed-mt-8">
+                  <button
+                    type="button"
+                    className="sed-btn sed-btn--ghost"
+                    aria-label="Добавить этап"
+                    onClick={() => setAddStageOpen(!addStageOpen)}
+                  >
+                    <PlusIcon />
+                    Добавить этап
+                  </button>
+                  {addStageOpen && (
+                    <select
+                      aria-label="Этап для добавления"
+                      value=""
+                      onChange={(e) => addStage(e.target.value)}
+                    >
+                      <option value="">— выберите этап —</option>
+                      {catalogStages
+                        .filter((s) => !addedStages.includes(s.code))
+                        .map((s) => (
+                          <option key={s.code} value={s.code}>
+                            {s.title || s.code}
+                          </option>
+                        ))}
+                    </select>
+                  )}
+                  {addedStages.length > 0 && (
+                    <span className="sed-note">Добавленные этапы: {addedStages.length}</span>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Ручной конструктор маршрута — только в режиме custom. */}
+          {routeMode === "custom" && (
+            <>
           <div className="sed-note">
             Конструктор маршрута: блоки с исполнителями — сотрудником из AD или группой.
           </div>
@@ -1270,6 +1612,8 @@ export function CreateForm(props: CreateFormProps) {
               Добавить параллельный блок
             </button>
           </div>
+            </>
+          )}
         </fieldset>
       )}
 

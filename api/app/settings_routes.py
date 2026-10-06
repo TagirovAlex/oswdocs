@@ -18,11 +18,12 @@ import tempfile
 import zipfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import bindparam, create_engine, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import sessionmaker
@@ -36,6 +37,7 @@ from .docs import (
     _soffice_binary,
     request_url,
 )
+from .routing_store import DbRoutingStore, RoutingUnavailable, get_routing_store
 
 router = APIRouter(tags=["настройки"])
 
@@ -1240,6 +1242,428 @@ def delete_doc_type(
         )
     )
     return {"deleted": code}
+
+
+# --- Справочники маршрута согласования (миграция 0008: ad_services/
+# route_profiles/approval_stages/stage_assignees) — админ-эндпоинты.
+# Службы заполняются синхронизацией AD (upsert), этапы/профили/состав этапа —
+# вручную админом. Аудит правок ведёт routing_store (в т.ч. без ПДн: логины
+# сотрудников в details не пишутся), здесь только чтение с audit_log.
+# Справочник — источник маршрута: набор кодов этапов и групп задан настройками
+# (валидация ниже), значения в коде не зашиты.
+
+# Код этапа/профиля справочника: snake_case (латиница), уникален в таблице.
+_ROUTE_CODE_PATTERN = r"^[a-z][a-z0-9_]*$"
+
+
+class StageCatalogIn(BaseModel):
+    """Новый этап маршрута (approval_stages).
+
+    owner_kind задаёт источник исполнителя: ad_group — группа AD, stage_roster —
+    состав этапа (stage_assignees), manager_ad — руководитель сотрудника.
+    Для ad_group owner_group обязателен, для stage_roster — запрещён."""
+
+    code: str = Field(pattern=_ROUTE_CODE_PATTERN, description="Код этапа (snake_case, уникален)")
+    title: str = Field(min_length=1, description="Наименование этапа (колонка 2 бланка)")
+    stage_lines: list[str] = Field(
+        default_factory=list, description="Строки этапа (колонка 3 бланка); пустые не допускаются"
+    )
+    owner_kind: Literal["ad_group", "stage_roster", "manager_ad"] = Field(
+        default="ad_group", description="Источник исполнителя этапа"
+    )
+    owner_group: str | None = Field(
+        default=None, description="Группа AD-владелец (только для owner_kind=ad_group)"
+    )
+    optional: bool = Field(default=True, description="Этап необязательный для маршрута")
+    print_assignee: bool = Field(
+        default=False, description="Печатать исполнителя на бланке"
+    )
+    require_comment: bool = Field(
+        default=False, description="Комментарий обязателен даже при согласии"
+    )
+    active: bool = Field(default=True, description="Активен этап (active=false — вне маршрутов)")
+
+    @model_validator(mode="after")
+    def _check_stage(self) -> "StageCatalogIn":
+        """Нормализация и проверки парности owner_kind/owner_group и строк этапа."""
+        owner = (self.owner_group or "").strip() or None
+        if self.owner_kind == "ad_group" and not owner:
+            raise ValueError("Для owner_kind=ad_group обязателен owner_group (группа AD)")
+        if self.owner_kind == "stage_roster" and owner:
+            raise ValueError(
+                "Для owner_kind=stage_roster owner_group не задаётся: "
+                "исполнитель — состав этапа"
+            )
+        lines = [line.strip() for line in self.stage_lines]
+        if any(not line for line in lines):
+            raise ValueError("Строки этапа (stage_lines) не могут быть пустыми")
+        self.owner_group = owner
+        self.stage_lines = lines
+        return self
+
+
+class StageCatalogUpdateIn(BaseModel):
+    """Правка этапа маршрута (частичное обновление; код этапа неизменен).
+
+    Парность owner_kind/owner_group проверяется по переданным полям: смена
+    kind без owner_group и kind=stage_roster вместе с owner_group — 422."""
+
+    title: str | None = Field(default=None, min_length=1, description="Наименование этапа")
+    stage_lines: list[str] | None = Field(
+        default=None, description="Строки этапа; пустые не допускаются"
+    )
+    owner_kind: Literal["ad_group", "stage_roster", "manager_ad"] | None = Field(
+        default=None, description="Источник исполнителя этапа"
+    )
+    owner_group: str | None = Field(
+        default=None, description="Группа AD-владелец (только для owner_kind=ad_group)"
+    )
+    optional: bool | None = Field(default=None, description="Этап необязательный")
+    print_assignee: bool | None = Field(default=None, description="Печатать исполнителя")
+    require_comment: bool | None = Field(
+        default=None, description="Комментарий обязателен даже при согласии"
+    )
+    active: bool | None = Field(default=None, description="Активен этап")
+
+    @model_validator(mode="after")
+    def _check_stage(self) -> "StageCatalogUpdateIn":
+        """Пустые строки этапа и несогласованная пара owner_kind/owner_group — 422."""
+        if self.owner_kind == "stage_roster" and (self.owner_group or "").strip():
+            raise ValueError(
+                "Для owner_kind=stage_roster owner_group не задаётся: "
+                "исполнитель — состав этапа"
+            )
+        if self.owner_kind == "ad_group" and not (self.owner_group or "").strip():
+            raise ValueError("Для owner_kind=ad_group обязателен owner_group (группа AD)")
+        if self.owner_group is not None:
+            self.owner_group = self.owner_group.strip() or None
+        if self.stage_lines is not None:
+            lines = [line.strip() for line in self.stage_lines]
+            if any(not line for line in lines):
+                raise ValueError("Строки этапа (stage_lines) не могут быть пустыми")
+            self.stage_lines = lines
+        return self
+
+
+class StageAssigneeItem(BaseModel):
+    """Участник состава этапа: логин AD (ПДн) и должность для показа."""
+
+    sam: str = Field(min_length=1, description="Логин AD (sAMAccountName) участника этапа")
+    position_title: str | None = Field(
+        default=None, description="Должность участника (для показа в UI)"
+    )
+
+
+class StageAssigneesIn(BaseModel):
+    """Состав этапа целиком: переданные — добавляются/реактивируются,
+    отсутствующие деактивируются (одна транзакция в routing_store)."""
+
+    assignees: list[StageAssigneeItem] = Field(
+        default_factory=list, description="Состав этапа (активные)"
+    )
+
+
+class RouteProfileIn(BaseModel):
+    """Новый профиль маршрута (route_profiles); service_id пуст — по умолчанию."""
+
+    code: str = Field(pattern=_ROUTE_CODE_PATTERN, description="Код профиля (snake_case, уникален)")
+    name: str = Field(min_length=1, description="Наименование профиля")
+    service_id: int | None = Field(
+        default=None, description="Служба профиля (null — профиль по умолчанию)"
+    )
+    active: bool = Field(default=True, description="Активен профиль (active=false — вне подбора)")
+
+
+class RouteProfileUpdateIn(BaseModel):
+    """Правка профиля маршрута (частичное обновление; код неизменен)."""
+
+    name: str | None = Field(default=None, min_length=1, description="Наименование профиля")
+    service_id: int | None = Field(
+        default=None, description="Служба профиля (null — профиль по умолчанию)"
+    )
+    active: bool | None = Field(default=None, description="Активен профиль")
+
+
+class RouteProfileStepIn(BaseModel):
+    """Шаг профиля маршрута: этап, порядок и переопределения флагов этапа.
+
+    Переопределения null — «брать значение этапа» (optional/require_comment),
+    поэтому незаданный шаг профиля ведёт себя как сам этап."""
+
+    stage_id: int = Field(ge=1, description="Этап маршрута (approval_stages.id)")
+    step_order: int = Field(
+        ge=1, description="Порядок шага в профиле (с 1, без повторов)"
+    )
+    optional_override: bool | None = Field(
+        default=None, description="Этап необязательный для этого профиля (null — как в этапе)"
+    )
+    require_comment_override: bool | None = Field(
+        default=None, description="Комментарий обязателен для этого профиля (null — как в этапе)"
+    )
+
+
+class RouteProfileStepsIn(BaseModel):
+    """Состав профиля целиком: переданные шаги заменяют прежние (одна транзакция).
+
+    Порядок уникален внутри профиля: в БД на этом UNIQUE (profile_id,
+    step_order), поэтому повтор — 422 на границе, а не конфликт из хранилища."""
+
+    steps: list[RouteProfileStepIn] = Field(
+        default_factory=list, description="Шаги профиля по порядку (пусто — профиль без этапов)"
+    )
+
+    @model_validator(mode="after")
+    def _check_orders(self) -> "RouteProfileStepsIn":
+        """Повторы порядка внутри профиля — 422 (иначе отказ хранилища)."""
+        orders = [step.step_order for step in self.steps]
+        duplicates = sorted({order for order in orders if orders.count(order) > 1})
+        if duplicates:
+            raise ValueError(
+                "Порядок шагов профиля должен быть уникален: повторяются %s"
+                % ", ".join(str(order) for order in duplicates)
+            )
+        return self
+
+
+def _int_or_none(value: object) -> int | None:
+    """Целое из значения справочника; нечисло/пусто — None."""
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _require_known_step_group(store: DbSettingsStore, group: str | None) -> None:
+    """Группа-владелец этапа обязана быть в справочнике групп шагов.
+
+    Неизвестная группа — 422 с понятным текстом: этап с несуществующей
+    группой-владельцем не достался бы ни одному сотруднику (ветка ad_group)."""
+    if not group:
+        return
+    known = _clean_groups(read_setting_value(store, "allowed_ad_groups"))
+    if group not in known:
+        raise HTTPException(
+            status_code=422,
+            detail="Группа %r не найдена в справочнике групп шагов (allowed_ad_groups)" % group,
+        )
+
+
+def _reject_known_code(rows: list[dict], code: str, label: str) -> None:
+    """Код справочника уникален: занятый — 409 (проверка до INSERT, чтобы не
+    отдавать 503 из-за конфликта, завернутого в RoutingUnavailable)."""
+    if any(str(item.get("code") or "") == code for item in rows or []):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="%s с кодом %s уже существует" % (label, code)
+        )
+
+
+@router.get("/settings/routing/catalogs")
+def read_routing_catalogs(
+    user: CurrentUser = Depends(get_current_user),
+    store: DbRoutingStore = Depends(get_routing_store),
+) -> dict:
+    """Справочники маршрута одним ответом (для загрузки UI админки): службы,
+    профили, этапы, шаги профилей и состав этапов (реестры).
+
+    Только admin, иначе 403; хранилище недоступно — 503. Шаги профилей читаются
+    ОДНИМ запросом по всем профилям (list_all_profile_steps), иначе на каждый
+    профиль шёл бы свой SELECT (N+1). Состав этапов — по запросу на этап:
+    отдельной выборки по всем этапам в хранилище нет, а справочник маленький и
+    читается админской страницей один раз."""
+    _require_admin(user)
+    try:
+        services = store.list_services()
+        profiles = store.list_profiles()
+        stages = store.list_stages()
+        profile_steps = store.list_all_profile_steps()
+        rosters = {
+            str(stage["id"]): store.list_stage_assignees(stage["id"])
+            for stage in stages
+            if stage.get("id")
+        }
+    except RoutingUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    audit_log.append(
+        AuditEvent(
+            actor=user.sam,
+            action="settings.read",
+            entity="routing_catalogs",
+            entity_id="routing.catalogs",
+        )
+    )
+    return {
+        "services": services,
+        "profiles": profiles,
+        "stages": stages,
+        "profile_steps": profile_steps,
+        "rosters": rosters,
+    }
+
+
+@router.post("/settings/routing/stages", status_code=status.HTTP_201_CREATED)
+def create_routing_stage(
+    payload: StageCatalogIn,
+    user: CurrentUser = Depends(get_current_user),
+    store: DbRoutingStore = Depends(get_routing_store),
+    settings_store: DbSettingsStore = Depends(get_settings_store),
+) -> dict:
+    """Создать этап маршрута (только admin): код уникален (409), группа-владелец
+    должна быть в справочнике групп шагов (422). Аудит ведёт routing_store."""
+    _require_admin(user)
+    try:
+        _reject_known_code(store.list_stages(), payload.code, "Этап")
+        _require_known_step_group(settings_store, payload.owner_group)
+        stage_id = store.create_stage(
+            {
+                "code": payload.code,
+                "title": payload.title,
+                "stage_lines": payload.stage_lines,
+                "owner_kind": payload.owner_kind,
+                "owner_group": payload.owner_group,
+                "optional": payload.optional,
+                "print_assignee": payload.print_assignee,
+                "require_comment": payload.require_comment,
+                "active": payload.active,
+                "actor": user.sam,
+            }
+        )
+    except RoutingUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    except SettingsUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    return {"id": stage_id, "code": payload.code}
+
+
+@router.put("/settings/routing/stages/{stage_id}")
+def update_routing_stage(
+    stage_id: int,
+    payload: StageCatalogUpdateIn,
+    user: CurrentUser = Depends(get_current_user),
+    store: DbRoutingStore = Depends(get_routing_store),
+    settings_store: DbSettingsStore = Depends(get_settings_store),
+) -> dict:
+    """Изменить этап маршрута (только admin): частичное обновление полей этапа
+    (version увеличивается), аудит — в routing_store."""
+    _require_admin(user)
+    updates = payload.model_dump(mode="json", exclude_unset=True)
+    try:
+        _require_known_step_group(settings_store, updates.get("owner_group"))
+        store.update_stage(stage_id, {**updates, "actor": user.sam})
+    except RoutingUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    except SettingsUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    return {"id": stage_id, "updated": ",".join(sorted(updates))}
+
+
+@router.put("/settings/routing/stages/{stage_id}/assignees")
+def replace_stage_assignees(
+    stage_id: int,
+    payload: StageAssigneesIn,
+    user: CurrentUser = Depends(get_current_user),
+    store: DbRoutingStore = Depends(get_routing_store),
+) -> dict:
+    """Заменить состав этапа (owner_kind = stage_roster, только admin): переданные
+    логины добавляются/реактивируются, отсутствующие деактивируются одной
+    транзакцией; аудит — в routing_store (без логинов в details)."""
+    _require_admin(user)
+    items = [
+        {"sam": item.sam.strip(), "position_title": item.position_title}
+        for item in payload.assignees
+    ]
+    try:
+        store.set_stage_assignees(stage_id, items, user.sam)
+    except RoutingUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    return {"stage_id": stage_id, "count": len(items)}
+
+
+@router.post("/settings/routing/profiles", status_code=status.HTTP_201_CREATED)
+def create_routing_profile(
+    payload: RouteProfileIn,
+    user: CurrentUser = Depends(get_current_user),
+    store: DbRoutingStore = Depends(get_routing_store),
+) -> dict:
+    """Создать профиль маршрута (только admin): код уникален (409); service_id
+    пуст — профиль по умолчанию (для всех служб). Аудит — в routing_store."""
+    _require_admin(user)
+    try:
+        _reject_known_code(store.list_profiles(), payload.code, "Профиль")
+        profile_id = store.create_profile(
+            {
+                "code": payload.code,
+                "name": payload.name,
+                "service_id": payload.service_id,
+                "active": payload.active,
+                "actor": user.sam,
+            }
+        )
+    except RoutingUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    return {"id": profile_id, "code": payload.code}
+
+
+@router.put("/settings/routing/profiles/{profile_id}")
+def update_routing_profile(
+    profile_id: int,
+    payload: RouteProfileUpdateIn,
+    user: CurrentUser = Depends(get_current_user),
+    store: DbRoutingStore = Depends(get_routing_store),
+) -> dict:
+    """Изменить профиль маршрута (только admin): частичное обновление полей,
+    аудит — в routing_store."""
+    _require_admin(user)
+    updates = payload.model_dump(mode="json", exclude_unset=True)
+    try:
+        store.update_profile(profile_id, {**updates, "actor": user.sam})
+    except RoutingUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    return {"id": profile_id, "updated": ",".join(sorted(updates))}
+
+
+@router.put("/settings/routing/profiles/{profile_id}/steps")
+def replace_profile_steps(
+    profile_id: int,
+    payload: RouteProfileStepsIn,
+    user: CurrentUser = Depends(get_current_user),
+    store: DbRoutingStore = Depends(get_routing_store),
+) -> dict:
+    """Заменить состав шагов профиля (только admin): переданные шаги полностью
+    заменяют прежние одной транзакцией, этапы должны существовать и быть активны
+    (иначе 422, состав не меняется). Аудит — в routing_store (profile.steps.update)."""
+    _require_admin(user)
+    items = [
+        {
+            "stage_id": step.stage_id,
+            "step_order": step.step_order,
+            "optional_override": step.optional_override,
+            "require_comment_override": step.require_comment_override,
+        }
+        for step in payload.steps
+    ]
+    try:
+        store.set_profile_steps(profile_id, items, user.sam)
+    except RoutingUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    return {"profile_id": profile_id, "count": len(items)}
 
 
 # --- Файлы .docx-шаблонов бегунков (H): импорт/скачивание/замена/предпросмотр.

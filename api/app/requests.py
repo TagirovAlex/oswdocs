@@ -27,6 +27,7 @@ from .employee_sync import (
     EmployeeSyncStore,
     get_employee_sync_store,
 )
+from .link_store import get_links_store
 from .mailer import (
     EVENT_ASSIGNED,
     EVENT_CLOSED,
@@ -44,6 +45,16 @@ from .requests_store import (
     RequestsUnavailable,
     get_requests_store,
 )
+from .routing import (
+    REASON_DEFAULT_PROFILE,
+    REASON_PROFILE_NOT_FOUND,
+    REASON_SERVICE_NOT_REGISTERED,
+    RoutePick,
+    apply_dismissals_and_additions,
+    pick_profile,
+    stage_executor,
+)
+from .routing_store import DbRoutingStore, RoutingUnavailable, get_routing_store
 from .settings_routes import (
     DbSettingsStore,
     _groups_with_names,
@@ -189,6 +200,26 @@ class CreateRequestIn(BaseModel):
     blocks: list[RouteBlockSpec] | None = Field(
         default=None, description="Маршрут блоками (приоритетнее steps)"
     )
+    route_mode: Literal["auto", "custom"] = Field(
+        default="auto",
+        description=(
+            "auto — маршрут собирается из справочников по службе сотрудника; "
+            "custom — ручной маршрут (blocks/steps). Явные blocks/steps всегда "
+            "приоритетнее: это осознанно заданный ОК маршрут"
+        ),
+    )
+    dismissed_stages: list[str] = Field(
+        default_factory=list, description="Коды этапов, снятых ОК из маршрута (auto)"
+    )
+    added_stages: list[str] = Field(
+        default_factory=list, description="Коды этапов, добавленных ОК в конец маршрута (auto)"
+    )
+    ad_sam: str | None = Field(
+        default=None, description="Логин AD сотрудника (если известен) — источник данных карточки"
+    )
+    base_code: str | None = Field(
+        default=None, description="Код базы 1С сотрудника — для поиска связки 1С↔AD"
+    )
 
 
 class DecisionIn(BaseModel):
@@ -282,6 +313,12 @@ class StepOut(BaseModel):
         default=False,
         description="Может ли текущий пользователь поставить отметку прямо сейчас",
     )
+    stage_title: str | None = Field(
+        default=None, description="Наименование этапа маршрута (снимок из справочника)"
+    )
+    stage_code: str | None = Field(
+        default=None, description="Код этапа маршрута (снимок из справочника)"
+    )
 
 
 class RequestOut(BaseModel):
@@ -290,6 +327,20 @@ class RequestOut(BaseModel):
     id: str
     status: str
     route_origin: str
+    profile_id: int | None = Field(
+        default=None, description="Профиль маршрута заявки (снимок подбора; null — ручной маршрут)"
+    )
+    profile_name: str | None = Field(
+        default=None, description="Наименование профиля маршрута (для показа в UI)"
+    )
+    service_id: int | None = Field(default=None, description="Служба заявки из справочника")
+    service_name: str | None = Field(
+        default=None, description="Служба заявки (значение department при подборе по справочникам)"
+    )
+    is_manager: bool = Field(
+        default=False,
+        description="Руководитель ли сотрудник заявки (по карточке AD); в БД не хранится",
+    )
     enterprise: str | None = None
     enterprise_name: str | None = Field(
         default=None, description="Название предприятия из settings.enterprises"
@@ -328,6 +379,16 @@ class _Step(BaseModel):
     done_by: str | None = None
     done_at: datetime | None = None
     comment: str | None = None
+    # Снимок этапа справочника (шаги маршрута, собранного по профилю): снимок
+    # нужен печати/карточке и не пересобирается при правке справочников.
+    # owner_kind в БД не хранится (колонки нет) — после перечитки заявки из
+    # Postgres признак теряется, права по реестру этапа тогда не проверяются.
+    owner_kind: str | None = None
+    stage_id: int | None = None
+    stage_code: str | None = None
+    stage_title: str | None = None
+    stage_lines: list[str] = Field(default_factory=list)
+    profile_step_id: int | None = None
 
 
 class _Request(BaseModel):
@@ -348,6 +409,12 @@ class _Request(BaseModel):
     escalation_hours: int | None = None
     created_by: str
     steps: list[_Step] = Field(default_factory=list)
+    # Снимок подбора маршрута по справочникам (миграция 0008); is_manager —
+    # признак из карточки AD для предпросмотра/аудита, в БД не хранится.
+    profile_id: int | None = None
+    service_id: int | None = None
+    service_name: str | None = None
+    is_manager: bool = False
 
 
 # --- Офлайн-хранилище (тесты/локаль без БД); на стенде эндпоинты получают
@@ -483,6 +550,353 @@ def _build_steps(
     return steps
 
 
+# --- Маршрут из справочников (route_mode = auto) ---
+# Человекочитаемые причины подбора профиля (ключи reason из app.routing).
+_ROUTE_REASON_TEXT = {
+    REASON_SERVICE_NOT_REGISTERED: "служба не заведена",
+    REASON_PROFILE_NOT_FOUND: "профиль не найден",
+    REASON_DEFAULT_PROFILE: "не задан профиль по умолчанию",
+}
+
+
+def _int_or_none(value: object) -> int | None:
+    """Целое из значения справочника; нечисло/пусто — None (id в снимке этапа)."""
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _ad_or_body(ad_value: object, body_value: str) -> str:
+    """Значение с приоритетом AD: пустое из AD не затирает то, что пришло в теле."""
+    text = str(ad_value or "").strip()
+    return text or str(body_value or "")
+
+
+def _routing_store_or_none() -> DbRoutingStore | None:
+    """Хранилище справочников маршрута: подмена зависимости в тестах, иначе боевое.
+
+    Получить не удалось (нет БД/настроек) — None: выдача заявки не падает (fail-soft,
+    как карта предприятий и групп в _public_view)."""
+    try:
+        return _resolve_dependency(get_routing_store, get_settings())
+    except Exception:
+        return None
+
+
+def _profile_id(profile: dict | None) -> int:
+    """id профиля из строки справочника (0 — профиля нет)."""
+    return _int_or_none((profile or {}).get("id")) or 0
+
+
+def _profile_names_map(store: DbRoutingStore | None) -> dict[int, str]:
+    """Карта «id профиля → наименование» (для RequestOut.profile_name).
+
+    Хранилище недоступно — пустая карта (profile_name тогда None, без 500)."""
+    if store is None:
+        return {}
+    try:
+        profiles = store.list_profiles()
+    except Exception:
+        return {}
+    names: dict[int, str] = {}
+    for item in profiles or []:
+        if not isinstance(item, dict):
+            continue
+        profile_id = _int_or_none(item.get("id"))
+        name = str(item.get("name") or "").strip()
+        if profile_id and name:
+            names[profile_id] = name
+    return names
+
+
+class _RosterResolver:
+    """Состав этапов (owner_kind = stage_roster) с кэшем на один вызов ответа.
+
+    Один SELECT на этап и не больше: состав спрашивается для каждого шага
+    снимка (owner_kind = stage_roster) при выдаче карточки/решении по шагу.
+    Хранилище недоступно — пустой состав (fail-soft: карточка заявки не должна
+    падать из-за справочников; решение по такому шагу будет отклонено как
+    чужое)."""
+
+    def __init__(self, store: DbRoutingStore | None) -> None:
+        self._store = store
+        self._cache: dict[int, list[str]] = {}
+
+    def sams(self, stage_id: int | None) -> list[str]:
+        """Активные логины состава этапа (пусто — этапа нет/хранилище недоступно)."""
+        if not stage_id or self._store is None:
+            return []
+        key = int(stage_id)
+        if key not in self._cache:
+            try:
+                rows = self._store.list_stage_assignees(key)
+            except Exception:
+                rows = []
+            self._cache[key] = [
+                str(row.get("sam") or "").strip()
+                for row in rows or []
+                if isinstance(row, dict) and str(row.get("sam") or "").strip()
+            ]
+        return self._cache[key]
+
+    def owns(self, step: _Step, sam: str) -> bool:
+        """Входит ли сотрудник в состав этапа шага (только owner_kind = stage_roster).
+
+        Сравнение логинов — без учёта регистра и пробелов, как в app.routing
+        can_user_act (состав этапа задаётся в справочнике вручную)."""
+        if getattr(step, "owner_kind", None) != "stage_roster":
+            return False
+        wanted = str(sam or "").strip().casefold()
+        if not wanted:
+            return False
+        return any(item.casefold() == wanted for item in self.sams(step.stage_id))
+
+
+def _stage_owner_kinds(store: DbRoutingStore | None) -> dict[int, str]:
+    """Карта «id этапа → owner_kind» из справочника (ОДИН SELECT на вызов ответа).
+
+    Колонки owner_kind у шага заявки в БД нет (признак живёт в
+    approval_stages), поэтому шаг, перечитанный из Postgres, его не знает, а
+    право по реестру этапа (owner_kind = stage_roster) без него не проверяется.
+    Справочник пуст/недоступен — пустая карта: тогда признак остаётся таким, каким
+    пришёл (fail-soft, как состав этапа у _RosterResolver)."""
+    if store is None:
+        return {}
+    try:
+        rows = store.list_stages()
+    except Exception:
+        return {}
+    kinds: dict[int, str] = {}
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        stage_id = _int_or_none(row.get("id"))
+        kind = str(row.get("owner_kind") or "").strip()
+        if stage_id and kind:
+            kinds[stage_id] = kind
+    return kinds
+
+
+def _restore_step_owner_kinds(request: _Request, kinds: dict[int, str]) -> None:
+    """Восстановить owner_kind шагов заявки из справочника по stage_id (in-place).
+
+    Уже заполненный owner_kind не трогаем: снимок на момент создания заявки
+    описывает, на кого этап тогда назначали, и не должен меняться задним числом
+    после правки справочника. Шаги ручного маршрута (stage_id пуст) не меняются.
+    """
+    if not kinds:
+        return
+    for step in request.steps:
+        if step.owner_kind or not step.stage_id:
+            continue
+        kind = kinds.get(step.stage_id)
+        if kind:
+            step.owner_kind = kind
+
+
+def _route_reason_detail(picked: RoutePick) -> str:
+    """Текст 422 о неподобранном маршруте: причина подбора и её машинный код.
+
+    Пометки reason (Dismissed=..., Added=...) сохраняются в скобках, чтобы по
+    логу/API было видно, что именно ОК снял/добавил."""
+    reason = str(picked.reason or "")
+    base = reason.split("+")[0]
+    return "Маршрут из справочников не собран: %s (%s)" % (
+        _ROUTE_REASON_TEXT.get(base, base or "причина неизвестна"),
+        reason or "причина неизвестна",
+    )
+
+
+def _employee_sam(body: "CreateRequestIn | RoutePreviewIn") -> str | None:
+    """Логин AD увольняемого: из тела, затем связка 1С↔AD, затем локальный
+    справочник сотрудников (employee_base_map.ad_sam).
+
+    Ни один источник не обязателен: без логина карточка AD не читается и данные
+    берутся из тела (подбор маршрута идёт по службе из тела). Связка ищется по
+    составному ключу enterprise|base_code|tab_num (тот же формат, что
+    link.py::link_key; base_code пуст — по нему не ищем). Тело предпросмотра
+    маршрута (RoutePreviewIn) отдаёт те же поля идентификации сотрудника."""
+    direct = str(body.ad_sam or "").strip()
+    if direct:
+        return direct
+    key = _employee_key(body.enterprise, body.base_code, body.tab_num)
+    if key and body.base_code:
+        try:
+            record = _resolve_dependency(get_links_store, get_settings()).find(key)
+        except Exception:
+            record = None
+        if record is not None and record.sam:
+            return record.sam
+    try:
+        rows = _resolve_dependency(get_employee_sync_store, get_settings()).find_by_people(
+            body.enterprise, [], [body.tab_num]
+        )
+    except Exception:
+        return None
+    # Неоднозначный табельный номер (человек в двух базах) логина не даёт:
+    # молча взяли бы чужую карточку.
+    if len(rows) == 1:
+        return str(rows[0].get("ad_sam") or "").strip() or None
+    return None
+
+
+def _manager_sam_from_dn(
+    manager_dn: str, store: DbRoutingStore, ad_reader: object | None
+) -> tuple[str | None, str | None]:
+    """Руководитель сотрудника по DN: (sam, ФИО).
+
+    Истина — AD: get_user_by_dn по DN руководителя. Фолбэк — локальный
+    best-effort по зеркалу users (manager_sam_by_dn ищет совпадение строки
+    manager_dn, а не сотрудника по своему DN, поэтому это запасной путь).
+    AD недоступен и в зеркале пусто — (None, None): этап manager_ad остаётся
+    незакрываемым, предпросмотр покажет blocked_reason, создание даст 422."""
+    dn = (manager_dn or "").strip()
+    if not dn:
+        return None, None
+    if ad_reader is not None:
+        try:
+            manager = ad_reader.get_user_by_dn(dn)
+        except Exception:
+            manager = None
+        if manager is not None:
+            return (
+                str(getattr(manager, "sam", "") or "").strip() or None,
+                str(getattr(manager, "display_name", "") or "").strip() or None,
+            )
+    try:
+        sam = store.manager_sam_by_dn(dn)
+    except Exception:
+        sam = None
+    return (sam or None), _owner_display_name(ad_reader, sam)
+
+
+def _step_from_stage(
+    stage_row: dict, order: int, manager_sam: str | None, ttl_days: int, now: datetime
+) -> _Step:
+    """Шаг заявки из строки этапа: исполнитель по owner_kind + снимок этапа.
+
+    owner_group шага обязателен (_Step), поэтому он берётся из этапа, иначе —
+    персональный исполнитель (как в _build_steps), иначе код этапа. Этап
+    manager_ad без руководителя (ни в AD, ни замена от ОК) — 422: назначать
+    такой шаг не на кого."""
+    owner_kind = str(stage_row.get("owner_kind") or "ad_group")
+    resolver, assignee = stage_executor(stage_row, manager_sam)
+    stage_code = str(stage_row.get("code") or stage_row.get("stage_code") or "")
+    if owner_kind == "manager_ad" and not assignee:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Не найден руководитель сотрудника в AD, укажите замену "
+                "(manager) для этапа manager_ad"
+            ),
+        )
+    override = stage_row.get("require_comment_override")
+    require_comment = (
+        bool(stage_row.get("require_comment")) if override is None else bool(override)
+    )
+    return _Step(
+        order=order,
+        owner_group=str(stage_row.get("owner_group") or assignee or stage_code),
+        resolver=resolver,
+        assignee=assignee,
+        require_comment=require_comment,
+        expires_at=now + timedelta(days=ttl_days),
+        owner_kind=owner_kind,
+        stage_id=_int_or_none(stage_row.get("stage_id", stage_row.get("id"))),
+        stage_code=stage_code or None,
+        stage_title=str(stage_row.get("stage_title") or stage_row.get("title") or "") or None,
+        stage_lines=[
+            str(line)
+            for line in (stage_row.get("stage_lines") or [])
+            if isinstance(line, str) and line.strip()
+        ],
+        profile_step_id=_int_or_none(stage_row.get("profile_step_id")),
+    )
+
+
+def _auto_route(
+    store: DbRoutingStore,
+    body: CreateRequestIn,
+    card: dict | None,
+    route: RouteSettings,
+    now: datetime,
+) -> dict:
+    """Маршрут заявки из справочников по службе увольняемого.
+
+    Возвращает снимок подбора: steps, profile_id, service_id, department,
+    position, service_name. Значения сотрудника — из карточки AD (пустые не
+    затирают тело); табельный номер и дата приёма остаются из 1С.
+
+    Профиль не подобран — 422 с причиной подбора: молча уходить в ручной
+    маршрут нельзя (заявка получила бы не тот маршрут, который заказан).
+
+    Подбор профиля идёт в два вызова pick_profile: список этапов справочника
+    читается по id профиля (list_profile_steps), а профиль выбирается по службе.
+    Повторный вызов на тех же данных детерминирован (app.routing — чистая)."""
+    department = _ad_or_body((card or {}).get("dept_ad"), body.department)
+    position = _ad_or_body((card or {}).get("title_ad"), body.position)
+    services = store.list_services()
+    profiles = store.list_profiles()
+    picked = pick_profile(department, services, profiles, [])
+    if picked.profile is None:
+        raise HTTPException(status_code=422, detail=_route_reason_detail(picked))
+    picked = pick_profile(
+        department,
+        services,
+        profiles,
+        store.list_profile_steps(_profile_id(picked.profile)),
+    )
+    picked = apply_dismissals_and_additions(
+        picked,
+        body.dismissed_stages,
+        body.added_stages,
+        store.list_stages() if body.added_stages else [],
+    )
+    manager_sam: str | None = str(body.manager or "").strip() or None
+    if manager_sam is None:
+        manager_dn = str((card or {}).get("manager_dn") or "").strip()
+        if manager_dn:
+            manager_sam = _manager_sam_from_dn(
+                manager_dn, store, _resolve_dependency(get_ad_reader)
+            )[0]
+    steps = [
+        _step_from_stage(stage_row, index, manager_sam, route.approval_ttl_days, now)
+        for index, (stage_row, _optional) in enumerate(picked.stages, start=1)
+    ]
+    return {
+        "steps": steps,
+        "profile_id": _profile_id(picked.profile) or None,
+        "service_id": _int_or_none((picked.service or {}).get("id")),
+        "department": department,
+        "position": position,
+        "service_name": department,
+    }
+
+
+def _auto_route_entry(body: CreateRequestIn, route: RouteSettings, now: datetime) -> dict:
+    """Подбор маршрута по справочникам: логин AD → карточка сотрудника → маршрут.
+
+    Справочники недоступны — 503 (RoutingUnavailable), как LinksUnavailable в
+    link.py: это поломка хранилища, а не ошибка запроса."""
+    store = _routing_store_or_none()
+    if store is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Хранилище справочников маршрута недоступно",
+        )
+    sam = _employee_sam(body)
+    try:
+        card = store.user_card(sam) if sam else None
+        picked = _auto_route(store, body, card, route, now)
+        picked["is_manager"] = store.is_manager(sam) if sam else False
+    except RoutingUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    return picked
+
+
 def _get_request_or_404(store: RequestsStore, request_id: str) -> _Request:
     """Заявка по id, иначе 404 (без ПДн в ошибке)."""
     request = store.get(request_id)
@@ -518,21 +932,29 @@ def _current_pending(request: _Request) -> _Step | None:
     return steps[0] if steps else None
 
 
-def _owns_step(step: _Step, user: CurrentUser) -> bool:
+def _owns_step(
+    step: _Step, user: CurrentUser, roster: _RosterResolver | None = None
+) -> bool:
     """Владелец шага по действующим правилам: персональный assignee — только он
     (sam сравнивается ровно как раньше, регистр НЕ нормализуется — ослабление
-    сравнения расширило бы доступ), иначе любой из группы-владельца шага."""
+    сравнения расширило бы доступ), иначе любой из группы-владельца шага, иначе
+    участник состава этапа (owner_kind = stage_roster, состав — из справочника)."""
     if step.assignee:
         return user.sam == step.assignee
-    return step.owner_group in user.groups
+    if step.owner_group and step.owner_group in user.groups:
+        return True
+    return roster is not None and roster.owns(step, user.sam)
 
 
-def _check_step_owner(step: _Step, user: CurrentUser) -> None:
-    """Отметку ставит владелец: персональный assignee — только он, иначе любой из группы.
+def _check_step_owner(
+    step: _Step, user: CurrentUser, roster: _RosterResolver | None = None
+) -> None:
+    """Отметку ставит владелец: персональный assignee — только он, иначе любой из группы
+    или участник состава этапа.
 
     Правило вынесено в _owns_step (его же использует can_act), тексты 403 и коды
     ответов прежние."""
-    if _owns_step(step, user):
+    if _owns_step(step, user, roster):
         return
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
@@ -563,6 +985,7 @@ def _can_act(
     user: CurrentUser,
     pending_orders: set[int],
     now: datetime,
+    roster: _RosterResolver | None = None,
 ) -> bool:
     """Может ли пользователь поставить отметку по шагу прямо сейчас.
 
@@ -578,7 +1001,7 @@ def _can_act(
         return False
     if step.expires_at <= now:
         return False
-    return _owns_step(step, user)
+    return _owns_step(step, user, roster)
 
 
 def _resolve_dependency(factory, *args):
@@ -823,6 +1246,9 @@ def _public_view(
     doc_type_names: dict[str, str] | None = None,
     employee_keys: dict[str, str | None] | None = None,
     step_employee_keys: dict[tuple[str, int], dict[str, str | None]] | None = None,
+    routing_store: DbRoutingStore | None = None,
+    profile_names: dict[int, str] | None = None,
+    stage_kinds: dict[int, str] | None = None,
 ) -> RequestOut:
     """Ролевая обрезка: ОК/админы — всё, владелец — без tab_num (ПДн).
 
@@ -832,6 +1258,15 @@ def _public_view(
     AD/БД на шаг). employee_keys и step_employee_keys — результат пакетного
     резолва _employee_keys на всю выборку (ключи карточек сотрудников для ссылок);
     без них поля employee_key/emp_* остаются None.
+
+    Справочники маршрута (routing_store) — по требованию: резолвятся один раз на
+    вызов (состав этапов с кэшем по stage_id и наименование профиля), и только
+    когда в заявке есть снимок подбора. Недоступны — fail-soft: profile_name
+    None, состав этапа пуст (can_act у реестрного шага тогда False).
+    stage_kinds — карта «id этапа → owner_kind», прочитанная вызывающим (список
+    заявок читает справочник один раз на выборку); без неё справочник читается
+    здесь. Нужна для шагов, перечитанных из Postgres: owner_kind в БД не
+    хранится (см. _restore_step_owner_kinds).
 
     ПДн по ролям: enterprise_name (как enterprise/tab_num/fio) — только
     привилегированным, остальным None; owner_name (ФИО согласующего/наименование
@@ -854,6 +1289,20 @@ def _public_view(
     doc_names = doc_type_names if doc_type_names is not None else _doc_type_names_map()
     now = _utcnow()
     pending_orders = {s.order for s in _current_pending_steps(request)}
+    # Справочники маршрута: состояние маршрута — не ПДн, поэтому резолвим для всех.
+    route_store = routing_store if routing_store is not None else _routing_store_or_none()
+    roster = _RosterResolver(route_store)
+    # owner_kind шага в БД не хранится — восстанавливаем из справочника, иначе
+    # право по реестру этапа (assignee в ответе, can_act) не проверялось бы.
+    _restore_step_owner_kinds(
+        request,
+        stage_kinds if stage_kinds is not None else _stage_owner_kinds(route_store),
+    )
+    profile_labels = (
+        profile_names
+        if profile_names is not None
+        else (_profile_names_map(route_store) if request.profile_id else {})
+    )
     steps: list[StepOut] = []
     for s in sorted(request.steps, key=lambda x: x.order):
         # Данные сотрудника шага — из пакета резолва (пусто у непривилегированных).
@@ -863,7 +1312,7 @@ def _public_view(
                 order=s.order,
                 owner_group=s.owner_group,
                 resolver=s.resolver,
-                assignee=s.assignee if privileged or _owns_step(s, user) else None,
+                assignee=s.assignee if privileged or _owns_step(s, user, roster) else None,
                 owner_name=_step_owner_name(reader, s.assignee, groups, s.owner_group),
                 owner_duty=_owner_duty(reader, s.assignee),
                 employee_key=emp.get("employee_key"),
@@ -876,13 +1325,20 @@ def _public_view(
                 done_by=s.done_by if privileged else None,
                 done_at=s.done_at.isoformat() if s.done_at else None,
                 comment=s.comment,
-                can_act=_can_act(request, s, user, pending_orders, now),
+                can_act=_can_act(request, s, user, pending_orders, now, roster),
+                stage_title=s.stage_title,
+                stage_code=s.stage_code,
             )
         )
     return RequestOut(
         id=request.id,
         status=request.status,
         route_origin=request.route_origin,
+        profile_id=request.profile_id,
+        profile_name=profile_labels.get(request.profile_id) if request.profile_id else None,
+        service_id=request.service_id,
+        service_name=request.service_name,
+        is_manager=request.is_manager,
         enterprise=request.enterprise if privileged else None,
         enterprise_name=names.get(request.enterprise) if privileged else None,
         employee_key=(employee_keys or {}).get(request.id) if privileged else None,
@@ -921,20 +1377,41 @@ def _audit(
     )
 
 
-def _is_participant(request: _Request, user: CurrentUser) -> bool:
+def _is_step_viewer(step: _Step, user: CurrentUser, roster: _RosterResolver | None = None) -> bool:
+    """Видит ли пользователь шаг заявки (только чтение карточки/списка).
+
+    Группа-владелец шага, персональный исполнитель либо участник активного состава
+    этапа (owner_kind = stage_roster, состав — из справочника). Отличие от
+    _owns_step (право поставить отметку): здесь персональный исполнитель НЕ
+    отменяет видимость по группе — правила чтения прежние, добавлен только
+    реестрный случай."""
+    if step.owner_group and step.owner_group in user.groups:
+        return True
+    if step.assignee and step.assignee == user.sam:
+        return True
+    return roster is not None and roster.owns(step, user.sam)
+
+
+def _is_participant(
+    request: _Request, user: CurrentUser, roster: _RosterResolver | None = None
+) -> bool:
     """Участник заявки: ОК/админ/администратор СЭД, инициатор или владелец шага.
 
     Минимальная проверка доступа к карточке (комментарии/история) по образцу
     _can_view в documents.py, плюс инициатор заявки (создатель видит свою карточку
-    даже без шагов-владельцев)."""
+    даже без шагов-владельцев). Участник состава этапа (owner_kind = stage_roster)
+    — тоже участник: реестр назначает ему этап, как группе-владельцу. Резолвер не
+    передан — он строится здесь же (owner_kind шага восстанавливается из
+    справочника, см. _restore_step_owner_kinds)."""
     if user.role in ("hr", "hr_admin", "admin", "sed_admin"):
         return True
     if request.created_by == user.sam:
         return True
-    return any(
-        s.owner_group in user.groups or (s.assignee and s.assignee == user.sam)
-        for s in request.steps
-    )
+    if roster is None:
+        store = _routing_store_or_none()
+        _restore_step_owner_kinds(request, _stage_owner_kinds(store))
+        roster = _RosterResolver(store)
+    return any(_is_step_viewer(step, user, roster) for step in request.steps)
 
 
 def _previous_block_steps(request: _Request, order: int) -> list[_Step]:
@@ -1134,6 +1611,270 @@ def _notify_author_returned(
         _notify_skip(request, EVENT_RETURNED, "no_template")
 
 
+# --- Предпросмотр маршрута (read-only, до создания заявки) ---
+
+
+class RoutePreviewIn(BaseModel):
+    """Идентификация сотрудника для предпросмотра маршрута.
+
+    Поля те же, что у CreateRequestIn в части идентификации сотрудника
+    (предпросмотр не создаёт заявку, поэтому тема/содержание/вид документа не
+    нужны)."""
+
+    enterprise: str
+    tab_num: str = Field(description="Табельный номер (ПДн, только ОК)")
+    base_code: str | None = Field(default=None, description="Код базы 1С сотрудника")
+    ad_sam: str | None = Field(default=None, description="Логин AD сотрудника")
+    department: str | None = Field(
+        default=None, description="Служба увольняемого (подбор профиля, если нет AD)"
+    )
+    position: str | None = Field(
+        default=None, description="Должность увольняемого (для показа ОК)"
+    )
+    dismissed_stages: list[str] = Field(
+        default_factory=list, description="Коды этапов, снятых из маршрута"
+    )
+    added_stages: list[str] = Field(
+        default_factory=list, description="Коды этапов, добавленных в конец маршрута"
+    )
+
+
+class RoutePreviewProfileOut(BaseModel):
+    """Профиль маршрута предпросмотра (id/code/name — как в справочнике)."""
+
+    id: int
+    code: str
+    name: str
+
+
+class RoutePreviewServiceOut(BaseModel):
+    """Служба заявки предпросмотра (id/название/вид бланка)."""
+
+    id: int
+    dept_name: str
+    blank_kind: str | None = Field(default=None, description="Вид бланка печати (office/line)")
+
+
+class RoutePreviewStageOut(BaseModel):
+    """Этап маршрута предпросмотра: снимок этапа, исполнитель и причина блокировки.
+
+    blocked_reason — почему этап нельзя закрыть (руководитель не найден в AD,
+    группа-владелец не задана, состав этапа пуст), иначе None."""
+
+    stage_id: int | None = None
+    code: str | None = None
+    title: str | None = None
+    stage_lines: list[str] = Field(default_factory=list)
+    owner_kind: str = Field(default="ad_group", description="Источник исполнителя этапа")
+    owner_group: str | None = None
+    owner_name: str | None = Field(
+        default=None,
+        description=(
+            "Наименование исполнителя: руководитель — ФИО из AD, группа — "
+            "наименование из allowed_ad_groups, реестр — ФИО участников этапа"
+        ),
+    )
+    optional: bool = False
+    blocked_reason: str | None = None
+
+
+class RoutePreviewOut(BaseModel):
+    """Предпросмотр маршрута: подбор профиля/этапов и исполнители по этапам."""
+
+    profile: RoutePreviewProfileOut | None = None
+    service: RoutePreviewServiceOut | None = None
+    reason: str = Field(description="Причина подбора (reason из app.routing)")
+    stages: list[RoutePreviewStageOut] = Field(default_factory=list)
+    blank: str | None = Field(default=None, description="Вид бланка печати (office/line)")
+
+
+class _FioResolver:
+    """ФИО по логину AD из зеркала users с кэшем на один вызов предпросмотра.
+
+    Только чтение. Fail-soft: карточки нет (или хранилище недоступно) — отдаётся
+    сам логин: предпросмотр показывает ОК, кому назначен этап."""
+
+    def __init__(self, store: DbRoutingStore | None) -> None:
+        self._store = store
+        self._cache: dict[str, str] = {}
+
+    def fio(self, sam: str) -> str:
+        """ФИО сотрудника по логину (пусто — логин пуст)."""
+        key = str(sam or "").strip()
+        if not key:
+            return ""
+        if key not in self._cache:
+            try:
+                card = self._store.user_card(key) if self._store is not None else None
+            except Exception:
+                card = None
+            self._cache[key] = str((card or {}).get("fio_full") or "").strip() or key
+        return self._cache[key]
+
+    def roster_name(self, roster: _RosterResolver, stage_id: int | None) -> str:
+        """ФИО активного состава этапа через запятую (пусто — состав не задан)."""
+        names = [self.fio(sam) for sam in roster.sams(stage_id)]
+        return ", ".join(name for name in names if name)
+
+
+def _preview_manager(
+    store: DbRoutingStore, ad_reader: object | None, card: dict | None
+) -> tuple[str | None, str | None]:
+    """Руководитель сотрудника для этапов manager_ad: (sam, ФИО).
+
+    Разрешение — в _manager_sam_from_dn (сначала AD по DN, иначе зеркало users)."""
+    manager_dn = str((card or {}).get("manager_dn") or "").strip()
+    return _manager_sam_from_dn(manager_dn, store, ad_reader)
+
+
+def _preview_stages(
+    picked: RoutePick,
+    manager_sam: str | None,
+    manager_name: str | None,
+    group_names: dict[str, str],
+    roster: _RosterResolver,
+    fio: _FioResolver,
+) -> list[RoutePreviewStageOut]:
+    """Этапы предпросмотра: исполнитель и причина блокировки по каждому этапу.
+
+    Исполнитель по owner_kind: manager_ad — ФИО руководителя из AD, ad_group —
+    наименование группы из allowed_ad_groups, stage_roster — ФИО состава этапа.
+    Этап, который нечем закрыть, остаётся в ответе с blocked_reason (в отличие от
+    создания заявки, где manager_ad без руководителя даёт 422)."""
+    stages: list[RoutePreviewStageOut] = []
+    for stage_row, optional in picked.stages:
+        owner_kind = str(stage_row.get("owner_kind") or "ad_group")
+        owner_group = str(stage_row.get("owner_group") or "").strip() or None
+        stage_id = _int_or_none(stage_row.get("stage_id", stage_row.get("id")))
+        blocked_reason: str | None = None
+        if owner_kind == "manager_ad":
+            owner_name = manager_name
+            if not manager_sam:
+                blocked_reason = (
+                    "Не найден руководитель сотрудника в AD — этап нельзя закрыть "
+                    "(укажите замену)"
+                )
+        elif owner_kind == "stage_roster":
+            owner_name = fio.roster_name(roster, stage_id) or None
+            if not owner_name:
+                blocked_reason = "Не задан состав этапа (stage_assignees)"
+        else:
+            owner_name = group_names.get(owner_group) if owner_group else None
+            if not owner_group:
+                blocked_reason = "Не задана группа-владелец этапа (owner_group)"
+        stages.append(
+            RoutePreviewStageOut(
+                stage_id=stage_id,
+                code=str(stage_row.get("code") or stage_row.get("stage_code") or "") or None,
+                title=str(stage_row.get("stage_title") or stage_row.get("title") or "") or None,
+                stage_lines=[
+                    str(line)
+                    for line in (stage_row.get("stage_lines") or [])
+                    if isinstance(line, str) and line.strip()
+                ],
+                owner_kind=owner_kind,
+                owner_group=owner_group,
+                owner_name=owner_name,
+                optional=optional,
+                blocked_reason=blocked_reason,
+            )
+        )
+    return stages
+
+
+def _route_preview(body: RoutePreviewIn, ad_reader: object | None) -> RoutePreviewOut:
+    """Маршрут заявки по справочникам без создания заявки (предпросмотр для ОК).
+
+    Подбор тот же, что у create (route_mode=auto): служба по карточке AD/телу ->
+    профиль -> шаги профиля -> снятия/добавления этапов. Ничего не пишется (заявки,
+    справочники, аудит) — ответ собирается из чтений.
+
+    Fail-soft: справочники пустые — reason подбора и пустой список этапов, без 422
+    (в отличие от создания, где молчаливый ручной маршрут опасен)."""
+    store = _routing_store_or_none()
+    if store is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Хранилище справочников маршрута недоступно",
+        )
+    sam = _employee_sam(body)
+    card = store.user_card(sam) if sam else None
+    department = _ad_or_body((card or {}).get("dept_ad"), body.department or "")
+    services = store.list_services()
+    profiles = store.list_profiles()
+    picked = pick_profile(department, services, profiles, [])
+    if picked.profile is not None:
+        picked = pick_profile(
+            department,
+            services,
+            profiles,
+            store.list_profile_steps(_profile_id(picked.profile)),
+        )
+    picked = apply_dismissals_and_additions(
+        picked,
+        body.dismissed_stages,
+        body.added_stages,
+        store.list_stages() if body.added_stages else [],
+    )
+    manager_sam, manager_name = _preview_manager(store, ad_reader, card)
+    profile = (
+        RoutePreviewProfileOut(
+            id=_profile_id(picked.profile),
+            code=str(picked.profile.get("code") or ""),
+            name=str(picked.profile.get("name") or ""),
+        )
+        if picked.profile is not None
+        else None
+    )
+    service_id = _int_or_none((picked.service or {}).get("id"))
+    blank = str((picked.service or {}).get("blank_kind") or "").strip() or None
+    service = (
+        RoutePreviewServiceOut(
+            id=service_id,
+            dept_name=str(picked.service.get("dept_name") or ""),
+            blank_kind=blank,
+        )
+        if picked.service is not None and service_id
+        else None
+    )
+    return RoutePreviewOut(
+        profile=profile,
+        service=service,
+        reason=picked.reason or REASON_PROFILE_NOT_FOUND,
+        stages=_preview_stages(
+            picked,
+            manager_sam,
+            manager_name,
+            _step_group_names_map(),
+            _RosterResolver(store),
+            _FioResolver(store),
+        ),
+        blank=blank,
+    )
+
+
+@router.post("/requests/route/preview", response_model=RoutePreviewOut)
+def preview_route(
+    body: RoutePreviewIn,
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+    ad_reader: object | None = Depends(get_ad_reader),
+) -> RoutePreviewOut:
+    """Предпросмотр маршрута до создания заявки (роль как у создания заявки).
+
+    Ничего не сохраняется и не аудируется: подбор профиля/этапов по справочникам,
+    исполнитель по каждому этапу и вид бланка. Путь объявлен до
+    /requests/{request_id}/..., чтобы не конфликтовать с заявкой по id."""
+    settings.ensure_read_only()
+    _require_hr(user)
+    try:
+        return _route_preview(body, ad_reader)
+    except RoutingUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+
+
 @router.post("/requests", response_model=RequestOut, status_code=201)
 def create_request(
     body: CreateRequestIn,
@@ -1159,6 +1900,9 @@ def create_request(
             )
     now = _utcnow()
     category = _resolve_category(route, body.position, body.category)
+    # Снимок подбора маршрута по справочникам (route_mode = auto); для custom
+    # и шаблона остаётся None — тогда поля profile/service в ответе пустые.
+    auto: dict | None = None
     if body.blocks is not None:
         # Явный конструктор ОК (блоками) — приоритетнее шаблона и steps.
         for block in body.blocks:
@@ -1178,15 +1922,29 @@ def create_request(
         if template is not None:
             steps = _build_steps(template.steps, route.approval_ttl_days, body.manager, now)
             origin = "template"
-        else:
+        elif body.steps:
             # Fallback без шаблона — только ручной маршрут от разрешенной группы.
-            if not body.steps:
-                raise HTTPException(
-                    status_code=422,
-                    detail="Шаблон не найден: задайте ручной маршрут (steps)",
-                )
             steps = _build_steps(body.steps, route.approval_ttl_days, body.manager, now)
             origin = "custom"
+        elif body.route_mode == "auto":
+            # Маршрут из справочников по службе сотрудника: данные берём из AD,
+            # профиль/этапы — из справочников. Профиль не найден — 422 с причиной
+            # (см. _auto_route), молчаливого отката в ручной маршрут нет.
+            auto = _auto_route_entry(body, route, now)
+            steps = auto["steps"]
+            # Маршрут собран из профиля-шаблона: origin=template (в БД CHECK
+            # migration 0001 допускает только 'template'/'manual').
+            origin = "template"
+        else:
+            raise HTTPException(
+                status_code=422,
+                detail="Шаблон не найден: задайте ручной маршрут (steps)",
+            )
+    # Данные сотрудника для auto — из карточки AD (пустые не затирают тело).
+    # Категория и эскалация считаются выше по полям 1С тела: справочники
+    # категорий/эскалации ключуются должностью 1С, а не должностью из AD.
+    department = auto["department"] if auto else body.department
+    position = auto["position"] if auto else body.position
     try:
         request = _Request(
             id=store.next_id(),
@@ -1195,8 +1953,8 @@ def create_request(
             enterprise=body.enterprise,
             fio=body.fio,
             tab_num=body.tab_num,
-            department=body.department,
-            position=body.position,
+            department=department,
+            position=position,
             category=category,
             subject=body.subject,
             content=body.content,
@@ -1204,6 +1962,10 @@ def create_request(
             escalation_hours=route.position_escalation.get(body.position),
             created_by=user.sam,
             steps=steps,
+            profile_id=auto["profile_id"] if auto else None,
+            service_id=auto["service_id"] if auto else None,
+            service_name=auto["service_name"] if auto else None,
+            is_manager=auto["is_manager"] if auto else False,
         )
         store.create(request)
     except RequestsUnavailable as exc:
@@ -1234,6 +1996,16 @@ def list_requests(
     enterprise_names = _enterprise_names_map() if _is_hr(user) else {}
     group_names = _step_group_names_map()
     doc_type_names = _doc_type_names_map()
+    # Справочники маршрута — один раз на выборку (состав этапов с кэшем по
+    # stage_id и наименование профиля иначе читались бы на каждую заявку).
+    routing_store = _routing_store_or_none()
+    profile_names = _profile_names_map(routing_store)
+    # owner_kind шагов и состав этапов — по всей выборке: справочник этапов
+    # читается один раз (иначе на каждую заявку), а реестр кэшируется на вызов.
+    stage_kinds = _stage_owner_kinds(routing_store)
+    roster = _RosterResolver(routing_store)
+    for item in requests:
+        _restore_step_owner_kinds(item, stage_kinds)
     # Ключи карточек сотрудников (ссылки на карточку): пакетно по всей выборке,
     # только привилегированным (в _public_view обрезка по роли).
     employee_keys, step_employee_keys = _employee_keys(requests)
@@ -1248,16 +2020,15 @@ def list_requests(
                 doc_type_names=doc_type_names,
                 employee_keys=employee_keys,
                 step_employee_keys=step_employee_keys,
+                routing_store=routing_store,
+                profile_names=profile_names,
+                stage_kinds=stage_kinds,
             )
             for r in requests
         ]
     mine = [
-        r
-        for r in requests
-        if any(
-            s.owner_group in user.groups or (s.assignee and s.assignee == user.sam)
-            for s in r.steps
-        )
+        r for r in requests
+        if any(_is_step_viewer(s, user, roster) for s in r.steps)
     ]
     return [
         _public_view(
@@ -1269,6 +2040,9 @@ def list_requests(
             doc_type_names=doc_type_names,
             employee_keys=employee_keys,
             step_employee_keys=step_employee_keys,
+            routing_store=routing_store,
+            profile_names=profile_names,
+            stage_kinds=stage_kinds,
         )
         for r in mine
     ]
@@ -1296,6 +2070,13 @@ def list_folders(
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
+    # Счетчик «Мои задачи» — то же правило видимости, что у выборки
+    # list_requests.mine (в т.ч. участник состава этапа).
+    routing_store = _routing_store_or_none()
+    roster = _RosterResolver(routing_store)
+    stage_kinds = _stage_owner_kinds(routing_store)
+    for item in requests:
+        _restore_step_owner_kinds(item, stage_kinds)
     folders: list[FolderOut] = []
     if _is_hr(user):
         folders = [
@@ -1332,13 +2113,8 @@ def list_folders(
             id="mine",
             title="Мои задачи",
             count=sum(
-                1
-                for r in requests
-                if any(
-                    s.owner_group in user.groups
-                    or (s.assignee and s.assignee == user.sam)
-                    for s in r.steps
-                )
+                1 for r in requests
+                if any(_is_step_viewer(s, user, roster) for s in r.steps)
             ),
         )
     )
@@ -1360,11 +2136,16 @@ def get_request(
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
-    if not _is_hr(user) and not any(
-        s.owner_group in user.groups or (s.assignee and s.assignee == user.sam)
-        for s in request.steps
-    ):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Нет доступа к заявке")
+    if not _is_hr(user):
+        routing_store = _routing_store_or_none()
+        # owner_kind шага в БД не хранится — без восстановления из справочника
+        # участник состава этапа не считался бы владельцем шага (403).
+        _restore_step_owner_kinds(request, _stage_owner_kinds(routing_store))
+        if not any(
+            _is_step_viewer(s, user, _RosterResolver(routing_store))
+            for s in request.steps
+        ):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Нет доступа к заявке")
     return _public_view(request, user)
 
 
@@ -1533,8 +2314,13 @@ def decide_step(
     settings.ensure_read_only()
     reopened: list[_Step] | None = None
     before_orders: set[int] = set()
+    # Справочники маршрута для этого решения: состав этапов (owner_kind =
+    # stage_roster, кэш на вызов) и owner_kind шага, которого в request_steps нет.
+    routing_store = _routing_store_or_none()
+    roster = _RosterResolver(routing_store)
     try:
         request = _get_request_or_404(store, request_id)
+        _restore_step_owner_kinds(request, _stage_owner_kinds(routing_store))
         if request.status != IN_APPROVAL:
             raise HTTPException(status_code=409, detail="Отметки — только в статусе На согласовании")
         step = next((s for s in request.steps if s.order == order), None)
@@ -1542,7 +2328,7 @@ def decide_step(
             raise HTTPException(status_code=404, detail="Шаг не найден")
         if step.status != STEP_PENDING:
             raise HTTPException(status_code=409, detail="Шаг уже закрыт")
-        _check_step_owner(step, user)
+        _check_step_owner(step, user, roster)
         now = _utcnow()
         # Просрочка TTL — шаг в просроченные, заявка на доработку, решение отклоняется.
         if now > step.expires_at:

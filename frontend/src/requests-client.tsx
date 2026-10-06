@@ -116,7 +116,7 @@ export interface RequestRow {
   employeeKey?: string;
 }
 
-// Тело POST /api/requests (ручной маршрут — шаги с группами владельцев).
+// Тело POST /api/requests.
 export interface CreateRequestBody {
   enterprise: string;
   tab_num: string;
@@ -135,6 +135,92 @@ export interface CreateRequestBody {
   content: string;
   // Вид документа (GET /api/doc-types; пустой справочник — поле не уходит).
   doc_type_code?: string;
+  // Режим маршрута: auto — сборка из профиля службы (по умолчанию), custom —
+  // ручной конструктор (blocks/steps). В auto блоки не отправляются.
+  route_mode?: RouteMode;
+  // Коды этапов, снятых ОК из маршрута (auto).
+  dismissed_stages?: string[];
+  // Коды этапов, добавленных ОК в конец маршрута (auto).
+  added_stages?: string[];
+  // Код базы 1С и логин AD сотрудника — источник карточки для auto-маршрута.
+  base_code?: string;
+  ad_sam?: string;
+}
+
+// Режим маршрута заявки (POST /api/requests, route_mode).
+export type RouteMode = "auto" | "custom";
+
+// Профиль маршрута из предпросмотра (RoutePreviewProfileOut).
+export interface RoutePreviewProfile {
+  id: number;
+  code: string;
+  name: string;
+}
+
+// Служба заявки из предпросмотра (RoutePreviewServiceOut).
+export interface RoutePreviewService {
+  id: number;
+  dept_name: string;
+  blank_kind: string | null;
+}
+
+// Этап маршрута из предпросмотра (RoutePreviewStageOut). blocked_reason —
+// почему этап нельзя закрыть (руководитель не найден в AD, группа не задана,
+// состав этапа пуст), иначе null.
+export interface RoutePreviewStage {
+  stage_id: number | null;
+  code: string | null;
+  title: string | null;
+  stage_lines: string[];
+  owner_kind: string;
+  owner_group: string | null;
+  owner_name: string | null;
+  // Этап необязательный: optional=false — снять его нельзя.
+  optional: boolean;
+  blocked_reason: string | null;
+}
+
+// Тело POST /api/requests/route/preview (RoutePreviewIn).
+export interface RoutePreviewBody {
+  enterprise: string;
+  tab_num: string;
+  base_code?: string;
+  ad_sam?: string;
+  department?: string;
+  position?: string;
+  // Снятые и добавленные этапы — те же коды, что уходят в создание.
+  dismissed_stages?: string[];
+  added_stages?: string[];
+}
+
+// Ответ предпросмотра маршрута (RoutePreviewOut). reason — причина подбора
+// (service_profile / default_profile / service_not_registered /
+// profile_not_found, возможно с пометками через «+»).
+export interface RoutePreview {
+  profile: RoutePreviewProfile | null;
+  service: RoutePreviewService | null;
+  reason: string;
+  stages: RoutePreviewStage[];
+  blank: string | null;
+}
+
+// Этап справочника маршрутов (GET /api/settings/routing/catalogs → stages).
+export interface RoutingCatalogStage {
+  id: number;
+  code: string;
+  title: string;
+  owner_kind: string;
+  owner_group: string | null;
+  optional: boolean;
+  active: boolean;
+}
+
+// Справочник маршрутов админа (службы/профили/этапы/шаги). Форме создания
+// нужен список этапов (активных) для добавления в маршрут; остальное —
+// задел под админку.
+export interface RoutingCatalogs {
+  stages: RoutingCatalogStage[];
+  [key: string]: unknown;
 }
 
 // Ключ сортировки списка заявок (клик по заголовку колонки переключает знак).
@@ -452,6 +538,22 @@ export async function createRequest(body: CreateRequestBody): Promise<RequestOut
     method: "POST",
     body: JSON.stringify(body),
   });
+}
+
+// POST /api/requests/route/preview: предпросмотр маршрута по профилю службы
+// (только чтение, ничего не создаётся). 422 — неполные/неверные данные,
+// 503 — хранилище справочников недоступно.
+export async function previewRoute(body: RoutePreviewBody): Promise<RoutePreview> {
+  return requestJson<RoutePreview>("/api/requests/route/preview", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+// GET /api/settings/routing/catalogs: справочник маршрутов (только админ);
+// остальным 403 — вызывающий обязан деградировать (форма не ломается).
+export async function getRoutingCatalogs(): Promise<RoutingCatalogs> {
+  return requestJson<RoutingCatalogs>("/api/settings/routing/catalogs");
 }
 
 // POST /api/requests/{id}/print: генерация бегунка (ОК/админ). При отсутствии

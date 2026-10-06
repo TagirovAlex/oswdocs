@@ -16,6 +16,7 @@ import struct
 import zipfile
 import zlib
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Protocol
 
@@ -323,17 +324,52 @@ def manual_bypass_body(request: object) -> str:
     return "\n".join(lines)
 
 
+def _step_done_text(value: object) -> str:
+    """Дата отметки шага строкой ДД.ММ.ГГГГ ЧЧ:ММ (пусто — шаг не отмечен).
+
+    Принимаем и datetime модели шага, и строку (уже отформатированную дату) —
+    контекст собирается из «птичьего» объекта запроса, как и весь остальной."""
+    if value is None:
+        return ""
+    if isinstance(value, datetime):
+        return value.strftime("%d.%m.%Y %H:%M")
+    text = str(value).strip()
+    if not text:
+        return ""
+    try:
+        return datetime.fromisoformat(text).strftime("%d.%m.%Y %H:%M")
+    except ValueError:
+        return text[:16].replace("T", " ")
+
+
 def build_bypass_context(request: object) -> Dict[str, object]:
     """Контекст бегунка: поля 1С заявки без ПДн (mail/отпуск — не включаем)
-    + шаги маршрута (владельцы шагов — участники процесса, не ПДн)."""
-    steps = [
-        {
-            "order": step.order,
-            "owner": getattr(step, "assignee", None) or step.owner_group,
-            "status": step.status,
-        }
-        for step in sorted(request.steps, key=lambda s: s.order)
-    ]
+    + шаги маршрута (владельцы шагов — участники процесса, не ПДн).
+
+    По каждому шагу отдаём снимок этапа из справочников (position/stage_lines)
+    и отметку (done_at): бланк печатается по маршруту, собранному из этапов.
+    ФИО исполнителя (fio) здесь пустое намеренно: ФИО подставляет documents.py,
+    где ридер AD уже подключён, — docs.py про requests.py не знает (импорт
+    был бы циклическим, его не делаем)."""
+    steps = []
+    for step in sorted(request.steps, key=lambda s: s.order):
+        owner = getattr(step, "assignee", None) or step.owner_group
+        stage_lines = [
+            str(line)
+            for line in (getattr(step, "stage_lines", None) or [])
+            if str(line).strip()
+        ]
+        steps.append(
+            {
+                "order": step.order,
+                "owner": owner,
+                "status": step.status,
+                "position": str(getattr(step, "stage_title", None) or step.owner_group or ""),
+                "fio": "",
+                "stage_lines": stage_lines or [owner],
+                "done_at": _step_done_text(getattr(step, "done_at", None)),
+            }
+        )
     return {
         "request_id": request.id,
         "fio": request.fio,

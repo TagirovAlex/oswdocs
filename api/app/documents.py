@@ -29,7 +29,14 @@ from .docs import (
     generate_bypass,
     manual_bypass_body,
 )
-from .requests import _get_request_or_404
+from .requests import (
+    _get_request_or_404,
+    _is_step_viewer,
+    _restore_step_owner_kinds,
+    _RosterResolver,
+    _routing_store_or_none,
+    _stage_owner_kinds,
+)
 from .requests_store import RequestsStore, RequestsUnavailable, get_requests_store
 from .settings_routes import (
     DbSettingsStore,
@@ -263,14 +270,23 @@ def _require_hr(user: CurrentUser) -> None:
         )
 
 
-def _can_view(request: object, user: CurrentUser) -> bool:
-    """Доступ к документам: ОК/руководители ОК/админы или владелец одного из шагов заявки."""
+def _can_view(
+    request: object, user: CurrentUser, roster: _RosterResolver | None = None
+) -> bool:
+    """Доступ к документам: ОК/руководители ОК/админы или владелец одного из шагов заявки.
+
+    Правило шага то же, что у карточки заявки (requests._is_step_viewer):
+    группа-владелец, персональный исполнитель либо участник состава этапа
+    (owner_kind = stage_roster). Резолвер состава не передан — строится здесь
+    же, вместе с восстановлением owner_kind шага из справочника (в request_steps
+    такой колонки нет, см. requests._restore_step_owner_kinds)."""
     if user.role in ("hr", "hr_admin", "admin"):
         return True
-    return any(
-        s.owner_group in user.groups or (s.assignee and s.assignee == user.sam)
-        for s in request.steps
-    )
+    if roster is None:
+        routing_store = _routing_store_or_none()
+        _restore_step_owner_kinds(request, _stage_owner_kinds(routing_store))
+        roster = _RosterResolver(routing_store)
+    return any(_is_step_viewer(step, user, roster) for step in request.steps)
 
 
 def _enterprise_name(settings_store: DbSettingsStore, code: object) -> str:
@@ -291,15 +307,36 @@ def _enterprise_name(settings_store: DbSettingsStore, code: object) -> str:
     return str(code or "")
 
 
+def _blank_kind(request: object, routing_store: object | None) -> str | None:
+    """Признак бланка службы сотрудника (office/line) из справочника служб AD.
+
+    Приоритетнее категории заявки: категория приходит из position_to_category,
+    который наполняется вручную и на стенде пуст, а признак службы — из AD.
+    Нет справочника/доступа — None (тогда печать идёт по категории заявки)."""
+    service_id = getattr(request, "service_id", None)
+    if not service_id or routing_store is None:
+        return None
+    try:
+        services = routing_store.list_services()
+    except Exception:
+        return None
+    for item in services:
+        if item.get("id") == service_id:
+            return (item.get("blank_kind") or "").strip() or None
+    return None
+
+
 def _bypass_body(
-    request: object, doc_templates: object, position_sets: object = None
+    request: object, doc_templates: object, position_sets: object = None,
+    routing_store: object | None = None,
 ) -> tuple[str | None, str | None]:
     """(тело, имя .docx-файла) бегунка: шаблон doc_templates по службе+категории
     и набору должностей сотрудника (body — текстовый фолбэк, file — настоящий
     .docx-шаблон), иначе ручной конструктор из шагов; нет шаблона и нет шагов —
     (None, None) (422)."""
     template = find_doc_template(
-        doc_templates, request.department, request.category,
+        doc_templates, request.department,
+        _blank_kind(request, routing_store) or request.category,
         getattr(request, "position", None), position_sets,
     )
     if template is not None:
@@ -333,7 +370,9 @@ def print_bypass(
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except SettingsUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    body, template_file = _bypass_body(request, doc_templates, position_sets)
+    body, template_file = _bypass_body(
+        request, doc_templates, position_sets, _routing_store_or_none()
+    )
     if body is None and template_file is None:
         raise HTTPException(
             status_code=422,

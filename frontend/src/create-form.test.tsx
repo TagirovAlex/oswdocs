@@ -7,8 +7,8 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiHttpError, me } from "./auth-client";
 import { CreateForm } from "./create-form";
-import { createRequest, getAdGroupMembers, getEmployeeCard, getEnterprises, getMyLinks, getStepGroups, searchAd, searchEmployees, submitRequest } from "./requests-client";
-import type { AdGroupMember } from "./requests-client";
+import { createRequest, getAdGroupMembers, getEmployeeCard, getEnterprises, getMyLinks, getRoutingCatalogs, getStepGroups, previewRoute, searchAd, searchEmployees, submitRequest } from "./requests-client";
+import type { AdGroupMember, RoutePreview } from "./requests-client";
 
 // Мок клиента заявок; чистые функции — реальные.
 vi.mock("./requests-client", async (importOriginal) => {
@@ -24,6 +24,8 @@ vi.mock("./requests-client", async (importOriginal) => {
     createRequest: vi.fn(),
     submitRequest: vi.fn(),
     getMyLinks: vi.fn(),
+    previewRoute: vi.fn(),
+    getRoutingCatalogs: vi.fn(),
   };
 });
 
@@ -65,6 +67,54 @@ const okGroupMember = {
   title: "Начальник",
 };
 
+// Предпросмотр маршрута по профилю (POST /api/requests/route/preview):
+// профиль службы, два этапа — обязательный (не снимается) и необязательный.
+const routePreview: RoutePreview = {
+  profile: { id: 1, code: "uvol_base", name: "Увольнение (базовый профиль)" },
+  service: { id: 3, dept_name: "Цех № 1", blank_kind: "office" },
+  reason: "service_profile",
+  stages: [
+    {
+      stage_id: 1,
+      code: "rukovoditel",
+      title: "Непосредственный руководитель",
+      stage_lines: ["Строка руководителя"],
+      owner_kind: "manager_ad",
+      owner_group: null,
+      owner_name: "Иванов Иван Иванович",
+      optional: false,
+      blocked_reason: null,
+    },
+    {
+      stage_id: 2,
+      code: "buhgalteriya",
+      title: "Бухгалтерия",
+      stage_lines: [],
+      owner_kind: "ad_group",
+      owner_group: "SED_STEP_BUH",
+      owner_name: "Бухгалтерия (вымышленная группа)",
+      optional: true,
+      blocked_reason: null,
+    },
+  ],
+  blank: "office",
+};
+
+// Справочник маршрутов админа (GET /api/settings/routing/catalogs): активные этапы.
+const routingCatalogs = {
+  stages: [
+    {
+      id: 3,
+      code: "sluzhba_ok",
+      title: "Служба ОК",
+      owner_kind: "ad_group",
+      owner_group: "SED_STEP_OK",
+      optional: true,
+      active: true,
+    },
+  ],
+};
+
 beforeEach(() => {
   vi.mocked(getEnterprises).mockReset();
   vi.mocked(searchEmployees).mockReset();
@@ -75,6 +125,11 @@ beforeEach(() => {
   vi.mocked(createRequest).mockReset();
   vi.mocked(submitRequest).mockReset();
   vi.mocked(getMyLinks).mockReset();
+  vi.mocked(previewRoute).mockReset();
+  vi.mocked(getRoutingCatalogs).mockReset();
+  // По умолчанию маршрут подбирается по профилю, справочник этапов доступен.
+  vi.mocked(previewRoute).mockResolvedValue(routePreview);
+  vi.mocked(getRoutingCatalogs).mockResolvedValue(routingCatalogs);
   // По умолчанию связки АД-1С нет: инициатор — readonly-текст (старое поведение).
   vi.mocked(getMyLinks).mockResolvedValue([]);
   vi.mocked(me).mockReset();
@@ -89,8 +144,16 @@ beforeEach(() => {
   vi.mocked(getAdGroupMembers).mockResolvedValue([groupMember]);
 });
 
+// Переключение формы в ручной режим маршрута (по умолчанию — по профилю).
+async function switchToManualRoute(): Promise<void> {
+  const manual = screen.getByRole("radio", { name: "Вручную" }) as HTMLInputElement;
+  if (!manual.checked) fireEvent.click(manual);
+}
+
 // Заполнение формы до маршрута: предприятие → поиск 1С (503) → ручной ввод.
-async function fillEmployeeManually(): Promise<void> {
+// mode="custom" (по умолчанию в тестах) — переключает форму в ручной режим
+// маршрута; mode="auto" оставляет подбор по профилю.
+async function fillEmployeeManually(mode: "auto" | "custom" = "custom"): Promise<void> {
   await waitFor(() => expect(screen.getByLabelText("Предприятие")).toBeInTheDocument());
   fireEvent.change(screen.getByLabelText("Предприятие"), { target: { value: "ENT_PRIMER_1" } });
   // Поиск; без баз 1С — 503 → ручной ввод с пометкой.
@@ -108,6 +171,7 @@ async function fillEmployeeManually(): Promise<void> {
   });
   // Маршрут появляется, когда сотрудник заполнен (без стадий и «Далее»).
   await waitFor(() => expect(screen.getByText("Маршрут согласования")).toBeInTheDocument());
+  if (mode === "custom") await switchToManualRoute();
 }
 
 // Добавление исполнителя из AD в первый блок конструктора маршрута:
@@ -153,9 +217,10 @@ describe("CreateForm", () => {
         blocks: [{ mode: "sequential", steps: [{ sam: "petrov.pp" }] }],
       }),
     );
-    // Поле steps (группы) больше не отправляется.
+    // Поле steps (группы) больше не отправляется; blocks уходят в custom.
     const body = vi.mocked(createRequest).mock.calls[0][0];
     expect(body.steps).toBeUndefined();
+    expect(body.route_mode).toBe("custom");
     // Сброс формы: предприятие пусто → маршрут скрыт, «Создать» недоступен.
     await waitFor(() => expect(screen.getByLabelText("Предприятие")).toHaveValue(""));
     expect(screen.queryByText("Маршрут согласования")).not.toBeInTheDocument();
@@ -393,8 +458,9 @@ describe("CreateForm", () => {
     await waitFor(() => expect(screen.getByText("Громов Игорь Олегович")).toBeInTheDocument());
     fireEvent.click(screen.getByText("Громов Игорь Олегович"));
     await waitFor(() => expect(getEmployeeCard).toHaveBeenCalled());
-    // Подразделение/должность — текст из карточки, не input.
-    await waitFor(() => expect(screen.getByText("Цех № 1")).toBeInTheDocument());
+    // Подразделение/должность — текст из карточки, не input (название службы
+    // может совпадать с подразделением — берём все вхождения).
+    await waitFor(() => expect(screen.getAllByText("Цех № 1").length).toBeGreaterThan(0));
     expect(screen.queryByRole("textbox", { name: "Подразделение" })).not.toBeInTheDocument();
     expect(screen.queryByRole("textbox", { name: "Должность" })).not.toBeInTheDocument();
     expect(screen.getByText("Подразделение:")).toBeInTheDocument();
@@ -693,6 +759,213 @@ describe("CreateForm", () => {
     expect(link.getAttribute("href")).toBe(
       `?view=employee&key=${encodeURIComponent("ENT_PRIMER_1|zup_t1|Т-000201")}`,
     );
+  });
+
+  // Автоматический маршрут (по умолчанию): предпросмотр рисует профиль,
+  // службу и этапы; конструктор блоков скрыт, blocks в тело не уходят.
+  it("режим «по профилю»: предпросмотр показывает профиль, службу и этапы", async () => {
+    vi.mocked(searchEmployees).mockRejectedValue(new ApiHttpError(503, "Клиент 1С не настроен"));
+    vi.mocked(createRequest).mockResolvedValue({
+      id: "REQ-0100",
+      status: "Черновик",
+      route_origin: "template",
+      department: "Цех № 1",
+      position: "Слесарь",
+      created_by: "petrov.pp",
+      steps: [],
+    });
+
+    render(<CreateForm role="hr" />);
+    await fillEmployeeManually("auto");
+
+    // Режим по умолчанию — auto, ручной конструктор скрыт.
+    expect(screen.getByRole("radio", { name: "По профилю (рекомендуется)" })).toBeChecked();
+    expect(screen.queryByText("Добавить последовательный блок")).not.toBeInTheDocument();
+
+    // Предпросмотр вызван по предприятию и табельному номеру сотрудника.
+    await waitFor(() =>
+      expect(previewRoute).toHaveBeenCalledWith(
+        expect.objectContaining({ enterprise: "ENT_PRIMER_1", tab_num: "Т-000201" }),
+      ),
+    );
+    expect(screen.getByText("Увольнение (базовый профиль)")).toBeInTheDocument();
+    expect(screen.getByText(/Служба:/)).toHaveTextContent("Цех № 1");
+    expect(screen.getByText(/Причина подбора:/)).toHaveTextContent("профиль службы");
+    // Этапы предпросмотра — с исполнителями.
+    expect(screen.getByText("Непосредственный руководитель")).toBeInTheDocument();
+    expect(screen.getByText("Иванов Иван Иванович")).toBeInTheDocument();
+    expect(screen.getByText("Бухгалтерия")).toBeInTheDocument();
+
+    // В auto payload без blocks, с route_mode=auto.
+    fireEvent.click(screen.getByText("Создать"));
+    await waitFor(() => expect(createRequest).toHaveBeenCalled());
+    const body = vi.mocked(createRequest).mock.calls[0][0];
+    expect(body.route_mode).toBe("auto");
+    expect(body.blocks).toBeUndefined();
+    expect(body.dismissed_stages).toEqual([]);
+    expect(body.added_stages).toEqual([]);
+  });
+
+  // Снятие галочки этапа → код в dismissed_stages; обязательный этап (optional=false)
+  // снять нельзя.
+  it("снятие чекбокса этапа уходит в dismissed_stages, обязательный этап неактивен", async () => {
+    vi.mocked(searchEmployees).mockRejectedValue(new ApiHttpError(503, "Клиент 1С не настроен"));
+    vi.mocked(previewRoute).mockImplementation(async (body) => ({
+      ...routePreview,
+      stages: routePreview.stages.filter((s) => !body.dismissed_stages?.includes(s.code ?? "")),
+    }));
+    vi.mocked(createRequest).mockResolvedValue({
+      id: "REQ-0101",
+      status: "Черновик",
+      route_origin: "template",
+      department: "Цех № 1",
+      position: "Слесарь",
+      created_by: "petrov.pp",
+      steps: [],
+    });
+
+    render(<CreateForm role="hr" />);
+    await fillEmployeeManually("auto");
+
+    // Обязательный этап — чекбокс включён и неактивен, с подсказкой.
+    const required = screen.getByRole("checkbox", { name: "Этап Непосредственный руководитель" });
+    expect(required).toBeChecked();
+    expect(required).toBeDisabled();
+    expect(required).toHaveAttribute("title", "Этап обязательный");
+
+    // Необязательный этап снимается галочкой → предпросмотр перезапрашивается.
+    fireEvent.click(screen.getByRole("checkbox", { name: "Этап Бухгалтерия" }));
+    await waitFor(() =>
+      expect(previewRoute).toHaveBeenLastCalledWith(
+        expect.objectContaining({ dismissed_stages: ["buhgalteriya"] }),
+      ),
+    );
+
+    fireEvent.click(screen.getByText("Создать"));
+    await waitFor(() => expect(createRequest).toHaveBeenCalled());
+    expect(vi.mocked(createRequest).mock.calls[0][0].dismissed_stages).toEqual(["buhgalteriya"]);
+  });
+
+  // Причину блокировки этапа (важно для ОК) показываем рядом с этапом.
+  it("blocked_reason этапа показан рядом с этапом", async () => {
+    vi.mocked(searchEmployees).mockRejectedValue(new ApiHttpError(503, "Клиент 1С не настроен"));
+    vi.mocked(previewRoute).mockResolvedValue({
+      ...routePreview,
+      stages: [
+        {
+          ...routePreview.stages[0],
+          owner_name: null,
+          blocked_reason: "Не найден непосредственный руководитель в AD - этап заблокирован",
+        },
+      ],
+    });
+
+    render(<CreateForm role="hr" />);
+    await fillEmployeeManually("auto");
+    await waitFor(() =>
+      expect(screen.getByText(/Не найден непосредственный руководитель в AD/)).toBeInTheDocument(),
+    );
+  });
+
+  // Маршрут не подобрался: причина reason показывается по-русски, этапов нет,
+  // «Создать» недоступно — ручной режим остаётся путём.
+  it("маршрут не подобрался: причина по-русски, ручной режим доступен", async () => {
+    vi.mocked(searchEmployees).mockRejectedValue(new ApiHttpError(503, "Клиент 1С не настроен"));
+    vi.mocked(previewRoute).mockResolvedValue({
+      profile: null,
+      service: null,
+      reason: "service_not_registered",
+      stages: [],
+      blank: null,
+    });
+
+    render(<CreateForm role="hr" />);
+    await fillEmployeeManually("auto");
+
+    await waitFor(() => expect(screen.getByText(/Маршрут не подобрался/)).toBeInTheDocument());
+    expect(screen.getByText(/Маршрут не подобрался/)).toHaveTextContent("служба не заведена");
+    expect(screen.getByText("Этапы не подобраны.")).toBeInTheDocument();
+    expect(screen.getByText("Создать")).toBeDisabled();
+
+    // Переключение вручную открывает конструктор — деградация без ошибки.
+    await switchToManualRoute();
+    expect(screen.getByText("Добавить последовательный блок")).toBeInTheDocument();
+  });
+
+  // 422 предпросмотра: текст ошибки показан, создание в ручном режиме доступно.
+  it("422 предпросмотра показан текстом и не блокирует ручной режим", async () => {
+    vi.mocked(searchEmployees).mockRejectedValue(new ApiHttpError(503, "Клиент 1С не настроен"));
+    vi.mocked(previewRoute).mockRejectedValue(
+      new ApiHttpError(422, "Не удалось определить службу: не задано подразделение"),
+    );
+
+    render(<CreateForm role="hr" />);
+    await fillEmployeeManually("auto");
+
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent(/Не удалось определить службу/),
+    );
+    expect(screen.getByText("Создать")).toBeDisabled();
+    await switchToManualRoute();
+    expect(screen.getByText("Добавить последовательный блок")).toBeInTheDocument();
+  });
+
+  // 422 при создании в auto: detail показывается как есть, молчаливого
+  // переключения на ручной режим нет.
+  it("422 при создании в auto показывается как есть, режим не меняется", async () => {
+    vi.mocked(searchEmployees).mockRejectedValue(new ApiHttpError(503, "Клиент 1С не настроен"));
+    vi.mocked(createRequest).mockRejectedValue(
+      new ApiHttpError(422, "Не удалось подобрать маршрут: профиль не найден"),
+    );
+
+    render(<CreateForm role="hr" />);
+    await fillEmployeeManually("auto");
+    fireEvent.click(screen.getByText("Создать"));
+
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent(/Не удалось подобрать маршрут/),
+    );
+    // Режим остался автоматическим — ручной конструктор не показан.
+    expect(screen.getByRole("radio", { name: "По профилю (рекомендуется)" })).toBeChecked();
+    expect(screen.queryByText("Добавить последовательный блок")).not.toBeInTheDocument();
+  });
+
+  // «Добавить этап»: код уходит в added_stages. Справочник админский — при 403
+  // кнопки нет (деградация без ошибки).
+  it("добавление этапа уходит в added_stages; при 403 справочника кнопки нет", async () => {
+    vi.mocked(searchEmployees).mockRejectedValue(new ApiHttpError(503, "Клиент 1С не настроен"));
+    vi.mocked(createRequest).mockResolvedValue({
+      id: "REQ-0102",
+      status: "Черновик",
+      route_origin: "template",
+      department: "Цех № 1",
+      position: "Слесарь",
+      created_by: "petrov.pp",
+      steps: [],
+    });
+
+    const { unmount } = render(<CreateForm role="hr" />);
+    await fillEmployeeManually("auto");
+    fireEvent.click(screen.getByRole("button", { name: "Добавить этап" }));
+    fireEvent.change(screen.getByLabelText("Этап для добавления"), {
+      target: { value: "sluzhba_ok" },
+    });
+    await waitFor(() =>
+      expect(previewRoute).toHaveBeenLastCalledWith(
+        expect.objectContaining({ added_stages: ["sluzhba_ok"] }),
+      ),
+    );
+    fireEvent.click(screen.getByText("Создать"));
+    await waitFor(() => expect(createRequest).toHaveBeenCalled());
+    expect(vi.mocked(createRequest).mock.calls[0][0].added_stages).toEqual(["sluzhba_ok"]);
+    unmount();
+
+    // Не-админ: справочник 403 — кнопки добавления нет, ошибки тоже.
+    vi.mocked(getRoutingCatalogs).mockRejectedValue(new ApiHttpError(403, "Справочник — только админам"));
+    render(<CreateForm role="hr" />);
+    await fillEmployeeManually("auto");
+    expect(screen.queryByRole("button", { name: "Добавить этап" })).not.toBeInTheDocument();
+    expect(screen.getByText("Увольнение (базовый профиль)")).toBeInTheDocument();
   });
 
   // Конструктор блоков — карточки «Рассмотрение»; ссылки задают режим блока.
