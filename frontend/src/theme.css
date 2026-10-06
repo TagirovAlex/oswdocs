@@ -525,31 +525,28 @@ a {
   table-layout: fixed;
 }
 
+/* Таблица рассмотрения — 6 колонок (без «№»):
+   Вид | Должность | Сотрудник | Статус | Срок | Комментарий. */
+/* Вид рассмотрения: всего два значения — узкая колонка без переносов;
+   высвобожденное место отдано Должности и Сотруднику. */
 .sed-table--review th:nth-child(1),
 .sed-table--review td:nth-child(1) {
-  width: 44px;
-}
-
-/* Вид рассмотрения: всего два значения — узкая колонка без переносов;
-   высвобожденное место отдано Сотруднику. */
-.sed-table--review th:nth-child(2),
-.sed-table--review td:nth-child(2) {
   width: 132px;
   white-space: nowrap;
 }
 
+.sed-table--review th:nth-child(3),
+.sed-table--review td:nth-child(3) {
+  width: 140px;
+}
+
 .sed-table--review th:nth-child(4),
 .sed-table--review td:nth-child(4) {
-  width: 140px;
+  width: 92px;
 }
 
 .sed-table--review th:nth-child(5),
 .sed-table--review td:nth-child(5) {
-  width: 92px;
-}
-
-.sed-table--review th:nth-child(6),
-.sed-table--review td:nth-child(6) {
   width: 104px;
 }
 
