@@ -99,6 +99,8 @@ INFRA_KEYS: tuple[str, ...] = (
     "schedule_enterprises_sync",
     "schedule_ad_links_sync",
     "schedule_ad_groups_sync",
+    "schedule_hr_dismissals_sync",
+    "hr_dismissals_synced_at",
 )
 
 # SETTINGS_KEYS: полный набор (контент + инфра). Поля onec_enterprises_synced_at,

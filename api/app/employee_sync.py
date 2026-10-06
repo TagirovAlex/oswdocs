@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import List, Optional, Protocol
 
 from fastapi import Depends
@@ -24,10 +24,27 @@ from .settings_routes import read_setting_value
 
 # Размер страницы выгрузки сотрудников (лимит одной OData-выдачи), как в ad_sync.
 LIST_PAGE = 500
+# Размер страницы регистра кадровых данных (тот же лимит OData).
+HR_PAGE = 500
 
 
 class EmployeeSyncUnavailable(Exception):
     """Локальный справочник сотрудников недоступен (нет баз/предприятий/БД) — 503."""
+
+
+def _dismissed(row: dict, today: date | None = None) -> bool:
+    """Уволен ли сотрудник по дате из регистра 1С.
+
+    Критерий — только дата увольнения из 1С (решение человека): пусто или позже
+    сегодняшнего дня — работает; сегодня или раньше — уволен (учётку в AD после
+    увольнения отключают вручную, состояние AD не проверяем)."""
+    raw = str(row.get("dismissal_date") or "").strip()
+    if not raw:
+        return False
+    try:
+        return date.fromisoformat(raw[:10]) <= (today or date.today())
+    except ValueError:  # битая дата — считаем работающим, лучше показать лишнее
+        return False
 
 
 def _norm_people(values: list[str] | None) -> list[str]:
@@ -77,6 +94,15 @@ class EmployeeSyncStore(Protocol):
         """Записать строки (upsert по составному ключу), вернуть число строк."""
         ...
 
+    def update_dismissals(self, base_code: str, rows: list[dict]) -> int:
+        """Проставить даты увольнения по парам (ref_key, дата) базы.
+
+        Строка справочника и запись регистра сопоставляются по Ref_Key сотрудника
+        (поле «Сотрудник_Key» регистра). Дата пустая — запись в регистре есть, но
+        увольнения не было: очищаем прежнюю дату (сотрудник восстановлен).
+        Неизвестный ref_key игнорируем. Возврат — число обновлённых строк."""
+        ...
+
     def distinct_positions(self) -> list[str]:
         """Все должности справочника (position), уникальные, сортированные.
 
@@ -102,9 +128,12 @@ class InMemoryEmployeeSyncStore:
         self, enterprise: str, q: str, limit: int, offset: int = 0
     ) -> list[dict]:
         needle = (q or "").strip().lower()
+        today = date.today()
         hits = []
         for row in self._rows.values():
             if row["enterprise"] != enterprise:
+                continue
+            if _dismissed(row, today):
                 continue
             if needle and not (
                 needle in row["fio"].lower()
@@ -115,6 +144,19 @@ class InMemoryEmployeeSyncStore:
                 continue
             hits.append(dict(row))
         return hits[offset : offset + limit]
+
+    def update_dismissals(self, base_code: str, rows: list[dict]) -> int:
+        by_ref = {str(item.get("ref_key") or "").strip(): item for item in rows}
+        updated = 0
+        for row in self._rows.values():
+            if row.get("base_code") != base_code:
+                continue
+            item = by_ref.get(str(row.get("ref_key") or "").strip())
+            if item is None:
+                continue
+            row["dismissal_date"] = item.get("dismissal_date") or None
+            updated += 1
+        return updated
 
     def count_matching(self, enterprise: str, q: str) -> int:
         return len(self.search(enterprise, q, len(self._rows)))
@@ -157,16 +199,19 @@ class DbEmployeeSyncStore:
 
     # Все строки справочника (0 = синк не прошёл, нужен фолбэк на живой 1С).
     _COUNT_ALL_SQL = text("SELECT count(*) FROM employees")
-    # В выборку справочника попадают только сотрудники, связанные с AD
-    # (ad_sam): у остальных нет AD-карточки — нечем подтвердить службу и
-    # руководителя, и маршрут согласования не собрать. Отсекает архив и
-    # уволенных, учётки которых уже отключены в AD.
+    # Из выборки справочника исключены уволенные: увольнение определяется датой
+    # из регистра кадровых данных 1С (dismissal_date), а не состоянием AD —
+    # учётку в AD после увольнения отключают вручную. Пустая дата или позже
+    # сегодняшнего дня — сотрудник работает и в выдаче.
+    _WORKING_SQL = (
+        "AND (dismissal_date IS NULL OR dismissal_date > CURRENT_DATE)"
+    )
     _SEARCH_SQL = text(
         """
         SELECT enterprise, base_code, tab_num, fio, department, position, ad_sam, ad_status
         FROM employees
         WHERE enterprise = :enterprise
-          AND ad_sam IS NOT NULL
+          """ + _WORKING_SQL + """
           AND (:q = ''
                OR fio ILIKE '%' || :q || '%'
                OR tab_num ILIKE '%' || :q || '%'
@@ -180,7 +225,7 @@ class DbEmployeeSyncStore:
         """
         SELECT count(*) FROM employees
         WHERE enterprise = :enterprise
-          AND ad_sam IS NOT NULL
+          """ + _WORKING_SQL + """
           AND (:q = ''
                OR fio ILIKE '%' || :q || '%'
                OR tab_num ILIKE '%' || :q || '%'
@@ -188,19 +233,35 @@ class DbEmployeeSyncStore:
                OR COALESCE(ad_sam, '') ILIKE '%' || :q || '%')
         """
     )
+    # ref_key — ключ строки для регистра кадровых данных (сопоставление по
+    # увольнению). dismissal_date НЕ трогаем: его пишет только проход по
+    # регистру (update_dismissals), ежедневный справочник его бы затирал.
     _UPSERT_SQL = text(
         """
         INSERT INTO employees
-            (enterprise, base_code, tab_num, fio, department, position, ad_sam, ad_status)
+            (enterprise, base_code, tab_num, fio, department, position, ad_sam,
+             ad_status, ref_key)
         VALUES (:enterprise, :base_code, :tab_num, :fio, :department, :position,
-                :ad_sam, :ad_status)
+                :ad_sam, :ad_status, :ref_key)
         ON CONFLICT (enterprise, base_code, tab_num) DO UPDATE SET
             fio = EXCLUDED.fio,
             department = EXCLUDED.department,
             position = EXCLUDED.position,
             ad_sam = EXCLUDED.ad_sam,
             ad_status = EXCLUDED.ad_status,
+            ref_key = EXCLUDED.ref_key,
             updated_at = now()
+        """
+    )
+    # Даты увольнения пачкой: VALUES из bindparam(expanding=True) — psycopg ждёт
+    # список значений, кортеж из скаляров не подойдёт.
+    _UPDATE_DISMISSALS_SQL = text(
+        """
+        UPDATE employees e
+        SET dismissal_date = v.dismissal_date, hr_synced_at = now()
+        FROM (VALUES :rows) AS v(ref_key, dismissal_date)
+        WHERE e.base_code = :base_code
+          AND e.ref_key = v.ref_key
         """
     )
     # Шаблон точного пакетного поиска: условие по логинам/табельным номерам
@@ -319,6 +380,7 @@ class DbEmployeeSyncStore:
                 "position": row.get("position"),
                 "ad_sam": row.get("ad_sam"),
                 "ad_status": row.get("ad_status"),
+                "ref_key": row.get("ref_key") or None,
             }
             for row in rows
         ]
@@ -331,6 +393,32 @@ class DbEmployeeSyncStore:
                 "Справочник сотрудников недоступен: %s" % exc
             ) from exc
         return len(rows)
+
+    def update_dismissals(self, base_code: str, rows: list[dict]) -> int:
+        params = [
+            {
+                "ref_key": str(row.get("ref_key") or "").strip(),
+                # None = увольнения не было (регистр есть, дата пустая) — очищаем
+                # прежнюю дату, чтобы восстановленного сотрудника вернуло в выдачу.
+                "dismissal_date": row.get("dismissal_date") or None,
+            }
+            for row in rows
+            if str(row.get("ref_key") or "").strip()
+        ]
+        if not params:
+            return 0
+        statement = self._UPDATE_DISMISSALS_SQL.bindparams(
+            bindparam("rows", expanding=True)
+        )
+        try:
+            with self._session_factory() as session:
+                result = session.execute(statement, {"base_code": base_code, "rows": params})
+                session.commit()
+        except SQLAlchemyError as exc:
+            raise EmployeeSyncUnavailable(
+                "Справочник сотрудников недоступен: %s" % exc
+            ) from exc
+        return int(result.rowcount or 0)
 
     _POSITIONS_SQL = text(
         """
@@ -466,6 +554,8 @@ def sync_employees(store, links_store, emp_store: Optional[EmployeeSyncStore] = 
                     "fio": card.fio,
                     "department": card.dept or None,
                     "position": card.position or None,
+                    # Ключ строки для регистра кадровых данных (увольнение).
+                    "ref_key": card.ref_key or None,
                     **_link_row(card, links_store),
                 }
                 for card in cards
@@ -476,6 +566,107 @@ def sync_employees(store, links_store, emp_store: Optional[EmployeeSyncStore] = 
             "Ни одна база 1С не ответила: " + "; ".join(errors or ["баз нет"])
         )
     return {"synced": synced, "errors": errors}
+
+
+def sync_hr_dismissals(
+    store, emp_store: Optional[EmployeeSyncStore] = None
+) -> dict:
+    """Ежедневный проход по регистру кадровых данных: записать даты увольнения.
+
+    Источник — регистр текущих кадровых данных базы (InformationRegister_…), по
+    страницам ($skip/$top) одной выгрузкой на базу: пара (Ref_Key сотрудника,
+    дата увольнения) пишется в employees.dismissal_date через ref_key. Пустая
+    дата = увольнения не было (сотрудник работает) — прежняя дата очищается.
+
+    Только чтение 1С, запись — только в нашу таблицу employees. Падение одной
+    базы не валит остальные; не ответил НИ ОДИН регистр — EmployeeSyncUnavailable
+    (503). Возврат: {"scanned", "updated", "dismissed", "errors"}."""
+    from .employees import (  # локально против циклического импорта
+        _bases_from_settings,
+        _enterprise_index_from_settings,
+    )
+    from .onec_client import (
+        OneCBaseDown,
+        OneCCircuitOpen,
+        OneCClient,
+        OneCError,
+    )
+
+    bases = _bases_from_settings(store)
+    if not bases:
+        raise EmployeeSyncUnavailable("Базы 1С не настроены")
+    client = OneCClient(bases, enterprise_index=_enterprise_index_from_settings(store))
+    if emp_store is None:
+        emp_store = get_employee_sync_store(get_settings())
+
+    errors: List[str] = []
+    scanned = 0
+    updated = 0
+    dismissed = 0
+    ok = False
+    for base_code in sorted(bases):
+        skip = 0
+        page_rows: List[dict] = []
+        while True:
+            try:
+                page = client.list_hr_dismissals(base_code, skip=skip, top=HR_PAGE)
+            except (OneCBaseDown, OneCCircuitOpen, OneCError) as exc:
+                errors.append("%s: %s" % (base_code, exc))
+                break
+            except Exception as exc:  # сеть/прочее — изолируем, обход продолжаем
+                errors.append("%s: %s: %s" % (base_code, type(exc).__name__, exc))
+                break
+            ok = True
+            if not page:
+                break
+            scanned += len(page)
+            page_rows.extend(
+                {"ref_key": ref_key, "dismissal_date": date_value or None}
+                for ref_key, date_value in page
+            )
+            if len(page) < HR_PAGE:
+                break
+            skip += len(page)
+        if page_rows:
+            updated += emp_store.update_dismissals(base_code, page_rows)
+            dismissed += sum(1 for row in page_rows if row["dismissal_date"])
+    if not ok:
+        raise EmployeeSyncUnavailable(
+            "Регистр кадровых данных не ответил: " + "; ".join(errors or ["баз нет"])
+        )
+    return {
+        "scanned": scanned,
+        "updated": updated,
+        "dismissed": dismissed,
+        "errors": errors,
+    }
+
+
+def maybe_sync_hr_daily(store, emp_store: Optional[EmployeeSyncStore] = None) -> bool:
+    """Регламентный проход по регистру кадровых данных (worker): тихо, без сбоев.
+
+    Базы 1С не настроены — False; «не пора» по расписанию
+    schedule_hr_dismissals_sync (нет расписания — раз в 7 дней от
+    hr_dismissals_synced_at) — False; иначе sync_hr_dismissals, метка
+    hr_dismissals_synced_at пишется только после успеха — True."""
+    from .onec_sync import due_schedule  # лениво: избегаем циклов импорта
+
+    bases = read_setting_value(store, "onec_bases")
+    if not isinstance(bases, list) or not bases:
+        return False
+    schedule = read_setting_value(store, "schedule_hr_dismissals_sync")
+    last_raw = read_setting_value(store, "hr_dismissals_synced_at")
+    if not due_schedule(schedule, last_raw):
+        return False
+    try:
+        sync_hr_dismissals(store, emp_store)
+        store.set(
+            "hr_dismissals_synced_at",
+            json.dumps(datetime.now(timezone.utc).isoformat()),
+        )
+        return True
+    except Exception:
+        return False
 
 
 def maybe_sync_employees_weekly(store, links_store) -> bool:

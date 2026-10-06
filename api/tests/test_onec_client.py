@@ -5,6 +5,7 @@ https://1c-mock.local/... — mock-адреса только для FakeTranspor
 настройки — исключительно из env ONEC_BASES_JSON (см. тест env-парсинга).
 Общий conftest.py не используется (чужой файл A2); фикстуры — локально здесь.
 """
+import dataclasses
 import json
 import os
 import sys
@@ -101,6 +102,58 @@ def test_get_employee_success():
     card = c.get_employee("zup_a", "100")
     assert card.fio == FIOS["a100"]
     assert card.key() == make_key(ENT, "zup_a", "100")
+
+
+def test_list_hr_dismissals_pages_and_normalizes():
+    """Постраничное чтение регистра кадровых данных: (Ref_Key, дата увольнения).
+
+    Пустая дата регистра (0001-01-01) нормализуется в "" — увольнения не было;
+    записи без Сотрудник_Key пропускаются; пагинация идёт через $skip/$top."""
+    pages = [
+        [("ref-1", "2026-04-14T00:00:00"), ("ref-2", "")],
+        [("ref-3", "0001-01-01T00:00:00")],
+    ]
+    seen_skips = []
+
+    def handler(url, headers, timeout):
+        if "InformationRegister_" not in url:
+            return HttpResult(404, "{}")
+        seen_skips.append(url)
+        index = len(seen_skips) - 1
+        if index >= len(pages):
+            return HttpResult(200, json.dumps({"value": []}))
+        return HttpResult(
+            200,
+            json.dumps(
+                {
+                    "value": [
+                        {
+                            "Сотрудник_Key": ref,
+                            "ДатаУвольнения": value,
+                        }
+                        for ref, value in pages[index]
+                    ]
+                },
+                ensure_ascii=False,
+            ),
+        )
+
+    c = OneCClient({"zup_a": _bases()["zup_a"]}, transport=FakeTransport(handler))
+    first = c.list_hr_dismissals("zup_a", skip=0, top=2)
+    second = c.list_hr_dismissals("zup_a", skip=2, top=2)
+    assert first == [("ref-1", "2026-04-14T00:00:00"), ("ref-2", "")]
+    assert second == [("ref-3", "")]  # 0001-01-01 — увольнения не было
+    assert "$skip=2" in seen_skips[1]
+    assert "$select" in seen_skips[0]  # лёгкая выборка двух полей
+
+
+def test_list_hr_dismissals_without_register_configured():
+    """Регистр не настроен (hr_entity пуст) — пустой список, без запроса."""
+    cfg = dataclasses.replace(_bases()["zup_a"], hr_entity="")
+    t = FakeTransport(_ok_a)
+    c = OneCClient({"zup_a": cfg}, transport=t)
+    assert c.list_hr_dismissals("zup_a") == []
+    assert t.calls == []
 
 
 def test_timeout_is_5_seconds():

@@ -30,6 +30,7 @@ from .employee_sync import (
     EmployeeSyncStore,
     get_employee_sync_store,
     sync_employees,
+    sync_hr_dismissals,
 )
 from .link_store import LinksStore, get_links_store
 from .onec_client import (
@@ -489,6 +490,49 @@ def sync_employees_endpoint(
     )
     return {
         "synced": result["synced"],
+        "errors": result["errors"],
+        "at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@router.post("/employees/hr-sync")
+def sync_hr_dismissals_endpoint(
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+    settings_store: DbSettingsStore = Depends(get_settings_store),
+    emp_store: EmployeeSyncStore = Depends(get_employee_sync_store),
+) -> dict:
+    """Проход по регистру кадровых данных 1С: записать даты увольнения. Только admin.
+
+    Регламентный аналог (worker, раз в сутки по schedule_hr_dismissals_sync)
+    делает то же самое; ручной запуск нужен после правок в 1С. Источник
+    недоступен — 503 (не 500); успех — {"scanned", "updated", "dismissed",
+    "errors", "at"}. Запись — только в нашу таблицу employees, 1С — чтение."""
+    settings.ensure_read_only()
+    if user.role != "admin" and user.role != "sed_admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Проход по регистру кадровых данных запускает только админ",
+        )
+    try:
+        result = sync_hr_dismissals(settings_store, emp_store)
+    except EmployeeSyncUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    audit_log.append(
+        AuditEvent(
+            actor=user.sam,
+            action="employees.hr_sync",
+            entity="employee",
+            entity_id="employees",
+            detail="обновлено: %d; уволенных: %d" % (result["updated"], result["dismissed"]),
+        )
+    )
+    return {
+        "scanned": result["scanned"],
+        "updated": result["updated"],
+        "dismissed": result["dismissed"],
         "errors": result["errors"],
         "at": datetime.now(timezone.utc).isoformat(),
     }

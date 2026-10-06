@@ -20,7 +20,7 @@ import time
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Protocol
+from typing import Callable, Dict, List, Optional, Protocol, Tuple
 
 
 # Таймаут одного GET-запроса к базе 1С, секунды (приёмка Фазы 3).
@@ -478,6 +478,76 @@ class OneCClient:
             raise OneCError("база %r ответила %s" % (base_code, result.status))
         self._on_success(base_code)
         return self._parse_cards(cfg, result.body, enterprise)
+
+    def list_hr_dismissals(
+        self, base_code: str, skip: int = 0, top: int = 500
+    ) -> List[Tuple[str, str]]:
+        """Страница регистра текущих кадровых данных: [(Ref_Key сотрудника, дата увольнения)].
+
+        Даёт ежедневную выгрузку дат увольнения без второго запроса на каждого
+        сотрудника (сотни тысяч запросов не наберутся): регистр отдаётся
+        постранично ($skip/$top). Пустая дата регистра (0001-01-01) — "", её
+        нормализует _normalize_date. Регистр не настроен — пустой список.
+        Только чтение."""
+        cfg = self._require_base(base_code)
+        if not cfg.hr_entity or not cfg.hr_employee_field:
+            return []
+        self._ensure_allowed(base_code)
+        url = self._build_hr_list_url(cfg, skip, top)
+        try:
+            result = self._transport.get(url, self._auth_headers(cfg), self._timeout)
+        except OneCTimeoutError:
+            self._on_failure(base_code)
+            raise
+        except OneCConnectionError as exc:
+            self._on_failure(base_code)
+            raise OneCBaseDown("база %r недоступна: %s" % (base_code, exc)) from exc
+        except OneCCircuitOpen:
+            raise
+        except Exception as exc:
+            self._on_failure(base_code)
+            raise OneCBaseDown("база %r недоступна: %s" % (base_code, exc)) from exc
+        if result.status >= 500:
+            self._on_failure(base_code)
+            raise OneCBaseDown("база %r ответила %s" % (base_code, result.status))
+        if result.status != 200:
+            raise OneCError("база %r ответила %s" % (base_code, result.status))
+        self._on_success(base_code)
+        try:
+            data = json.loads(result.body)
+        except json.JSONDecodeError as exc:
+            raise OneCError("база %r вернула не-JSON" % base_code) from exc
+        items = data.get("value") if isinstance(data, dict) else data
+        if not isinstance(items, list):
+            return []
+        rows: List[Tuple[str, str]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            ref_key = str(item.get(cfg.hr_employee_field) or "").strip()
+            if not ref_key:
+                continue
+            rows.append(
+                (ref_key, self._normalize_date(self._field(item, cfg.termination_date_field)))
+            )
+        return rows
+
+    @classmethod
+    def _build_hr_list_url(cls, cfg: OneCBaseConfig, skip: int, top: int) -> str:
+        """OData-URL регистра кадровых данных постранично: $select минимальный.
+
+        Без $expand (подразделение/должность не нужны — только увольнение), выборка
+        двух полей вместо всей записи: регистр на 20+ тысяч сотрудников."""
+        select = urllib.parse.quote(
+            "%s,%s" % (cfg.hr_employee_field, cfg.termination_date_field), safe=","
+        )
+        return "%s/%s?$format=json&$select=%s&$top=%d&$skip=%d" % (
+            normalize_odata_base_url(cfg.url),
+            urllib.parse.quote(cfg.hr_entity),  # кириллица в имени сущности
+            select,
+            int(top),
+            int(skip),
+        )
 
     def _enrich_hr(self, cfg: OneCBaseConfig, card: EmployeeCard) -> EmployeeCard:
         """Дополнить карточку текущими кадровыми данными (регистр, $expand).

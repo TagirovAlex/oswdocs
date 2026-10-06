@@ -136,6 +136,8 @@ CONTRACT_VALUES = {
     "schedule_enterprises_sync": None,
     "schedule_ad_links_sync": None,
     "schedule_ad_groups_sync": None,
+    "schedule_hr_dismissals_sync": None,
+    "hr_dismissals_synced_at": None,
 }
 
 # Контент-часть контракта: только ключи CONTENT_KEYS (для GET/PUT /settings/content).
@@ -207,6 +209,8 @@ UPDATED_VALUES = {
     "schedule_enterprises_sync": None,
     "schedule_ad_links_sync": None,
     "schedule_ad_groups_sync": None,
+    "schedule_hr_dismissals_sync": None,
+    "hr_dismissals_synced_at": None,
     "position_sets": [
         {"name": "Руководители", "positions": ["Директор"]},
     ],

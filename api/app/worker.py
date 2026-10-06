@@ -264,6 +264,17 @@ def main() -> None:
     except Exception:
         pass
 
+    # Регламентный проход по регистру кадровых данных 1С (ежедневно по
+    # schedule_hr_dismissals_sync): пишет даты увольнения в employees, по которым
+    # поиск сотрудников отсекает уволенных. Запись — только в нашу таблицу.
+    try:
+        from .employee_sync import maybe_sync_hr_daily
+
+        if maybe_sync_hr_daily(settings_store):
+            print("sync: даты увольнения из регистра кадровых данных обновлены")
+    except Exception:
+        pass
+
     # Регламентная автосвязка 1С↔AD по точному ФИО: тихо, толерантность как у
     # maybe_sync_weekly; запись — только связки у нас; при реальном проходе —
     # уведомление по расписанию schedule_ad_links_sync.
