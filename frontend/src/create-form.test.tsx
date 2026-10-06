@@ -806,6 +806,82 @@ describe("CreateForm", () => {
     expect(body.added_stages).toEqual([]);
   });
 
+  // Руководитель не найден в AD: блок показывает причину и предлагает подобрать
+  // замену вручную; выбранный логин уходит и в предпросмотр, и в создание.
+  it("при отсутствии руководителя в AD предлагает подобрать замену вручную", async () => {
+    const boss = {
+      sam: "petrov.pp",
+      display_name: "Петров Пётр Петрович",
+      department: "Цех № 1",
+      title: "Начальник цеха",
+      mail: "petrov.pp@example.test",
+    };
+    vi.mocked(searchEmployees).mockRejectedValue(new ApiHttpError(503, "Клиент 1С не настроен"));
+    vi.mocked(searchAd).mockResolvedValue([boss]);
+    vi.mocked(previewRoute).mockImplementation(async (body) => ({
+      ...routePreview,
+      stages: routePreview.stages.map((s) =>
+        s.owner_kind === "manager_ad"
+          ? { ...s, owner_name: body.manager === boss.sam ? boss.display_name : null,
+              blocked_reason: body.manager === boss.sam ? null : "Руководитель в AD не определён" }
+          : s,
+      ),
+    }));
+    vi.mocked(createRequest).mockResolvedValue({
+      id: "REQ-0201",
+      status: "Черновик",
+      route_origin: "template",
+      department: "Цех № 1",
+      position: "Слесарь",
+      created_by: "petrov.pp",
+      steps: [],
+    });
+
+    render(<CreateForm role="hr" />);
+    await fillEmployeeManually("auto");
+
+    // Причина блокировки этапа видна в таблице этапов.
+    expect(screen.getByText("Руководитель в AD не определён")).toBeInTheDocument();
+    // Блок «Руководитель»: этап заблокирован — подбор замены открыт сразу.
+    expect(screen.getByRole("checkbox", { name: "Выбрать руководителя вручную" })).toBeDisabled();
+    expect(screen.getByText(/не определён в AD/)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("ФИО руководителя"), { target: { value: "Петров" } });
+    fireEvent.click(screen.getByRole("button", { name: "Найти руководителя" }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Выбрать руководителя Петров Пётр Петрович" })).toBeInTheDocument(),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Выбрать руководителя Петров Пётр Петрович" }));
+
+    // Замена ушла в предпросмотр и показывается как выбранная.
+    await waitFor(() =>
+      expect(previewRoute).toHaveBeenLastCalledWith(
+        expect.objectContaining({ manager: "petrov.pp" }),
+      ),
+    );
+    expect(screen.getByText(/Петров Пётр Петрович \(выбран вручную\)/)).toBeInTheDocument();
+
+    // И в тело создания.
+    fireEvent.click(screen.getByText("Создать"));
+    await waitFor(() => expect(createRequest).toHaveBeenCalled());
+    expect(vi.mocked(createRequest).mock.calls[0][0].manager).toBe("petrov.pp");
+  });
+
+  // Руководитель найден в AD: ФИО видно в этапе, замена не требуется, но её
+  // можно подобрать (чекбокс активен).
+  it("найденный руководитель: ФИО в этапе, ручной подбор доступен по желанию", async () => {
+    vi.mocked(searchEmployees).mockRejectedValue(new ApiHttpError(503, "Клиент 1С не настроен"));
+    vi.mocked(previewRoute).mockResolvedValue(routePreview);
+    render(<CreateForm role="hr" />);
+    await fillEmployeeManually("auto");
+    expect(screen.getByText("Иванов Иван Иванович")).toBeInTheDocument();
+    expect(screen.getByText(/Руководитель:/)).toHaveTextContent("найден в AD");
+    const box = screen.getByRole("checkbox", { name: "Выбрать руководителя вручную" });
+    expect(box).toBeEnabled();
+    expect(box).not.toBeChecked();
+    expect(screen.queryByLabelText("ФИО руководителя")).not.toBeInTheDocument();
+  });
+
   // Снятие галочки этапа → код в dismissed_stages; обязательный этап (optional=false)
   // снять нельзя.
   it("снятие чекбокса этапа уходит в dismissed_stages, обязательный этап неактивен", async () => {

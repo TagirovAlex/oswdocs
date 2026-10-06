@@ -145,6 +145,9 @@ export interface CreateRequestBody {
   // Код базы 1С и логин AD сотрудника — источник карточки для auto-маршрута.
   base_code?: string;
   ad_sam?: string;
+  // Замена руководителя, выбранная ОК вручную (логин AD): приоритетнее
+  // руководителя из AD для этапов manager_ad («Руководитель сотрудника»).
+  manager?: string;
 }
 
 // Режим маршрута заявки (POST /api/requests, route_mode).
@@ -191,6 +194,9 @@ export interface RoutePreviewBody {
   // Снятые и добавленные этапы — те же коды, что уходят в создание.
   dismissed_stages?: string[];
   added_stages?: string[];
+  // Замена руководителя (логин AD): показываем в предпросмотре именно того,
+  // кто пойдёт в маршрут, вместо того, кто найден по manager_dn из AD.
+  manager?: string;
 }
 
 // Ответ предпросмотра маршрута (RoutePreviewOut). reason — причина подбора

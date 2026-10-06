@@ -393,8 +393,11 @@ def test_auto_route_manager_stage_without_manager_422(
     routing_store.manager_sams = {}
     response = _create(client, hr)
     assert response.status_code == 422
-    assert "Не найден руководитель сотрудника в AD" in response.text
-    assert "замену" in response.text
+    assert "Руководитель сотрудника не определён" in response.text
+    # В карточке DN руководителя есть, но не резолвится — причина именно в этом.
+    assert "руководитель из AD не читается" in response.text
+    assert "Руководитель" in response.text
+    assert "manager" in response.text
     assert not requests_store.list_all()
     # Замена руководителя от ОК (manager) — этап назначается на неё.
     replaced = _create(client, hr, manager="zamen.vymyshlennaya")
@@ -402,6 +405,21 @@ def test_auto_route_manager_stage_without_manager_422(
     steps = replaced.json()["steps"]
     assert steps[1]["resolver"] == "ad_direct_manager"
     assert steps[1]["owner_group"] == "zamen.vymyshlennaya"
+
+
+def test_auto_route_manager_stage_without_manager_dn_422(
+    client, hr, settings_override, route_override, requests_store, routing_store
+):
+    """В карточке сотрудника вовсе нет руководителя — причина в тексте 422 другая."""
+    routing_store.cards = {
+        sam: {key: value for key, value in card.items() if key != "manager_dn"}
+        for sam, card in routing_store.cards.items()
+    }
+    routing_store.manager_sams = {}
+    response = _create(client, hr)
+    assert response.status_code == 422
+    assert "в AD не указан руководитель" in response.text
+    assert not requests_store.list_all()
 
 
 def test_route_mode_custom_keeps_previous_behaviour(

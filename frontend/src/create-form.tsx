@@ -248,6 +248,16 @@ export function CreateForm(props: CreateFormProps) {
   const [catalogStages, setCatalogStages] = useState<RoutingCatalogStage[] | null>(null);
   // Раскрыт ли список доступных этапов (кнопка «Добавить этап»).
   const [addStageOpen, setAddStageOpen] = useState<boolean>(false);
+  // Замена руководителя, выбранная ОК вручную (этап manager_ad): логин AD и ФИО
+  // для показа. Пусто — доверяем руководителю из AD (manager_dn сотрудника).
+  const [managerSam, setManagerSam] = useState<string>("");
+  const [managerName, setManagerName] = useState<string>("");
+  // Раскрыт ли подбор руководителя (чекбокс «выбрать вручную») и состояние поиска.
+  const [managerPickOpen, setManagerPickOpen] = useState<boolean>(false);
+  const [managerQuery, setManagerQuery] = useState<string>("");
+  const [managerHits, setManagerHits] = useState<AdCandidate[]>([]);
+  const [managerSearching, setManagerSearching] = useState<boolean>(false);
+  const [managerError, setManagerError] = useState<string>("");
   // Порядковый номер предпросмотра: устаревший ответ по прежнему сотруднику
   // не должен затирать текущий.
   const previewSeq = useRef(0);
@@ -442,6 +452,7 @@ export function CreateForm(props: CreateFormProps) {
       ...(position !== "" ? { position } : {}),
       dismissed_stages: dismissedStages,
       added_stages: addedStages,
+      ...(managerSam !== "" ? { manager: managerSam } : {}),
     })
       .then((data) => {
         if (previewSeq.current !== seq) return;
@@ -464,6 +475,7 @@ export function CreateForm(props: CreateFormProps) {
     position,
     dismissedStages,
     addedStages,
+    managerSam,
   ]);
 
   // Состав группы из AD: счётчик + раскрываемый список (ФИО/почта). Состав хранится
@@ -601,6 +613,10 @@ export function CreateForm(props: CreateFormProps) {
   const employeeReady = fio.trim() !== "" && tabNum.trim() !== "";
   // Готовность маршрута: в auto — этапы подобраны (blocks не отправляются),
   // в custom — заполнены блоки конструктора, как раньше.
+  // Этап «Руководитель» (manager_ad) из предпросмотра: кого нашли в AD и почему
+  // этап не закрывается, если не нашли.
+  const managerStage =
+    preview?.stages.find((s) => s.owner_kind === "manager_ad") ?? null;
   const routeReady =
     routeMode === "auto"
       ? preview !== null && preview.stages.length > 0
@@ -634,6 +650,8 @@ export function CreateForm(props: CreateFormProps) {
     setAdSam(hit.ad_sam ?? "");
     setDismissedStages([]);
     setAddedStages([]);
+    // Новый сотрудник — прежняя замена руководителя не подходит.
+    resetManagerPick();
     if (parts.length < 3) {
       return; // битый ключ — подразделение/должность останутся пустыми («—»)
     }
@@ -672,6 +690,53 @@ export function CreateForm(props: CreateFormProps) {
     setPreview(null);
     setPreviewError("");
     setAddStageOpen(false);
+    resetManagerPick();
+  }
+
+  // Замена руководителя вручную: сброс (смена сотрудника, снятие замены) и
+  // подбор по ФИО из AD. Пустой managerSam — доверяем руководителю из AD.
+  function resetManagerPick(): void {
+    setManagerSam("");
+    setManagerName("");
+    setManagerPickOpen(false);
+    setManagerQuery("");
+    setManagerHits([]);
+    setManagerSearching(false);
+    setManagerError("");
+  }
+
+  // Поиск руководителя в AD по ФИО: кнопка (без автопоиска на каждый ввод,
+  // чтобы не спрашивать каталог лишний раз).
+  function searchManager(): void {
+    const q = managerQuery.trim();
+    if (q === "") {
+      setManagerHits([]);
+      setManagerError("Введите ФИО руководителя");
+      return;
+    }
+    setManagerSearching(true);
+    setManagerError("");
+    searchAd(q)
+      .then((items) => {
+        setManagerHits(items);
+        setManagerSearching(false);
+        if (items.length === 0) setManagerError("Ничего не найдено в AD");
+      })
+      .catch((e: unknown) => {
+        setManagerHits([]);
+        setManagerSearching(false);
+        setManagerError(e instanceof Error ? e.message : "Ошибка поиска в AD");
+      });
+  }
+
+  function pickManager(cand: AdCandidate): void {
+    markTouched();
+    setManagerSam(cand.sam);
+    setManagerName(cand.display_name || cand.sam);
+    setManagerQuery(cand.display_name || cand.sam);
+    setManagerHits([]);
+    setManagerError("");
+    setManagerPickOpen(false);
   }
 
   // Снятие/возврат этапа маршрута (auto): optional=false — этап обязательный,
@@ -850,6 +915,7 @@ export function CreateForm(props: CreateFormProps) {
     setAddStageOpen(false);
     setBaseCode("");
     setAdSam("");
+    resetManagerPick();
     previewSeq.current++;
     // blockSeq НЕ обнуляем: счётчик монотонно растёт, поэтому id блоков
     // уникальны в пределах жизненного цикла формы. Иначе первый блок новой
@@ -894,6 +960,7 @@ export function CreateForm(props: CreateFormProps) {
         ...(docTypeCode !== "" ? { doc_type_code: docTypeCode } : {}),
         ...(baseCode !== "" ? { base_code: baseCode } : {}),
         ...(adSam !== "" ? { ad_sam: adSam } : {}),
+        ...(managerSam !== "" ? { manager: managerSam } : {}),
         route_mode: routeMode,
         // auto: маршрут собирает бэкенд из профиля — блоки НЕ отправляются.
         ...(routeMode === "auto"
@@ -1334,6 +1401,85 @@ export function CreateForm(props: CreateFormProps) {
                     </div>
                   )}
                 </>
+              )}
+              {/* Руководитель (этап manager_ad). ФИО и причину блокировки не
+                  дублируем — они видны в таблице этапов; здесь только ручной
+                  подбор замены. Если этап заблокирован, подбор открыт сразу. */}
+              {preview && managerStage && (
+                <div className="sed-block">
+                  <div>
+                    Руководитель:{" "}
+                    <strong>
+                      {managerSam !== ""
+                        ? `${managerName} (выбран вручную)`
+                        : managerStage.blocked_reason
+                          ? "не определён в AD — подберите замену"
+                          : "найден в AD"}
+                    </strong>
+                  </div>
+                  {managerSam !== "" ? (
+                    <div className="sed-toolbar sed-mt-8">
+                      <button
+                        type="button"
+                        className="sed-btn sed-btn--ghost"
+                        aria-label="Сбросить замену руководителя"
+                        onClick={resetManagerPick}
+                      >
+                        Сбросить замену
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="sed-toolbar sed-mt-8">
+                      <label>
+                        <input
+                          type="checkbox"
+                          aria-label="Выбрать руководителя вручную"
+                          checked={managerPickOpen || managerStage.blocked_reason !== null}
+                          disabled={managerStage.blocked_reason !== null}
+                          onChange={(e) => setManagerPickOpen(e.target.checked)}
+                        />{" "}
+                        Выбрать руководителя вручную
+                      </label>
+                    </div>
+                  )}
+                  {managerSam === "" && (managerPickOpen || managerStage.blocked_reason !== null) && (
+                    <div className="sed-toolbar sed-mt-8">
+                      <input
+                        aria-label="ФИО руководителя"
+                        value={managerQuery}
+                        placeholder="ФИО руководителя"
+                        onChange={(e) => setManagerQuery(e.target.value)}
+                      />
+                      <button
+                        type="button"
+                        className="sed-btn"
+                        aria-label="Найти руководителя"
+                        disabled={managerSearching}
+                        onClick={searchManager}
+                      >
+                        {managerSearching ? "Ищем…" : "Найти"}
+                      </button>
+                      {managerError && <span className="sed-note">{managerError}</span>}
+                    </div>
+                  )}
+                  {managerSam === "" && managerHits.length > 0 && (
+                    <ul className="sed-list">
+                      {managerHits.map((cand) => (
+                        <li key={cand.sam}>
+                          <button
+                            type="button"
+                            className="sed-btn sed-btn--ghost"
+                            aria-label={`Выбрать руководителя ${cand.display_name}`}
+                            onClick={() => pickManager(cand)}
+                          >
+                            {cand.display_name || cand.sam} ({cand.sam})
+                            {cand.title ? ` — ${cand.title}` : ""}
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
               )}
               {/* Этапы: по умолчанию все включены; снятая галочка — код в
                   dismissed_stages. optional=false — этап обязательный. */}

@@ -853,13 +853,31 @@ def _auto_route(
         body.added_stages,
         store.list_stages() if body.added_stages else [],
     )
+    manager_dn = str((card or {}).get("manager_dn") or "").strip()
     manager_sam: str | None = str(body.manager or "").strip() or None
-    if manager_sam is None:
-        manager_dn = str((card or {}).get("manager_dn") or "").strip()
-        if manager_dn:
-            manager_sam = _manager_sam_from_dn(
-                manager_dn, store, _resolve_dependency(get_ad_reader)
-            )[0]
+    if manager_sam is None and manager_dn:
+        manager_sam = _manager_sam_from_dn(
+            manager_dn, store, _resolve_dependency(get_ad_reader)
+        )[0]
+    if manager_sam is None and any(
+        str(stage_row.get("owner_kind") or "") == "manager_ad"
+        for stage_row, _optional in picked.stages
+    ):
+        # Причина важна для ОК: подсказываем именно действие, а не «укажите замену»
+        # без указания, где её указать.
+        cause = (
+            "в AD не указан руководитель"
+            if not manager_dn
+            else "руководитель из AD не читается (запись не найдена или каталог недоступен)"
+        )
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Руководитель сотрудника не определён: {cause}. "
+                "Выберите его вручную в блоке «Руководитель» формы "
+                "(или передайте manager — логин AD)."
+            ),
+        )
     steps = [
         _step_from_stage(stage_row, index, manager_sam, route.approval_ttl_days, now)
         for index, (stage_row, _optional) in enumerate(picked.stages, start=1)
@@ -1629,7 +1647,10 @@ class RoutePreviewIn(BaseModel):
         default=None, description="Служба увольняемого (подбор профиля, если нет AD)"
     )
     position: str | None = Field(
-        default=None, description="Должность увольняемого (для показа ОК)"
+        default=None, description="Должность сотрудника (её не задаёт ОК)"
+    )
+    manager: str | None = Field(
+        default=None, description="Замена руководителя (sam) — приоритет над руководителем из AD"
     )
     dismissed_stages: list[str] = Field(
         default_factory=list, description="Коды этапов, снятых из маршрута"
@@ -1816,7 +1837,14 @@ def _route_preview(body: RoutePreviewIn, ad_reader: object | None) -> RoutePrevi
         body.added_stages,
         store.list_stages() if body.added_stages else [],
     )
+    fio_resolver = _FioResolver(store)
     manager_sam, manager_name = _preview_manager(store, ad_reader, card)
+    # Замена руководителя, выбранная ОК, приоритетнее того, что нашли в AD:
+    # так предпросмотр показывает именно того, кто пойдёт в маршрут.
+    override = str(body.manager or "").strip()
+    if override:
+        manager_sam = override
+        manager_name = fio_resolver.fio(override) or override
     profile = (
         RoutePreviewProfileOut(
             id=_profile_id(picked.profile),
@@ -1847,7 +1875,7 @@ def _route_preview(body: RoutePreviewIn, ad_reader: object | None) -> RoutePrevi
             manager_name,
             _step_group_names_map(),
             _RosterResolver(store),
-            _FioResolver(store),
+            fio_resolver,
         ),
         blank=blank,
     )
