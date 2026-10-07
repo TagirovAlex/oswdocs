@@ -7,7 +7,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiHttpError, me } from "./auth-client";
 import { CreateForm } from "./create-form";
-import { createRequest, getAdGroupMembers, getEmployeeCard, getEnterprises, getMyLinks, getRoutingCatalogs, getStepGroups, previewRoute, searchAd, searchEmployees, submitRequest } from "./requests-client";
+import { createRequest, getAdGroupMembers, getEmployeeCard, getEnterprises, getMyLinks, getRoutingCatalogs, getStepGroups, linkEmployee, previewRoute, searchAd, searchEmployees, submitRequest } from "./requests-client";
 import type { AdGroupMember, RoutePreview } from "./requests-client";
 
 // Мок клиента заявок; чистые функции — реальные.
@@ -25,6 +25,7 @@ vi.mock("./requests-client", async (importOriginal) => {
     submitRequest: vi.fn(),
     getMyLinks: vi.fn(),
     previewRoute: vi.fn(),
+    linkEmployee: vi.fn(),
     getRoutingCatalogs: vi.fn(),
   };
 });
@@ -1558,4 +1559,67 @@ describe("CreateForm", () => {
     expect(screen.getByRole("dialog")).toBeInTheDocument();
     expect(screen.getByLabelText("Поиск в AD")).toBeInTheDocument();
   });
+});
+
+
+// --- Подтверждение связи 1С↔AD при создании заявки ---------------------------
+
+it("предлагает подтвердить связь с AD и после неё перезапрашивает предпросмотр", async () => {
+  // Кандидат AD ровно один, связи нет → форма предлагает подтверждение вместо
+  // «сотрудник не найден в AD». После подтверждения логин подставляется в
+  // выбор сотрудника, предпросмотр запрашивается заново — маршрут соберётся.
+  const linkCandidate = {
+    sam: "ivanov.ii",
+    fio: "Громов Игорь Олегович",
+    dept_ad: "Цех Тестовый",
+    title_ad: "Тестировщик",
+    manager_sam: null,
+  };
+  // До подтверждения предпросмотр предлагает связать; после — связь оформлена.
+  let linked = false;
+  vi.mocked(previewRoute).mockImplementation(async () => ({
+    profile: { id: 1, code: "office_default", name: "Офисные сотрудники" },
+    service: { id: 1, dept_name: "Цех Тестовый", blank_kind: "office" },
+    reason: "service_match",
+    stages: [],
+    blank: "office",
+    notice: linked
+      ? null
+      : "Связь 1С↔AD не оформлена, хотя в AD есть «Громов Игорь Олегович» (ivanov.ii).",
+    link_state: linked ? "linked" : "need_link",
+    link_candidate: linked ? null : linkCandidate,
+  }));
+  vi.mocked(linkEmployee).mockImplementation(async () => {
+    linked = true;
+    return {
+      linked: true,
+      already: false,
+      sam: linkCandidate.sam,
+      fio: linkCandidate.fio,
+      dept_ad: linkCandidate.dept_ad,
+      title_ad: linkCandidate.title_ad,
+    };
+  });
+
+  // Поиск сотрудника в 1С недоступен → форма переходит на ручной ввод (как в
+  // остальных тестах формы), предпросмотр всё равно уходит по табельному номеру.
+  vi.mocked(searchEmployees).mockRejectedValue(
+    new ApiHttpError(503, "Клиент 1С не настроен"),
+  );
+
+  render(<CreateForm role="hr" />);
+  await fillEmployeeManually("auto");
+
+  fireEvent.click(await screen.findByRole("button", { name: "Подтвердить связь с AD" }));
+
+  await waitFor(() =>
+    expect(linkEmployee).toHaveBeenCalledWith(
+      expect.objectContaining({ enterprise: "ENT_PRIMER_1", tab_num: "Т-000201" }),
+    ),
+  );
+  await waitFor(() => expect(vi.mocked(previewRoute).mock.calls.length).toBeGreaterThan(1));
+  // После подтверждения предложения больше нет (связь оформлена).
+  await waitFor(() =>
+    expect(screen.queryByRole("button", { name: "Подтвердить связь с AD" })).toBeNull(),
+  );
 });

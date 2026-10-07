@@ -9,6 +9,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ApiHttpError, me } from "./auth-client";
 import {
+  linkEmployee,
   createRequest,
   getAdGroupMembers,
   getDocTypes,
@@ -237,6 +238,10 @@ export function CreateForm(props: CreateFormProps) {
   const [routeMode, setRouteMode] = useState<RouteMode>("auto");
   // Предпросмотр маршрута: профиль/служба/этапы + текст ошибки (422/503).
   const [preview, setPreview] = useState<RoutePreview | null>(null);
+  // Подтверждение связи 1С↔AD прямо в форме: после успеха перезапрашиваем
+  // предпросмотр (маршрут соберётся по карточке AD).
+  const [linking, setLinking] = useState(false);
+  const [linkError, setLinkError] = useState("");
   const [previewError, setPreviewError] = useState<string>("");
   const [previewLoading, setPreviewLoading] = useState<boolean>(false);
   // Правки маршрута ОК: снятые и добавленные этапы (коды) — уходят и в
@@ -480,6 +485,28 @@ export function CreateForm(props: CreateFormProps) {
     addedStages,
     managerSam,
   ]);
+
+// Подтвердить связь 1С↔AD для выбранного сотрудника: кандидат в AD один (иначе
+// бэкенд вернул бы 422 и выбор делает человек). После связи подставляем sam —
+// предпросмотр сам перезапустится по зависимостям и соберёт маршрут.
+const confirmLink = async () => {
+  if (!enterprise || tabNum.trim() === "") return;
+  setLinking(true);
+  setLinkError("");
+  try {
+    const result = await linkEmployee({
+      enterprise,
+      tab_num: tabNum.trim(),
+      ...(baseCode !== "" ? { base_code: baseCode } : {}),
+      ...(fio.trim() !== "" ? { fio: fio.trim() } : {}),
+    });
+    setAdSam(result.sam);
+  } catch (e: unknown) {
+    setLinkError(e instanceof Error ? e.message : "Не удалось подтвердить связь");
+  } finally {
+    setLinking(false);
+  }
+};
 
   // Состав группы из AD: счётчик + раскрываемый список (ФИО/почта). Состав хранится
   // по id блока. Ошибка или недоступность AD — текст, форма не падает.
@@ -1501,6 +1528,26 @@ export function CreateForm(props: CreateFormProps) {
                   {preview && preview.notice && (
                     <div role="alert" className="sed-note">
                       {preview.notice}
+                    </div>
+                  )}
+                  {/* Связь 1С↔AD не оформлена, хотя кандидат в AD один: ОК
+                      подтверждает связь здесь — служба и руководитель подтянутся,
+                      и маршрут соберётся без похода в другой раздел. */}
+                  {preview && preview.link_state === "need_link" && preview.link_candidate && (
+                    <div className="sed-note">
+                      <div>
+                        В AD: {preview.link_candidate.fio || preview.link_candidate.sam}
+                        {preview.link_candidate.title_ad ? ` (${preview.link_candidate.title_ad})` : ""}
+                        {preview.link_candidate.dept_ad ? `, ${preview.link_candidate.dept_ad}` : ""}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={confirmLink}
+                        disabled={linking}
+                      >
+                        {linking ? "Связываем…" : "Подтвердить связь с AD"}
+                      </button>
+                      {linkError && <div role="alert">{linkError}</div>}
                     </div>
                   )}
                   {/* Этапы: по умолчанию все включены; снятая галочка — код в

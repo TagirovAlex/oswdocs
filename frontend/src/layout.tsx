@@ -27,11 +27,12 @@ import type { Role } from "./api-mock";
 import { useTheme } from "./theme";
 import { AdminSettings } from "./admin-settings";
 import { Directory } from "./directory";
+import { LinkMatch } from "./link-match";
 import { createUrl, openPopup, requestUrl } from "./windows";
 
 // Вкладки скелета. «Создание» убрана: создание заявки — кнопка «Создать
 // заявку» (окно ?view=create), приватный маршрут создания сохранён.
-const TABS = ["Заявки", "Справочник", "Настройки"] as const;
+const TABS = ["Заявки", "Справочник", "Сопоставление", "Настройки"] as const;
 type Tab = (typeof TABS)[number];
 
 // Иконки вкладок-модулей и кнопки темы — инлайн-SVG (currentColor,
@@ -56,6 +57,15 @@ function TabIcon(props: { tab: Tab }) {
         <rect x="5" y="4.5" width="14" height="17" rx="2" />
         <rect x="9" y="2.5" width="6" height="4" rx="1" />
         <path d="M9 14l2.2 2.2L15.5 12" />
+      </svg>
+    );
+  }
+  if (tab === "Сопоставление") {
+    return (
+      <svg {...common}>
+        <rect x="3" y="4.5" width="7.5" height="6" rx="1.5" />
+        <rect x="13.5" y="13.5" width="7.5" height="6" rx="1.5" />
+        <path d="M10.5 7.5h2.2a2 2 0 0 1 2 2v4" />
       </svg>
     );
   }
@@ -198,6 +208,8 @@ export function SedLayout(props: SedLayoutProps) {
     if (role === "hr" || role === "hr_admin" || role === "admin") {
       tabs.push("Справочник");
     }
+    // Сопоставление 1С↔AD — администраторам (подтверждение связок).
+    if (role === "admin") tabs.push("Сопоставление");
     if (role === "admin" || role === "hr_admin") tabs.push("Настройки");
     return tabs;
   }, [role]);
@@ -377,6 +389,7 @@ export function SedLayout(props: SedLayoutProps) {
         {/* Контент: справочник/настройки — экраны B4, иначе таблица. */}
         <main className="sed-content">
           {tab === "Справочник" && <Directory role={role} />}
+          {tab === "Сопоставление" && <LinkMatch role={role} />}
           {tab === "Настройки" && <AdminSettings role={role} />}
           {tab === "Заявки" && (
           <>

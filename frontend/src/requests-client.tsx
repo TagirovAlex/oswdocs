@@ -211,6 +211,42 @@ export interface RoutePreview {
   // Предупреждение для ОК: например, сотрудник не найден в AD — маршрут по
   // службе не подбирается, печать пойдёт бланком по умолчанию.
   notice?: string | null;
+  // Состояние связи 1С↔AD выбранного сотрудника:
+  //   linked — связь есть; need_link — кандидат AD один, связь не подтверждена
+  //   (её подтверждает кнопка в форме); ambiguous — в AD несколько записей с этим
+  //   ФИО; absent — в AD нет записи с таким ФИО.
+  link_state?: "linked" | "need_link" | "ambiguous" | "absent" | null;
+  link_candidate?: {
+    sam: string;
+    fio: string | null;
+    dept_ad: string | null;
+    title_ad: string | null;
+    manager_sam: string | null;
+  } | null;
+}
+
+/** Результат подтверждения связи при создании заявки (link-employee). */
+export interface LinkEmployeeResult {
+  linked: boolean;
+  already: boolean;
+  sam: string;
+  fio: string | null;
+  dept_ad: string | null;
+  title_ad: string | null;
+}
+
+// POST /api/requests/route/link-employee: оформить связь 1С↔AD по сотруднику.
+// Кандидат в AD должен быть ровно один; при нескольких — 422 (выбор за человеком).
+export async function linkEmployee(payload: {
+  enterprise: string;
+  base_code?: string | null;
+  tab_num: string;
+  fio?: string | null;
+}): Promise<LinkEmployeeResult> {
+  return requestJson<LinkEmployeeResult>("/api/requests/route/link-employee", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
 }
 
 // Этап справочника маршрутов (GET /api/settings/routing/catalogs → stages).
@@ -815,6 +851,11 @@ export interface AdSyncResult {
   skipped_ad_no_match: number;
   skipped_ad_duplicates: number;
   errors: string[];
+  /** Сколько строк расхождений записано (миграция 0010). Необязательно:
+   *  ответы без этого поля (старый бэкенд, офлайн-моки) считаются пустыми. */
+  discrepancies_saved?: number;
+  /** Счётчики расхождений по причинам (см. LinkDiscrepancy.reason). */
+  discrepancies?: Record<string, number>;
 }
 
 // POST /api/link_1c_ad/sync: принудительная автосвязка по точному ФИО (только админ).
@@ -902,4 +943,91 @@ export function filterRequests(
     if (filters.status && row.status !== filters.status) return false;
     return true;
   });
+}
+
+
+// --- Сопоставление 1С↔AD: расхождения и массовое подтверждение ---------------
+
+/** Строка расхождения автосопоставления (GET /api/link_1c_ad/discrepancies). */
+export interface LinkDiscrepancy {
+  key: string;
+  enterprise: string;
+  base_code: string;
+  tab_num: string;
+  fio: string;
+  /** one_c_duplicate — в 1С несколько карточек ФИО; ad_duplicate — в AD несколько
+   *  записей ФИО; not_in_ad — в AD нет записи с таким ФИО. */
+  reason: string;
+  ad_sam: string | null;
+  ad_fio: string | null;
+  ad_dept: string | null;
+  ad_title: string | null;
+  one_c_dept: string | null;
+  one_c_position: string | null;
+  /** Должность/служба карточки 1С совпали с кандидатом AD — связка выглядит верной. */
+  recommended: boolean;
+  /** Кандидат AD ровно один: строку можно подтвердить пакетом. */
+  can_confirm: boolean;
+  candidates: string[];
+  sibling_tabs: string[];
+  detected_at: string | null;
+  resolved_at: string | null;
+}
+
+export interface DiscrepancyPage {
+  items: LinkDiscrepancy[];
+  counts: Record<string, number>;
+  page: number;
+  page_size: number;
+  total: number;
+}
+
+export interface DiscrepancyFilters {
+  reason?: string;
+  q?: string;
+  onlyOpen?: boolean;
+  page?: number;
+  pageSize?: number;
+}
+
+// GET /api/link_1c_ad/discrepancies: страница расхождений + счётчики по причинам.
+export async function getLinkDiscrepancies(
+  filters: DiscrepancyFilters = {},
+): Promise<DiscrepancyPage> {
+  const params = new URLSearchParams();
+  if (filters.reason) params.set("reason", filters.reason);
+  if (filters.q) params.set("q", filters.q);
+  if (filters.onlyOpen === false) params.set("only_open", "false");
+  params.set("page", String(filters.page ?? 1));
+  params.set("page_size", String(filters.pageSize ?? 50));
+  return requestJson<DiscrepancyPage>(`/api/link_1c_ad/discrepancies?${params.toString()}`);
+}
+
+// POST /api/link_1c_ad/discrepancies/confirm: подтвердить связки пачкой.
+export interface ConfirmResult {
+  linked: number;
+  skipped: string[];
+  errors: string[];
+  linked_sams: string[];
+}
+
+export async function confirmLinkDiscrepancies(keys: string[]): Promise<ConfirmResult> {
+  return requestJson<ConfirmResult>("/api/link_1c_ad/discrepancies/confirm", {
+    method: "POST",
+    body: JSON.stringify({ keys }),
+  });
+}
+
+// POST /api/link_1c_ad/sync — ручной запуск сопоставления (уже был в справочнике).
+export interface SyncLinksResult {
+  synced: boolean;
+  scanned: number;
+  created: number;
+  skipped_linked: number;
+  skipped_1c_duplicates: number;
+  skipped_ad_no_match: number;
+  skipped_ad_duplicates: number;
+  errors: string[];
+  discrepancies_saved: number;
+  discrepancies: Record<string, number>;
 }
