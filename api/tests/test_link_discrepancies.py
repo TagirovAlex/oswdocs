@@ -257,3 +257,15 @@ def test_confirm_writes_audit(client, admin_headers, discrepancies):
     assert response.status_code == 200, response.text
     actions = [event.action for event in audit_log.all()]
     assert "link.discrepancies_confirm" in actions
+
+def test_pass_reports_saved_discrepancy_count(discrepancies):
+    """В ответе прохода есть счётчик сохранённых строк расхождений.
+
+    Без него ответ /link_1c_ad/sync падал бы AttributeError — поле AdSyncResult
+    должно объявляться в самом классе, а не только заполняться в run_ad_sync.
+    """
+    from app.ad_sync import AdSyncResult
+
+    assert AdSyncResult().discrepancies_saved == 0
+    _store, result = discrepancies
+    assert result.discrepancies_saved == len(result.discrepancies)
