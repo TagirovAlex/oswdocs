@@ -3,7 +3,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { TOKEN_KEY } from "./auth-client";
-import { LinkMatch } from "./link-match";
+import { LinkMatch, pagerPages } from "./link-match";
 
 interface MockDiscrepancy {
   key: string;
@@ -178,6 +178,21 @@ describe("LinkMatch", () => {
     await waitFor(() =>
       expect(screen.getByText(/Просмотрено 23538, создано связок 9/)).toBeInTheDocument(),
     );
+  });
+
+  it("строит пагинацию: первая, последняя и по пять с каждой стороны", () => {
+    expect(pagerPages(1, 3)).toEqual([1, 2, 3]);
+    const middle = pagerPages(50, 200);
+    // Первая и последняя страницы показаны всегда…
+    expect(middle[0]).toBe(1);
+    expect(middle[middle.length - 1]).toBe(200);
+    // …вокруг текущей — до пяти с каждой стороны.
+    expect(middle).toContain(45);
+    expect(middle).toContain(55);
+    expect(middle).not.toContain(44);
+    expect(middle).not.toContain(56);
+    // Разрывы обозначены многоточием.
+    expect(middle).toContain("…");
   });
 
   it("скрыт от ролей без права подтверждения", () => {

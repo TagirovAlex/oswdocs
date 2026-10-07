@@ -56,6 +56,9 @@ class AdSyncResult:
     discrepancies: List[dict] = field(default_factory=list)
     # Сколько строк расхождений записано в нашу БД (складка прохода для сводки).
     discrepancies_saved: int = 0
+    # Карточки уволенных пропущены (решение человека: сопоставляем тех, кто
+    # сейчас работает; дата увольнения — из регистра кадровых данных 1С).
+    skipped_dismissed: int = 0
 
     def counts_by_reason(self) -> dict:
         """Счётчики расхождений по причине (сводка прохода и UI)."""
@@ -171,6 +174,7 @@ def _list_enterprise(
     enterprise: str,
     result: AdSyncResult,
     now: str,
+    dismissed: set | None = None,
 ) -> None:
     """Обойти все базы предприятия: собрать сотрудников и связать уникальные."""
     from .link import LinkRecord, link_key
@@ -189,6 +193,12 @@ def _list_enterprise(
     for card in cards:
         result.scanned += 1
         key = link_key(card.enterprise, card.base_code, card.tab_num)
+        # Уволенных не сопоставляем: связь и маршрут им не нужны, а в расхождениях
+        # они только мешают разбору. Даты увольнения берём из нашего справочника
+        # (их наполняет ежедневный проход по регистру кадровых данных).
+        if dismissed and key in dismissed:
+            result.skipped_dismissed += 1
+            continue
         try:
             if store.find(key) is not None:
                 result.skipped_linked += 1
@@ -369,17 +379,20 @@ def run_ad_sync(
     enterprises: List[str],
     now: Optional[str] = None,
     save_discrepancies: bool = True,
+    dismissed: Optional[set] = None,
 ) -> AdSyncResult:
     """Один проход автосвязки: предприятия → базы → сотрудники → verified-связки.
 
     enterprises — коды предприятий из settings (связка предприятие→базы — из
     синхронизации, client.bases_for_enterprise). now — инжектируемые часы для
-    детерминированных тестов. Только чтение 1С/AD + запись связок в нашу БД."""
+    детерминированных тестов. dismissed — ключи карточек уволенных (справочник employees): их пропускаем. Только чтение 1С/AD + запись связок и расхождений в нашу БД."""
     result = AdSyncResult()
     moment = now or datetime.now(timezone.utc).isoformat()
     for enterprise in enterprises:
         try:
-            _list_enterprise(client, reader, store, enterprise, result, moment)
+            _list_enterprise(
+                client, reader, store, enterprise, result, moment, dismissed
+            )
         except Exception as exc:  # падение одной ветки не валит остальные
             result.errors.append("%s: %s" % (enterprise, exc))
     if save_discrepancies and result.discrepancies:
@@ -440,7 +453,11 @@ def compute_ad_status(
 
 
 def maybe_sync_links_weekly(
-    store, client: OneCClient, reader: Optional[AdReader], links_store: LinksStore
+    store,
+    client: OneCClient,
+    reader: Optional[AdReader],
+    links_store: LinksStore,
+    dismissed: Optional[set] = None,
 ) -> "AdSyncResult | bool":
     """Регламентная автосвязка (worker): тихо, без сбоев.
 
@@ -462,7 +479,9 @@ def maybe_sync_links_weekly(
         return False
     try:
         enterprises = [str(item.get("code")) for item in raw if isinstance(item, dict)]
-        result = run_ad_sync(client, reader, links_store, enterprises)
+        result = run_ad_sync(
+            client, reader, links_store, enterprises, dismissed=dismissed
+        )
         store.set(
             "ad_links_synced_at",
             json.dumps(datetime.now(timezone.utc).isoformat()),

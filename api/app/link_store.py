@@ -6,10 +6,11 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Protocol
 
 from fastapi import Depends
-from sqlalchemy import bindparam, create_engine, text
+from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import sessionmaker
 
@@ -382,12 +383,12 @@ class DbLinksStore:
                ad_dept, ad_title, one_c_dept, one_c_position, recommended,
                detail, detected_at, resolved_at
         FROM link_discrepancies
-        WHERE key = ANY(:keys)
+        WHERE key = ANY(CAST(:keys AS text[]))
         """
     )
     _RESOLVE_DISCREPANCIES_SQL = text(
         "UPDATE link_discrepancies SET resolved_at = now() "
-        "WHERE key = ANY(:keys) AND resolved_at IS NULL"
+        "WHERE key = ANY(CAST(:keys AS text[])) AND resolved_at IS NULL"
     )
 
     def __init__(self, database_url: str) -> None:
@@ -516,10 +517,15 @@ class DbLinksStore:
                 "recommended": bool(row.get("recommended")),
                 # Кандидаты AD (при дубле ФИО в AD) и табельные номера остальных
                 # карточек 1С этой группы — нужны админу для выбора.
-                "detail": {
-                    "candidates": list(row.get("candidates") or []),
-                    "sibling_tabs": list(row.get("sibling_tabs") or []),
-                },
+                # JSON-строкой: psycopg3 не адаптирует dict в параметр
+                # («cannot adapt type 'dict'»), приведение к jsonb — в SQL.
+                "detail": json.dumps(
+                    {
+                        "candidates": list(row.get("candidates") or []),
+                        "sibling_tabs": list(row.get("sibling_tabs") or []),
+                    },
+                    ensure_ascii=False,
+                ),
             }
             for row in rows
         ]
@@ -601,10 +607,7 @@ class DbLinksStore:
         try:
             with self._session_factory() as session:
                 rows = session.execute(
-                    self._GET_DISCREPANCIES_SQL.bindparams(
-                        bindparam("keys", expanding=True)
-                    ),
-                    {"keys": list(keys)},
+                    self._GET_DISCREPANCIES_SQL, {"keys": list(keys)}
                 ).all()
         except SQLAlchemyError as exc:
             raise LinksUnavailable("Расхождения сопоставления недоступны: %s" % exc) from exc
@@ -616,10 +619,7 @@ class DbLinksStore:
         try:
             with self._session_factory() as session:
                 result = session.execute(
-                    self._RESOLVE_DISCREPANCIES_SQL.bindparams(
-                        bindparam("keys", expanding=True)
-                    ),
-                    {"keys": list(keys)},
+                    self._RESOLVE_DISCREPANCIES_SQL, {"keys": list(keys)}
                 )
                 session.commit()
         except SQLAlchemyError as exc:

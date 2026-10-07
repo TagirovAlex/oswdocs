@@ -30,6 +30,34 @@ const REASON_ORDER = ["one_c_duplicate", "ad_duplicate", "not_in_ad"];
 // Размер страницы выдачи расхождений (сервер принимает до 200).
 const PAGE_SIZE = 50;
 
+// Номера страниц пагинации: всегда первая и последняя, вокруг текущей — до пяти
+// с каждой стороны, между разрывами — «…». При малом числе страниц (<= 12) —
+// все подряд без разрывов.
+export function pagerPages(current: number, total: number): Array<number | "…"> {
+  if (total <= 1) return [1];
+  const window = 5;
+  const span = window * 2 + 1;
+  const set = new Set<number>();
+  if (total <= span + 4) {
+    for (let i = 1; i <= total; i++) set.add(i);
+  } else {
+    set.add(1);
+    set.add(total);
+    for (let i = current - window; i <= current + window; i++) {
+      if (i >= 1 && i <= total) set.add(i);
+    }
+  }
+  const sorted = [...set].sort((a, b) => a - b);
+  const out: Array<number | "…"> = [];
+  let prev = 0;
+  for (const page of sorted) {
+    if (prev !== 0 && page - prev > 1) out.push("…");
+    out.push(page);
+    prev = page;
+  }
+  return out;
+}
+
 interface LinkMatchProps {
   // Раздел доступен администратору: подтверждение связок пишет проверенные
   // связи от имени пользователя. На уровне API раздел открыт и администратору
@@ -335,15 +363,40 @@ export function LinkMatch(props: LinkMatchProps) {
       </table>
 
       <div className="sed-actions">
+        <button type="button" disabled={page <= 1} onClick={() => setPage(1)}>
+          В начало
+        </button>
         <button type="button" disabled={page <= 1} onClick={() => setPage(page - 1)}>
           Назад
+        </button>
+        {pagerPages(page, pages).map((item, index) =>
+          item === "…" ? (
+            <span key={`gap-${index}`}>…</span>
+          ) : (
+            <button
+              key={item}
+              type="button"
+              aria-current={item === page ? "page" : undefined}
+              disabled={item === page}
+              onClick={() => setPage(item)}
+            >
+              {item}
+            </button>
+          ),
+        )}
+        <button
+          type="button"
+          disabled={page >= pages}
+          onClick={() => setPage(page + 1)}
+        >
+          Вперёд
+        </button>
+        <button type="button" disabled={page >= pages} onClick={() => setPage(pages)}>
+          В конец
         </button>
         <span>
           Страница {page} из {pages}
         </span>
-        <button type="button" disabled={page >= pages} onClick={() => setPage(page + 1)}>
-          Вперёд
-        </button>
       </div>
     </section>
   );

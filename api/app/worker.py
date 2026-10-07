@@ -283,11 +283,20 @@ def main() -> None:
         from .employees import get_ad_reader, get_onec_client
         from .link_store import DbLinksStore
 
+        # Уволенных не сопоставляем (дата увольнения — из регистра 1С, локальный
+        # справочник). Справочник недоступен — пустой набор, проход идёт по всем.
+        try:
+            from .employee_sync import get_employee_sync_store
+
+            dismissed = set(get_employee_sync_store(settings).dismissed_keys())
+        except Exception:
+            dismissed = set()
         sync_result = maybe_sync_links_weekly(
             settings_store,
             get_onec_client(settings, settings_store),
             get_ad_reader(),
             DbLinksStore(settings.DATABASE_URL),
+            dismissed=dismissed,
         )
         if sync_result:
             print("sync: автосвязка 1С-AD выполнена")

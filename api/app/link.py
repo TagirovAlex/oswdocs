@@ -20,6 +20,7 @@ from .ad_sync import AdSyncUnavailable, run_ad_sync
 from .audit import AuditEvent, audit_log
 from .config import Settings, get_settings
 from .deps import CurrentUser, get_current_user, is_privileged
+from .employee_sync import get_employee_sync_store
 from .employees import get_ad_reader, get_onec_client
 from .link_store import (
     InMemoryLinksStore,
@@ -304,8 +305,11 @@ def sync_links_endpoint(
             status_code=status.HTTP_409_CONFLICT,
             detail="Предприятия не настроены: выполните синхронизацию из 1С",
         )
+    # Уволенных не сопоставляем: связь и маршрут им не нужны, а в расхождениях
+    # они мешают разбору. Даты — из локального справочника (регистр 1С).
+    dismissed = _dismissed_keys()
     try:
-        result = run_ad_sync(client, reader, store, enterprises)
+        result = run_ad_sync(client, reader, store, enterprises, dismissed=dismissed)
     except (LinksUnavailable, AdSyncUnavailable) as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
@@ -334,6 +338,7 @@ def sync_links_endpoint(
         "skipped_1c_duplicates": result.skipped_1c_duplicates,
         "skipped_ad_no_match": result.skipped_ad_no_match,
         "skipped_ad_duplicates": result.skipped_ad_duplicates,
+        "skipped_dismissed": result.skipped_dismissed,
         "errors": result.errors,
         # Выдача расхождений (миграция 0010): счётчики по причинам + сколько
         # строк записано. Подробности — GET /link_1c_ad/discrepancies.
@@ -543,6 +548,26 @@ def confirm_link_discrepancies(
         "errors": errors,
         "linked_sams": linked_sams[:50],
     }
+
+
+def _dismissed_keys() -> set:
+    """Ключи уволенных карточек из локального справочника (best effort).
+
+    Подмены границы (dependency_overrides) уважаем — иначе офлайн-прогоны пошли
+    бы в боевой Postgres. Справочник недоступен — пустое множество: проход
+    сопоставит всех, как раньше (лучше лишние расхождения, чем молча пропущенные
+    связи)."""
+    from .main import app  # локально против циклического импорта
+
+    try:
+        override = app.dependency_overrides.get(get_employee_sync_store)
+        store = (
+            override() if override is not None
+            else get_employee_sync_store(get_settings())
+        )
+        return set(store.dismissed_keys())
+    except Exception:
+        return set()
 
 
 class MyLinkOut(BaseModel):

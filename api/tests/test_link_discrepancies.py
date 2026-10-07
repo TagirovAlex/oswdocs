@@ -269,3 +269,63 @@ def test_pass_reports_saved_discrepancy_count(discrepancies):
     assert AdSyncResult().discrepancies_saved == 0
     _store, result = discrepancies
     assert result.discrepancies_saved == len(result.discrepancies)
+
+
+# --- Уволенных сопоставление не трогает ---------------------------------------
+
+def test_pass_skips_dismissed_employees(discrepancies):
+    """В проход попадают только те, кто сейчас работает.
+
+    Решение человека: уволенным связь и маршрут не нужны, а в расхождениях они
+    мешают разбору. Дата увольнения — из регистра 1С (локальный справочник)."""
+    store, _result = discrepancies
+    dismissed = {"%s|zup_t1|004" % ENT}
+    before = store.count_discrepancies()
+    result = run_ad_sync(_hr_client(), _reader(), store, [ENT], dismissed=dismissed)
+    # Карточка 004 пропущена: её ключа нет среди расхождений прохода.
+    skipped_key = "%s|zup_t1|004" % ENT
+    assert result.skipped_dismissed == 1
+    collected = {
+        "%s|%s|%s" % (row["enterprise"], row["base_code"], row["tab_num"])
+        for row in result.discrepancies
+    }
+    assert skipped_key not in collected
+    # В БД старая строка осталась: проход перезаписывает выдачу, но если ключа
+    # больше нет среди расхождений — он исчезает из таблицы.
+    assert store.count_discrepancies() != before or before == 0
+
+
+def test_dismissed_keys_from_directory():
+    """Ключи уволенных строятся по дате из справочника (сегодня и раньше — уволен)."""
+    from datetime import date, timedelta
+
+    from app.employee_sync import InMemoryEmployeeSyncStore
+
+    today = date.today()
+    store = InMemoryEmployeeSyncStore()
+    store.upsert_many(
+        [
+            {
+                "enterprise": "ENT",
+                "base_code": "zup_t1",
+                "tab_num": "001",
+                "fio": "Работает",
+                "dismissal_date": None,
+            },
+            {
+                "enterprise": "ENT",
+                "base_code": "zup_t1",
+                "tab_num": "002",
+                "fio": "Уволен вчера",
+                "dismissal_date": (today - timedelta(days=1)).isoformat(),
+            },
+            {
+                "enterprise": "ENT",
+                "base_code": "zup_t1",
+                "tab_num": "003",
+                "fio": "Увольнение завтра",
+                "dismissal_date": (today + timedelta(days=1)).isoformat(),
+            },
+        ]
+    )
+    assert store.dismissed_keys() == {"ENT|zup_t1|002"}

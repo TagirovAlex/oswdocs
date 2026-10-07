@@ -110,6 +110,15 @@ class EmployeeSyncStore(Protocol):
         """Записать строки (upsert по составному ключу), вернуть число строк."""
         ...
 
+    def dismissed_keys(self) -> set:
+        """Ключи уволенных карточек: 'enterprise|base_code|tab_num'.
+
+        Критерий — дата увольнения из регистра 1С (dismissal_date <= сегодня);
+        пустая дата или будущая — сотрудник работает. Нужны автосопоставлению,
+        чтобы не предлагать связи тем, кто уже уволен (связь и маршрут им не
+        нужны, а расхождения только мешают разбору)."""
+        ...
+
     def mark_linked(self, enterprise: str, tab_num: str, sam: str, base_code: str = "") -> int:
         """Проставить ad_sam/ad_status строке справочника после оформления связи.
 
@@ -170,6 +179,14 @@ class InMemoryEmployeeSyncStore:
                 continue
             hits.append(dict(row))
         return hits[offset : offset + limit]
+
+    def dismissed_keys(self) -> set:
+        """Ключи карточек с датой увольнения <= сегодня (локальная логика даты)."""
+        return {
+            "%s|%s|%s" % (row.get("enterprise"), row.get("base_code"), row.get("tab_num"))
+            for row in self._rows.values()
+            if _dismissed(row)
+        }
 
     def mark_linked(self, enterprise: str, tab_num: str, sam: str, base_code: str = "") -> int:
         updated = 0
@@ -431,6 +448,24 @@ class DbEmployeeSyncStore:
                 "Справочник сотрудников недоступен: %s" % exc
             ) from exc
         return len(rows)
+
+    _DISMISSED_KEYS_SQL = text(
+        """
+        SELECT enterprise, base_code, tab_num FROM employees
+        WHERE dismissal_date IS NOT NULL AND dismissal_date <= CURRENT_DATE
+        """
+    )
+
+    def dismissed_keys(self) -> set:
+        """Ключи уволенных карточек из локальной таблицы (дата из регистра 1С)."""
+        try:
+            with self._session_factory() as session:
+                rows = session.execute(self._DISMISSED_KEYS_SQL).all()
+        except SQLAlchemyError as exc:
+            raise EmployeeSyncUnavailable(
+                "Справочник сотрудников недоступен: %s" % exc
+            ) from exc
+        return {"%s|%s|%s" % (row[0], row[1], row[2]) for row in rows}
 
     _MARK_LINKED_SQL = text(
         """
