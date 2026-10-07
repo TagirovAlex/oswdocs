@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from app.audit import audit_log  # noqa: E402
 from app.config import Settings, get_settings  # noqa: E402
 from app.deps import CurrentUser  # noqa: E402
+from app.employees import get_ad_reader  # noqa: E402
 from app.main import app  # noqa: E402
 from app.requests import (  # noqa: E402
     IN_APPROVAL,
@@ -527,3 +528,240 @@ def test_roster_step_can_act_flag(
     outsider = CurrentUser(sam=OUTSIDER_SAM, groups=[], role="owner")
     assert _public_view(stored, member).steps[0].can_act is True
     assert _public_view(stored, outsider).steps[0].can_act is False
+
+# --- Общая подготовка для состояния связи 1С↔AD -----------------------------
+
+
+class FakeGateway:
+    """Мок-шлюз LDAPS: поиск по подстроке displayName (как в боевом AD)."""
+
+    def __init__(self, entries):
+        self._entries = [dict(entry) for entry in entries]
+
+    def bind(self):
+        return None
+
+    def search_user_by_sam(self, sam):
+        for entry in self._entries:
+            if entry["sAMAccountName"].lower() == sam.strip().lower():
+                return dict(entry)
+        return None
+
+    def search_user_by_dn(self, dn):
+        return None
+
+    def search_users(self, query):
+        needle = (query or "").strip().lower()
+        return [dict(e) for e in self._entries if needle in e["displayName"].lower()]
+
+
+def _ad_entry(sam, fio, department="Цех Тестовый", title="Тестировщик"):
+    return {
+        "dn": "CN=%s,OU=SED,DC=example,DC=local" % fio,
+        "sAMAccountName": sam,
+        "displayName": fio,
+        "department": department,
+        "title": title,
+        "manager": "",
+        "memberOf": [],
+        "mail": "%s@example.local" % sam,
+        "userAccountControl": 512,
+    }
+
+
+@pytest.fixture
+def store_with_employee():
+    """Сотрудник 1С без связи 1С↔AD + кандидат AD (роли карт — на станции).
+
+    Связи нет и карточки AD в зеркале users нет, поэтому предпросмотр должен
+    предложить подтвердить связь (а creation в auto — вернуть 422 с действием)."""
+    from app.ad_reader import AdReader, AdReaderSettings, InMemoryCache
+    from app.employee_sync import InMemoryEmployeeSyncStore, get_employee_sync_store
+    from app.link import clear_for_tests, get_memory_links_store
+    from app.link_store import get_links_store
+    from app.main import app
+
+    clear_for_tests()
+    links = get_memory_links_store()
+    app.dependency_overrides[get_links_store] = lambda: links
+    emp = InMemoryEmployeeSyncStore()
+    emp.upsert_many(
+        [
+            {
+                "enterprise": "ENT",
+                "base_code": "zup_t1",
+                "tab_num": "001",
+                "fio": "Сказочников Иван Тестович",
+                "department": None,
+                "position": None,
+                "ad_sam": None,
+                "ad_status": None,
+            }
+        ]
+    )
+    app.dependency_overrides[get_employee_sync_store] = lambda: emp
+    app.dependency_overrides[get_ad_reader] = lambda: AdReader(
+        settings=AdReaderSettings(
+            ad_url="ldaps://mock.local:636",
+            base_dn="OU=SED,DC=example,DC=local",
+            reader_dn="CN=sed-reader,OU=SED,DC=example,DC=local",
+            cache_ttl_seconds=60,
+            timeout_seconds=1.0,
+        ),
+        gateway=FakeGateway([_ad_entry("t.ivan", "Сказочников Иван Тестович")]),
+        cache=InMemoryCache(),
+    )
+    yield emp
+    app.dependency_overrides.pop(get_employee_sync_store, None)
+    app.dependency_overrides.pop(get_ad_reader, None)
+    app.dependency_overrides.pop(get_links_store, None)
+
+
+# --- Состояние связи 1С↔AD в предпросмотре и подтверждение при создании ------
+
+def test_preview_reports_need_link_with_candidate(client, hr_headers, store_with_employee, settings_override):
+    """В AD запись есть, связи нет: предпросмотр предлагает её подтвердить.
+
+    Раньше сообщение было одно («не найден в AD»), и ОК не понимал, что делать;
+    теперь приходит link_state=need_link с кандидатом (sam/ФИО/служба)."""
+    response = client.post(
+        "/requests/route/preview",
+        json={"enterprise": "ENT", "tab_num": "001"},
+        headers=hr_headers,
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["link_state"] == "need_link"
+    assert body["link_candidate"]["sam"] == "t.ivan"
+    assert body["notice"] and "Связь 1С↔AD не оформлена" in body["notice"]
+
+
+def test_preview_reports_ambiguous_ad_candidates(client, hr_headers, store_with_employee, settings_override):
+    """Две записи AD с одним ФИО — подтверждать нельзя, выбор за человеком."""
+    from app.ad_reader import AdReader, AdReaderSettings, InMemoryCache
+
+    entries = [
+        _ad_entry("t.ivan", "Сказочников Иван Тестович"),
+        _ad_entry("t.ivan2", "Сказочников Иван Тестович"),
+    ]
+    app.dependency_overrides[get_ad_reader] = lambda: AdReader(
+        settings=AdReaderSettings(
+            ad_url="ldaps://mock.local:636",
+            base_dn="OU=SED,DC=example,DC=local",
+            reader_dn="CN=sed-reader,OU=SED,DC=example,DC=local",
+            cache_ttl_seconds=60,
+            timeout_seconds=1.0,
+        ),
+        gateway=FakeGateway(entries),
+        cache=InMemoryCache(),
+    )
+    try:
+        response = client.post(
+            "/requests/route/preview",
+            json={"enterprise": "ENT", "tab_num": "001"},
+            headers=hr_headers,
+        )
+    finally:
+        app.dependency_overrides.pop(get_ad_reader, None)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["link_state"] == "ambiguous"
+    assert body["notice"] and "несколько записей" in body["notice"]
+
+
+def test_link_employee_creates_link_for_confirmed_candidate(
+    client, hr_headers, store_with_employee, settings_override
+):
+    """Подтверждение при импорте: связь создаётся, после неё маршрут собирается."""
+    response = client.post(
+        "/requests/route/link-employee",
+        json={"enterprise": "ENT", "tab_num": "001", "fio": "Сказочников Иван Тестович"},
+        headers=hr_headers,
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["linked"] is True
+    assert body["sam"] == "t.ivan"
+    # Связка появилась — предпросмотр теперь видит карточку AD
+    preview = client.post(
+        "/requests/route/preview",
+        json={"enterprise": "ENT", "tab_num": "001"},
+        headers=hr_headers,
+    ).json()
+    assert preview["link_state"] in ("linked", None)
+
+
+def test_link_employee_is_idempotent(client, hr_headers, store_with_employee, settings_override):
+    """Повторное подтверждение той же связи — 200 без дубля."""
+    payload = {
+        "enterprise": "ENT",
+        "tab_num": "001",
+        "fio": "Сказочников Иван Тестович",
+    }
+    first = client.post("/requests/route/link-employee", json=payload, headers=hr_headers)
+    second = client.post("/requests/route/link-employee", json=payload, headers=hr_headers)
+    assert first.status_code == 200 and second.status_code == 200, second.text
+    assert second.json()["already"] is True
+
+
+def test_link_employee_rejects_ambiguous(client, hr_headers, store_with_employee, settings_override):
+    """Несколько кандидатов AD — 422 со списком логинов, выбор за человеком."""
+    from app.ad_reader import AdReader, AdReaderSettings, InMemoryCache
+
+    app.dependency_overrides[get_ad_reader] = lambda: AdReader(
+        settings=AdReaderSettings(
+            ad_url="ldaps://mock.local:636",
+            base_dn="OU=SED,DC=example,DC=local",
+            reader_dn="CN=sed-reader,OU=SED,DC=example,DC=local",
+            cache_ttl_seconds=60,
+            timeout_seconds=1.0,
+        ),
+        gateway=FakeGateway(
+            [
+                _ad_entry("t.ivan", "Сказочников Иван Тестович"),
+                _ad_entry("t.ivan2", "Сказочников Иван Тестович"),
+            ]
+        ),
+        cache=InMemoryCache(),
+    )
+    try:
+        response = client.post(
+            "/requests/route/link-employee",
+            json={"enterprise": "ENT", "tab_num": "001", "fio": "Сказочников Иван Тестович"},
+            headers=hr_headers,
+        )
+    finally:
+        app.dependency_overrides.pop(get_ad_reader, None)
+    assert response.status_code == 422, response.text
+    assert "t.ivan" in response.json()["detail"]
+
+
+def test_link_employee_rejects_missing_ad_record(client, hr_headers, store_with_employee, settings_override):
+    """В AD нет записи — 422, подтверждать нечего."""
+    response = client.post(
+        "/requests/route/link-employee",
+        json={"enterprise": "ENT", "tab_num": "001", "fio": "Кого-то Нет В AD"},
+        headers=hr_headers,
+    )
+    assert response.status_code == 422, response.text
+
+
+def test_link_employee_roles(
+    client, owner_headers, store_with_employee, settings_override
+):
+    assert (
+        client.post(
+            "/requests/route/link-employee",
+            json={"enterprise": "ENT", "tab_num": "001"},
+            headers={},
+        ).status_code
+        == 401
+    )
+    assert (
+        client.post(
+            "/requests/route/link-employee",
+            json={"enterprise": "ENT", "tab_num": "001"},
+            headers=owner_headers,
+        ).status_code
+        == 403
+    )

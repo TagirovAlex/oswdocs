@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol
 
 from fastapi import Depends
-from sqlalchemy import create_engine, text
+from sqlalchemy import bindparam, create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import sessionmaker
 
@@ -38,6 +38,48 @@ class LinksStore(Protocol):
         """Сохранить/перезаписать факт связки (upsert по составному ключу)."""
         ...
 
+    def replace_discrepancies(self, rows: list[dict]) -> int:
+        """Перезаписать выдачу расхождений последним проходом (миграция 0010).
+
+        Полная замена таблицы: проход знает всю картину (в том числе, что ранее
+        было расхождением и стало связанным), поэтому накопление строк вводило бы
+        в заблуждение. Возврат — число записанных строк."""
+        ...
+
+    def list_discrepancies(
+        self,
+        reason: str | None = None,
+        query: str = "",
+        only_open: bool = True,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict]:
+        """Страница расхождений (фильтры: причина, подстрока ФИО/таб.№/логина).
+
+        Каждая строка: key/enterprise/base_code/tab_num/fio/reason/ad_sam/ad_fio/
+        ad_dept/ad_title/one_c_dept/one_c_position/recommended/detected_at/
+        resolved_at. Порядок — сначала те, что можно подтвердить (recommended), и
+        свежие по времени обнаружения."""
+        ...
+
+    def count_discrepancies(
+        self, reason: str | None = None, query: str = "", only_open: bool = True
+    ) -> int:
+        """Сколько расхождений подходит под фильтры (те же, что у list_discrepancies)."""
+        ...
+
+    def counts_by_reason(self) -> dict:
+        """Счётчики расхождений по причине: {reason: кол-во} (включая закрытые)."""
+        ...
+
+    def get_discrepancies(self, keys: list[str]) -> list[dict]:
+        """Строки расхождений по ключам (порядок и состав — как сохранили)."""
+        ...
+
+    def resolve_discrepancies(self, keys: list[str]) -> int:
+        """Пометить расхождения закрытыми (resolved_at=now()) после подтверждения."""
+        ...
+
     def ensure_targets(self, base: dict | None, employee: dict | None, user: dict | None) -> None:
         """Зеркало ссылок связки в НАШИХ таблицах (one_c_bases/employee_base_map/users).
 
@@ -58,6 +100,7 @@ class InMemoryLinksStore:
         self._bases: dict[str, dict] = {}  # код базы
         self._employees: dict[str, dict] = {}  # enterprise|base_code|tab_num
         self._users: dict[str, dict] = {}  # sam в нижнем регистре
+        self._discrepancies: dict[str, dict] = {}  # key -> расхождение
 
     def reset(self) -> None:
         """Сброс состояния. Только для изоляции pytest/локального запуска."""
@@ -65,6 +108,7 @@ class InMemoryLinksStore:
         self._bases.clear()
         self._employees.clear()
         self._users.clear()
+        self._discrepancies.clear()
 
     def find(self, key: str) -> LinkRecord | None:
         return self._links.get(key)
@@ -76,6 +120,111 @@ class InMemoryLinksStore:
 
     def save(self, record: LinkRecord) -> None:
         self._links[record.key] = record
+
+    def _discrepancy_key(self, row: dict) -> str:
+        return "%s|%s|%s" % (row["enterprise"], row["base_code"], row["tab_num"])
+
+    def replace_discrepancies(self, rows: list[dict]) -> int:
+        """Та же нормализация, что у Postgres: detail-объект из плоских полей,
+        иначе офлайн-прогоны видели бы другой контракт выдачи, чем боевая БД."""
+        self._discrepancies = {}
+        for row in rows:
+            item = dict(row)
+            item["detail"] = {
+                "candidates": list(row.get("candidates") or []),
+                "sibling_tabs": list(row.get("sibling_tabs") or []),
+            }
+            item.pop("candidates", None)
+            item.pop("sibling_tabs", None)
+            item.setdefault("resolved_at", None)
+            item.setdefault("detected_at", None)
+            self._discrepancies[self._discrepancy_key(item)] = item
+        return len(self._discrepancies)
+
+    def list_discrepancies(
+        self,
+        reason: str | None = None,
+        query: str = "",
+        only_open: bool = True,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict]:
+        needle = (query or "").strip().lower()
+        hits = []
+        for row in self._discrepancies.values():
+            if reason and row.get("reason") != reason:
+                continue
+            if only_open and row.get("resolved_at"):
+                continue
+            if needle and not any(
+                needle in str(row.get(field) or "").lower()
+                for field in ("fio", "tab_num", "ad_sam", "ad_fio")
+            ):
+                continue
+            hits.append(dict(row))
+        hits.sort(key=lambda r: (not r.get("recommended"), r.get("tab_num") or ""))
+        return [
+            self._with_key(self._discrepancy_key(row), row)
+            for row in hits[offset : offset + limit]
+        ]
+
+    def _with_key(self, key: str, row: dict) -> dict:
+        """key — колонка БД; в памяти он ключ словаря, отдаём тем же полем."""
+        item = dict(row)
+        item["key"] = key
+        return item
+
+    def _match_discrepancy(
+        self,
+        row: dict,
+        reason: str | None,
+        needle: str,
+        only_open: bool,
+    ) -> bool:
+        if reason and row.get("reason") != reason:
+            return False
+        if only_open and row.get("resolved_at"):
+            return False
+        if needle and not any(
+            needle in str(row.get(field) or "").lower()
+            for field in ("fio", "tab_num", "ad_sam", "ad_fio")
+        ):
+            return False
+        return True
+
+    def count_discrepancies(
+        self, reason: str | None = None, query: str = "", only_open: bool = True
+    ) -> int:
+        needle = (query or "").strip().lower()
+        return sum(
+            1
+            for row in self._discrepancies.values()
+            if self._match_discrepancy(row, reason, needle, only_open)
+        )
+
+    def counts_by_reason(self) -> dict:
+        counts: dict[str, int] = {}
+        for row in self._discrepancies.values():
+            reason = str(row.get("reason") or "")
+            counts[reason] = counts.get(reason, 0) + 1
+        return counts
+
+    def get_discrepancies(self, keys: list[str]) -> list[dict]:
+        return [
+            self._with_key(key, self._discrepancies[key])
+            for key in keys
+            if key in self._discrepancies
+        ]
+
+    def resolve_discrepancies(self, keys: list[str]) -> int:
+        marked = 0
+        for key in keys:
+            row = self._discrepancies.get(key)
+            if row is None or row.get("resolved_at"):
+                continue
+            row["resolved_at"] = "now"
+            marked += 1
+        return marked
 
     def ensure_targets(self, base: dict | None, employee: dict | None, user: dict | None) -> None:
         """Запомнить зеркала (в памяти FK нет — только для проверок тестов)."""
@@ -179,6 +328,66 @@ class DbLinksStore:
         """
     )
 
+    # Расхождения автосопоставления (миграция 0010). Полная замена таблицы на
+    # каждом проходе: проход знает и что стало связанным, поэтому накопления нет.
+    _REPLACE_DISCREPANCIES_SQL = text(
+        "DELETE FROM link_discrepancies"
+    )
+    _INSERT_DISCREPANCY_SQL = text(
+        """
+        INSERT INTO link_discrepancies
+            (key, enterprise, base_code, tab_num, fio, reason, ad_sam, ad_fio,
+             ad_dept, ad_title, one_c_dept, one_c_position, recommended)
+        VALUES (:key, :enterprise, :base_code, :tab_num, :fio, :reason, :ad_sam,
+                :ad_fio, :ad_dept, :ad_title, :one_c_dept, :one_c_position, :recommended)
+        ON CONFLICT (key) DO UPDATE SET
+            fio = EXCLUDED.fio,
+            reason = EXCLUDED.reason,
+            ad_sam = EXCLUDED.ad_sam,
+            ad_fio = EXCLUDED.ad_fio,
+            ad_dept = EXCLUDED.ad_dept,
+            ad_title = EXCLUDED.ad_title,
+            one_c_dept = EXCLUDED.one_c_dept,
+            one_c_position = EXCLUDED.one_c_position,
+            recommended = EXCLUDED.recommended,
+            detected_at = now(),
+            resolved_at = NULL
+        """
+    )
+    _LIST_DISCREPANCIES_SQL = text(
+        """
+        SELECT key, enterprise, base_code, tab_num, fio, reason, ad_sam, ad_fio,
+               ad_dept, ad_title, one_c_dept, one_c_position, recommended,
+               detected_at, resolved_at
+        FROM link_discrepancies
+        WHERE (:reason = '' OR reason = :reason)
+          AND (:only_open = false OR resolved_at IS NULL)
+          AND (:q = ''
+               OR fio ILIKE '%' || :q || '%'
+               OR tab_num ILIKE '%' || :q || '%'
+               OR COALESCE(ad_sam, '') ILIKE '%' || :q || '%'
+               OR COALESCE(ad_fio, '') ILIKE '%' || :q || '%')
+        ORDER BY recommended DESC, fio, tab_num
+        LIMIT :limit OFFSET :offset
+        """
+    )
+    _COUNT_DISCREPANCIES_SQL = text(
+        "SELECT reason, count(*) FROM link_discrepancies GROUP BY reason"
+    )
+    _GET_DISCREPANCIES_SQL = text(
+        """
+        SELECT key, enterprise, base_code, tab_num, fio, reason, ad_sam, ad_fio,
+               ad_dept, ad_title, one_c_dept, one_c_position, recommended,
+               detected_at, resolved_at
+        FROM link_discrepancies
+        WHERE key = ANY(:keys)
+        """
+    )
+    _RESOLVE_DISCREPANCIES_SQL = text(
+        "UPDATE link_discrepancies SET resolved_at = now() "
+        "WHERE key = ANY(:keys) AND resolved_at IS NULL"
+    )
+
     def __init__(self, database_url: str) -> None:
         self._engine = create_engine(database_url, pool_pre_ping=True)
         self._session_factory = sessionmaker(
@@ -266,6 +475,147 @@ class DbLinksStore:
         except SQLAlchemyError as exc:
             raise LinksUnavailable(f"Хранилище связок недоступно: {exc}") from exc
 
+    @staticmethod
+    def _discrepancy_dict(row) -> dict:
+        return {
+            "key": row[0],
+            "enterprise": row[1],
+            "base_code": row[2],
+            "tab_num": row[3],
+            "fio": row[4],
+            "reason": row[5],
+            "ad_sam": row[6],
+            "ad_fio": row[7],
+            "ad_dept": row[8],
+            "ad_title": row[9],
+            "one_c_dept": row[10],
+            "one_c_position": row[11],
+            "recommended": bool(row[12]),
+            "detected_at": row[13].isoformat() if row[13] else None,
+            "resolved_at": row[14].isoformat() if row[14] else None,
+        }
+
+    def replace_discrepancies(self, rows: list[dict]) -> int:
+        params = [
+            {
+                "key": "%s|%s|%s" % (row["enterprise"], row["base_code"], row["tab_num"]),
+                "enterprise": row["enterprise"],
+                "base_code": row["base_code"],
+                "tab_num": row["tab_num"],
+                "fio": row["fio"],
+                "reason": row["reason"],
+                "ad_sam": row.get("ad_sam"),
+                "ad_fio": row.get("ad_fio"),
+                "ad_dept": row.get("ad_dept"),
+                "ad_title": row.get("ad_title"),
+                "one_c_dept": row.get("one_c_dept"),
+                "one_c_position": row.get("one_c_position"),
+                "recommended": bool(row.get("recommended")),
+            }
+            for row in rows
+        ]
+        try:
+            with self._session_factory() as session:
+                session.execute(self._REPLACE_DISCREPANCIES_SQL)
+                if params:
+                    session.execute(self._INSERT_DISCREPANCY_SQL, params)
+                session.commit()
+        except SQLAlchemyError as exc:
+            raise LinksUnavailable("Расхождения сопоставления недоступны: %s" % exc) from exc
+        return len(params)
+
+    def list_discrepancies(
+        self,
+        reason: str | None = None,
+        query: str = "",
+        only_open: bool = True,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict]:
+        try:
+            with self._session_factory() as session:
+                rows = session.execute(
+                    self._LIST_DISCREPANCIES_SQL,
+                    {
+                        "reason": (reason or "").strip(),
+                        "q": (query or "").strip(),
+                        "only_open": bool(only_open),
+                        "limit": int(limit),
+                        "offset": int(offset),
+                    },
+                ).all()
+        except SQLAlchemyError as exc:
+            raise LinksUnavailable("Расхождения сопоставления недоступны: %s" % exc) from exc
+        return [self._discrepancy_dict(row) for row in rows]
+
+    _COUNT_DISCREPANCIES_TOTAL_SQL = text(
+        """
+        SELECT count(*) FROM link_discrepancies
+        WHERE (:reason = '' OR reason = :reason)
+          AND (:only_open = false OR resolved_at IS NULL)
+          AND (:q = ''
+               OR fio ILIKE '%' || :q || '%'
+               OR tab_num ILIKE '%' || :q || '%'
+               OR COALESCE(ad_sam, '') ILIKE '%' || :q || '%'
+               OR COALESCE(ad_fio, '') ILIKE '%' || :q || '%')
+        """
+    )
+
+    def count_discrepancies(
+        self, reason: str | None = None, query: str = "", only_open: bool = True
+    ) -> int:
+        try:
+            with self._session_factory() as session:
+                value = session.execute(
+                    self._COUNT_DISCREPANCIES_TOTAL_SQL,
+                    {
+                        "reason": (reason or "").strip(),
+                        "q": (query or "").strip(),
+                        "only_open": bool(only_open),
+                    },
+                ).scalar()
+        except SQLAlchemyError as exc:
+            raise LinksUnavailable("Расхождения сопоставления недоступны: %s" % exc) from exc
+        return int(value or 0)
+
+    def counts_by_reason(self) -> dict:
+        try:
+            with self._session_factory() as session:
+                rows = session.execute(self._COUNT_DISCREPANCIES_SQL).all()
+        except SQLAlchemyError as exc:
+            raise LinksUnavailable("Расхождения сопоставления недоступны: %s" % exc) from exc
+        return {str(row[0]): int(row[1]) for row in rows}
+
+    def get_discrepancies(self, keys: list[str]) -> list[dict]:
+        if not keys:
+            return []
+        try:
+            with self._session_factory() as session:
+                rows = session.execute(
+                    self._GET_DISCREPANCIES_SQL.bindparams(
+                        bindparam("keys", expanding=True)
+                    ),
+                    {"keys": list(keys)},
+                ).all()
+        except SQLAlchemyError as exc:
+            raise LinksUnavailable("Расхождения сопоставления недоступны: %s" % exc) from exc
+        return [self._discrepancy_dict(row) for row in rows]
+
+    def resolve_discrepancies(self, keys: list[str]) -> int:
+        if not keys:
+            return 0
+        try:
+            with self._session_factory() as session:
+                result = session.execute(
+                    self._RESOLVE_DISCREPANCIES_SQL.bindparams(
+                        bindparam("keys", expanding=True)
+                    ),
+                    {"keys": list(keys)},
+                )
+                session.commit()
+        except SQLAlchemyError as exc:
+            raise LinksUnavailable("Расхождения сопоставления недоступны: %s" % exc) from exc
+        return int(result.rowcount or 0)
     def ensure_targets(self, base: dict | None, employee: dict | None, user: dict | None) -> None:
         """Зеркала ссылок связки (одной транзакцией): база/сотрудник/пользователь.
 

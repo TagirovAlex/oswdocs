@@ -34,6 +34,11 @@ class AdSyncUnavailable(Exception):
 # Размер страницы выгрузки сотрудников (лимит одной OData-выдачи).
 LIST_PAGE = 500
 
+# Причины расхождений автосопоставления (выдача админу + фильтры UI).
+REASON_ONE_C_DUPLICATE = "one_c_duplicate"    # в 1С несколько карточек с этим ФИО
+REASON_AD_DUPLICATE = "ad_duplicate"          # в AD несколько записей с этим ФИО
+REASON_NOT_IN_AD = "not_in_ad"                # в AD нет записи с таким ФИО
+
 
 @dataclass
 class AdSyncResult:
@@ -46,6 +51,17 @@ class AdSyncResult:
     skipped_ad_no_match: int = 0  # точного ФИО в AD нет
     skipped_ad_duplicates: int = 0  # несколько AD-записей с этим ФИО
     errors: List[str] = field(default_factory=list)  # падения баз/AD (не валят проход)
+    # Расхождения для выдачи админу (миграция 0010): строки расхождений прохода.
+    # Собираются всегда — их показывает и ручной запуск, и регламент.
+    discrepancies: List[dict] = field(default_factory=list)
+
+    def counts_by_reason(self) -> dict:
+        """Счётчики расхождений по причине (сводка прохода и UI)."""
+        counts: dict[str, int] = {}
+        for row in self.discrepancies:
+            reason = str(row.get("reason") or "")
+            counts[reason] = counts.get(reason, 0) + 1
+        return counts
 
 
 def _norm(text: str) -> str:
@@ -102,6 +118,50 @@ def _pick_duplicate_card(cards: list, ad_user: object) -> object | None:
     return matched[0] if len(matched) == 1 else None
 
 
+def _record_discrepancy(
+    result: "AdSyncResult",
+    card: object,
+    reason: str,
+    ad_user: object | None = None,
+    candidates: list | None = None,
+    one_c_cards: list | None = None,
+    recommended: bool = False,
+) -> None:
+    """Запомнить строку расхождения для выдачи админу (миграция 0010).
+
+    Всё, что нужно человеку для решения, попадает в одну строку: логин и ФИО
+    кандидата AD, его подразделение/должность и — для дублей ФИО в 1С —
+    должность/служба самой карточки, чтобы было видно, какая подходит.
+    В 1С/AD не пишем, только наша таблица расхождений."""
+    result.discrepancies.append(
+        {
+            "enterprise": getattr(card, "enterprise", "") or "",
+            "base_code": getattr(card, "base_code", "") or "",
+            "tab_num": getattr(card, "tab_num", "") or "",
+            "fio": getattr(card, "fio", "") or "",
+            "reason": reason,
+            "ad_sam": getattr(ad_user, "sam", None),
+            "ad_fio": getattr(ad_user, "display_name", None),
+            "ad_dept": getattr(ad_user, "department", None),
+            "ad_title": getattr(ad_user, "title", None),
+            "one_c_dept": getattr(card, "dept", None) or None,
+            "one_c_position": getattr(card, "position", None) or None,
+            # Рекомендация для массового подтверждения: должность/служба этой
+            # карточки 1С совпадает с кандидатом AD — связка выглядит верной.
+            "recommended": bool(recommended)
+            or (
+                ad_user is not None
+                and _matches_ad_profile(card, ad_user)
+                and not candidates
+            ),
+            # Прочие кандидаты AD при дубле ФИО и табельные номера остальных
+            # карточек 1С этой группы — в detail (JSONB), колонки плоские.
+            "candidates": list(candidates or []),
+            "sibling_tabs": [getattr(item, "tab_num", "") for item in (one_c_cards or [])],
+        }
+    )
+
+
 def _list_enterprise(
     client: OneCClient,
     reader: AdReader,
@@ -148,6 +208,12 @@ def _list_enterprise(
         if not exact:
             # Дублей нет — человек просто не заведён в AD. Дубли ФИО в 1С — это
             # другая причина (разбор по ручной сверке), счётчик прежний.
+            _record_discrepancy(
+                result,
+                card,
+                REASON_ONE_C_DUPLICATE if is_duplicate else REASON_NOT_IN_AD,
+                recommended=False,
+            )
             if is_duplicate:
                 result.skipped_1c_duplicates += 1
             else:
@@ -155,6 +221,15 @@ def _list_enterprise(
             continue
         if len(exact) > 1:
             result.skipped_ad_duplicates += 1
+            # Кандидатов несколько — выбирает человек (в строке видно их логины).
+            _record_discrepancy(
+                result,
+                card,
+                REASON_AD_DUPLICATE,
+                ad_user=exact[0],
+                candidates=[u.sam for u in exact],
+                recommended=False,
+            )
             continue
         ad_user = exact[0]
         if is_duplicate:
@@ -169,9 +244,36 @@ def _list_enterprise(
                 )
             picked = _pick_duplicate_card(enriched[wanted], ad_user)
             if picked is None:
+                # Ни одна карточка группы не подошла: админ выбирает вручную,
+                # видя должность/службу каждой карточки и данные кандидата AD.
+                for sibling in enriched[wanted]:
+                    _record_discrepancy(
+                        result,
+                        sibling,
+                        REASON_ONE_C_DUPLICATE,
+                        ad_user=ad_user,
+                        one_c_cards=enriched[wanted],
+                        recommended=False,
+                    )
                 result.skipped_1c_duplicates += 1
                 continue
             if link_key(picked.enterprise, picked.base_code, picked.tab_num) != key:
+                # Связалась другая карточка группы: остальные показываем админу
+                # отдельными строками (их автоматика не связала). Карточку,
+                # которую свяжут сейчас, в расхождения не пишем.
+                for sibling in enriched[wanted]:
+                    if link_key(sibling.enterprise, sibling.base_code, sibling.tab_num) == link_key(
+                        picked.enterprise, picked.base_code, picked.tab_num
+                    ):
+                        continue
+                    _record_discrepancy(
+                        result,
+                        sibling,
+                        REASON_ONE_C_DUPLICATE,
+                        ad_user=ad_user,
+                        one_c_cards=enriched[wanted],
+                        recommended=False,
+                    )
                 result.skipped_1c_duplicates += 1
                 continue
             card = picked  # связываем и сохраняем карточку с должностью/службой
@@ -264,6 +366,7 @@ def run_ad_sync(
     store: LinksStore,
     enterprises: List[str],
     now: Optional[str] = None,
+    save_discrepancies: bool = True,
 ) -> AdSyncResult:
     """Один проход автосвязки: предприятия → базы → сотрудники → verified-связки.
 
@@ -277,6 +380,16 @@ def run_ad_sync(
             _list_enterprise(client, reader, store, enterprise, result, moment)
         except Exception as exc:  # падение одной ветки не валит остальные
             result.errors.append("%s: %s" % (enterprise, exc))
+    if save_discrepancies and result.discrepancies:
+        # Расхождения — выдача админу (миграция 0010), список один и тот же для
+        # ручного запуска и регламента. Падение записи не должно обнулять уже
+        # созданные связки: отсюда ошибка в result, а не исключение.
+        try:
+            result.discrepancies_saved = store.replace_discrepancies(
+                result.discrepancies
+            )
+        except Exception as exc:
+            result.errors.append("расхождения не сохранены: %s" % exc)
     return result
 
 

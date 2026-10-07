@@ -110,6 +110,16 @@ class EmployeeSyncStore(Protocol):
         """Записать строки (upsert по составному ключу), вернуть число строк."""
         ...
 
+    def mark_linked(self, enterprise: str, tab_num: str, sam: str, base_code: str = "") -> int:
+        """Проставить ad_sam/ad_status строке справочника после оформления связи.
+
+        Нужно сразу после подтверждения связи человеком: иначе следующий запрос
+        создания заявки не увидит логин и снова предложит подтвердить (и собрать
+        маршрут не сможет) — до следующего планового синка справочника.
+        Совпадение — по табельному номеру в предприятии (base_code уточняет,
+        если передан); вернулось число обновлённых строк."""
+        ...
+
     def update_dismissals(self, base_code: str, rows: list[dict]) -> int:
         """Проставить даты увольнения по парам (ref_key, дата) базы.
 
@@ -160,6 +170,18 @@ class InMemoryEmployeeSyncStore:
                 continue
             hits.append(dict(row))
         return hits[offset : offset + limit]
+
+    def mark_linked(self, enterprise: str, tab_num: str, sam: str, base_code: str = "") -> int:
+        updated = 0
+        for row in self._rows.values():
+            if row.get("enterprise") != enterprise or row.get("tab_num") != tab_num:
+                continue
+            if base_code and row.get("base_code") != base_code:
+                continue
+            row["ad_sam"] = sam
+            row["ad_status"] = "linked"
+            updated += 1
+        return updated
 
     def update_dismissals(self, base_code: str, rows: list[dict]) -> int:
         by_ref = {str(item.get("ref_key") or "").strip(): item for item in rows}
@@ -409,6 +431,34 @@ class DbEmployeeSyncStore:
                 "Справочник сотрудников недоступен: %s" % exc
             ) from exc
         return len(rows)
+
+    _MARK_LINKED_SQL = text(
+        """
+        UPDATE employees
+        SET ad_sam = :sam, ad_status = 'linked', updated_at = now()
+        WHERE enterprise = :enterprise AND tab_num = :tab_num
+          AND (:base_code = '' OR base_code = :base_code)
+        """
+    )
+
+    def mark_linked(self, enterprise: str, tab_num: str, sam: str, base_code: str = "") -> int:
+        try:
+            with self._session_factory() as session:
+                result = session.execute(
+                    self._MARK_LINKED_SQL,
+                    {
+                        "enterprise": enterprise,
+                        "tab_num": tab_num,
+                        "sam": sam,
+                        "base_code": (base_code or "").strip(),
+                    },
+                )
+                session.commit()
+        except SQLAlchemyError as exc:
+            raise EmployeeSyncUnavailable(
+                "Справочник сотрудников недоступен: %s" % exc
+            ) from exc
+        return int(result.rowcount or 0)
 
     def update_dismissals(self, base_code: str, rows: list[dict]) -> int:
         pairs = [

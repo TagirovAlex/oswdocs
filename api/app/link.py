@@ -335,6 +335,213 @@ def sync_links_endpoint(
         "skipped_ad_no_match": result.skipped_ad_no_match,
         "skipped_ad_duplicates": result.skipped_ad_duplicates,
         "errors": result.errors,
+        # Выдача расхождений (миграция 0010): счётчики по причинам + сколько
+        # строк записано. Подробности — GET /link_1c_ad/discrepancies.
+        "discrepancies_saved": result.discrepancies_saved,
+        "discrepancies": result.counts_by_reason(),
+    }
+
+
+class DiscrepancyOut(BaseModel):
+    """Строка расхождения автосопоставления 1С↔AD (выдача админу).
+
+    reason: one_c_duplicate (в 1С несколько карточек ФИО), ad_duplicate (в AD
+    несколько записей ФИО), not_in_ad (в AD нет такого ФИО). can_confirm —
+    можно ли подтвердить массово: у строки есть ровно один кандидат AD (sam),
+    выбранный человеком по должности/службе. recommended — должность/служба
+    карточки 1С совпадает с кандидатом AD (связка выглядит верной)."""
+
+    key: str
+    enterprise: str
+    base_code: str
+    tab_num: str
+    fio: str
+    reason: str
+    ad_sam: str | None = None
+    ad_fio: str | None = None
+    ad_dept: str | None = None
+    ad_title: str | None = None
+    one_c_dept: str | None = None
+    one_c_position: str | None = None
+    recommended: bool = False
+    can_confirm: bool = False
+    candidates: list[str] = Field(default_factory=list)
+    sibling_tabs: list[str] = Field(default_factory=list)
+    detected_at: str | None = None
+    resolved_at: str | None = None
+
+
+def _discrepancy_out(row: dict) -> DiscrepancyOut:
+    """Строка БД -> контракт выдачи; can_confirm — кандидат AD ровно один."""
+    detail = row.get("detail") or {}
+    sam = row.get("ad_sam")
+    return DiscrepancyOut(
+        key=row["key"],
+        enterprise=row["enterprise"],
+        base_code=row["base_code"],
+        tab_num=row["tab_num"],
+        fio=row["fio"],
+        reason=row["reason"],
+        ad_sam=sam,
+        ad_fio=row.get("ad_fio"),
+        ad_dept=row.get("ad_dept"),
+        ad_title=row.get("ad_title"),
+        one_c_dept=row.get("one_c_dept"),
+        one_c_position=row.get("one_c_position"),
+        recommended=bool(row.get("recommended")),
+        # Кандидат один и известен — можно подтвердить пакетно; при нескольких
+        # записях AD (ad_duplicate) sam не проставлен, выбор за человеком.
+        can_confirm=bool(sam) and row["reason"] != "ad_duplicate",
+        candidates=list(detail.get("candidates") or []),
+        sibling_tabs=list(detail.get("sibling_tabs") or []),
+        detected_at=row.get("detected_at"),
+        resolved_at=row.get("resolved_at"),
+    )
+
+
+@router.get("/link_1c_ad/discrepancies")
+def list_link_discrepancies(
+    reason: str = Query(default="", max_length=40, description="Фильтр по причине"),
+    q: str = Query(default="", max_length=200, description="Подстрока ФИО/таб.№/логина"),
+    only_open: bool = Query(default=True, description="Только не подтверждённые"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+    store: LinksStore = Depends(get_links_store),
+) -> dict:
+    """Расхождения автоматического сопоставления 1С↔AD: admin/sed_admin.
+
+    Наполняет проход автосвязки (POST /link_1c_ad/sync или регламент по
+    schedule_ad_links_sync). Здесь только чтение нашей таблицы; AD/1С не трогаем.
+    Ответ: items + total + counts (счётчики по причинам) + page/page_size."""
+    settings.ensure_read_only()
+    if user.role not in ("admin", "sed_admin"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Расхождения сопоставления доступны только администратору",
+        )
+    try:
+        rows = store.list_discrepancies(
+            reason=reason or None,
+            query=q,
+            only_open=only_open,
+            limit=page_size,
+            offset=(page - 1) * page_size,
+        )
+        total = store.count_discrepancies(
+            reason=reason or None, query=q, only_open=only_open
+        )
+        counts = store.counts_by_reason()
+    except LinksUnavailable as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    return {
+        "items": [_discrepancy_out(row).model_dump() for row in rows],
+        "counts": counts,
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+    }
+
+
+class ConfirmDiscrepanciesIn(BaseModel):
+    """Массовое подтверждение: список ключей карточек (из выдачи расхождений)."""
+
+    keys: list[str] = Field(min_length=1, max_length=500)
+
+
+@router.post("/link_1c_ad/discrepancies/confirm")
+def confirm_link_discrepancies(
+    body: ConfirmDiscrepanciesIn,
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+    store: LinksStore = Depends(get_links_store),
+) -> dict:
+    """Подтвердить расхождения пачкой: создать проверенные связки 1С↔AD.
+
+    Связывается только то, где кандидат AD ровно один (у строки проставлен sam);
+    при нескольких записях AD или отсутствии кандидата строка пропускается и
+    возвращается в skipped с причиной — выбор делает человек. Запись — только
+    связки в нашу БД (users/employee_base_map заполняются), AD/1С не пишутся.
+    Ответ: {linked, skipped, errors, linked_sams}."""
+    settings.ensure_read_only()
+    if user.role not in ("admin", "sed_admin"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Подтверждать сопоставление может только администратор",
+        )
+    try:
+        rows = store.get_discrepancies(body.keys)
+        now = _dt.datetime.now(_dt.timezone.utc).isoformat()
+        linked = 0
+        skipped: list[str] = []
+        errors: list[str] = []
+        linked_sams: list[str] = []
+        for row in rows:
+            sam = (row.get("ad_sam") or "").strip()
+            if not sam or row.get("reason") == "ad_duplicate":
+                skipped.append(row["key"])
+                continue
+            try:
+                # Зеркала ссылок — те же, что у прохода автосвязки: без них
+                # внешние ключи link_1c_ad не создадутся.
+                store.ensure_targets(
+                    None,
+                    {
+                        "enterprise": row["enterprise"],
+                        "base_code": row["base_code"],
+                        "tab_num": row["tab_num"],
+                        "fio": row["fio"],
+                        "dept_1c": row.get("one_c_dept"),
+                        "position_1c": row.get("one_c_position"),
+                    },
+                    {
+                        "sam": sam,
+                        "fio_full": row.get("ad_fio") or row["fio"],
+                        "dept_ad": row.get("ad_dept"),
+                        "title_ad": row.get("ad_title"),
+                        "manager_dn": None,
+                        "mail": None,
+                    },
+                )
+                store.save(
+                    LinkRecord(
+                        enterprise=row["enterprise"],
+                        base_code=row["base_code"],
+                        tab_num=row["tab_num"],
+                        key=row["key"],
+                        sam=sam,
+                        by=user.sam,
+                        at=now,
+                        verified=True,
+                        diverged=False,
+                        needs_manual_review=False,
+                        truth_source="1c",
+                    )
+                )
+            except Exception as exc:  # одна строка не должна валить пакет
+                errors.append("%s: %s" % (row["key"], exc))
+                continue
+            linked += 1
+            linked_sams.append(sam)
+        if linked:
+            store.resolve_discrepancies([row["key"] for row in rows if row.get("ad_sam")])
+    except LinksUnavailable as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    audit_log.append(
+        AuditEvent(
+            actor=user.sam,
+            action="link.discrepancies_confirm",
+            entity="link_1c_ad",
+            entity_id="discrepancies",
+            detail="linked=%d skipped=%d errors=%d" % (linked, len(skipped), len(errors)),
+        )
+    )
+    return {
+        "linked": linked,
+        "skipped": skipped,
+        "errors": errors,
+        "linked_sams": linked_sams[:50],
     }
 
 

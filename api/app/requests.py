@@ -815,6 +815,171 @@ def _step_from_stage(
     )
 
 
+def _missing_ad_card_detail(body: "CreateRequestIn") -> str:
+    """Текст 422 «нет карточки AD» с учётом реальной причины.
+
+    Человек может быть в AD, но без подтверждённой связи — тогда достаточно
+    подтвердить связь (кнопка в предпросмотре), а не идти в другой раздел."""
+    fio = _employee_fio(body, body.tab_num)
+    candidates = _ad_candidates(_resolve_dependency(get_ad_reader, get_settings()), fio)
+    if len(candidates) == 1:
+        return (
+            "Связь 1С↔AD не оформлена, хотя в AD есть «%s» (%s). Подтвердите связь в "
+            "предпросмотре — служба и руководитель подтянутся. Иначе маршрут по "
+            "профилю службы собрать нельзя: переключите режим на «Вручную»."
+            % (candidates[0].display_name, candidates[0].sam)
+        )
+    if len(candidates) > 1:
+        return (
+            "В AD несколько записей с этим ФИО — выберите сотрудника в разделе "
+            "«Сопоставление 1С↔AD» или переключите режим на «Вручную»: маршрут по "
+            "профилю службы собрать нельзя."
+        )
+    return (
+        "Сотрудник не найден в AD — маршрут по профилю службы собрать нельзя. "
+        "Оформите связь 1С↔AD (раздел «Сопоставление 1С↔AD») или переключите "
+        "режим на «Вручную» и задайте маршрут самостоятельно."
+    )
+
+
+class LinkEmployeeIn(BaseModel):
+    """Подтверждение связи 1С↔AD при создании заявки."""
+
+    enterprise: str
+    tab_num: str
+    base_code: str | None = None
+    fio: str | None = None
+
+
+@router.post("/requests/route/link-employee")
+def link_employee(
+    body: LinkEmployeeIn,
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+    links_store: object = Depends(get_links_store),
+    ad_reader: object | None = Depends(get_ad_reader),
+) -> dict:
+    """Оформить связь 1С↔AD по сотруднику (роль как у создания заявки).
+
+    Кандидат в AD должен быть ровно один: при нескольких записях 422 со списком
+    логинов — выбор делает человек (раздел «Сопоставление 1С↔AD»). Запись —
+    только связка в нашей БД (плюс зеркала users/employee_base_map для внешних
+    ключей); AD и 1С не пишутся. Действие аудируется как link.create."""
+    settings.ensure_read_only()
+    _require_hr(user)
+    if ad_reader is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Ридер AD не настроен",
+        )
+    fio = str(body.fio or "").strip() or _employee_fio(body, body.tab_num)
+    candidates = _ad_candidates(ad_reader, fio)
+    if not candidates:
+        raise HTTPException(
+            status_code=422,
+            detail="В AD нет записи с ФИО «%s» — подтверждать нечего." % (fio or "?"),
+        )
+    if len(candidates) > 1:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "В AD несколько записей с ФИО «%s» (%s) — выберите сотрудника вручную "
+                "в разделе «Сопоставление 1С↔AD»."
+                % (fio, ", ".join(sorted(c.sam for c in candidates)))
+            ),
+        )
+    from .link import LinkRecord, link_key  # локально против циклического импорта
+
+    key = link_key(body.enterprise, body.base_code or "", body.tab_num)
+    try:
+        record = links_store.find(key)
+    except Exception:
+        record = None
+    ad_user = candidates[0]
+    now = datetime.now(timezone.utc).isoformat()
+    if record is not None and record.sam:
+        if record.sam != ad_user.sam:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Связь уже оформлена на другого сотрудника (%s). Изменить её можно "
+                    "в разделе «Сопоставление 1С↔AD»." % record.sam
+                ),
+            )
+        return {
+            "linked": True,
+            "already": True,
+            "sam": record.sam,
+            "fio": ad_user.display_name,
+            "dept_ad": ad_user.department,
+            "title_ad": ad_user.title,
+        }
+    try:
+        links_store.ensure_targets(
+            None,
+            {
+                "enterprise": body.enterprise,
+                "base_code": body.base_code or "",
+                "tab_num": body.tab_num,
+                "fio": fio,
+            },
+            {
+                "sam": ad_user.sam,
+                "fio_full": ad_user.display_name or ad_user.sam,
+                "dept_ad": ad_user.department,
+                "title_ad": ad_user.title,
+                "manager_dn": ad_user.manager_dn,
+                "mail": ad_user.mail,
+            },
+        )
+        links_store.save(
+            LinkRecord(
+                enterprise=body.enterprise,
+                base_code=body.base_code or "",
+                tab_num=body.tab_num,
+                key=key,
+                sam=ad_user.sam,
+                by=user.sam,
+                at=now,
+                verified=True,
+                diverged=False,
+                needs_manual_review=False,
+                truth_source="1c",
+            )
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Связь не сохранена: %s" % exc,
+        ) from exc
+    # Строку справочника помечаем связанной сразу: иначе следующий предпросмотр
+    # не увидит логин (ad_sam) и снова предложит подтвердить связь. Ошибка
+    # здесь не критична — плановый синк справочника поправит значение.
+    try:
+        _resolve_dependency(get_employee_sync_store, get_settings()).mark_linked(
+            body.enterprise, body.tab_num, ad_user.sam, body.base_code or ""
+        )
+    except Exception:
+        pass
+    audit_log.append(
+        AuditEvent(
+            actor=user.sam,
+            action="link.create",
+            entity="link_1c_ad",
+            entity_id=key,
+            detail="sam=%s (подтверждено при создании заявки)" % ad_user.sam,
+        )
+    )
+    return {
+        "linked": True,
+        "already": False,
+        "sam": ad_user.sam,
+        "fio": ad_user.display_name,
+        "dept_ad": ad_user.department,
+        "title_ad": ad_user.title,
+    }
+
+
 def _auto_route(
     store: DbRoutingStore,
     body: CreateRequestIn,
@@ -842,11 +1007,7 @@ def _auto_route(
     if card is None:
         raise HTTPException(
             status_code=422,
-            detail=(
-                "Сотрудник не найден в AD — маршрут по профилю службы собрать нельзя. "
-                "Оформите связь 1С↔AD (Настройки → «Связи 1С↔AD») или переключите "
-                "режим на «Вручную» и задайте маршрут самостоятельно."
-            ),
+            detail=_missing_ad_card_detail(body),
         )
     if not department.strip():
         raise HTTPException(
@@ -1720,6 +1881,19 @@ class RoutePreviewStageOut(BaseModel):
     blocked_reason: str | None = None
 
 
+class RoutePreviewLinkOut(BaseModel):
+    """Кандидат AD для подтверждения связи при создании заявки.
+
+    Показываем ОК, к кому привяжется карточка 1С: логин, ФИО, служба, должность.
+    Руководитель нужен, чтобы после подтверждения маршрут собрался сразу."""
+
+    sam: str
+    fio: str | None = None
+    dept_ad: str | None = None
+    title_ad: str | None = None
+    manager_sam: str | None = None
+
+
 class RoutePreviewOut(BaseModel):
     """Предпросмотр маршрута: подбор профиля/этапов и исполнители по этапам."""
 
@@ -1731,6 +1905,17 @@ class RoutePreviewOut(BaseModel):
     # Пояснение для ОК: например, сотрудник не найден в AD (карточки нет —
     # служба неизвестна, бланк печати пойдёт по умолчанию). Пусто — всё в порядке.
     notice: str | None = Field(default=None, description="Предупреждение для ОК")
+    # Состояние связи 1С↔AD выбранного сотрудника:
+    #   linked    — связь оформлена, служба и руководитель берутся из AD;
+    #   need_link — в AD ровно одна запись с этим ФИО, связь не подтверждена
+    #               (её подтверждает ОК кнопкой — POST /requests/route/link-employee);
+    #   ambiguous — в AD несколько записей с этим ФИО, выбор за человеком;
+    #   absent    — в AD нет записи с этим ФИО.
+    # None — сотрудник не выбран или AD недоступен.
+    link_state: str | None = Field(default=None, description="Состояние связи 1С↔AD")
+    link_candidate: RoutePreviewLinkOut | None = Field(
+        default=None, description="Кандидат AD для подтверждения связи"
+    )
 
 
 class _FioResolver:
@@ -1827,6 +2012,83 @@ def _preview_stages(
     return stages
 
 
+LINK_STATE_LINKED = "linked"        # связь оформлена
+LINK_STATE_NEED_LINK = "need_link"  # кандидат AD один, связь не подтверждена
+LINK_STATE_AMBIGUOUS = "ambiguous"  # в AD несколько записей с этим ФИО
+LINK_STATE_ABSENT = "absent"        # в AD нет записи с таким ФИО
+
+
+def _employee_fio(body: "CreateRequestIn | RoutePreviewIn", tab_num: str | None) -> str:
+    """ФИО сотрудника из тела, иначе — из локального справочника по таб. №.
+
+    Нужно, когда связи 1С↔AD ещё нет: без ФИО в AD не найти кандидата."""
+    direct = str(getattr(body, "fio", "") or "").strip()
+    if direct:
+        return direct
+    if not tab_num:
+        return ""
+    try:
+        rows = _resolve_dependency(get_employee_sync_store, get_settings()).find_by_people(
+            body.enterprise, [], [tab_num]
+        )
+    except Exception:
+        return ""
+    if len(rows) != 1:  # неоднозначный табельный номер — ФИО не подставляем
+        return ""
+    return str(rows[0].get("fio") or "").strip()
+
+
+def _ad_candidates(ad_reader: object | None, fio: str) -> list:
+    """Кандидаты AD по ФИО: точное совпадение displayName (регистр/пробелы — нет)."""
+    from .ad_sync import _norm  # лениво: сетевой модуль без нужды не тянем
+
+    if not fio or ad_reader is None:
+        return []
+    wanted = _norm(fio)
+    try:
+        return [u for u in ad_reader.search_users(fio) if _norm(u.display_name) == wanted]
+    except Exception:  # AD недоступен — предпросмотр не блокируем
+        return []
+
+
+def _link_state(
+    body: "CreateRequestIn | RoutePreviewIn",
+    store: DbRoutingStore | None,
+    sam: str | None,
+    ad_reader: object | None,
+) -> tuple[str | None, RoutePreviewLinkOut | None]:
+    """Состояние связи 1С↔AD по сотруднику и кандидат AD для подтверждения.
+
+    Нужно, чтобы отличать «человека нет в AD» (нужно завести учётку) от «человек
+    в AD есть, но связь не подтверждена»: во втором случае ОК подтверждает связь
+    кнопкой, и маршрут собирается сразу. Только чтение AD и наших зеркал."""
+    if ad_reader is None:
+        return None, None
+    # sam есть — связь уже оформлена (тело, связка 1С↔AD или ad_sam справочника):
+    # подтверждать нечего, дальше маршрут собирается по карточке AD.
+    if sam:
+        return LINK_STATE_LINKED, None
+    fio = _employee_fio(body, body.tab_num)
+    candidates = _ad_candidates(ad_reader, fio)
+    if not fio:
+        return None, None
+    if not candidates:
+        return LINK_STATE_ABSENT, None
+    if len(candidates) > 1:
+        return LINK_STATE_AMBIGUOUS, None
+    ad_user = candidates[0]
+    manager_sam = None
+    if store is not None:
+        manager_sam = store.manager_sam_by_dn(ad_user.manager_dn or "")
+    return LINK_STATE_NEED_LINK, RoutePreviewLinkOut(
+        sam=ad_user.sam,
+        fio=ad_user.display_name,
+        dept_ad=ad_user.department,
+        title_ad=ad_user.title,
+        manager_sam=manager_sam,
+    )
+
+
 def _route_preview(body: RoutePreviewIn, ad_reader: object | None) -> RoutePreviewOut:
     """Маршрут заявки по справочникам без создания заявки (предпросмотр для ОК).
 
@@ -1847,8 +2109,20 @@ def _route_preview(body: RoutePreviewIn, ad_reader: object | None) -> RoutePrevi
     department = _ad_or_body((card or {}).get("dept_ad"), body.department or "")
     # Нет карточки AD или пустая служба — маршрут по профилю службы не собрать:
     # объясняем это в предпросмотре (создание в auto вернёт 422, см. _auto_route).
+    link_state, link_candidate = _link_state(body, store, sam, ad_reader)
     notice = None
-    if card is None or not department.strip():
+    if card is None and link_state == LINK_STATE_NEED_LINK:
+        notice = (
+            "Связь 1С↔AD не оформлена, хотя в AD есть «%s» (%s): подтвердите связь — "
+            "служба и руководитель подтянутся, и маршрут соберётся."
+            % (link_candidate.fio or link_candidate.sam, link_candidate.sam)
+        )
+    elif card is None and link_state == LINK_STATE_AMBIGUOUS:
+        notice = (
+            "В AD несколько записей с этим ФИО — выберите сотрудника в разделе "
+            "«Сопоставление 1С↔AD» или переключите маршрут на «Вручную»."
+        )
+    elif card is None or not department.strip():
         notice = (
             "Сотрудник не найден в AD (нет карточки или не указана служба): маршрут по "
             "службе не подбирается, печать пойдёт бланком по умолчанию."
@@ -1911,6 +2185,8 @@ def _route_preview(body: RoutePreviewIn, ad_reader: object | None) -> RoutePrevi
         ),
         blank=blank,
         notice=notice,
+        link_state=link_state,
+        link_candidate=link_candidate,
     )
 
 
