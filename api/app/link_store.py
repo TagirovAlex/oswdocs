@@ -337,9 +337,10 @@ class DbLinksStore:
         """
         INSERT INTO link_discrepancies
             (key, enterprise, base_code, tab_num, fio, reason, ad_sam, ad_fio,
-             ad_dept, ad_title, one_c_dept, one_c_position, recommended)
+             ad_dept, ad_title, one_c_dept, one_c_position, recommended, detail)
         VALUES (:key, :enterprise, :base_code, :tab_num, :fio, :reason, :ad_sam,
-                :ad_fio, :ad_dept, :ad_title, :one_c_dept, :one_c_position, :recommended)
+                :ad_fio, :ad_dept, :ad_title, :one_c_dept, :one_c_position,
+                :recommended, CAST(:detail AS JSONB))
         ON CONFLICT (key) DO UPDATE SET
             fio = EXCLUDED.fio,
             reason = EXCLUDED.reason,
@@ -350,6 +351,7 @@ class DbLinksStore:
             one_c_dept = EXCLUDED.one_c_dept,
             one_c_position = EXCLUDED.one_c_position,
             recommended = EXCLUDED.recommended,
+            detail = EXCLUDED.detail,
             detected_at = now(),
             resolved_at = NULL
         """
@@ -358,7 +360,7 @@ class DbLinksStore:
         """
         SELECT key, enterprise, base_code, tab_num, fio, reason, ad_sam, ad_fio,
                ad_dept, ad_title, one_c_dept, one_c_position, recommended,
-               detected_at, resolved_at
+               detail, detected_at, resolved_at
         FROM link_discrepancies
         WHERE (:reason = '' OR reason = :reason)
           AND (:only_open = false OR resolved_at IS NULL)
@@ -378,7 +380,7 @@ class DbLinksStore:
         """
         SELECT key, enterprise, base_code, tab_num, fio, reason, ad_sam, ad_fio,
                ad_dept, ad_title, one_c_dept, one_c_position, recommended,
-               detected_at, resolved_at
+               detail, detected_at, resolved_at
         FROM link_discrepancies
         WHERE key = ANY(:keys)
         """
@@ -491,8 +493,9 @@ class DbLinksStore:
             "one_c_dept": row[10],
             "one_c_position": row[11],
             "recommended": bool(row[12]),
-            "detected_at": row[13].isoformat() if row[13] else None,
-            "resolved_at": row[14].isoformat() if row[14] else None,
+            "detail": row[13] or {},
+            "detected_at": row[14].isoformat() if row[14] else None,
+            "resolved_at": row[15].isoformat() if row[15] else None,
         }
 
     def replace_discrepancies(self, rows: list[dict]) -> int:
@@ -511,6 +514,12 @@ class DbLinksStore:
                 "one_c_dept": row.get("one_c_dept"),
                 "one_c_position": row.get("one_c_position"),
                 "recommended": bool(row.get("recommended")),
+                # Кандидаты AD (при дубле ФИО в AD) и табельные номера остальных
+                # карточек 1С этой группы — нужны админу для выбора.
+                "detail": {
+                    "candidates": list(row.get("candidates") or []),
+                    "sibling_tabs": list(row.get("sibling_tabs") or []),
+                },
             }
             for row in rows
         ]
