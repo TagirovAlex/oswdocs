@@ -404,6 +404,28 @@ def _discrepancy_out(row: dict) -> DiscrepancyOut:
     )
 
 
+def _mark_directory_linked(row: dict, sam: str) -> None:
+    """Проставить ad_sam строке локального справочника после подтверждения.
+
+    Только наша БД; ошибка не должна срывать пакетное подтверждение."""
+    try:
+        from .main import app  # локально против циклического импорта
+
+        override = app.dependency_overrides.get(get_employee_sync_store)
+        store = (
+            override() if override is not None
+            else get_employee_sync_store(get_settings())
+        )
+        store.mark_linked(
+            str(row.get("enterprise") or ""),
+            str(row.get("tab_num") or ""),
+            sam,
+            str(row.get("base_code") or ""),
+        )
+    except Exception:
+        pass
+
+
 @router.get("/link_1c_ad/discrepancies")
 def list_link_discrepancies(
     reason: str = Query(default="", max_length=40, description="Фильтр по причине"),
@@ -527,6 +549,10 @@ def confirm_link_discrepancies(
             except Exception as exc:  # одна строка не должна валить пакет
                 errors.append("%s: %s" % (row["key"], exc))
                 continue
+            # Строку справочника помечаем связанной сразу, иначе создание заявки
+            # до следующего планового синка не увидит логин (как при подтверждении
+            # в форме). Ошибка здесь не критична — синк справочника поправит.
+            _mark_directory_linked(row, sam)
             linked += 1
             linked_sams.append(sam)
         if linked:

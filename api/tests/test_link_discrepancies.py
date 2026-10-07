@@ -329,3 +329,43 @@ def test_dismissed_keys_from_directory():
         ]
     )
     assert store.dismissed_keys() == {"ENT|zup_t1|002"}
+
+
+def test_bulk_confirm_marks_directory_row(client, admin_headers, discrepancies):
+    """После пакетного подтверждения строка справочника связана сразу.
+
+    Иначе создание заявки до следующего планового синка справочника снова
+    предложит подтвердить связь (и маршрут по профилю не соберётся)."""
+    from app.employee_sync import InMemoryEmployeeSyncStore, get_employee_sync_store
+    from app.main import app
+
+    emp = InMemoryEmployeeSyncStore()
+    emp.upsert_many(
+        [
+            {
+                "enterprise": ENT,
+                "base_code": "zup_t1",
+                "tab_num": "004",
+                "fio": FIO_1C_DUBL,
+                "ad_sam": None,
+                "ad_status": None,
+            }
+        ]
+    )
+    app.dependency_overrides[get_employee_sync_store] = lambda: emp
+    try:
+        store, _result = discrepancies
+        rows = store.list_discrepancies(reason=REASON_ONE_C_DUPLICATE, limit=50)
+        target = next(row for row in rows if row["tab_num"] == "004")
+        response = client.post(
+            "/link_1c_ad/discrepancies/confirm",
+            json={"keys": [target["key"]]},
+            headers=admin_headers,
+        )
+    finally:
+        app.dependency_overrides.pop(get_employee_sync_store, None)
+    assert response.status_code == 200, response.text
+    assert response.json()["linked"] == 1
+    row = emp.search(ENT, FIO_1C_DUBL, 10)[0]
+    assert row["ad_sam"] == "t.dubl"
+    assert row["ad_status"] == "linked"
