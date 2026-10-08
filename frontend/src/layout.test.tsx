@@ -298,10 +298,14 @@ describe("SedLayout", () => {
     expect(vi.mocked(getRequests).mock.calls.length).toBeGreaterThan(requestsCalls);
   });
 
-  // ФИО в таблице — ссылка на карточку сотрудника (employee_key от бэкенда):
-  // окно сотрудника открывается по клику, карточка заявки при этом НЕ открывается
-  // (событие гасится), иначе клик по ФИО открывал бы оба окна.
-  it("ФИО в таблице — ссылка на карточку сотрудника, карточка заявки не открывается", async () => {
+  // Контракт колонки «Сотрудник» в списке заявок изменился (коммиты f10f040 и
+  // f6bacde, 04.10.2026): ссылка на карточку сотрудника из таблицы убрана как
+  // лишняя, employee_key в ответе бэкенда больше не превращает ФИО в <a>.
+  // Проверяем новое поведение целиком: ссылки на карточку сотрудника в строке
+  // нет даже при employee_key, а клик по ФИО открывает карточку заявки (клик по
+  // строке) — окно сотрудника не открывается. Карточка сотрудника остаётся
+  // доступной из «Справочника сотрудников» и из карточки заявки (там ссылка есть).
+  it("ФИО в таблице — текст даже при employee_key: клик открывает карточку заявки", async () => {
     vi.mocked(getFolders).mockResolvedValue(folders);
     vi.mocked(getRequests).mockResolvedValue([
       { ...requestWith("Громов Игорь Олегович", "На согласовании"), employee_key: EMP_KEY },
@@ -310,12 +314,11 @@ describe("SedLayout", () => {
 
     renderWithTheme("hr");
     await waitFor(() => expect(screen.getByText("REQ-0001")).toBeInTheDocument());
-    const link = screen.getByRole("link", { name: "Громов Игорь Олегович" });
-    expect(link).toHaveAttribute("href", `?view=employee&key=${encodeURIComponent(EMP_KEY)}`);
-    fireEvent.click(link);
+    expect(screen.queryByRole("link", { name: "Громов Игорь Олегович" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText("Громов Игорь Олегович"));
     expect(open).toHaveBeenCalledTimes(1);
     expect(open).toHaveBeenCalledWith(
-      `?view=employee&key=${encodeURIComponent(EMP_KEY)}`,
+      "?view=request&id=REQ-0001",
       "_blank",
       expect.stringContaining("popup"),
     );

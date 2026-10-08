@@ -438,12 +438,15 @@ def test_duplicates_no_auto_merge(client, hr_headers, neg_mocks):
     assert all(i["needs_manual_review"] is True for i in body["items"])
 
 
-def test_duplicate_link_still_manual_review(client, hr_headers, neg_mocks):
+def test_duplicate_link_still_manual_review(client, admin_headers, neg_mocks):
     """Связка дубля создается (201), но требует ручной сверки; истина — 1С."""
+    # Заголовки админа, а не сотрудника ОК: контракт POST /link_1c_ad — привязка
+    # 1С-AD только админу (рядовой ОК получает 403, см. test_link_create_hr_403
+    # в test_auth_card.py). Раньше тест стучался от hr_headers и ждал 201.
     response = client.post(
         "/link_1c_ad",
         json={"enterprise": ENT, "base_code": "zup_t1", "tab_num": "003", "sam": "t.dubl"},
-        headers=hr_headers,
+        headers=admin_headers,
     )
     assert response.status_code == 201
     body = response.json()
@@ -505,7 +508,9 @@ def test_decision_comment_rules_422(client, hr_headers, owner_headers, neg_mocks
 
 # --- Полнота audit_log: каждое значимое действие пишет событие ---
 
-def test_audit_completeness_lifecycle(client, hr_headers, owner_headers, neg_mocks, route_single):
+def test_audit_completeness_lifecycle(
+    client, hr_headers, admin_headers, owner_headers, neg_mocks, route_single
+):
     """Счастливый путь пишет все значимые события; update/delete у журнала нет."""
     assert not hasattr(AuditLogger, "update")
     assert not hasattr(AuditLogger, "delete")
@@ -520,7 +525,9 @@ def test_audit_completeness_lifecycle(client, hr_headers, owner_headers, neg_moc
     client.post(
         "/link_1c_ad",
         json={"enterprise": ENT, "base_code": "zup_t1", "tab_num": "001", "sam": "t.ivan"},
-        headers=hr_headers,
+        # Создание связки — только админу (контракт POST /link_1c_ad); от hr_headers
+        # приходит 403 и событие link.create в журнал не пишется.
+        headers=admin_headers,
     )
     client.get(
         "/link_1c_ad",

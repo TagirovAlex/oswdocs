@@ -24,9 +24,12 @@ description: Use when editing FastAPI, SQLAlchemy, LDAP bind, 1C OData in SED. T
 - `employees.py` — `GET /employees?enterprise&q` (локальная таблица, `page`/`page_size`/`total`,
   уволенные отсекаются), `POST /employees/sync`, `POST /employees/hr-sync` (проход по регистру
   кадровых данных), `GET /employees/card`.
-- `routing.py`/`routing_store.py` — справочники маршрута и чистый подбор профиля по службе.
-- `requests.py` — `POST /requests/route/preview` (профиль/этапы/`notice`/`link_state`) и
-  `POST /requests/route/link-employee` (подтверждение связи при импорте).
+- `routing.py`/`routing_store.py` — справочники маршрута (в т.ч. бланки `blanks`/`blank_steps`) и
+  чистый подбор профиля по службе / шагов бланка (`pick_blank_steps`).
+- `requests.py` — `GET /requests/route/blanks` (селект бланка для ОК), `POST /requests/route/preview`
+  (бланк/профиль, этапы, `notice`, `link_state`) и `POST /requests/route/link-employee`
+  (подтверждение связи при импорте); создание заявки принимает `blank_id`, в заявку пишется снимок
+  бланка, автоподстановка по службе — за настройкой `blank_autopick`.
 - Границы вне роутеров создаём через `dependency_overrides`-совместимые фабрики — прямой
   вызов `get_*_store(get_settings())` в хелпере уводит офлайн-прогоны в боевую БД.
 - `requests.py, steps.py` — заявки, `route_origin=template|custom`, отметку ставит любой из `owner_group`.

@@ -9,7 +9,7 @@
 | Каталог хоста        | Назначение | Соответствие volumes в compose |
 |----------------------|------------|--------------------------------|
 | `/srv/sed/pgdata`    | Хост-конвенция для данных Postgres (PGDATA). В compose Фазы 0 используется именованный volume `pgdata` (`pgdata:/var/lib/postgresql/data` в сервисе `db`, без bind-опций — данными управляет Docker, переживают пересоздание контейнеров). Привязка к этому каталогу через `driver_opts: type=none o=bind device=/srv/sed/pgdata` — опционально на ВМ, не в scaffold. Внешнего порта у `db` нет. | именованный volume `pgdata` |
-| `/srv/sed/files`     | Хост-конвенция для прикрепленных файлов: сканы заявлений, DOCX/PDF бегунков (`documents`, `attachments`), бланки-шаблоны в `files/templates/` (`office_base.docx`, `line_base.docx` — производные от исходников `office.docx`/`line.docx` в репозитории; в `doc_templates` хранится только имя файла). В compose — именованный volume `files` (`files:/app/files` в `api`/`worker`). | именованный volume `files` |
+| `/srv/sed/files`     | Хост-конвенция для прикрепленных файлов: сканы заявлений, вложения (`attachments`), временные файлы печати бланка (`bypass_*_vcurrent.docx/pdf/qr` — создаются на печать и удаляются сразу после ответа; версии документов в БД не накапливаются). Файлов-шаблонов бланков нет: документ собирается из данных (`docs.build_blank_document`). В compose — именованный volume `files` (`files:/app/files` в `api`/`worker`). | именованный volume `files` |
 | `/srv/sed/backups`   | Локальное место выгрузки `pg_dump` перед отправкой в целевое хранилище бэкапов (см. регламент ниже). В compose — именованный volume `backups` (`backups:/app/backups:ro` в `api`/`worker`; в сервисе `db` НЕ монтируется — дамп делает задача приложения, не сам postgres). | именованный volume `backups` в `api`/`worker` |
 | `/srv/sed/certs`     | Корпоративные сертификат и ключ для `proxy` (Nginx, `:443`; `:80` — только редирект на `443`). НЕ именованный volume, а host-mount `${CERT_PATH:-/srv/sed/certs}:/etc/nginx/certs:ro` в сервисе `proxy` **только read-only**. Ключ в образы не копировать. | host-mount `${CERT_PATH}:/etc/nginx/certs:ro`, не volume |
 
@@ -37,8 +37,8 @@
 1. **БД** — логический дамп `pg_dump` (каталог `backups` как staging, затем —
    в целевое хранилище по регламенту ИТ). Дамп покрывает все таблицы,
    включая `settings`, `mail_templates`, `audit_log`.
-2. **`files`** — целиком (сканы, DOCX/PDF, бланки в `templates/`). Без них дамп БД неполон
-   (файлы связаны с `documents`/`attachments`).
+2. **`files`** — целиком (сканы, вложения). Файлы-шаблоны бланков в поставке нет (оформление печати
+   собирается из данных), поэтому ловить в бэкапе нечего; временные файлы печати удаляются.
 3. **`backups`** — сами выгрузки `pg_dump` хранятся/ротируются по регламенту.
 4. **`pgdata`** — дополнительно покрывается снапшотом ВМ/тома (физический уровень).
 5. **`certs` — не бэкапится** в общем порядке (приватный ключ); восстановление —
