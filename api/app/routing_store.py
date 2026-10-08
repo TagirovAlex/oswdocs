@@ -1,6 +1,7 @@
 # Хранилище справочников маршрута согласования (службы, профили, этапы,
-# состав этапа): таблицы ad_services/route_profiles/approval_stages/
-# stage_assignees/route_profile_steps из миграции 0008. Слой доступа — raw SQL
+# состав этапа, бланки): таблицы ad_services/route_profiles/approval_stages/
+# stage_assignees/route_profile_steps из миграции 0008 и blanks/blank_steps из
+# миграции 0012. Слой доступа — raw SQL
 # (SQLAlchemy text()), без ORM-моделей; приложение отдаёт маршрут наружу
 # функциями app.routing (подбор профиля и этапов), этот модуль только БД.
 # Запись только в свои таблицы и audit_log; в AD/1С не пишем, users — только
@@ -34,6 +35,8 @@ class RoutingUnavailable(Exception):
 # здесь (payload целиком в SQL не подставляется).
 _SERVICE_FIELDS = ("dept_name", "status", "blank_kind", "route_profile_id")
 _PROFILE_FIELDS = ("code", "name", "service_id", "active")
+# Бланки (миграция 0012): код уникален, макет — пресет печати office|line.
+_BLANK_FIELDS = ("code", "name", "doc_type_code", "description", "layout", "active")
 _STAGE_FIELDS = (
     "code",
     "title",
@@ -209,6 +212,68 @@ class DbRoutingStore:
         VALUES (:profile_id, :stage_id, :step_order, :optional_override,
                 :require_comment_override, now(), :actor)
         """
+    )
+
+    # Бланки (миграция 0012): step_count — счётчик из подзапроса, а не join с
+    # blank_steps (одна выборка справочника, а не запрос на каждый бланк).
+    _LIST_BLANKS = text(
+        """
+        SELECT b.id, b.code, b.name, b.doc_type_code, b.description, b.layout,
+               b.active, b.version, b.updated_at, b.updated_by,
+               (SELECT count(*) FROM blank_steps bs WHERE bs.blank_id = b.id) AS step_count
+        FROM blanks b
+        WHERE (CAST(:active_only AS BOOLEAN) = FALSE OR b.active = TRUE)
+        ORDER BY b.code, b.id
+        """
+    )
+    _BLANK_BY_ID = text(
+        """
+        SELECT id, code, name, doc_type_code, description, layout, active, version,
+               updated_at, updated_by
+        FROM blanks
+        WHERE id = :blank_id
+        """
+    )
+    _INSERT_BLANK = text(
+        """
+        INSERT INTO blanks (code, name, doc_type_code, description, layout, active,
+                            updated_at, updated_by)
+        VALUES (:code, :name, :doc_type_code, :description,
+                COALESCE(:layout, 'office'), COALESCE(:active, TRUE), now(), :actor)
+        RETURNING id
+        """
+    )
+    # Шаги бланка вместе с этапом (как у шагов профиля): выдаче заявке нужен
+    # текст этапа (title/stage_lines), вид исполнителя и режим шага
+    # (approval_mode, миграция 0013: параллельный — любой из ответственных,
+    # последовательный — все), админке — состав.
+    _LIST_BLANK_STEPS = text(
+        """
+        SELECT bs.blank_id, bs.stage_id, bs.step_order, bs.optional_override,
+               bs.require_comment_override, bs.approval_mode,
+               s.code AS stage_code, s.title AS title, s.stage_lines, s.owner_kind,
+               s.owner_group, s.optional, s.print_assignee, s.require_comment,
+               s.active AS stage_active
+        FROM blank_steps bs
+        JOIN approval_stages s ON s.id = bs.stage_id
+        WHERE bs.blank_id = :blank_id
+        ORDER BY bs.step_order, s.id
+        """
+    )
+    _DELETE_BLANK_STEPS = text("DELETE FROM blank_steps WHERE blank_id = :blank_id")
+    _INSERT_BLANK_STEP = text(
+        """
+        INSERT INTO blank_steps (blank_id, stage_id, step_order, optional_override,
+                                 require_comment_override, updated_at)
+        VALUES (:blank_id, :stage_id, :step_order, :optional_override,
+                :require_comment_override, now())
+        """
+    )
+    # Версия бланка растёт при замене состава шагов: blank_version из снимка
+    # заявки должен отличать выданные составы.
+    _BUMP_BLANK_VERSION = text(
+        "UPDATE blanks SET version = version + 1, updated_at = now(), updated_by = :actor "
+        "WHERE id = :blank_id"
     )
 
     _LIST_STAGE_ASSIGNEES = text(
@@ -585,6 +650,140 @@ class DbRoutingStore:
             self._audit(
                 session, actor, "profile.steps.update", "profile", profile_id,
                 "шаги профиля обновлены",
+                {"steps": len(wanted), "stage_ids": stage_ids},
+            )
+            session.commit()
+
+    # --- Бланки (миграция 0012: blanks/blank_steps) ---
+
+    def list_blanks(self, active_only: bool = False) -> list[dict]:
+        """Бланки из справочника (по умолчанию — все, включая отключённые);
+        step_count — число шагов бланка."""
+        with self._session() as session:
+            rows = session.execute(self._LIST_BLANKS, {"active_only": active_only}).all()
+        return _rows_to_dicts(rows)
+
+    def blank_by_id(self, blank_id: int) -> dict | None:
+        """Бланк по id; отсутствует — None."""
+        with self._session() as session:
+            row = session.execute(self._BLANK_BY_ID, {"blank_id": blank_id}).first()
+        return dict(row._mapping) if row is not None else None
+
+    def create_blank(self, data: dict) -> int:
+        """Создать бланк с аудитом (blank.create). Возвращает id.
+
+        Дубль code — 409 на границе (роутер сверяется со списком бланков), здесь
+        нарушение UNIQUE приходит обёрнутым в RoutingUnavailable (503)."""
+        actor = str(data.get("actor") or "")
+        params = self._payload(data, _BLANK_FIELDS)
+        with self._session() as session:
+            row = session.execute(
+                self._INSERT_BLANK,
+                {
+                    "code": params["code"],
+                    "name": params["name"],
+                    "doc_type_code": params["doc_type_code"],
+                    "description": params["description"],
+                    "layout": params["layout"],
+                    "active": params["active"],
+                    "actor": actor,
+                },
+            ).first()
+            blank_id = int(row[0]) if row is not None else 0
+            self._audit(
+                session, actor, "blank.create", "blank", blank_id,
+                "бланк создан", {"fields": sorted(_BLANK_FIELDS)},
+            )
+            session.commit()
+        return blank_id
+
+    def update_blank(self, blank_id: int, data: dict) -> None:
+        """Правка бланка: в SET только поля из белого списка (пустой payload — no-op)."""
+        fields = tuple(col for col in _BLANK_FIELDS if col in data)
+        if not fields:
+            return
+        actor = str(data.get("actor") or "")
+        params = self._payload(data, fields)
+        params.update({"id": blank_id, "actor": actor})
+        with self._session() as session:
+            session.execute(self._update_sql("blanks", fields), params)
+            self._audit(
+                session, actor, "blank.update", "blank", blank_id,
+                "бланк изменён", {"fields": sorted(fields)},
+            )
+            session.commit()
+
+    def list_blank_steps(self, blank_id: int) -> list[dict]:
+        """Шаги бланка вместе с этапом (по step_order, id этапа): выдаче заявке
+        нужен текст этапа и вид исполнителя, stage_lines всегда списком."""
+        with self._session() as session:
+            rows = session.execute(
+                self._LIST_BLANK_STEPS, {"blank_id": blank_id}
+            ).all()
+        items = _rows_to_dicts(rows)
+        for item in items:
+            item["stage_lines"] = _stage_lines(item.get("stage_lines"))
+        return items
+
+    def set_blank_steps(self, blank_id: int, items: list[dict], actor: str) -> None:
+        """Замена состава шагов бланка одной транзакцией: прежние шаги удаляются,
+        переданные — вставляются в порядке step_order, версия бланка растёт
+        (аудит blank.steps.update).
+
+        items — список {stage_id, step_order, optional_override,
+        require_comment_override}; optional_override/require_comment_override = None
+        означают «взять из этапа». Этап вне маршрутов (active = FALSE) или
+        несуществующий — 422 с перечнем (как у профиля): такой шаг не попал бы
+        ни в одну заявку. Уникальность порядка в бланке (PK (blank_id,
+        step_order)) проверяет схема запроса на границе — дубль порядка до сюда
+        не доходит.
+        """
+        wanted: list[dict] = []
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
+            stage_id = _int_or_none(item.get("stage_id"))
+            step_order = _int_or_none(item.get("step_order"))
+            if not stage_id or not step_order or step_order < 1:
+                continue
+            wanted.append(
+                {
+                    "stage_id": stage_id,
+                    "step_order": step_order,
+                    "optional_override": _override_or_none(item.get("optional_override")),
+                    "require_comment_override": _override_or_none(
+                        item.get("require_comment_override")
+                    ),
+                }
+            )
+        stage_ids = sorted({item["stage_id"] for item in wanted})
+        actor = str(actor or "")
+        with self._session() as session:
+            known: set[int] = set()
+            if stage_ids:
+                rows = session.execute(
+                    self._ACTIVE_STAGE_IDS, {"ids": stage_ids}
+                ).all()
+                known = {int(row[0]) for row in rows}
+            unknown = [stage_id for stage_id in stage_ids if stage_id not in known]
+            if unknown:
+                # 422 до DELETE: состав бланка остаётся прежним.
+                raise HTTPException(
+                    status_code=422,
+                    detail="Шаги бланка: этапы не найдены или отключены: %s"
+                    % ", ".join(str(stage_id) for stage_id in unknown),
+                )
+            session.execute(self._DELETE_BLANK_STEPS, {"blank_id": blank_id})
+            for item in sorted(wanted, key=lambda row: row["step_order"]):
+                session.execute(
+                    self._INSERT_BLANK_STEP, {"blank_id": blank_id, **item}
+                )
+            session.execute(
+                self._BUMP_BLANK_VERSION, {"blank_id": blank_id, "actor": actor}
+            )
+            self._audit(
+                session, actor, "blank.steps.update", "blank", blank_id,
+                "шаги бланка обновлены",
                 {"steps": len(wanted), "stage_ids": stage_ids},
             )
             session.commit()

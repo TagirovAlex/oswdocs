@@ -1,23 +1,29 @@
 // Админка настроек: контент (руководитель ОК + админ) и инфра (только админ).
 // Значения — из settings БД (GET/PUT /api/settings для админа, /settings/content
 // для руководителя ОК), в коде не хардкодятся. Вкладки: Процесс / Справочники /
-// Шаблоны (контент) и Инфра / Регламенты / Доступ и роли (только админ).
-import { useEffect, useRef, useState } from "react";
-import { base64ToBlob, getDocTypes } from "./requests-client";
-import type { DocType } from "./requests-client";
+// Шаблоны (контент) и Бланки / Инфра / Регламенты / Доступ и роли / Архивация
+// (только админ). Вкладка «Бланки» — справочник бланков из requests-client.
+import { useEffect, useState } from "react";
+import {
+  createBlank,
+  getBlankSteps,
+  getBlanks,
+  getDocTypes,
+  getRoutingCatalogs,
+  setBlankSteps,
+  updateBlank,
+  updateRoutingStage,
+} from "./requests-client";
+import type { BlankRow, BlankStepRow, DocType, RoutingCatalogStage } from "./requests-client";
 import {
   createDocType,
   deleteBackup,
-  deleteDocTemplateFile,
   deleteDocType,
   downloadBackup,
-  downloadDocTemplateFile,
   getArchiveSettings,
   getSettings,
   getSettingsContent,
   listBackups,
-  previewDocTemplateFile,
-  getAdTitles,
   runBackup,
   saveArchiveSettings,
   saveSettings,
@@ -25,16 +31,13 @@ import {
   syncAdGroups,
   syncEnterprises,
   updateDocType,
-  uploadDocTemplateFile,
 } from "./settings-client";
 import type {
   ArchiveSettingsData,
   BackupFile,
   ContentSettingsData,
-  PositionSet,
   ScheduleReglament,
   SettingsData,
-  SettingsDocTemplate,
   SettingsEnterprise,
   SettingsMailTemplate,
   SettingsOnecBase,
@@ -42,6 +45,7 @@ import type {
   SettingsTemplateStep,
   StepGroupRef,
 } from "./settings-client";
+import { RichTextEditor, richTextToPlain } from "./rich-text";
 import type { Role } from "./api-mock";
 
 interface AdminSettingsProps {
@@ -51,12 +55,13 @@ interface AdminSettingsProps {
 }
 
 // Вкладки админки: контент (Процесс/Справочники/Шаблоны) + Инфра, Регламенты,
-// Доступ и роли и Архивация (бэкапы) — только админ.
+// Доступ и роли, Архивация и Бланки — только админ.
 const CONTENT_TABS = ["Процесс", "Справочники", "Шаблоны"] as const;
 const ALL_TABS = [
   "Процесс",
   "Справочники",
   "Шаблоны",
+  "Бланки",
   "Инфра",
   "Регламенты",
   "Доступ и роли",
@@ -447,597 +452,6 @@ function TemplatesEditor(props: { value: SettingsTemplate[]; onChange: (v: Setti
   );
 }
 
-// Редактор бланков бегунков (doc_templates): служба + категория + либо тело DOCX
-// (Jinja, текстовый фолбэк, когда file не задан), либо .docx-файл (загрузка/
-// скачивание/замена/удаление + предпросмотр рендера на тестовых данных).
-// Файл — в FILES_DIR/templates/, в settings хранится только имя (file).
-function DocTemplatesEditor(props: {
-  value: SettingsDocTemplate[];
-  positionSets: PositionSet[];
-  onChange: (v: SettingsDocTemplate[]) => void;
-}) {
-  const { value, positionSets, onChange } = props;
-  // Скрытые input-ы загрузки .docx (по индексу карточки): общие для «Загрузить
-  // .docx» и «Заменить» (в один момент в карточке видна одна из кнопок).
-  const fileInputs = useRef<(HTMLInputElement | null)[]>([]);
-  const [fileError, setFileError] = useState<string>("");
-
-  function update(index: number, patch: Partial<SettingsDocTemplate>): void {
-    onChange(value.map((doc, i) => (i === index ? { ...doc, ...patch } : doc)));
-  }
-
-  // Загрузка .docx: новая (previous нет) либо замена (previous=текущий file).
-  // При успехе — имя файла в карточку; текстовый body остаётся фолбэком.
-  async function handleUpload(index: number, file: File | null): Promise<void> {
-    if (!file) return;
-    setFileError("");
-    try {
-      const previous = value[index]?.file ?? undefined;
-      const result = await uploadDocTemplateFile(file, previous);
-      update(index, { file: result.name });
-    } catch (e: unknown) {
-      setFileError(e instanceof Error ? e.message : "Ошибка загрузки файла бланка");
-    } finally {
-      // Сброс значения input, чтобы повторный выбор того же файла сработал.
-      const input = fileInputs.current[index];
-      if (input) input.value = "";
-    }
-  }
-
-  // Скачивание файла бланка (GET .../download).
-  async function handleDownload(name: string): Promise<void> {
-    setFileError("");
-    try {
-      await downloadDocTemplateFile(name);
-    } catch (e: unknown) {
-      setFileError(e instanceof Error ? e.message : "Ошибка скачивания файла бланка");
-    }
-  }
-
-  // Удаление файла бланка (DELETE) с подтверждением; при успехе file=null —
-  // бланк снова редактируется текстом (фолбэк).
-  async function handleDelete(index: number, name: string): Promise<void> {
-    if (!window.confirm(`Удалить файл бланка ${name}? Действие необратимо.`)) return;
-    setFileError("");
-    try {
-      await deleteDocTemplateFile(name);
-      update(index, { file: null });
-    } catch (e: unknown) {
-      setFileError(e instanceof Error ? e.message : "Ошибка удаления файла бланка");
-    }
-  }
-
-  // Предпросмотр рендера файла на тестовых данных: PDF открываем в новом окне
-  // (base64 → blob), generated=false с reason — текст в редакторе.
-  async function handlePreview(name: string): Promise<void> {
-    setFileError("");
-    try {
-      const result = await previewDocTemplateFile(name);
-      if (result.generated && result.pdf_b64) {
-        const pdfUrl = URL.createObjectURL(base64ToBlob(result.pdf_b64, "application/pdf"));
-        window.open(pdfUrl, "_blank");
-        setTimeout(() => URL.revokeObjectURL(pdfUrl), 60_000);
-      } else {
-        setFileError(result.reason ?? "Бланк не сгенерирован");
-      }
-    } catch (e: unknown) {
-      setFileError(e instanceof Error ? e.message : "Ошибка предпросмотра бланка");
-    }
-  }
-
-  return (
-    <fieldset>
-      <legend>Бланки бегунков (doc_templates)</legend>
-      {value.length === 0 && <div className="sed-note">не задано</div>}
-      {value.map((doc, i) => {
-        // Имя файла бланка (null/отсутствует — текстовый body-фолбэк).
-        const fileName = doc.file ?? null;
-        return (
-          <div key={i} className="sed-editor-card">
-            <label className="sed-field">
-              Служба
-              <input
-                aria-label={`Служба бланка ${i + 1}`}
-                value={doc.service}
-                onChange={(e) => update(i, { service: e.target.value })}
-              />
-            </label>
-            <label className="sed-field">
-              Категория
-              <input
-                aria-label={`Категория бланка ${i + 1}`}
-                value={doc.category}
-                onChange={(e) => update(i, { category: e.target.value })}
-              />
-            </label>
-            <label className="sed-field">
-              Набор должностей
-              <select
-                aria-label={`Набор должностей бланка ${i + 1}`}
-                value={doc.position_set ?? ""}
-                onChange={(e) => update(i, { position_set: e.target.value || null })}
-              >
-                <option value="">— по умолчанию —</option>
-                {positionSets.map((s) => (
-                  <option key={s.name} value={s.name}>
-                    {s.name || "— без названия —"}
-                  </option>
-                ))}
-              </select>
-            </label>
-            {fileName ? (
-              <div className="sed-mt-8">
-                <div className="sed-note sed-mt-0">
-                  Файл бланка: <strong>{fileName}</strong>
-                </div>
-                <div className="sed-toolbar sed-mt-8">
-                  <button
-                    type="button"
-                    className="sed-btn sed-btn--neutral"
-                    aria-label={`Скачать файл бланка ${i + 1}`}
-                    onClick={() => void handleDownload(fileName)}
-                  >
-                    Скачать
-                  </button>
-                  <label className="sed-btn sed-btn--neutral">
-                    Заменить
-                    <input
-                      type="file"
-                      accept=".docx"
-                      aria-label={`Заменить файл бланка ${i + 1}`}
-                      style={{ display: "none" }}
-                      ref={(el) => {
-                        fileInputs.current[i] = el;
-                      }}
-                      onChange={(e) => void handleUpload(i, e.target.files?.[0] ?? null)}
-                    />
-                  </label>
-                  <button
-                    type="button"
-                    className="sed-btn sed-btn--danger"
-                    aria-label={`Удалить файл бланка ${i + 1}`}
-                    onClick={() => void handleDelete(i, fileName)}
-                  >
-                    Удалить
-                  </button>
-                  <button
-                    type="button"
-                    className="sed-btn sed-btn--neutral"
-                    onClick={() => void handlePreview(fileName)}
-                  >
-                    Предпросмотр
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <>
-                <label className="sed-field">
-                  Тело бегунка (Jinja-плейсхолдеры)
-                  <textarea
-                    aria-label={`Тело бланка ${i + 1}`}
-                    rows={4}
-                    value={doc.body}
-                    onChange={(e) => update(i, { body: e.target.value })}
-                  />
-                </label>
-                <div className="sed-toolbar sed-mt-8">
-                  <label className="sed-btn">
-                    Загрузить .docx
-                    <input
-                      type="file"
-                      accept=".docx"
-                      aria-label={`Загрузить файл бланка ${i + 1}`}
-                      style={{ display: "none" }}
-                      ref={(el) => {
-                        fileInputs.current[i] = el;
-                      }}
-                      onChange={(e) => void handleUpload(i, e.target.files?.[0] ?? null)}
-                    />
-                  </label>
-                </div>
-              </>
-            )}
-            <div className="sed-toolbar sed-mt-8">
-              <button
-                type="button"
-                className="sed-btn sed-btn--ghost"
-                onClick={() => onChange(value.filter((_, j) => j !== i))}
-              >
-                Удалить бланк
-              </button>
-            </div>
-          </div>
-        );
-      })}
-      {fileError && (
-        <div role="alert" className="sed-mt-8">
-          {fileError}
-        </div>
-      )}
-      <div className="sed-toolbar sed-mt-12">
-        <button
-          type="button"
-          className="sed-btn"
-          onClick={() => onChange([...value, { service: "", category: "", body: "" }])}
-        >
-          Добавить бланк
-        </button>
-      </div>
-    </fieldset>
-  );
-}
-
-// Редактор наборов должностей (position_sets): именованный набор + список
-// должностей; подсказки — титулы AD из кэша (datalist); добавить/удалить.
-// Массовый выбор — модалка «Выбрать из справочника» (поиск + чекбоксы,
-// нижняя панель выбранных, ОК добавляет всех; как выбор исполнителей).
-function PositionSetsEditor(props: {
-  value: PositionSet[];
-  titles: string[];
-  onChange: (v: PositionSet[]) => void;
-}) {
-  const { value, titles, onChange } = props;
-  // Модалка выбора: индекс набора, строка поиска, отмеченные (порядок кликов),
-  // страница (выбор сохраняется при листании — один проход на всё).
-  const [modalSet, setModalSet] = useState<number | null>(null);
-  const [modalQuery, setModalQuery] = useState<string>("");
-  const [modalChecked, setModalChecked] = useState<string[]>([]);
-  const [modalPage, setModalPage] = useState<number>(1);
-  function updateSet(index: number, patch: Partial<PositionSet>): void {
-    onChange(value.map((s, i) => (i === index ? { ...s, ...patch } : s)));
-  }
-  function openModal(index: number): void {
-    setModalSet(index);
-    setModalQuery("");
-    setModalChecked([]);
-    setModalPage(1);
-  }
-  function closeModal(): void {
-    setModalSet(null);
-    setModalQuery("");
-    setModalChecked([]);
-    setModalPage(1);
-  }
-  function toggleModalChecked(title: string): void {
-    setModalChecked((prev) =>
-      prev.includes(title) ? prev.filter((t) => t !== title) : [...prev, title],
-    );
-  }
-  // ОК модалки: добавить отмеченные в набор (без дублей), закрыть.
-  function confirmModalChecked(): void {
-    if (modalSet === null || modalChecked.length === 0) return;
-    const set = value[modalSet];
-    if (!set) {
-      closeModal();
-      return;
-    }
-    const merged = [...set.positions];
-    modalChecked.forEach((title) => {
-      if (!merged.includes(title)) merged.push(title);
-    });
-    updateSet(modalSet, { positions: merged });
-    closeModal();
-  }
-  // Номера страниц модалки: при >10 — первые пять и последние пять
-  // с разрывом, иначе все подряд (как пейджер конструктора).
-  function modalPagerPages(current: number, total: number): Array<number | "…"> {
-    if (total <= 1) return [1];
-    const set = new Set<number>();
-    if (total <= 10) {
-      for (let i = 1; i <= total; i++) set.add(i);
-    } else {
-      for (let i = 1; i <= 5; i++) set.add(i);
-      for (let i = Math.max(1, total - 4); i <= total; i++) set.add(i);
-    }
-    const sorted = [...set].sort((a, b) => a - b);
-    const out: Array<number | "…"> = [];
-    let prev = 0;
-    for (const page of sorted) {
-      if (prev !== 0 && page - prev > 1) out.push("…");
-      out.push(page);
-      prev = page;
-    }
-    return out;
-  }
-  // Выбрать все / отменить все на текущей странице модалки.
-  function toggleModalPageAll(pageTitles: string[], allChecked: boolean): void {
-    if (allChecked) {
-      const page = new Set(pageTitles);
-      setModalChecked((prev) => prev.filter((t) => !page.has(t)));
-    } else {
-      setModalChecked((prev) => [...prev, ...pageTitles.filter((t) => !prev.includes(t))]);
-    }
-  }
-  // Поиск по справочнику (регистр не важен) + пагинация: выбор живёт
-  // между страницами, за один проход отмечается всё нужное.
-  const MODAL_PAGE_SIZE = 50;
-  const modalMatches = titles.filter((t) =>
-    t.toLowerCase().includes(modalQuery.trim().toLowerCase()),
-  );
-  const modalPages = Math.max(1, Math.ceil(modalMatches.length / MODAL_PAGE_SIZE));
-  const modalPageSafe = Math.min(modalPage, modalPages);
-  const modalShown = modalMatches.slice(
-    (modalPageSafe - 1) * MODAL_PAGE_SIZE,
-    modalPageSafe * MODAL_PAGE_SIZE,
-  );
-  // Шапка «выбрать все»: отмечены ли все строки текущей страницы.
-  const modalPageChecked =
-    modalShown.length > 0 && modalShown.every((t) => modalChecked.includes(t));
-  return (
-    <fieldset>
-      <legend>Наборы должностей (для бланков)</legend>
-      <div className="sed-note">
-        Бланк ссылается на набор по названию; должность сотрудника ищется
-        в наборе без учёта регистра. Пустой набор ничему не соответствует.
-      </div>
-      {value.length === 0 && <div className="sed-note">не задано</div>}
-      {value.map((set, i) => (
-        <div key={i} className="sed-editor-card">
-          <label className="sed-field">
-            Название набора
-            <input
-              aria-label={`Название набора ${i + 1}`}
-              value={set.name}
-              onChange={(e) => updateSet(i, { name: e.target.value })}
-            />
-          </label>
-          {set.positions.map((pos, j) => (
-            <div key={j} className="sed-editor-row sed-editor-row--center">
-              <input
-                aria-label={`Должность ${i + 1}.${j + 1}`}
-                placeholder="Должность (title из AD)"
-                list="sed-ad-titles"
-                value={pos}
-                onChange={(e) =>
-                  updateSet(i, {
-                    positions: set.positions.map((p, k) => (k === j ? e.target.value : p)),
-                  })
-                }
-              />
-              <button
-                type="button"
-                className="sed-btn sed-btn--ghost"
-                onClick={() =>
-                  updateSet(i, { positions: set.positions.filter((_, k) => k !== j) })
-                }
-              >
-                Удалить должность
-              </button>
-            </div>
-          ))}
-          <div className="sed-toolbar sed-mt-8">
-            <button type="button" className="sed-btn" onClick={() => openModal(i)}>
-              Выбрать из справочника
-            </button>
-            <button
-              type="button"
-              className="sed-btn"
-              onClick={() => updateSet(i, { positions: [...set.positions, ""] })}
-            >
-              Добавить должность
-            </button>
-            <button
-              type="button"
-              className="sed-btn sed-btn--ghost"
-              onClick={() => updateSet(i, { positions: [] })}
-              disabled={set.positions.length === 0}
-            >
-              Очистить список
-            </button>
-            <button
-              type="button"
-              className="sed-btn sed-btn--ghost"
-              onClick={() => onChange(value.filter((_, k) => k !== i))}
-            >
-              Удалить набор
-            </button>
-          </div>
-        </div>
-      ))}
-      <datalist id="sed-ad-titles">
-        {titles.map((t) => (
-          <option key={t} value={t} />
-        ))}
-      </datalist>
-      <div className="sed-toolbar sed-mt-12">
-        <button
-          type="button"
-          className="sed-btn"
-          onClick={() => onChange([...value, { name: "", positions: [] }])}
-        >
-          Добавить набор
-        </button>
-      </div>
-      {modalSet !== null && value[modalSet] && (
-        <div className="sed-modal-backdrop" onClick={closeModal}>
-          <div
-            className="sed-modal"
-            role="dialog"
-            aria-modal="true"
-            aria-label={`Выбор должностей — ${value[modalSet].name || "набор"}`}
-            onClick={(e) => e.stopPropagation()}
-            onKeyDown={(e) => {
-              if (e.key === "Escape") closeModal();
-            }}
-          >
-            <h4>Выбор должностей{value[modalSet].name ? ` — ${value[modalSet].name}` : ""}</h4>
-            <div className="sed-fieldrow">
-              <label className="sed-field">
-                Поиск по справочнику
-                <input
-                  autoFocus
-                  aria-label="Поиск должности"
-                  placeholder="Должность"
-                  value={modalQuery}
-                  onChange={(e) => {
-                    setModalQuery(e.target.value);
-                    setModalPage(1);
-                  }}
-                />
-              </label>
-              {/* ОК сверху (дубль нижней): при большом выборе не нужно мотать вниз. */}
-              <button
-                type="button"
-                className="sed-btn"
-                onClick={confirmModalChecked}
-                disabled={modalChecked.length === 0}
-                title="Добавить выбранные в набор"
-              >
-                ОК
-              </button>
-              <button
-                type="button"
-                className="sed-btn sed-btn--ghost"
-                onClick={() => setModalChecked([])}
-                disabled={modalChecked.length === 0}
-                title="Снять все отметки"
-              >
-                Очистить
-              </button>
-            </div>
-            <div className="sed-pager sed-pager--single" aria-label="Пагинация должностей">
-              <button
-                type="button"
-                className="sed-btn"
-                aria-label="Первая страница"
-                disabled={modalPageSafe <= 1}
-                onClick={() => setModalPage(1)}
-              >
-                Первая
-              </button>
-              <button
-                type="button"
-                className="sed-btn"
-                aria-label="Предыдущая страница"
-                disabled={modalPageSafe <= 1}
-                onClick={() => setModalPage(modalPageSafe - 1)}
-              >
-                ← Назад
-              </button>
-              {modalPagerPages(modalPageSafe, modalPages).map((page, index) =>
-                page === "…" ? (
-                  <span key={`ell-${index}`} aria-hidden="true">
-                    …
-                  </span>
-                ) : (
-                  <button
-                    key={page}
-                    type="button"
-                    className="sed-btn"
-                    aria-label={`Страница ${page}`}
-                    aria-current={page === modalPageSafe ? "page" : undefined}
-                    disabled={page === modalPageSafe}
-                    onClick={() => setModalPage(page)}
-                  >
-                    {page}
-                  </button>
-                ),
-              )}
-              <button
-                type="button"
-                className="sed-btn"
-                aria-label="Следующая страница"
-                disabled={modalPageSafe >= modalPages}
-                onClick={() => setModalPage(modalPageSafe + 1)}
-              >
-                Вперёд →
-              </button>
-              <button
-                type="button"
-                className="sed-btn"
-                aria-label="Последняя страница"
-                disabled={modalPageSafe >= modalPages}
-                onClick={() => setModalPage(modalPages)}
-              >
-                Последняя
-              </button>
-              <span role="status">
-                стр {modalPageSafe} из {modalPages}
-              </span>
-            </div>
-            {modalShown.length > 0 && (
-              <table className="sed-table" aria-label="Должности справочника">
-                <thead>
-                  <tr>
-                    <th scope="col">
-                      <input
-                        type="checkbox"
-                        aria-label="Выбрать все на странице"
-                        checked={modalPageChecked}
-                        onChange={() => toggleModalPageAll(modalShown, modalPageChecked)}
-                      />
-                    </th>
-                    <th scope="col">Должность</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {modalShown.map((title) => (
-                    <tr key={title}>
-                      <td>
-                        <input
-                          type="checkbox"
-                          aria-label={`Выбрать ${title}`}
-                          checked={modalChecked.includes(title)}
-                          onChange={() => toggleModalChecked(title)}
-                        />
-                      </td>
-                      <td>{title}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-            {modalShown.length === 0 && (
-              <div className="sed-note">Ничего не найдено</div>
-            )}
-            <div className="sed-block" aria-label="Выбранные должности">
-              {modalChecked.length === 0 && <div className="sed-note">Не выбрано</div>}
-              <ul className="sed-list">
-                {modalChecked.map((title) => (
-                  <li key={title}>
-                    {title}{" "}
-                    <button
-                      type="button"
-                      aria-label={`Убрать ${title}`}
-                      title="Убрать из выбранных"
-                      onClick={() => toggleModalChecked(title)}
-                      className="sed-btn sed-btn--ghost"
-                    >
-                      Убрать
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            </div>
-            <div className="sed-toolbar sed-mt-8">
-              <button
-                type="button"
-                className="sed-btn sed-btn--ghost"
-                onClick={() => setModalChecked([])}
-                disabled={modalChecked.length === 0}
-              >
-                Очистить
-              </button>
-              <span className="sed-toolbar__spacer" />
-              <button
-                type="button"
-                className="sed-btn"
-                onClick={confirmModalChecked}
-                disabled={modalChecked.length === 0}
-              >
-                ОК
-              </button>
-              <button type="button" className="sed-btn sed-btn--ghost" onClick={closeModal}>
-                Отмена
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-    </fieldset>
-  );
-}
-
 // Редактор писем (mail_templates): код события + тема + HTML-тело (Jinja).
 function MailTemplatesEditor(props: { value: SettingsMailTemplate[]; onChange: (v: SettingsMailTemplate[]) => void }) {
   const { value, onChange } = props;
@@ -1356,6 +770,642 @@ function DocTypesEditor() {
   );
 }
 
+// Карточка бланка в админке: код (только при создании — потом неизменен),
+// название, вид документа, описание, макет печати и активность.
+interface BlankForm {
+  // null — новый бланк; число — правка существующего.
+  id: number | null;
+  code: string;
+  name: string;
+  doc_type_code: string;
+  description: string;
+  layout: "office" | "line";
+  active: boolean;
+}
+
+// Пустая карточка нового бланка; макет по умолчанию office — как в контракте
+// API (BlankCatalogIn.layout), наборы должностей/имена — только из справочников.
+const EMPTY_BLANK_FORM: BlankForm = {
+  id: null,
+  code: "",
+  name: "",
+  doc_type_code: "",
+  description: "",
+  layout: "office",
+  active: true,
+};
+
+// Варианты переопределения флага шага бланка: пусто — «как в этапе» (в БД null),
+// да/нет — принудительное значение флага для этого бланка.
+const OVERRIDE_CHOICES: readonly { value: string; title: string }[] = [
+  { value: "", title: "как в этапе" },
+  { value: "true", title: "да" },
+  { value: "false", title: "нет" },
+];
+
+// Переопределение флага шага (null — «как в этапе») → значение селекта формы.
+function overrideValue(flag: boolean | null): string {
+  return flag === null || flag === undefined ? "" : String(flag);
+}
+
+// Значение селекта формы → переопределение флага шага ("" — «как в этапе»).
+function overrideFlag(value: string): boolean | null {
+  return value === "" ? null : value === "true";
+}
+
+// Вкладка «Бланки» (только админ): справочник бланков — карточка (код, название,
+// вид документа, описание, макет печати, активность) и состав шагов (добавление
+// этапа из справочника, порядок, необязательный этап, обязательный комментарий).
+// Текст этапа и его пунктов правится визуальным редактором (HTML уходит в те же
+// поля справочника этапов). Файлов-шаблонов .docx нет: печать собирается из данных.
+function BlanksEditor() {
+  const [blanks, setBlanks] = useState<BlankRow[]>([]);
+  // Активные этапы-кандидаты для состава бланка (GET /settings/routing/catalogs).
+  const [stages, setStages] = useState<RoutingCatalogStage[]>([]);
+  // Виды документов (doc_types) — значение doc_type_code бланка.
+  const [docTypes, setDocTypes] = useState<DocType[]>([]);
+  const [loadError, setLoadError] = useState<string>("");
+  const [error, setError] = useState<string>("");
+  const [saved, setSaved] = useState<string>("");
+  const [busy, setBusy] = useState<boolean>(false);
+  const [form, setForm] = useState<BlankForm>(EMPTY_BLANK_FORM);
+  // id выбранного бланка (null — состав не открыт).
+  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [steps, setSteps] = useState<BlankStepRow[]>([]);
+  // Этап, выбранный в селекте добавления в состав бланка.
+  const [stageToAdd, setStageToAdd] = useState<string>("");
+  // Черновик текста этапа по id этапа (визуальный редактор): заполняется при
+  // первом раскрытии блока, дальше живёт в состоянии до сохранения или смены бланка.
+  const [stageText, setStageText] = useState<Record<number, { title: string; lines: string[] }>>({});
+  // id этапа, у которого раскрыт блок «Текст этапа» (null — закрыты все).
+  const [textOpen, setTextOpen] = useState<number | null>(null);
+
+  // Список бланков после любой правки (step_count/version из ответа сервера).
+  function loadBlanks(): void {
+    getBlanks()
+      .then((items) => {
+        setBlanks(items);
+        setLoadError("");
+      })
+      .catch((e: unknown) =>
+        setLoadError(e instanceof Error ? e.message : "Ошибка загрузки справочника бланков"),
+      );
+  }
+
+  useEffect(() => {
+    loadBlanks();
+    // Этапы и виды документов — для добавления шага и выбора вида документа.
+    // Справочник админский; недоступность не ломает список бланков.
+    getRoutingCatalogs()
+      .then((catalogs) => setStages((catalogs.stages ?? []).filter((s) => s.active)))
+      .catch(() => setStages([]));
+    getDocTypes(false)
+      .then((items) => setDocTypes(items))
+      .catch(() => setDocTypes([]));
+  }, []);
+
+  // Состав выбранного бланка — по его id (состав пустым не бывает: шаги нет — []).
+  function loadSteps(blankId: number): void {
+    getBlankSteps(blankId)
+      .then((items) => {
+        setSteps(items);
+        setStageText({});
+        setTextOpen(null);
+      })
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : "Ошибка загрузки состава бланка"));
+  }
+
+  function selectBlank(blankId: number): void {
+    setSelectedId(blankId);
+    setError("");
+    setSaved("");
+    loadSteps(blankId);
+  }
+
+  // Создание/правка карточки бланка. Код неизменен после создания — при правке
+  // он показывается read-only, поэтому в PUT не уходит.
+  async function handleSaveForm(): Promise<void> {
+    const name = form.name.trim();
+    if (name === "") {
+      setError("Укажите название бланка");
+      return;
+    }
+    if (form.id === null && form.code.trim() === "") {
+      setError("Укажите код бланка");
+      return;
+    }
+    setError("");
+    setSaved("");
+    setBusy(true);
+    const payload = {
+      name,
+      doc_type_code: form.doc_type_code === "" ? null : form.doc_type_code,
+      description: form.description === "" ? null : form.description,
+      layout: form.layout,
+      active: form.active,
+    };
+    try {
+      if (form.id === null) {
+        await createBlank({ code: form.code.trim(), ...payload });
+        setSaved("Бланк создан");
+        setForm(EMPTY_BLANK_FORM);
+      } else {
+        await updateBlank(form.id, payload);
+        setSaved("Бланк сохранён");
+      }
+      loadBlanks();
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Ошибка сохранения бланка");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Шаг из справочника этапов → строка состава бланка (значения флагов этапа
+  // подставляются на сервере при чтении состава).
+  function stepDraft(catalog: RoutingCatalogStage, blankId: number, order: number): BlankStepRow {
+    return {
+      blank_id: blankId,
+      stage_id: catalog.id,
+      step_order: order,
+      optional_override: null,
+      require_comment_override: null,
+      stage_code: catalog.code,
+      title: catalog.title,
+      stage_lines: [],
+      owner_kind: catalog.owner_kind,
+      owner_group: catalog.owner_group,
+      optional: catalog.optional,
+      print_assignee: null,
+      require_comment: null,
+      stage_active: catalog.active,
+    };
+  }
+
+  // Добавление этапа в конец состава бланка (этап уже в составе не добавляем).
+  function addStage(): void {
+    if (selectedId === null || stageToAdd === "") return;
+    const catalog = stages.find((s) => String(s.id) === stageToAdd);
+    if (!catalog || steps.some((s) => s.stage_id === catalog.id)) return;
+    setSteps((prev) => [...prev, stepDraft(catalog, selectedId, prev.length + 1)]);
+    setStageToAdd("");
+  }
+
+  // Порядок шага: кнопки «вверх/вниз» (доступнее перетаскивания). step_order
+  // пересчитывается при сохранении состава, поэтому здесь достаточно сдвига.
+  function moveStep(index: number, delta: number): void {
+    const target = index + delta;
+    if (target < 0 || target >= steps.length) return;
+    setSteps((prev) => {
+      const next = [...prev];
+      const [row] = next.splice(index, 1);
+      next.splice(target, 0, row);
+      return next;
+    });
+  }
+
+  function patchStep(index: number, patch: Partial<BlankStepRow>): void {
+    setSteps((prev) => prev.map((s, i) => (i === index ? { ...s, ...patch } : s)));
+  }
+
+  // Сохранение состава: полная замена одной транзакцией (порядок — с 1).
+  async function handleSaveSteps(): Promise<void> {
+    if (selectedId === null) return;
+    setError("");
+    setSaved("");
+    setBusy(true);
+    try {
+      await setBlankSteps(
+        selectedId,
+        steps.map((s, i) => ({
+          stage_id: s.stage_id,
+          step_order: i + 1,
+          optional_override: s.optional_override ?? null,
+          require_comment_override: s.require_comment_override ?? null,
+        })),
+      );
+      setSaved("Состав бланка сохранён");
+      loadSteps(selectedId);
+      loadBlanks();
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Ошибка сохранения состава бланка");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Раскрытие блока «Текст этапа»: черновик берётся из справочника один раз.
+  function openStageText(step: BlankStepRow): void {
+    setTextOpen(step.stage_id);
+    setStageText((prev) =>
+      prev[step.stage_id]
+        ? prev
+        : { ...prev, [step.stage_id]: { title: step.title ?? "", lines: [...step.stage_lines] } },
+    );
+  }
+
+  function patchStageText(stageId: number, patch: Partial<{ title: string; lines: string[] }>): void {
+    setStageText((prev) => {
+      const draft = prev[stageId] ?? { title: "", lines: [] };
+      return { ...prev, [stageId]: { ...draft, ...patch } };
+    });
+  }
+
+  // Сохранение текста этапа: HTML из визуального редактора уходит в те же поля
+  // справочника этапов (title/stage_lines), поэтому разметка попадёт в печать.
+  async function handleSaveStageText(stageId: number): Promise<void> {
+    const draft = stageText[stageId];
+    if (!draft) return;
+    const title = draft.title.trim();
+    if (richTextToPlain(title) === "") {
+      setError("Название этапа не может быть пустым");
+      return;
+    }
+    const lines = draft.lines.filter((line) => richTextToPlain(line) !== "");
+    setError("");
+    setSaved("");
+    setBusy(true);
+    try {
+      await updateRoutingStage(stageId, { title, stage_lines: lines });
+      setSaved("Текст этапа сохранён");
+      if (selectedId !== null) loadSteps(selectedId);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Ошибка сохранения текста этапа");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const selectedBlank = blanks.find((b) => b.id === selectedId) ?? null;
+  // Свободные этапы для добавления: активные и ещё не добавленные в состав.
+  const addableStages = stages.filter((s) => !steps.some((step) => step.stage_id === s.id));
+
+  return (
+    <fieldset>
+      <legend>Бланки (справочник заявок)</legend>
+      <div className="sed-note">
+        Бланк — набор этапов из справочника. Его выбирает сотрудник ОК при создании
+        заявки: система формирует шаги и ответственных, а снимок бланка пишется в
+        заявку. Файлов-шаблонов .docx нет — печатный документ собирается из данных.
+      </div>
+      {loadError && <div role="alert">Бланки: {loadError}</div>}
+      {!loadError && blanks.length === 0 && <div className="sed-note">Бланков нет</div>}
+      {blanks.length > 0 && (
+        <table className="sed-table" aria-label="Справочник бланков">
+          <thead>
+            <tr>
+              <th scope="col">Код</th>
+              <th scope="col">Название</th>
+              <th scope="col">Вид документа</th>
+              <th scope="col">Макет</th>
+              <th scope="col">Шагов</th>
+              <th scope="col">Версия</th>
+              <th scope="col">Активен</th>
+              <th scope="col">Действия</th>
+            </tr>
+          </thead>
+          <tbody>
+            {blanks.map((blank) => (
+              <tr key={blank.id} className={blank.id === selectedId ? "sed-table__row--active" : undefined}>
+                <td>{blank.code}</td>
+                <td>
+                  {blank.name}
+                  {blank.description && <div className="sed-sub">{blank.description}</div>}
+                </td>
+                <td>{blank.doc_type_code ?? "—"}</td>
+                <td>{blank.layout}</td>
+                <td>{blank.step_count ?? 0}</td>
+                <td>{blank.version}</td>
+                <td>{blank.active ? "да" : "нет"}</td>
+                <td>
+                  <div className="sed-toolbar sed-mt-0">
+                    <button
+                      type="button"
+                      className="sed-btn sed-btn--ghost"
+                      aria-label={`Состав бланка ${blank.code}`}
+                      onClick={() => selectBlank(blank.id)}
+                    >
+                      Состав
+                    </button>
+                    <button
+                      type="button"
+                      className="sed-btn sed-btn--ghost"
+                      aria-label={`Править бланк ${blank.code}`}
+                      onClick={() => {
+                        setForm({
+                          id: blank.id,
+                          code: blank.code,
+                          name: blank.name,
+                          doc_type_code: blank.doc_type_code ?? "",
+                          description: blank.description ?? "",
+                          layout: blank.layout === "line" ? "line" : "office",
+                          active: blank.active,
+                        });
+                      }}
+                    >
+                      Править
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      {/* Карточка бланка: создание или правка выбранного. */}
+      <div className="sed-editor-card">
+        <div className="sed-blockcard__head">
+          <span className="sed-blockcard__title">{form.id === null ? "Новый бланк" : `Правка бланка: ${form.code}`}</span>
+          <span className="sed-blockcard__spacer" />
+          {form.id !== null && (
+            <button
+              type="button"
+              className="sed-btn sed-btn--ghost"
+              onClick={() => setForm(EMPTY_BLANK_FORM)}
+            >
+              Отменить правку
+            </button>
+          )}
+        </div>
+        <div className="sed-editor-row">
+          <label className="sed-field">
+            Код
+            <input
+              aria-label="Код бланка"
+              value={form.code}
+              readOnly={form.id !== null}
+              title={form.id !== null ? "Код бланка после создания не меняется" : undefined}
+              onChange={(e) => setForm({ ...form, code: e.target.value })}
+            />
+          </label>
+          <label className="sed-field">
+            Название
+            <input
+              aria-label="Название бланка"
+              value={form.name}
+              onChange={(e) => setForm({ ...form, name: e.target.value })}
+            />
+          </label>
+        </div>
+        <div className="sed-editor-row">
+          <label className="sed-field">
+            Вид документа
+            <select
+              aria-label="Вид документа бланка"
+              value={form.doc_type_code}
+              onChange={(e) => setForm({ ...form, doc_type_code: e.target.value })}
+            >
+              <option value="">— не задан —</option>
+              {docTypes.map((dt) => (
+                <option key={dt.code} value={dt.code}>
+                  {dt.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="sed-field">
+            Макет печати
+            <select
+              aria-label="Макет печати бланка"
+              value={form.layout}
+              onChange={(e) => setForm({ ...form, layout: e.target.value as "office" | "line" })}
+            >
+              <option value="office">office — с шапкой и таблицей шагов</option>
+              <option value="line">line — построчный</option>
+            </select>
+          </label>
+          <label className="sed-field">
+            <input
+              type="checkbox"
+              aria-label="Бланк активен"
+              checked={form.active}
+              onChange={(e) => setForm({ ...form, active: e.target.checked })}
+            />
+            Активен
+          </label>
+        </div>
+        <label className="sed-field">
+          Описание (пояснение сотруднику ОК в селекте бланка)
+          <textarea
+            aria-label="Описание бланка"
+            rows={2}
+            value={form.description}
+            onChange={(e) => setForm({ ...form, description: e.target.value })}
+          />
+        </label>
+        <div className="sed-toolbar sed-mt-8">
+          <button type="button" className="sed-btn" onClick={handleSaveForm} disabled={busy}>
+            {form.id === null ? "Создать бланк" : "Сохранить бланк"}
+          </button>
+        </div>
+      </div>
+
+      {/* Состав шагов выбранного бланка. */}
+      {selectedBlank && (
+        <div className="sed-editor-card">
+          <div className="sed-blockcard__head">
+            <span className="sed-blockcard__title">Состав бланка: {selectedBlank.name}</span>
+            <span className="sed-blockcard__spacer" />
+            <button
+              type="button"
+              className="sed-btn sed-btn--ghost"
+              onClick={() => setSelectedId(null)}
+            >
+              Закрыть состав
+            </button>
+          </div>
+          {steps.length === 0 && <div className="sed-note">Шагов нет</div>}
+          {steps.length > 0 && (
+            <table className="sed-table" aria-label={`Состав бланка ${selectedBlank.code}`}>
+              <thead>
+                <tr>
+                  <th scope="col">№</th>
+                  <th scope="col">Этап</th>
+                  <th scope="col">Необязательный</th>
+                  <th scope="col">Комментарий</th>
+                  <th scope="col">Действия</th>
+                </tr>
+              </thead>
+              <tbody>
+                {steps.map((step, i) => {
+                  const title = step.title || step.stage_code || `Этап #${step.stage_id}`;
+                  return (
+                    <tr key={`${step.stage_id}-${i}`}>
+                      <td>{i + 1}</td>
+                      <td>
+                        {title}
+                        <div className="sed-sub">
+                          {step.owner_kind === "manager_ad"
+                            ? "руководитель из AD"
+                            : step.owner_group ?? step.owner_kind ?? ""}
+                        </div>
+                      </td>
+                      <td>
+                        <select
+                          aria-label={`Необязательность шага ${i + 1}`}
+                          value={overrideValue(step.optional_override)}
+                          onChange={(e) =>
+                            patchStep(i, { optional_override: overrideFlag(e.target.value) })
+                          }
+                        >
+                          {OVERRIDE_CHOICES.map((choice) => (
+                            <option key={choice.value} value={choice.value}>
+                              {choice.title}
+                            </option>
+                          ))}
+                        </select>
+                        {step.optional_override === null && (
+                          <div className="sed-sub">
+                            в этапе: {step.optional ? "необязательный" : "обязательный"}
+                          </div>
+                        )}
+                      </td>
+                      <td>
+                        <select
+                          aria-label={`Комментарий шага ${i + 1}`}
+                          value={overrideValue(step.require_comment_override)}
+                          onChange={(e) =>
+                            patchStep(i, { require_comment_override: overrideFlag(e.target.value) })
+                          }
+                        >
+                          {OVERRIDE_CHOICES.map((choice) => (
+                            <option key={choice.value} value={choice.value}>
+                              {choice.title}
+                            </option>
+                          ))}
+                        </select>
+                      </td>
+                      <td>
+                        <div className="sed-toolbar sed-mt-0">
+                          <button
+                            type="button"
+                            className="sed-btn sed-btn--ghost"
+                            aria-label={`Поднять шаг ${i + 1}`}
+                            disabled={i === 0}
+                            onClick={() => moveStep(i, -1)}
+                          >
+                            Вверх
+                          </button>
+                          <button
+                            type="button"
+                            className="sed-btn sed-btn--ghost"
+                            aria-label={`Опустить шаг ${i + 1}`}
+                            disabled={i === steps.length - 1}
+                            onClick={() => moveStep(i, 1)}
+                          >
+                            Вниз
+                          </button>
+                          <button
+                            type="button"
+                            className="sed-btn sed-btn--ghost"
+                            aria-label={`Текст этапа ${i + 1}`}
+                            onClick={() => openStageText(step)}
+                          >
+                            Текст этапа
+                          </button>
+                          <button
+                            type="button"
+                            className="sed-btn sed-btn--ghost"
+                            aria-label={`Удалить шаг ${i + 1}`}
+                            onClick={() => setSteps((prev) => prev.filter((_, j) => j !== i))}
+                          >
+                            Удалить
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+
+          {/* Текст этапа и его пунктов — визуальный редактор (HTML уходит в
+              справочник этапов; разметка попадёт в печать). */}
+          {textOpen !== null && stageText[textOpen] && (
+            <div className="sed-blanktext">
+              <RichTextEditor
+                label={`Название этапа ${textOpen}`}
+                value={stageText[textOpen].title}
+                hint="Разметка попадёт в печатный документ."
+                onChange={(html) => patchStageText(textOpen, { title: html })}
+              />
+              {stageText[textOpen].lines.map((line, li) => (
+                <div key={li} className="sed-blanktext__line">
+                  <RichTextEditor
+                    label={`Пункт этапа ${textOpen}.${li + 1}`}
+                    value={line}
+                    onChange={(html) =>
+                      patchStageText(textOpen, {
+                        lines: stageText[textOpen].lines.map((l, k) => (k === li ? html : l)),
+                      })
+                    }
+                  />
+                  <button
+                    type="button"
+                    className="sed-btn sed-btn--ghost"
+                    aria-label={`Удалить пункт этапа ${li + 1}`}
+                    onClick={() =>
+                      patchStageText(textOpen, {
+                        lines: stageText[textOpen].lines.filter((_, k) => k !== li),
+                      })
+                    }
+                  >
+                    Удалить пункт
+                  </button>
+                </div>
+              ))}
+              <div className="sed-toolbar sed-mt-8">
+                <button
+                  type="button"
+                  className="sed-btn sed-btn--ghost"
+                  onClick={() =>
+                    patchStageText(textOpen, { lines: [...stageText[textOpen].lines, "<p></p>"] })
+                  }
+                >
+                  Добавить пункт
+                </button>
+                <button
+                  type="button"
+                  className="sed-btn"
+                  disabled={busy}
+                  onClick={() => handleSaveStageText(textOpen)}
+                >
+                  Сохранить текст этапа
+                </button>
+              </div>
+            </div>
+          )}
+
+          <div className="sed-toolbar sed-mt-8">
+            <select
+              aria-label="Этап для добавления в бланк"
+              value={stageToAdd}
+              onChange={(e) => setStageToAdd(e.target.value)}
+            >
+              <option value="">— выберите этап —</option>
+              {addableStages.map((s) => (
+                <option key={s.id} value={String(s.id)}>
+                  {s.title || s.code}
+                </option>
+              ))}
+            </select>
+            <button type="button" className="sed-btn sed-btn--ghost" onClick={addStage} disabled={stageToAdd === ""}>
+              Добавить этап
+            </button>
+            <button type="button" className="sed-btn" onClick={handleSaveSteps} disabled={busy}>
+              Сохранить состав
+            </button>
+          </div>
+        </div>
+      )}
+      {error && <div role="alert">{error}</div>}
+      {saved && <div role="status">{saved}</div>}
+    </fieldset>
+  );
+}
+
 // Формат размера бэкапа: в мегабайтах «X.X МБ» (1 знак после запятой);
 // меньше 1 КБ — в килобайтах («X.X КБ»).
 function formatBackupSize(sizeBytes: number): string {
@@ -1601,11 +1651,7 @@ export function AdminSettings(props: AdminSettingsProps) {
   const [adGroups, setAdGroups] = useState<StepGroupRef[]>([]);
   const [positionCategory, setPositionCategory] = useState<PositionCategoryPair[]>([]);
   const [templates, setTemplates] = useState<SettingsTemplate[]>([]);
-  const [docTemplates, setDocTemplates] = useState<SettingsDocTemplate[]>([]);
   const [mailTemplates, setMailTemplates] = useState<SettingsMailTemplate[]>([]);
-  // Наборы должностей для привязки бланков + титулы AD для подсказок.
-  const [positionSets, setPositionSets] = useState<PositionSet[]>([]);
-  const [adTitles, setAdTitles] = useState<string[]>([]);
   // Базы 1С: поля формы + параллельный признак «пароль задан» для placeholder.
   const [onecBases, setOnecBases] = useState<SettingsOnecBase[]>([]);
   const [onecBasesSet, setOnecBasesSet] = useState<boolean[]>([]);
@@ -1673,16 +1719,7 @@ export function AdminSettings(props: AdminSettingsProps) {
         setPositionCategory(pairsFromRecord(data.position_to_category));
         setPositionEscalation(data.position_escalation);
         setTemplates(data.templates ?? []);
-        setDocTemplates(data.doc_templates ?? []);
         setMailTemplates(data.mail_templates ?? []);
-        setPositionSets(data.position_sets ?? []);
-        getAdTitles()
-          .then((titles) => {
-            if (alive) setAdTitles(titles);
-          })
-          .catch(() => {
-            if (alive) setAdTitles([]);
-          });
         setError("");
       })
       .catch((e: unknown) => {
@@ -1720,9 +1757,7 @@ export function AdminSettings(props: AdminSettingsProps) {
       position_to_category: recordFromPairs(positionCategory),
       position_escalation: positionEscalation,
       templates,
-      doc_templates: docTemplates,
       mail_templates: mailTemplates,
-      position_sets: positionSets,
     };
     setBusy(true);
     try {
@@ -1869,7 +1904,6 @@ export function AdminSettings(props: AdminSettingsProps) {
               {groupSyncError && <span role="alert">{groupSyncError}</span>}
             </div>
           )}
-          <PositionSetsEditor value={positionSets} titles={adTitles} onChange={setPositionSets} />
           <PositionCategoryEditor value={positionCategory} onChange={setPositionCategory} />
           {/* Виды документов — таблица doc_types; только админ (не контент-ключ settings). */}
           {isAdmin && <DocTypesEditor />}
@@ -1880,10 +1914,14 @@ export function AdminSettings(props: AdminSettingsProps) {
       {activeTab === "Шаблоны" && (
         <>
           <TemplatesEditor value={templates} onChange={setTemplates} />
-          <DocTemplatesEditor value={docTemplates} positionSets={positionSets} onChange={setDocTemplates} />
           <MailTemplatesEditor value={mailTemplates} onChange={setMailTemplates} />
         </>
       )}
+
+      {/* Справочник бланков — только админ (вкладки инфраструктуры, как сейчас
+          у остальных настроек): бланки создаются и правятся своими запросами, а
+          не общим PUT /settings, поэтому своей кнопки «Сохранить» здесь нет. */}
+      {activeTab === "Бланки" && isAdmin && <BlanksEditor />}
 
       {activeTab === "Инфра" && isAdmin && (
         <fieldset>
@@ -2277,9 +2315,9 @@ export function AdminSettings(props: AdminSettingsProps) {
 
       {activeTab === "Архивация" && isAdmin && <ArchiveTab />}
 
-      {/* Общий «Сохранить» — не для вкладки «Архивация»: у неё свой эндпоинт
-          и своя кнопка сохранения (PUT /api/archive). */}
-      {activeTab !== "Архивация" && (
+      {/* Общий «Сохранить» — не для вкладок с собственным сохранением:
+          «Архивация» (PUT /api/archive) и «Бланки» (свои CRUD-запросы). */}
+      {activeTab !== "Архивация" && activeTab !== "Бланки" && (
         <div className="sed-toolbar sed-mt-12">
           <button type="button" className="sed-btn" onClick={handleSave} disabled={busy}>
             {busy ? "Сохранение…" : "Сохранить"}

@@ -6,7 +6,9 @@
 # События v1: назначена/напоминание/эскалация/закрыта/возврат (имена событий —
 # константы; тексты шаблонов — только из mail_templates/settings, не из кода).
 # Получатель — mail из AD владельца шага/автора заявки (AdReader, только чтение);
-# нет ридера/почты — письмо тихо пропускается (офлайн).
+# у шага с несколькими ответственными письмо уходит каждому, кому по шагу ещё
+# предстоит отметиться (снимок assignees/approvals, миграция 0013); нет
+# ридера/почты — письмо тихо пропускается (офлайн).
 # ПДн в письма не включаются (см. sanitize_context в docs.py).
 
 from __future__ import annotations
@@ -14,8 +16,7 @@ from __future__ import annotations
 import json
 import smtplib
 import uuid
-from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from dataclasses import asdict, dataclass
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Dict, List, Protocol
@@ -24,7 +25,6 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import sessionmaker
 
-from .docs import sanitize_context
 
 # События уведомлений v1 (имена; тексты — в mail_templates из настроек).
 EVENT_ASSIGNED = "assigned"  # назначена
@@ -200,19 +200,64 @@ def manager_mail(ad_reader: object | None, sam: str | None) -> str | None:
     return getattr(manager, "mail", "") or None
 
 
+def step_logins(step: object) -> List[str]:
+    """Логины ответственных шага из снимка (assignees, миграция 0013).
+
+    Один ответственный — список из одного (без дублей с прежним assignee);
+    пустой снимок у заявок, выданных до миграции, — прежний одиночный assignee.
+    Мусор и повторы отсекаются, порядок снимка сохраняется."""
+    logins: List[str] = []
+    for raw in getattr(step, "assignees", None) or []:
+        sam = str(raw).strip()
+        if sam and sam not in logins:
+            logins.append(sam)
+    if not logins:
+        single = str(getattr(step, "assignee", None) or "").strip()
+        if single:
+            logins.append(single)
+    return logins
+
+
+def step_marked_sams(step: object) -> set[str]:
+    """Логины, уже оставившие отметку по шагу (снимок approvals, без ФИО).
+
+    Их повторно не уведомляем: письмо «назначена» получает тот, кому по этому
+    шагу ещё предстоит отметиться. Повреждённый элемент снимка пропускаем."""
+    marked: set[str] = set()
+    for item in getattr(step, "approvals", None) or []:
+        sam = (
+            str(item.get("sam") or "").strip()
+            if isinstance(item, dict)
+            else str(getattr(item, "sam", "") or "").strip()
+        )
+        if sam:
+            marked.add(sam)
+    return marked
+
+
 def step_owner_mails(step: object, ad_reader: object | None) -> List[str]:
     """Адресаты шага (список) для уведомлений.
 
-    Персональный шаг (assignee) — почта исполнителя; иначе групповой шаг —
-    почта всех активных участников owner_group (AD, только чтение, без дублей
-    и пустых). Нет ридера/адресатов/сбоя AD — пустой список, без исключений:
-    письмо тихо не ставится (офлайн). Рассылка — по строке на адресата
-    (в очереди одно письмо = одна строка)."""
+    Шаг с ответственными (снимок assignees) — почта каждого, кому по шагу ещё
+    предстоит отметиться: уже отметивший повторно письма не получает, у одного
+    ответственного письмо одно (дублей нет). Групповой шаг (снимок пуст) —
+    почта всех активных участников owner_group (AD, только чтение). Нет
+    ридера/адресатов/сбоя AD — пустой список, без исключений: письмо тихо не
+    ставится (офлайн). Рассылка — по строке на адресата (в очереди одно письмо =
+    одна строка)."""
     if ad_reader is None:
         return []
-    if getattr(step, "assignee", None):
-        mail = recipient_mail(ad_reader, step.assignee)
-        return [mail] if mail else []
+    mails: List[str] = []
+    logins = step_logins(step)
+    if logins:
+        marked = step_marked_sams(step)
+        for sam in logins:
+            if sam in marked:
+                continue
+            mail = recipient_mail(ad_reader, sam)
+            if mail and mail not in mails:
+                mails.append(mail)
+        return mails
     group = getattr(step, "owner_group", None)
     if not group:
         return []
@@ -223,7 +268,6 @@ def step_owner_mails(step: object, ad_reader: object | None) -> List[str]:
         members = resolver(group) or []
     except Exception:
         return []
-    mails: List[str] = []
     for user in members:
         if not getattr(user, "enabled", True):
             continue

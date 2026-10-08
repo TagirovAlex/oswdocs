@@ -12,11 +12,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app.requests import (  # noqa: E402
     STEP_APPROVED,
-    STEP_PENDING,
     RouteBlockSpec,
     StepSpec,
     _Request,
-    _Step,
     _block_info,
     _build_steps,
     _current_pending_steps,

@@ -31,8 +31,6 @@ from app.docs import BypassResult, generate_bypass  # noqa: E402
 from app.main import app  # noqa: E402
 from app.mailer import (  # noqa: E402
     EVENT_ASSIGNED,
-    EVENT_ESCALATION,
-    EVENT_REMINDER,
     EVENT_RETURNED,
     FileMailQueue,
     MockMailer,
@@ -273,8 +271,8 @@ def test_print_returns_pdf_and_does_not_store_versions(
     assert documents_store.list_by_request(rid) == []
 
 
-def test_print_uses_doc_template_body(client, hr, monkeypatch):
-    """Шаблон бегунка по службе+категории: generate_bypass получает body шаблона."""
+def test_print_uses_blank_snapshot_from_request(client, hr, monkeypatch):
+    """Печать идёт по снимку бланка заявки (макет blank_layout), не по шаблону."""
     rid = _create(client, hr, category="линейный",
                   steps=[{"owner_group": "SED_STEP_BUH"}])["id"]
     captured = {}
@@ -286,15 +284,19 @@ def test_print_uses_doc_template_body(client, hr, monkeypatch):
     monkeypatch.setattr("app.documents.generate_bypass", fake)
     response = client.post(f"/requests/{rid}/print", headers=hr)
     assert response.status_code == 200
-    assert captured["template_body"] == FAKE_BODY
     assert captured["request_id"] == rid
     assert captured["version"] == "current"
+    # Пути через файлы-шаблонов у печати больше нет.
+    assert "template_body" not in captured
+    assert "template_file" not in captured
 
 
-def test_print_without_template_manual_constructor(client, hr, monkeypatch, settings_store):
-    """Нет шаблона бегунка → ручной конструктор из шагов заявки."""
-    settings_store._data["doc_templates"] = "[]"
-    rid = _create(client, hr,
+def test_print_ignores_doc_templates_and_builds_from_steps(client, hr, monkeypatch):
+    """Настройка doc_templates печать не читает: документ собирается из шагов.
+
+    Ключ давно вне контракта настроек (файлы-бланки удалены), но если такая строка
+    осталась в БД от прежней фазы — печать всё равно собирает бланок из данных."""
+    rid = _create(client, hr, category="линейный",
                   steps=[{"owner_group": "SED_STEP_BUH"}, {"owner_group": "SED_STEP_HR"}])["id"]
     captured = {}
 
@@ -305,12 +307,46 @@ def test_print_without_template_manual_constructor(client, hr, monkeypatch, sett
     monkeypatch.setattr("app.documents.generate_bypass", fake)
     response = client.post(f"/requests/{rid}/print", headers=hr)
     assert response.status_code == 200
-    assert "SED_STEP_BUH" in captured["template_body"]
-    assert "SED_STEP_HR" in captured["template_body"]
+    owners = [step["owner"] for step in captured["context"]["steps"]]
+    assert owners == ["SED_STEP_BUH", "SED_STEP_HR"]
+    assert FAKE_BODY not in json.dumps(captured["context"], ensure_ascii=False, default=str)
 
 
-def test_print_422_without_template_and_steps(client, hr, requests_store):
-    """Нет шаблона бегунка и нет шагов → 422 (не 500)."""
+def test_print_context_carries_all_step_assignees(client, hr, requests_store, monkeypatch):
+    """Печать получает по шагу снимок ВСЕХ ответственных (assignees) и ФИО
+    (assignee_names) — колонка «Ответственный» печатает их по списку."""
+    requests_store.create(_Request(
+        id="REQ-9101", status=IN_APPROVAL, route_origin="custom",
+        enterprise=FAKE_ENTERPRISE, fio="Вымышленный Сотрудник Полный",
+        tab_num="В-0001", department=FAKE_SERVICE, position=FAKE_POSITION,
+        created_by="ok.vymyshlennaya",
+        steps=[_Step(
+            order=1, owner_group="roster_vymyshlennyy", assignee="reestr.pervyy",
+            assignees=["reestr.pervyy", "reestr.vtoroy", "reestr.tretiy"],
+            approval_mode="sequential", status=STEP_PENDING,
+            expires_at=_utcnow() + timedelta(days=5),
+        )],
+    ))
+    captured = {}
+
+    def fake(**kw):
+        captured.update(kw)
+        return _fake_result()
+
+    monkeypatch.setattr("app.documents.generate_bypass", fake)
+    assert client.post("/requests/REQ-9101/print", headers=hr).status_code == 200
+    step = captured["context"]["steps"][0]
+    assert step["assignees"] == ["reestr.pervyy", "reestr.vtoroy", "reestr.tretiy"]
+    assert step["assignee"] == "reestr.pervyy"
+    # Карточек этих логинов в зеркале users нет — печатаются логины, печать не падает.
+    assert step["assignee_names"] == [
+        "reestr.pervyy", "reestr.vtoroy", "reestr.tretiy",
+    ]
+    assert step["fio"] == "reestr.pervyy"
+
+
+def test_print_422_without_steps(client, hr, requests_store):
+    """Шагов маршрута нет — 422 (не 500), даже если doc_templates заполнен."""
     request = _Request(
         id="REQ-9001", status="Черновик", route_origin="custom",
         enterprise=FAKE_ENTERPRISE, fio="Вымышленный Сотрудник Полный",
@@ -320,6 +356,7 @@ def test_print_422_without_template_and_steps(client, hr, requests_store):
     requests_store.create(request)
     response = client.post("/requests/REQ-9001/print", headers=hr)
     assert response.status_code == 422
+    assert "шаг" in response.json()["detail"].lower()
 
 
 def test_print_offline_generated_false(client, hr, documents_store, monkeypatch):
@@ -613,7 +650,7 @@ REQUIREMENTS_PATH = os.path.join(os.path.dirname(__file__), "..", "requirements.
 
 # Имя импорта может отличаться от имени пакета: docx приходит вместе с docxtpl
 # (python-docx — его зависимость, отдельной строкой не объявляем).
-IMPORT_TO_PACKAGE = {"docx": "docxtpl"}
+IMPORT_TO_PACKAGE = {"docx": "python-docx"}
 # PNG-бэкенд qrcode (img.save(format="PNG")) требует Pillow; по импортам docs.py
 # это не видно — PIL импортирует сам qrcode, поэтому проверяем пакет явно.
 RENDER_PACKAGES = ("pillow",)
@@ -668,8 +705,8 @@ def test_docs_imports_declared_in_requirements():
     assert not missing, f"в requirements.txt нет пакетов для docs.py: {missing}"
 
 
-def _ok_docx(template_body: str, context: dict) -> bytes:
-    """DOCX-рендер-заглушка: docx/docxtpl на машине может не быть установлен."""
+def _ok_docx(context: dict) -> bytes:
+    """DOCX-сборщик-заглушка: python-docx/qrcode на машине может не быть."""
     return b"docx-bytes"
 
 
@@ -680,14 +717,14 @@ def _raise_missing_pil(url: str) -> bytes:
 
 def _bypass_kwargs(tmp_path) -> dict:
     return dict(
-        request_id="REQ-0001", version="v1", template_body=FAKE_BODY,
-        context={}, base_url=BASE_URL, files_dir=str(tmp_path),
+        request_id="REQ-0001", version="v1", context={},
+        base_url=BASE_URL, files_dir=str(tmp_path),
     )
 
 
 def test_generate_bypass_offline_reason_names_module(monkeypatch, tmp_path):
     """ModuleNotFoundError → generated=False, причина называет сам модуль."""
-    monkeypatch.setattr(docs_module, "_render_docx_stand", _ok_docx)
+    monkeypatch.setattr(docs_module, "build_blank_document", _ok_docx)
     monkeypatch.setattr(docs_module, "_render_qr_png", _raise_missing_pil)
     result = generate_bypass(**_bypass_kwargs(tmp_path))
     assert result.generated is False
@@ -697,7 +734,7 @@ def test_generate_bypass_offline_reason_names_module(monkeypatch, tmp_path):
 
 def test_generate_bypass_reraises_real_errors(monkeypatch, tmp_path):
     """Настоящий сбой рендера не превращается в generated=False — проброс."""
-    monkeypatch.setattr(docs_module, "_render_docx_stand", _ok_docx)
+    monkeypatch.setattr(docs_module, "build_blank_document", _ok_docx)
 
     def broken(url: str) -> bytes:
         raise RuntimeError("сбой рендера QR")
@@ -709,7 +746,7 @@ def test_generate_bypass_reraises_real_errors(monkeypatch, tmp_path):
 
 def test_print_offline_missing_module_is_not_500(client, hr, monkeypatch):
     """Офлайн без библиотеки → 200 {"generated": false, "reason": ...}, не 500."""
-    monkeypatch.setattr(docs_module, "_render_docx_stand", _ok_docx)
+    monkeypatch.setattr(docs_module, "build_blank_document", _ok_docx)
     monkeypatch.setattr(docs_module, "_render_qr_png", _raise_missing_pil)
     rid = _create(client, hr, category="линейный",
                   steps=[{"owner_group": "SED_STEP_BUH"}])["id"]
@@ -754,7 +791,7 @@ def test_convert_to_pdf_uses_tmp_profile_and_ignores_home(tmp_path, monkeypatch)
 
 def test_generate_bypass_reason_has_soffice_returncode_and_stderr(tmp_path, monkeypatch):
     """Сбой конвертации: в причине код возврата soffice и хвост его stderr."""
-    monkeypatch.setattr(docs_module, "_render_docx_stand", _ok_docx)
+    monkeypatch.setattr(docs_module, "build_blank_document", _ok_docx)
     monkeypatch.setattr(docs_module, "_render_qr_png", lambda url: b"qr-bytes")
     monkeypatch.setattr(docs_module, "_soffice_binary", lambda: "/usr/bin/soffice")
     stderr = "\n".join([
@@ -783,7 +820,7 @@ def test_generate_bypass_reason_has_soffice_returncode_and_stderr(tmp_path, monk
 
 def test_generate_bypass_reason_without_soffice(tmp_path, monkeypatch):
     """Нет soffice в PATH — причина называет LibreOffice, конвертер не запускается."""
-    monkeypatch.setattr(docs_module, "_render_docx_stand", _ok_docx)
+    monkeypatch.setattr(docs_module, "build_blank_document", _ok_docx)
     monkeypatch.setattr(docs_module, "_render_qr_png", lambda url: b"qr-bytes")
     monkeypatch.setattr(docs_module, "_soffice_binary", lambda: None)
 

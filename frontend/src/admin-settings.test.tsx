@@ -1,29 +1,35 @@
-﻿// Тесты админки настроек (волна B4 / B3 Волны 2): данные — из /api/settings
-// (settings-client). Сеть не нужна: модуль settings-client мокается,
-// сценарии — загрузка полного объекта, сохранение, добавление/удаление
-// предприятий и групп, рендер шаблонов, успех/ошибка/403.
+// Тесты админки настроек (волна B4 / B3 Волны 2): данные — из /api/settings
+// (settings-client) и справочников бланков (requests-client). Сеть не нужна:
+// модули settings-client и requests-client мокаются, сценарии — загрузка полного
+// объекта, сохранение, добавление/удаление предприятий и групп, рендер шаблонов,
+// справочник бланков с визуальным редактором текста этапа, успех/ошибка/403.
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AdminSettings } from "./admin-settings";
 import { ApiHttpError } from "./auth-client";
 import {
+  createBlank,
+  getBlankSteps,
+  getBlanks,
+  getDocTypes,
+  getRoutingCatalogs,
+  setBlankSteps,
+  updateBlank,
+  updateRoutingStage,
+} from "./requests-client";
+import {
   deleteBackup,
-  deleteDocTemplateFile,
   downloadBackup,
-  downloadDocTemplateFile,
-  getAdTitles,
   getArchiveSettings,
   getSettings,
   getSettingsContent,
   listBackups,
-  previewDocTemplateFile,
   runBackup,
   saveArchiveSettings,
   saveSettings,
   saveSettingsContent,
   syncAdGroups,
   syncEnterprises,
-  uploadDocTemplateFile,
 } from "./settings-client";
 import type { SettingsData } from "./settings-client";
 
@@ -35,18 +41,30 @@ vi.mock("./settings-client", () => ({
   saveSettingsContent: vi.fn(),
   syncEnterprises: vi.fn(),
   syncAdGroups: vi.fn(),
-  getAdTitles: vi.fn(),
   getArchiveSettings: vi.fn(),
   saveArchiveSettings: vi.fn(),
   listBackups: vi.fn(),
   runBackup: vi.fn(),
   deleteBackup: vi.fn(),
   downloadBackup: vi.fn(),
-  uploadDocTemplateFile: vi.fn(),
-  downloadDocTemplateFile: vi.fn(),
-  deleteDocTemplateFile: vi.fn(),
-  previewDocTemplateFile: vi.fn(),
 }));
+
+// Мок клиента заявок: нужны только методы справочника бланков и виды документов
+// (остальное — реальное, чтобы пустые вызовы fetch не шумели).
+vi.mock("./requests-client", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./requests-client")>();
+  return {
+    ...actual,
+    getBlanks: vi.fn(),
+    createBlank: vi.fn(),
+    updateBlank: vi.fn(),
+    getBlankSteps: vi.fn(),
+    setBlankSteps: vi.fn(),
+    getRoutingCatalogs: vi.fn(),
+    updateRoutingStage: vi.fn(),
+    getDocTypes: vi.fn(),
+  };
+});
 
 // Настройки, как их отдаёт GET /api/settings (полный объект по контракту B2).
 const settings: SettingsData = {
@@ -71,10 +89,6 @@ const settings: SettingsData = {
       category: "Увольнение",
       steps: [{ owner_group: "SED_HR" }, { owner_group: "SED_Vlastelcy", require_comment: true }],
     },
-  ],
-  position_sets: [{ name: "Руководители", positions: ["Директор"] }],
-  doc_templates: [
-    { service: "Бухгалтерия", category: "Увольнение", body: "Бегунок: {{ fio }}" },
   ],
   mail_templates: [{ code: "assigned", subject: "Заявка {{ request_id }}", body_html: "<html>{{ fio }}</html>" }],
   onec_bases: [],
@@ -112,9 +126,7 @@ const contentOnly: SettingsData = {
   allowed_ad_groups: ["SED_HR"],
   position_to_category: { "Руководитель": "Руководители" },
   position_escalation: {},
-  position_sets: [],
   templates: [],
-  doc_templates: [],
   mail_templates: [],
   onec_bases: [],
   onec_enterprises_synced_at: null,
@@ -125,10 +137,99 @@ const contentOnly: SettingsData = {
   hr_admin_groups: null,
 };
 
-// Настройки с бланком на .docx-файле (file задан): редактор в режиме файла.
-const withFileSettings: SettingsData = {
-  ...settings,
-  doc_templates: [{ service: "Бухгалтерия", category: "Увольнение", body: "", file: "bланк_v1.docx" }],
+// Вымышленные бланки справочника (GET /api/settings/routing/blanks) и состав
+// шагов одного из них (GET .../blanks/{id}/steps).
+const blanks = [
+  {
+    id: 10,
+    code: "uvol_base",
+    name: "Увольнение (базовый)",
+    doc_type_code: "uvol",
+    description: "Пояснение для сотрудника ОК",
+    layout: "office",
+    active: true,
+    version: 3,
+    step_count: 2,
+  },
+  {
+    id: 11,
+    code: "uvol_line",
+    name: "Увольнение (линейный)",
+    doc_type_code: null,
+    description: null,
+    layout: "line",
+    active: false,
+    version: 1,
+    step_count: 0,
+  },
+];
+
+const blankSteps = [
+  {
+    blank_id: 10,
+    stage_id: 1,
+    step_order: 1,
+    optional_override: null,
+    require_comment_override: null,
+    stage_code: "rukovoditel",
+    title: "Непосредственный руководитель",
+    stage_lines: ["Ознакомить с приказом"],
+    owner_kind: "manager_ad",
+    owner_group: null,
+    optional: false,
+    print_assignee: true,
+    require_comment: false,
+    stage_active: true,
+  },
+  {
+    blank_id: 10,
+    stage_id: 2,
+    step_order: 2,
+    optional_override: true,
+    require_comment_override: true,
+    stage_code: "buhgalteriya",
+    title: "Бухгалтерия",
+    stage_lines: [],
+    owner_kind: "ad_group",
+    owner_group: "SED_STEP_BUH",
+    optional: true,
+    print_assignee: false,
+    require_comment: false,
+    stage_active: true,
+  },
+];
+
+// Справочник этапов для добавления в состав бланка (только активные).
+const catalogs = {
+  stages: [
+    {
+      id: 1,
+      code: "rukovoditel",
+      title: "Непосредственный руководитель",
+      owner_kind: "manager_ad",
+      owner_group: null,
+      optional: false,
+      active: true,
+    },
+    {
+      id: 2,
+      code: "buhgalteriya",
+      title: "Бухгалтерия",
+      owner_kind: "ad_group",
+      owner_group: "SED_STEP_BUH",
+      optional: true,
+      active: true,
+    },
+    {
+      id: 3,
+      code: "sluzhba_ok",
+      title: "Служба ОК",
+      owner_kind: "ad_group",
+      owner_group: "SED_STEP_OK",
+      optional: true,
+      active: true,
+    },
+  ],
 };
 
 beforeEach(() => {
@@ -138,18 +239,29 @@ beforeEach(() => {
   vi.mocked(saveSettingsContent).mockReset();
   vi.mocked(syncEnterprises).mockReset();
   vi.mocked(syncAdGroups).mockReset();
-  vi.mocked(getAdTitles).mockReset();
-  vi.mocked(getAdTitles).mockResolvedValue([]);
   vi.mocked(getArchiveSettings).mockReset();
   vi.mocked(saveArchiveSettings).mockReset();
   vi.mocked(listBackups).mockReset();
   vi.mocked(runBackup).mockReset();
   vi.mocked(deleteBackup).mockReset();
   vi.mocked(downloadBackup).mockReset();
-  vi.mocked(uploadDocTemplateFile).mockReset();
-  vi.mocked(downloadDocTemplateFile).mockReset();
-  vi.mocked(deleteDocTemplateFile).mockReset();
-  vi.mocked(previewDocTemplateFile).mockReset();
+  vi.mocked(getBlanks).mockReset();
+  vi.mocked(createBlank).mockReset();
+  vi.mocked(updateBlank).mockReset();
+  vi.mocked(getBlankSteps).mockReset();
+  vi.mocked(setBlankSteps).mockReset();
+  vi.mocked(getRoutingCatalogs).mockReset();
+  vi.mocked(updateRoutingStage).mockReset();
+  vi.mocked(getDocTypes).mockReset();
+  // Виды документов (doc_types) — пустой справочник по умолчанию.
+  vi.mocked(getDocTypes).mockResolvedValue([
+    { code: "uvol", name: "Увольнение", is_active: true, sort_order: 1 },
+  ]);
+  // Справочники бланков по умолчанию: один бланк с двумя шагами, этапы и вид
+  // документа (тесты без бланков переопределяют getBlanks пустым списком).
+  vi.mocked(getBlanks).mockResolvedValue(blanks);
+  vi.mocked(getBlankSteps).mockResolvedValue(blankSteps);
+  vi.mocked(getRoutingCatalogs).mockResolvedValue(catalogs);
 });
 
 describe("AdminSettings", () => {
@@ -292,222 +404,6 @@ describe("AdminSettings", () => {
       expect(screen.getByText("Состав обновлён: групп 2, участников 5, должностей в справочнике 3")).toBeInTheDocument(),
     );
     expect(syncAdGroups).toHaveBeenCalledTimes(1);
-  });
-
-  // Наборы должностей: добавление набора и должности уходит в PUT.
-  it("добавляет набор должностей и должность", async () => {
-    vi.mocked(getSettings).mockResolvedValue({ ...settings, position_sets: [] });
-    vi.mocked(saveSettings).mockImplementation(async (data) => data);
-
-    render(<AdminSettings role="admin" />);
-    await waitFor(() => expect(screen.getByRole("button", { name: "Справочники" })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Справочники" }));
-    fireEvent.click(screen.getByText("Добавить набор"));
-    await waitFor(() => expect(screen.getByLabelText("Название набора 1")).toBeInTheDocument());
-
-    fireEvent.change(screen.getByLabelText("Название набора 1"), { target: { value: "Линейные" } });
-    fireEvent.click(screen.getByText("Добавить должность"));
-    await waitFor(() => expect(screen.getByLabelText("Должность 1.1")).toBeInTheDocument());
-    fireEvent.change(screen.getByLabelText("Должность 1.1"), { target: { value: "Слесарь" } });
-    fireEvent.click(screen.getByText("Сохранить"));
-
-    await waitFor(() => expect(vi.mocked(saveSettings)).toHaveBeenCalled());
-    const sent = vi.mocked(saveSettings).mock.calls[0][0];
-    expect(sent.position_sets).toEqual([{ name: "Линейные", positions: ["Слесарь"] }]);
-  });
-
-  // Наборы должностей: удаление должности и набора.
-  it("удаляет должность и набор", async () => {
-    vi.mocked(getSettings).mockResolvedValue(settings);
-
-    render(<AdminSettings role="admin" />);
-    await waitFor(() => expect(screen.getByRole("button", { name: "Справочники" })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Справочники" }));
-    await waitFor(() => expect(screen.getByLabelText("Название набора 1")).toBeInTheDocument());
-    expect(screen.getByLabelText("Название набора 1")).toHaveValue("Руководители");
-
-    fireEvent.click(screen.getByText("Добавить должность"));
-    await waitFor(() => expect(screen.getByLabelText("Должность 1.2")).toBeInTheDocument());
-    fireEvent.click(screen.getAllByText("Удалить должность")[0]);
-    await waitFor(() => expect(screen.queryByLabelText("Должность 1.2")).not.toBeInTheDocument());
-
-    fireEvent.click(screen.getByText("Удалить набор"));
-    await waitFor(() => expect(screen.queryByLabelText("Название набора 1")).not.toBeInTheDocument());
-  });
-
-  // Бланк ссылается на набор должностей: выбор уходит в PUT.
-  it("бланк привязывается к набору должностей", async () => {
-    vi.mocked(getSettings).mockResolvedValue(settings);
-    vi.mocked(saveSettings).mockImplementation(async (data) => data);
-
-    render(<AdminSettings role="admin" />);
-    await waitFor(() => expect(screen.getByRole("button", { name: "Шаблоны" })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Шаблоны" }));
-    await waitFor(() => expect(screen.getByLabelText("Набор должностей бланка 1")).toBeInTheDocument());
-    fireEvent.change(screen.getByLabelText("Набор должностей бланка 1"), {
-      target: { value: "Руководители" },
-    });
-    fireEvent.click(screen.getByText("Сохранить"));
-
-    await waitFor(() => expect(vi.mocked(saveSettings)).toHaveBeenCalled());
-    const sent = vi.mocked(saveSettings).mock.calls[0][0];
-    expect(sent.doc_templates?.[0]?.position_set).toBe("Руководители");
-  });
-
-  // Кнопка очистки списка должностей набора.
-  it("очищает список должностей набора", async () => {
-    vi.mocked(getSettings).mockResolvedValue(settings);
-    vi.mocked(saveSettings).mockImplementation(async (data) => data);
-
-    render(<AdminSettings role="admin" />);
-    await waitFor(() => expect(screen.getByRole("button", { name: "Справочники" })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Справочники" }));
-    await waitFor(() => expect(screen.getByLabelText("Название набора 1")).toBeInTheDocument());
-    fireEvent.click(screen.getByText("Очистить список"));
-    fireEvent.click(screen.getByText("Сохранить"));
-
-    await waitFor(() => expect(vi.mocked(saveSettings)).toHaveBeenCalled());
-    const sent = vi.mocked(saveSettings).mock.calls[0][0];
-    expect(sent.position_sets?.[0]?.positions).toEqual([]);
-  });
-
-  // Модалка должностей: поиск, чекбоксы, ОК добавляет выбранные в набор.
-  it("модалка добавляет должности из справочника в набор", async () => {
-    vi.mocked(getSettings).mockResolvedValue(settings);
-    vi.mocked(getAdTitles).mockResolvedValue(["Бухгалтер", "Кассир", "Сторож"]);
-    vi.mocked(saveSettings).mockImplementation(async (data) => data);
-
-    render(<AdminSettings role="admin" />);
-    await waitFor(() => expect(screen.getByRole("button", { name: "Справочники" })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Справочники" }));
-    await waitFor(() => expect(screen.getByLabelText("Название набора 1")).toBeInTheDocument());
-    fireEvent.click(screen.getByText("Выбрать из справочника"));
-    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
-    fireEvent.change(screen.getByLabelText("Поиск должности"), { target: { value: "ир" } });
-    await waitFor(() => expect(screen.getByText("Кассир")).toBeInTheDocument());
-    expect(screen.queryByText("Сторож")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("checkbox", { name: "Выбрать Кассир" }));
-    // Верхняя ОК (дубль нижней) подтверждает выбор.
-    fireEvent.click(screen.getAllByRole("button", { name: "ОК" })[0]);
-    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
-    fireEvent.click(screen.getByText("Сохранить"));
-
-    await waitFor(() => expect(vi.mocked(saveSettings)).toHaveBeenCalled());
-    const sent = vi.mocked(saveSettings).mock.calls[0][0];
-    expect(sent.position_sets?.[0]?.positions).toContain("Кассир");
-  });
-
-  // Модалка должностей: пагинация, выбор сохраняется между страницами.
-  it("модалка: листание с сохранением выбора", async () => {
-    const titles = Array.from({ length: 60 }, (_, i) => `Должность ${String(i + 1).padStart(2, "0")}`);
-    vi.mocked(getSettings).mockResolvedValue({ ...settings, position_sets: [] });
-    vi.mocked(getAdTitles).mockResolvedValue(titles);
-    vi.mocked(saveSettings).mockImplementation(async (data) => data);
-
-    render(<AdminSettings role="admin" />);
-    await waitFor(() => expect(screen.getByRole("button", { name: "Справочники" })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Справочники" }));
-    fireEvent.click(screen.getByText("Добавить набор"));
-    await waitFor(() => expect(screen.getByLabelText("Название набора 1")).toBeInTheDocument());
-    fireEvent.click(screen.getByText("Выбрать из справочника"));
-    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
-    // Страница 1: отмечаем первую, идём вперёд.
-    fireEvent.click(screen.getByRole("checkbox", { name: "Выбрать Должность 01" }));
-    fireEvent.click(screen.getByRole("button", { name: "Следующая страница" }));
-    await waitFor(() => expect(screen.getByText("Должность 51")).toBeInTheDocument());
-    // В таблице её больше нет (в нижней панели выбранных — осталась).
-    const grid = screen.getByRole("table", { name: "Должности справочника" });
-    expect(within(grid).queryByText("Должность 01")).not.toBeInTheDocument();
-    // Страница 2: отмечаем, возвращаемся — выбор первой на месте.
-    fireEvent.click(screen.getByRole("checkbox", { name: "Выбрать Должность 51" }));
-    fireEvent.click(screen.getByRole("button", { name: "Предыдущая страница" }));
-    const gridBack = await screen.findByRole("table", { name: "Должности справочника" });
-    await waitFor(() => expect(within(gridBack).getByText("Должность 01")).toBeInTheDocument());
-    expect(screen.getByRole("checkbox", { name: "Выбрать Должность 01" })).toBeChecked();
-    // ОК добавляет обе разом (нижняя кнопка).
-    fireEvent.click(screen.getAllByRole("button", { name: "ОК" })[1]);
-    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
-    fireEvent.click(screen.getByText("Сохранить"));
-
-    await waitFor(() => expect(vi.mocked(saveSettings)).toHaveBeenCalled());
-    const sent = vi.mocked(saveSettings).mock.calls[0][0];
-    expect(sent.position_sets?.[0]?.positions).toEqual(["Должность 01", "Должность 51"]);
-  });
-
-  // Модалка должностей: при >10 страниц — первые пять и последние пять.
-  it("модалка: номера первых и последних пяти страниц", async () => {
-    const titles = Array.from({ length: 600 }, (_, i) => `Должность ${String(i + 1).padStart(3, "0")}`);
-    vi.mocked(getSettings).mockResolvedValue({ ...settings, position_sets: [] });
-    vi.mocked(getAdTitles).mockResolvedValue(titles);
-
-    render(<AdminSettings role="admin" />);
-    await waitFor(() => expect(screen.getByRole("button", { name: "Справочники" })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Справочники" }));
-    fireEvent.click(screen.getByText("Добавить набор"));
-    await waitFor(() => expect(screen.getByLabelText("Название набора 1")).toBeInTheDocument());
-    fireEvent.click(screen.getByText("Выбрать из справочника"));
-    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
-    // Первые пять и последние пять, середина скрыта.
-    for (const page of [1, 2, 3, 4, 5, 8, 9, 10, 11, 12]) {
-      expect(screen.getByRole("button", { name: `Страница ${page}` })).toBeInTheDocument();
-    }
-    expect(screen.queryByRole("button", { name: "Страница 6" })).not.toBeInTheDocument();
-    // Переход на последнюю — последние записи.
-    fireEvent.click(screen.getByRole("button", { name: "Страница 12" }));
-    await waitFor(() => expect(screen.getByText("Должность 600")).toBeInTheDocument());
-  });
-
-  // Модалка должностей: шапка выбирает/снимает всю страницу, верхняя
-  // кнопка Очистить дублирует нижнюю.
-  it("модалка: выбрать все на странице и верхняя Очистить", async () => {
-    const titles = Array.from({ length: 60 }, (_, i) => `Должность ${String(i + 1).padStart(2, "0")}`);
-    vi.mocked(getSettings).mockResolvedValue({ ...settings, position_sets: [] });
-    vi.mocked(getAdTitles).mockResolvedValue(titles);
-    vi.mocked(saveSettings).mockImplementation(async (data) => data);
-
-    render(<AdminSettings role="admin" />);
-    await waitFor(() => expect(screen.getByRole("button", { name: "Справочники" })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Справочники" }));
-    fireEvent.click(screen.getByText("Добавить набор"));
-    await waitFor(() => expect(screen.getByLabelText("Название набора 1")).toBeInTheDocument());
-    fireEvent.click(screen.getByText("Выбрать из справочника"));
-    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
-    // Шапка отмечает всю страницу разом.
-    fireEvent.click(screen.getByRole("checkbox", { name: "Выбрать все на странице" }));
-    expect(screen.getByRole("checkbox", { name: "Выбрать Должность 01" })).toBeChecked();
-    // Верхняя Очистить (дубль нижней) снимает всё.
-    const clears = screen.getAllByRole("button", { name: "Очистить" });
-    expect(clears.length).toBe(2);
-    fireEvent.click(clears[0]);
-    expect(screen.getByRole("checkbox", { name: "Выбрать Должность 01" })).not.toBeChecked();
-    // Обе ОК недоступны без выбора.
-    for (const ok of screen.getAllByRole("button", { name: "ОК" })) {
-      expect(ok).toBeDisabled();
-    }
-  });
-
-  // Модалка должностей: Отмена закрывает без добавления.
-  it("модалка должностей: Отмена без добавления", async () => {
-    vi.mocked(getSettings).mockResolvedValue(settings);
-    vi.mocked(getAdTitles).mockResolvedValue(["Бухгалтер"]);
-    vi.mocked(saveSettings).mockImplementation(async (data) => data);
-
-    render(<AdminSettings role="admin" />);
-    await waitFor(() => expect(screen.getByRole("button", { name: "Справочники" })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Справочники" }));
-    await waitFor(() => expect(screen.getByLabelText("Название набора 1")).toBeInTheDocument());
-    fireEvent.click(screen.getByText("Выбрать из справочника"));
-    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("checkbox", { name: "Выбрать Бухгалтер" }));
-    fireEvent.click(
-      within(screen.getByRole("dialog")).getByRole("button", { name: "Отмена" }),
-    );
-    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
-    fireEvent.click(screen.getByText("Сохранить"));
-
-    await waitFor(() => expect(vi.mocked(saveSettings)).toHaveBeenCalled());
-    const sent = vi.mocked(saveSettings).mock.calls[0][0];
-    expect(sent.position_sets?.[0]?.positions).toEqual(["Директор"]);
   });
 
   // Ручной синк состава групп: ошибка API — понятный текст.
@@ -663,24 +559,22 @@ describe("AdminSettings", () => {
     expect(syncEnterprises).toHaveBeenCalledTimes(1);
   });
 
-  // Админ: на вкладке «Шаблоны» видит редакторы бланков/писем, добавляет и сохраняет.
-  it("админ видит редакторы бланков/писем и сохраняет их", async () => {
+  // Админ: на вкладке «Шаблоны» редактор маршрутов и писем; бланков бегунков
+  // (doc_templates) в UI больше нет — печать собирается из данных бланка.
+  it("админ правит шаблоны маршрутов и письма, бланков бегунков нет", async () => {
     vi.mocked(getSettings).mockResolvedValue(settings);
     vi.mocked(saveSettings).mockImplementation(async (data) => data);
 
     render(<AdminSettings role="admin" />);
     await waitFor(() => expect(screen.getByRole("button", { name: "Шаблоны" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Шаблоны" }));
-    await waitFor(() => expect(screen.getByText("Бланки бегунков (doc_templates)")).toBeInTheDocument());
-    expect(screen.getByText("Письма (mail_templates)")).toBeInTheDocument();
-    // Существующие бланк и письмо загружены из настроек.
-    expect(screen.getByLabelText("Служба бланка 1")).toHaveValue("Бухгалтерия");
+    await waitFor(() => expect(screen.getByText("Письма (mail_templates)")).toBeInTheDocument());
+    // Редактор бланков бегунков и наборов должностей удалён.
+    expect(screen.queryByText("Бланки бегунков (doc_templates)")).not.toBeInTheDocument();
+    expect(screen.queryByText("Наборы должностей (для бланков)")).not.toBeInTheDocument();
+    // Существующие шаблон маршрута и письмо загружены из настроек.
+    expect(screen.getByLabelText("Служба шаблона 1")).toHaveValue("Бухгалтерия");
     expect(screen.getByLabelText("Код письма 1")).toHaveValue("assigned");
-
-    fireEvent.click(screen.getByText("Добавить бланк"));
-    fireEvent.change(screen.getByLabelText("Служба бланка 2"), { target: { value: "Служба-2" } });
-    fireEvent.change(screen.getByLabelText("Категория бланка 2"), { target: { value: "линейный" } });
-    fireEvent.change(screen.getByLabelText("Тело бланка 2"), { target: { value: "Бегунок 2: {{ fio }}" } });
 
     fireEvent.click(screen.getByText("Добавить письмо"));
     fireEvent.change(screen.getByLabelText("Код письма 2"), { target: { value: "reminder" } });
@@ -692,10 +586,6 @@ describe("AdminSettings", () => {
     await waitFor(() =>
       expect(saveSettings).toHaveBeenCalledWith(
         expect.objectContaining({
-          doc_templates: [
-            { service: "Бухгалтерия", category: "Увольнение", body: "Бегунок: {{ fio }}" },
-            { service: "Служба-2", category: "линейный", body: "Бегунок 2: {{ fio }}" },
-          ],
           mail_templates: [
             { code: "assigned", subject: "Заявка {{ request_id }}", body_html: "<html>{{ fio }}</html>" },
             { code: "reminder", subject: "Напоминание", body_html: "<html>напоминание</html>" },
@@ -703,24 +593,28 @@ describe("AdminSettings", () => {
         }),
       ),
     );
+    // Мёртвые ключи настроек в PUT не уходят.
+    const sent = vi.mocked(saveSettings).mock.calls[0][0] as unknown as Record<string, unknown>;
+    expect(sent).not.toHaveProperty("doc_templates");
+    expect(sent).not.toHaveProperty("position_sets");
   });
 
-  // Руководитель ОК: редакторы бланков/писем на «Шаблонах», сохранение через content.
-  it("руководитель ОК редактирует бланки/письма и сохраняет через content", async () => {
+  // Руководитель ОК: редакторы шаблонов/писем на «Шаблонах», сохранение через content.
+  it("руководитель ОК редактирует шаблоны/письма и сохраняет через content", async () => {
     vi.mocked(getSettingsContent).mockResolvedValue(contentOnly);
     vi.mocked(saveSettingsContent).mockImplementation(async (data) => data);
 
     render(<AdminSettings role="hr_admin" />);
     await waitFor(() => expect(screen.getByRole("button", { name: "Шаблоны" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Шаблоны" }));
-    await waitFor(() => expect(screen.getByText("Бланки бегунков (doc_templates)")).toBeInTheDocument());
-    expect(screen.getByText("Письма (mail_templates)")).toBeInTheDocument();
-    // contentOnly: бланков/писем нет — редакторы пустые, но доступны.
+    await waitFor(() => expect(screen.getByText("Письма (mail_templates)")).toBeInTheDocument());
+    // Редактор бланков бегунков убран и у руководителя ОК.
+    expect(screen.queryByText("Бланки бегунков (doc_templates)")).not.toBeInTheDocument();
+    // contentOnly: шаблонов/писем нет — редакторы пустые, но доступны.
 
-    fireEvent.click(screen.getByText("Добавить бланк"));
-    fireEvent.change(screen.getByLabelText("Служба бланка 1"), { target: { value: "Служба" } });
-    fireEvent.change(screen.getByLabelText("Категория бланка 1"), { target: { value: "линейный" } });
-    fireEvent.change(screen.getByLabelText("Тело бланка 1"), { target: { value: "Бегунок: {{ fio }}" } });
+    fireEvent.click(screen.getByText("Добавить шаблон"));
+    fireEvent.change(screen.getByLabelText("Служба шаблона 1"), { target: { value: "Служба" } });
+    fireEvent.change(screen.getByLabelText("Категория шаблона 1"), { target: { value: "Увольнение" } });
 
     fireEvent.click(screen.getByText("Добавить письмо"));
     fireEvent.change(screen.getByLabelText("Код письма 1"), { target: { value: "assigned" } });
@@ -732,7 +626,7 @@ describe("AdminSettings", () => {
     await waitFor(() =>
       expect(saveSettingsContent).toHaveBeenCalledWith(
         expect.objectContaining({
-          doc_templates: [{ service: "Служба", category: "линейный", body: "Бегунок: {{ fio }}" }],
+          templates: [{ service: "Служба", category: "Увольнение", steps: [] }],
           mail_templates: [{ code: "assigned", subject: "Заявка", body_html: "<html>заявка</html>" }],
         }),
       ),
@@ -878,137 +772,270 @@ describe("AdminSettings", () => {
     confirm.mockRestore();
   });
 
-  // Задача H: бланк без file — textarea-фолбэк и кнопка «Загрузить .docx».
-  it("бланк без файла: textarea-фолбэк и кнопка «Загрузить .docx»", async () => {
+  // --- Справочник бланков (вкладка «Бланки», только админ) --------------------
+
+  // Открытие вкладки бланков и список из справочника (код, название, макет, шаги).
+  it("вкладка «Бланки»: список бланков из справочника", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Бланки" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Бланки" }));
+
+    const table = await screen.findByRole("table", { name: "Справочник бланков" });
+    expect(within(table).getByText("uvol_base")).toBeInTheDocument();
+    expect(within(table).getByText("Увольнение (базовый)")).toBeInTheDocument();
+    expect(within(table).getByText("office")).toBeInTheDocument();
+    // Отключённый бланк виден админу и помечен как неактивный.
+    expect(within(table).getByText("uvol_line")).toBeInTheDocument();
+    expect(getBlanks).toHaveBeenCalled();
+  });
+
+  // Роль: руководителю ОК вкладки «Бланки» нет (справочник — админский).
+  it("вкладка «Бланки» недоступна руководителю ОК", async () => {
+    vi.mocked(getSettingsContent).mockResolvedValue(contentOnly);
+
+    render(<AdminSettings role="hr_admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Шаблоны" })).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Бланки" })).not.toBeInTheDocument();
+    expect(getBlanks).not.toHaveBeenCalled();
+  });
+
+  // Создание бланка: код, название, вид документа, описание, макет, активность.
+  it("создание бланка уходит в createBlank с полями карточки", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+    vi.mocked(createBlank).mockResolvedValue({ id: 12, code: "uvol_new" });
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Бланки" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Бланки" }));
+    await waitFor(() => expect(screen.getByLabelText("Код бланка")).toBeInTheDocument());
+
+    fireEvent.change(screen.getByLabelText("Код бланка"), { target: { value: "uvol_new" } });
+    fireEvent.change(screen.getByLabelText("Название бланка"), {
+      target: { value: "Увольнение (новый)" },
+    });
+    fireEvent.change(screen.getByLabelText("Вид документа бланка"), { target: { value: "uvol" } });
+    fireEvent.change(screen.getByLabelText("Макет печати бланка"), { target: { value: "line" } });
+    fireEvent.change(screen.getByLabelText("Описание бланка"), {
+      target: { value: "Пояснение для ОК" },
+    });
+    fireEvent.click(screen.getByText("Создать бланк"));
+
+    await waitFor(() => expect(createBlank).toHaveBeenCalled());
+    expect(createBlank).toHaveBeenCalledWith({
+      code: "uvol_new",
+      name: "Увольнение (новый)",
+      doc_type_code: "uvol",
+      description: "Пояснение для ОК",
+      layout: "line",
+      active: true,
+    });
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Бланк создан"));
+  });
+
+  // Правка бланка: код неизменен (read-only), остальные поля уходят в updateBlank.
+  it("правка бланка: код неизменен, поля уходят в updateBlank", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+    vi.mocked(updateBlank).mockResolvedValue({ id: 10 });
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Бланки" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Бланки" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Править бланк uvol_base" }));
+
+    const code = screen.getByLabelText("Код бланка");
+    expect(code).toHaveValue("uvol_base");
+    expect(code).toHaveAttribute("readonly");
+    expect(screen.getByLabelText("Название бланка")).toHaveValue("Увольнение (базовый)");
+
+    fireEvent.change(screen.getByLabelText("Название бланка"), {
+      target: { value: "Увольнение (базовый, правка)" },
+    });
+    fireEvent.click(screen.getByLabelText("Бланк активен"));
+    fireEvent.click(screen.getByText("Сохранить бланк"));
+
+    await waitFor(() =>
+      expect(updateBlank).toHaveBeenCalledWith(10, {
+        name: "Увольнение (базовый, правка)",
+        doc_type_code: "uvol",
+        description: "Пояснение для сотрудника ОК",
+        layout: "office",
+        active: false,
+      }),
+    );
+  });
+
+  // Состав бланка: этапы из справочника, порядок кнопками «вверх/вниз»,
+  // необязательный этап и обязательный комментарий, удаление шага.
+  it("состав бланка: добавление этапа, порядок, флаги и удаление", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+    vi.mocked(setBlankSteps).mockResolvedValue({ blank_id: 10, count: 2 });
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Бланки" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Бланки" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Состав бланка uvol_base" }));
+
+    // Состав пришёл по GET .../blanks/{id}/steps: два шага по порядку.
+    await waitFor(() => expect(getBlankSteps).toHaveBeenCalledWith(10));
+    const table = await screen.findByRole("table", { name: "Состав бланка uvol_base" });
+    const rows = within(table).getAllByRole("row").slice(1);
+    expect(within(rows[0]).getByText("Непосредственный руководитель")).toBeInTheDocument();
+    expect(within(rows[1]).getByText("Бухгалтерия")).toBeInTheDocument();
+    // Крайние шаги не двигаются: первый вверх, последний вниз — неактивны.
+    expect(within(rows[0]).getByRole("button", { name: "Поднять шаг 1" })).toBeDisabled();
+    expect(within(rows[1]).getByRole("button", { name: "Опустить шаг 2" })).toBeDisabled();
+
+    // Шаг 1 обязательный: переопределение «как в этапе», значение показано подсказкой.
+    expect(within(rows[0]).getByLabelText("Необязательность шага 1")).toHaveValue("");
+    expect(within(rows[0]).getByText("в этапе: обязательный")).toBeInTheDocument();
+    // Шаг 2 в бланке необязательный и с обязательным комментарием.
+    expect(within(rows[1]).getByLabelText("Необязательность шага 2")).toHaveValue("true");
+    expect(within(rows[1]).getByLabelText("Комментарий шага 2")).toHaveValue("true");
+
+    // Меняем флаги первого шага и двигаем его вниз, затем удаляем второй шаг.
+    fireEvent.change(within(rows[0]).getByLabelText("Необязательность шага 1"), {
+      target: { value: "true" },
+    });
+    fireEvent.change(within(rows[0]).getByLabelText("Комментарий шага 1"), {
+      target: { value: "true" },
+    });
+    fireEvent.click(within(rows[0]).getByRole("button", { name: "Опустить шаг 1" }));
+    await waitFor(() =>
+      expect(
+        within(
+          within(screen.getByRole("table", { name: "Состав бланка uvol_base" })).getAllByRole("row")[2],
+        ).getByText("Непосредственный руководитель"),
+      ).toBeInTheDocument(),
+    );
+    // Удаляем второй шаг (после перестановки это руководитель).
+    fireEvent.click(screen.getByRole("button", { name: "Удалить шаг 2" }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Удалить шаг 2" })).toBeNull());
+
+    // Этап, уже добавленный в состав, в селекте добавления не предлагается.
+    const add = screen.getByLabelText("Этап для добавления в бланк") as HTMLSelectElement;
+    expect(within(add).getByRole("option", { name: "Служба ОК" })).toBeInTheDocument();
+    expect(within(add).queryByRole("option", { name: "Бухгалтерия" })).not.toBeInTheDocument();
+
+    // Добавляем этап и сохраняем состав: порядок пересчитан с 1, флаги ушли.
+    fireEvent.change(add, { target: { value: "3" } });
+    fireEvent.click(screen.getByRole("button", { name: "Добавить этап" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Удалить шаг 2" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить состав" }));
+
+    await waitFor(() =>
+      expect(setBlankSteps).toHaveBeenCalledWith(10, [
+        // Порядок после перестановки: бухгалтерия первой (её флаги из бланка).
+        { stage_id: 2, step_order: 1, optional_override: true, require_comment_override: true },
+        // Добавленный этап — без переопределений («как в этапе»).
+        { stage_id: 3, step_order: 2, optional_override: null, require_comment_override: null },
+      ]),
+    );
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Состав бланка сохранён"));
+  });
+
+  // Текст этапа и его пунктов — визуальный редактор: разметка уходит в те же
+  // поля справочника этапов (title/stage_lines), с предупреждением о печати.
+  it("текст этапа: визуальный редактор сохраняет HTML в справочник этапов", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+    vi.mocked(updateRoutingStage).mockResolvedValue({ id: 1, updated: "title,stage_lines" });
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Бланки" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Бланки" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Состав бланка uvol_base" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Текст этапа 1" }));
+
+    // Название этапа и его пункт редактируются визуально; предупреждение о печати.
+    expect(await screen.findByText("Разметка попадёт в печатный документ.")).toBeInTheDocument();
+    await waitFor(() =>
+      // Название и пункт этапа показаны в редакторах (в таблице они тоже есть).
+      expect(screen.getAllByText("Непосредственный руководитель").length).toBeGreaterThan(1),
+    );
+    expect(screen.getByText("Ознакомить с приказом")).toBeInTheDocument();
+    const toolbars = screen.getAllByRole("toolbar");
+    expect(toolbars.length).toBeGreaterThanOrEqual(2);
+
+    // Помечаем выделенное в названии этапа: полужирный.
+    const area = document.querySelector<HTMLElement>(".sed-blanktext .ProseMirror");
+    expect(area).not.toBeNull();
+    area?.setAttribute("tabindex", "-1");
+    area?.focus();
+    const range = document.createRange();
+    range.selectNodeContents(area as HTMLElement);
+    window.getSelection()?.removeAllRanges();
+    window.getSelection()?.addRange(range);
+    document.dispatchEvent(new Event("selectionchange"));
+    await waitFor(() => expect(area?.textContent).not.toBe(""));
+    fireEvent.click(screen.getAllByRole("button", { name: "Полужирный" })[0]);
+
+    // Добавляем пункт и сохраняем текст этапа.
+    fireEvent.click(screen.getByRole("button", { name: "Добавить пункт" }));
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить текст этапа" }));
+
+    await waitFor(() => expect(updateRoutingStage).toHaveBeenCalled());
+    const [stageId, patch] = vi.mocked(updateRoutingStage).mock.calls[0];
+    expect(stageId).toBe(1);
+    expect(patch.title).toContain("<strong>");
+    expect(patch.title).toContain("Непосредственный руководитель");
+    // Пункты: прежний остался, добавленный пустой не уходит.
+    expect(patch.stage_lines).toEqual(["Ознакомить с приказом"]);
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Текст этапа сохранён"));
+  });
+
+  // Ошибка сервера при сохранении состава — понятным текстом, форма жива.
+  it("ошибка сохранения состава показывается текстом", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+    vi.mocked(setBlankSteps).mockRejectedValue(new ApiHttpError(422, "Этап вне маршрутов: Служба ОК"));
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Бланки" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Бланки" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Состав бланка uvol_base" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Сохранить состав" }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent("Этап вне маршрутов: Служба ОК"),
+    );
+  });
+
+  // Недоступность справочника бланков (503) — понятный текст, админка жива.
+  it("недоступность справочника бланков показывает текст", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+    vi.mocked(getBlanks).mockRejectedValue(new ApiHttpError(503, "Хранилище справочников недоступно"));
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Бланки" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Бланки" }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent("Хранилище справочников недоступно"),
+    );
+    // Карточка нового бланка остаётся доступной.
+    expect(screen.getByLabelText("Код бланка")).toBeInTheDocument();
+  });
+
+  // Мёртвый UI бланков бегунков убран целиком: ни редактора doc_templates/наборов
+  // должностей, ни загрузки/предпросмотра файлов .docx; печать — из данных бланка
+  // (вкладка «Бланки»).
+  it("в админке нет UI бланков бегунков и файлов .docx", async () => {
     vi.mocked(getSettings).mockResolvedValue(settings);
 
     render(<AdminSettings role="admin" />);
     await waitFor(() => expect(screen.getByRole("button", { name: "Шаблоны" })).toBeInTheDocument());
+
     fireEvent.click(screen.getByRole("button", { name: "Шаблоны" }));
-    await waitFor(() => expect(screen.getByLabelText("Тело бланка 1")).toBeInTheDocument());
-    expect(screen.getByLabelText("Тело бланка 1")).toHaveValue("Бегунок: {{ fio }}");
-    expect(screen.getByText("Загрузить .docx")).toBeInTheDocument();
-  });
+    await waitFor(() => expect(screen.getByText("Письма (mail_templates)")).toBeInTheDocument());
+    expect(screen.queryByText("Бланки бегунков (doc_templates)")).not.toBeInTheDocument();
+    expect(screen.queryByText("Добавить бланк")).not.toBeInTheDocument();
+    expect(screen.queryByText("Загрузить .docx")).not.toBeInTheDocument();
+    expect(screen.queryByText("Предпросмотр")).not.toBeInTheDocument();
 
-  // Задача H: бланк с file — имя файла и файловые операции, textarea скрыта.
-  it("бланк с файлом: имя файла и кнопки операций, textarea скрыта", async () => {
-    vi.mocked(getSettings).mockResolvedValue(withFileSettings);
-    vi.mocked(downloadDocTemplateFile).mockResolvedValue(undefined);
-
-    render(<AdminSettings role="admin" />);
-    await waitFor(() => expect(screen.getByRole("button", { name: "Шаблоны" })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Шаблоны" }));
-    await waitFor(() => expect(screen.getByText("bланк_v1.docx")).toBeInTheDocument());
-    expect(screen.getByRole("button", { name: "Скачать файл бланка 1" })).toBeInTheDocument();
-    expect(screen.getByText("Заменить")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Удалить файл бланка 1" })).toBeInTheDocument();
-    expect(screen.getByText("Предпросмотр")).toBeInTheDocument();
-    expect(screen.queryByLabelText("Тело бланка 1")).not.toBeInTheDocument();
-
-    // «Скачать» — вызов downloadDocTemplateFile с именем файла.
-    fireEvent.click(screen.getByRole("button", { name: "Скачать файл бланка 1" }));
-    expect(downloadDocTemplateFile).toHaveBeenCalledWith("bланк_v1.docx");
-  });
-
-  // Задача H: новая загрузка .docx без previous → uploadDocTemplateFile(file).
-  it("загрузка .docx: вызов без previous, имя файла появляется в карточке", async () => {
-    vi.mocked(getSettings).mockResolvedValue(settings);
-    vi.mocked(uploadDocTemplateFile).mockResolvedValue({ name: "bланк.docx" });
-
-    render(<AdminSettings role="admin" />);
-    await waitFor(() => expect(screen.getByRole("button", { name: "Шаблоны" })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Шаблоны" }));
-    await waitFor(() => expect(screen.getByLabelText("Загрузить файл бланка 1")).toBeInTheDocument());
-
-    const file = new File(["docx"], "bланк.docx", {
-      type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    });
-    fireEvent.change(screen.getByLabelText("Загрузить файл бланка 1"), { target: { files: [file] } });
-
-    await waitFor(() => expect(uploadDocTemplateFile).toHaveBeenCalledWith(file, undefined));
-    // После успеха бланк переключается в режим файла (textarea скрыта).
-    await waitFor(() => expect(screen.getByText("bланк.docx")).toBeInTheDocument());
-    expect(screen.queryByLabelText("Тело бланка 1")).not.toBeInTheDocument();
-  });
-
-  // Задача H: замена файла → uploadDocTemplateFile с previous=текущий file.
-  it("замена файла: uploadDocTemplateFile с previous", async () => {
-    vi.mocked(getSettings).mockResolvedValue(withFileSettings);
-    vi.mocked(uploadDocTemplateFile).mockResolvedValue({ name: "bланк_v2.docx" });
-
-    render(<AdminSettings role="admin" />);
-    await waitFor(() => expect(screen.getByRole("button", { name: "Шаблоны" })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Шаблоны" }));
-    await waitFor(() => expect(screen.getByText("bланк_v1.docx")).toBeInTheDocument());
-
-    const file = new File(["docx"], "bланк_v2.docx", {
-      type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    });
-    fireEvent.change(screen.getByLabelText("Заменить файл бланка 1"), { target: { files: [file] } });
-
-    await waitFor(() => expect(uploadDocTemplateFile).toHaveBeenCalledWith(file, "bланк_v1.docx"));
-    await waitFor(() => expect(screen.getByText("bланк_v2.docx")).toBeInTheDocument());
-  });
-
-  // Задача H: удаление файла с подтверждением → DELETE, file сбрасывается в null.
-  it("удаление файла бланка: подтверждение, DELETE и возврат к textarea", async () => {
-    vi.mocked(getSettings).mockResolvedValue(withFileSettings);
-    vi.mocked(deleteDocTemplateFile).mockResolvedValue(undefined);
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
-
-    render(<AdminSettings role="admin" />);
-    await waitFor(() => expect(screen.getByRole("button", { name: "Шаблоны" })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Шаблоны" }));
-    await waitFor(() => expect(screen.getByText("bланк_v1.docx")).toBeInTheDocument());
-
-    fireEvent.click(screen.getByRole("button", { name: "Удалить файл бланка 1" }));
-    await waitFor(() => expect(deleteDocTemplateFile).toHaveBeenCalledWith("bланк_v1.docx"));
-    // После удаления file=null — снова текстовый фолбэк.
-    await waitFor(() => expect(screen.getByLabelText("Тело бланка 1")).toBeInTheDocument());
-    expect(screen.queryByText("bланк_v1.docx")).not.toBeInTheDocument();
-    confirm.mockRestore();
-  });
-
-  // Задача H: предпросмотр — при generated=true PDF открывается в новом окне.
-  it("предпросмотр бланка открывает PDF в новом окне", async () => {
-    vi.mocked(getSettings).mockResolvedValue(withFileSettings);
-    vi.mocked(previewDocTemplateFile).mockResolvedValue({ generated: true, pdf_b64: "AAAA", reason: null });
-    // jsdom не реализует URL.createObjectURL — стаб возвращает blob-адрес.
-    const createObjectURL = vi.fn(() => "blob:mock-pdf");
-    Object.defineProperty(URL, "createObjectURL", { value: createObjectURL, configurable: true });
-    const open = vi.spyOn(window, "open").mockReturnValue(null);
-
-    try {
-      render(<AdminSettings role="admin" />);
-      await waitFor(() => expect(screen.getByRole("button", { name: "Шаблоны" })).toBeInTheDocument());
-      fireEvent.click(screen.getByRole("button", { name: "Шаблоны" }));
-      await waitFor(() => expect(screen.getByText("bланк_v1.docx")).toBeInTheDocument());
-
-      fireEvent.click(screen.getByText("Предпросмотр"));
-      await waitFor(() => expect(previewDocTemplateFile).toHaveBeenCalledWith("bланк_v1.docx"));
-      expect(createObjectURL).toHaveBeenCalled();
-      expect(open).toHaveBeenCalledWith("blob:mock-pdf", "_blank");
-    } finally {
-      delete (URL as { createObjectURL?: unknown }).createObjectURL;
-      open.mockRestore();
-    }
-  });
-
-  // Задача H: предпросмотр — generated=false с reason показывает причину.
-  it("предпросмотр при generated=false показывает reason", async () => {
-    vi.mocked(getSettings).mockResolvedValue(withFileSettings);
-    vi.mocked(previewDocTemplateFile).mockResolvedValue({
-      generated: false,
-      pdf_b64: null,
-      reason: "LibreOffice не настроен",
-    });
-
-    render(<AdminSettings role="admin" />);
-    await waitFor(() => expect(screen.getByRole("button", { name: "Шаблоны" })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Шаблоны" }));
-    await waitFor(() => expect(screen.getByText("bланк_v1.docx")).toBeInTheDocument());
-
-    fireEvent.click(screen.getByText("Предпросмотр"));
-    await waitFor(() => expect(screen.getByText("LibreOffice не настроен")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Справочники" }));
+    await waitFor(() => expect(screen.getByLabelText("Код предприятия 1")).toBeInTheDocument());
+    expect(screen.queryByText("Наборы должностей (для бланков)")).not.toBeInTheDocument();
+    expect(screen.queryByText("Добавить набор")).not.toBeInTheDocument();
+    expect(screen.queryByText("Выбрать из справочника")).not.toBeInTheDocument();
   });
 });

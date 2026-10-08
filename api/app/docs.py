@@ -2,10 +2,15 @@
 # Генерация — логически часть worker, не api-запроса (см. скил mail-docs).
 # Здесь только stdlib: DOCX собирается вручную (zip + document.xml),
 # QR — заглушка (PNG с URL заявки в tEXt-блоке, матрица — на стенде
-# библиотекой qrcode). Боевой рендер (python-docx-template/Jinja +
-# настоящий QR + LibreOffice PDF) подменяется без смены вызовов.
+# библиотекой qrcode).
+# Печать бланков (волна «Справочник бланков»): документ собирается ИЗ ДАННЫХ
+# заявки — build_blank_document на python-docx, макет из снимка blank_layout
+# (office|line). Файлы-шаблоны .docx источником оформления больше не являются
+# (ключ настроек doc_templates и ручки файлов-шаблонов удалены — печать собирает
+# бланок из данных).
 # ПДн (остаток отпуска и др.) в бланки не включаются — см. sanitize_context.
-# Зависимости стенда (python-docx-template/qrcode/LibreOffice) — раскомментирует стенд, offline только stdlib.
+# Зависимости стенда (python-docx/qrcode/Pillow/LibreOffice) — раскомментирует
+# стенд, offline только stdlib.
 
 from __future__ import annotations
 
@@ -17,6 +22,7 @@ import zipfile
 import zlib
 from dataclasses import dataclass
 from datetime import datetime
+from html import unescape
 from pathlib import Path
 from typing import Dict, List, Protocol
 
@@ -109,7 +115,7 @@ class DocRenderer(Protocol):
         context: Dict[str, object],
         base_url: str,
     ) -> bytes:
-        """Собрать DOCX-бегунок из тела шаблона doc_templates (Jinja)."""
+        """Собрать DOCX-бегунок из переданного текста-шаблона (Jinja-подстановка)."""
         ...  # pragma: no cover
 
     def render_pdf_stub(self, request_id: str, version: int) -> bytes:
@@ -118,7 +124,11 @@ class DocRenderer(Protocol):
 
 
 class StdlibDocxRenderer:
-    """Offline-рендер DOCX на stdlib (zipfile): шаблон + QR-заглушка + версия."""
+    """Offline-рендер DOCX на stdlib (zipfile): текст + QR-заглушка + версия.
+
+    Остался от волны B3 как заглушка офлайна; печать заявки (documents.py) его
+    не вызывает — она собирает бланк из данных через build_blank_document.
+    """
 
     def render_docx(
         self,
@@ -218,11 +228,12 @@ class StdlibDocxRenderer:
 
 # ---------------------------------------------------------------------------
 # W3a: боевая генерация бегунка (DOCX -> PDF + QR) на стенде.
-# Зависимости стенда (python-docx-template/qrcode/Pillow/LibreOffice)
+# Зависимости стенда (python-docx/qrcode/Pillow/LibreOffice)
 # импортируются лениво: офлайн их нет — generate_bypass вернет generated=False
-# с причиной (не 500); прочие сбои не глотаются. Тексты шаблонов — только из
-# doc_templates/settings, хардкода нет. Профиль soffice — в /tmp (см.
-# _convert_to_pdf_report): HOME контейнера не существует, софт без профиля RC=77.
+# с причиной (не 500); прочие сбои не глотаются. Оформление бланка — из данных
+# заявки и снимка бланка (см. build_blank_document), файлов-шаблонов нет.
+# Профиль soffice — в /tmp (см. _convert_to_pdf_report): HOME контейнера не
+# существует, софт без профиля RC=77.
 # ---------------------------------------------------------------------------
 
 
@@ -235,93 +246,6 @@ class BypassResult:
     docx_path: str = ""
     pdf_path: str = ""
     qr_payload: str = ""
-
-
-def _norm_position(value: object) -> str:
-    """Должность к сравнению: регистр/пробелы не различаются (как _norm ФИО)."""
-    return " ".join(str(value or "").strip().lower().split())
-
-
-def _set_positions(position_sets: object, set_name: object) -> list[str]:
-    """Должности именованного набора (position_sets): нормализованные, без пустых."""
-    if not set_name or not isinstance(position_sets, list):
-        return []
-    wanted = _norm_position(set_name)
-    for item in position_sets:
-        if (
-            isinstance(item, dict)
-            and _norm_position(item.get("name")) == wanted
-            and isinstance(item.get("positions"), list)
-        ):
-            return [
-                norm
-                for norm in (_norm_position(p) for p in item["positions"])
-                if norm
-            ]
-    return []
-
-
-def _matches_field(entry_value: object, request_value: object) -> bool:
-    """Совпадение поля бланка: пустое в записи — wildcard (любое значение)."""
-    entry = str(entry_value or "").strip()
-    if not entry:
-        return True
-    return entry == str(request_value or "").strip()
-
-
-def find_doc_template(
-    templates: object,
-    service: str,
-    category: str | None,
-    position: object = None,
-    position_sets: object = None,
-) -> dict | None:
-    """Подбор шаблона бегунка: служба+категория (поля 1С), затем набор должностей.
-
-    Пустые служба/категория в записи — wildcard (бланк только по набору:
-    ручные заявки часто без категории). Среди подходящих (с непустым
-    body/file) приоритет — бланку, чей набор (position_set) содержит должность
-    сотрудника; иначе — бланк без набора (по умолчанию); иначе None.
-    Без должности — первый подходящий (прежнее поведение).
-    """
-    if not isinstance(templates, list):
-        return None
-    matched = [
-        item
-        for item in templates
-        if isinstance(item, dict)
-        and _matches_field(item.get("service"), service)
-        and _matches_field(item.get("category"), category)
-        and ((item.get("body") or "").strip() or (item.get("file") or "").strip())
-    ]
-    if not matched:
-        return None
-    wanted = _norm_position(position)
-    if not wanted:
-        return matched[0]
-    for item in matched:
-        if wanted in _set_positions(position_sets, item.get("position_set")):
-            return item
-    for item in matched:
-        if not (item.get("position_set") or "").strip():
-            return item
-    return None
-
-
-def manual_bypass_body(request: object) -> str:
-    """Тело бегунка без шаблона: ручной конструктор из шагов заявки
-    (состав маршрута; тексты-шаблоны в код не зашиты)."""
-    lines = [
-        "Сотрудник: {{ fio }}",
-        "Служба: {{ department }}",
-        "Должность: {{ position }}",
-        "",
-        "Маршрут согласования:",
-    ]
-    for step in sorted(request.steps, key=lambda s: s.order):
-        owner = getattr(step, "assignee", None) or step.owner_group
-        lines.append(f"{step.order}. {owner} — {step.status}")
-    return "\n".join(lines)
 
 
 def _step_done_text(value: object) -> str:
@@ -342,15 +266,37 @@ def _step_done_text(value: object) -> str:
         return text[:16].replace("T", " ")
 
 
-def build_bypass_context(request: object) -> Dict[str, object]:
-    """Контекст бегунка: поля 1С заявки без ПДн (mail/отпуск — не включаем)
-    + шаги маршрута (владельцы шагов — участники процесса, не ПДн).
+def _step_logins(step: object) -> List[str]:
+    """Логины ответственных шага из снимка (assignees, миграция 0013).
 
-    По каждому шагу отдаём снимок этапа из справочников (position/stage_lines)
-    и отметку (done_at): бланк печатается по маршруту, собранному из этапов.
-    ФИО исполнителя (fio) здесь пустое намеренно: ФИО подставляет documents.py
-    по логину исполнителя (assignee) из зеркала AD — docs.py про хранилище
-    заявок не знает (импорт был бы циклическим, его не делаем)."""
+    Пустой снимок — прежний одиночный assignee (заявки, выданные до миграции):
+    печатать и уведомлять надо прежнего исполнителя. Мусор в jsonb и дубли
+    отсекаются, порядок снимка сохраняется."""
+    logins: List[str] = []
+    for raw in getattr(step, "assignees", None) or []:
+        sam = str(raw).strip()
+        if sam and sam not in logins:
+            logins.append(sam)
+    if not logins:
+        single = str(getattr(step, "assignee", None) or "").strip()
+        if single:
+            logins.append(single)
+    return logins
+
+
+def build_bypass_context(request: object) -> Dict[str, object]:
+    """Контекст бланка: поля 1С заявки без ПДн (mail/отпуск — не включаем)
+    + снимок бланка (название/версия/макет) + шаги маршрута (владельцы шагов —
+    участники процесса, не ПДн).
+
+    По каждому шагу отдаём снимок этапа из справочников (title/stage_lines),
+    снимок ответственных (assignees — все логины, один ответственный — список
+    из одного) и отметку (done_at): бланк печатается по маршруту, собранному из
+    этапов, и в колонке «Ответственный» печатаются ВСЕ ответственные шага.
+    assignee_names здесь пустой намеренно: ФИО по логинам подставляет
+    documents.py из зеркала AD (docs.py про хранилище заявок не знает — импорт
+    был бы циклическим, его не делаем); fio — ФИО первого ответственного
+    (прежнее поле контекста, оставлено для одиночного исполнителя)."""
     steps = []
     for step in sorted(request.steps, key=lambda s: s.order):
         owner = getattr(step, "assignee", None) or step.owner_group
@@ -364,11 +310,21 @@ def build_bypass_context(request: object) -> Dict[str, object]:
                 "order": step.order,
                 "owner": owner,
                 "status": step.status,
+                # Название этапа (снимок этапа) и текст его пунктов: в печать
+                # идут через build_blank_document (HTML из редактора — там).
+                "title": str(
+                    getattr(step, "stage_title", None) or step.owner_group or ""
+                ),
                 "position": str(getattr(step, "stage_title", None) or step.owner_group or ""),
-                # Логин персонального исполнителя: documents.py по нему подставит
-                # ФИО из AD (в бланке колонка «Должность/ФИО»).
+                # Снимок ответственных: логины (assignees, миграция 0013) плюс
+                # прежний одиночный assignee — у заявок, выданных до миграции,
+                # снимка нет, печатать надо прежнего исполнителя.
+                "assignees": _step_logins(step),
                 "assignee": getattr(step, "assignee", None) or "",
                 "fio": "",
+                # ФИО ответственных по логинам: подставляет documents.py
+                # (в бланке колонка «Ответственный» — по строке на ответственного).
+                "assignee_names": [],
                 "stage_lines": stage_lines or [owner],
                 "done_at": _step_done_text(getattr(step, "done_at", None)),
             }
@@ -380,50 +336,376 @@ def build_bypass_context(request: object) -> Dict[str, object]:
         "position": request.position,
         "category": request.category or "",
         "enterprise": request.enterprise or "",
+        "tab_num": getattr(request, "tab_num", None) or "",
+        "doc_type_code": getattr(request, "doc_type_code", None) or "",
+        # Снимок выбранного бланка: правка справочника не меняет выданную
+        # заявку, поэтому печатаем ровно тот макет, который зафиксирован.
+        "blank_id": getattr(request, "blank_id", None),
+        "blank_name": getattr(request, "blank_name", None) or "",
+        "blank_version": getattr(request, "blank_version", None),
+        "blank_layout": getattr(request, "blank_layout", None) or "",
         "steps": steps,
     }
 
 
-def _render_docx_stand(template_body: str, context: Dict[str, object]) -> bytes:
-    """DOCX через python-docx-template (docxtpl): body — Jinja-подобный текст."""
-    import io
+# ---------------------------------------------------------------------------
+# Бланк из данных (волна «Справочник бланков»): DOCX собирается python-docx,
+# макет — из снимка заявки (blank_layout), два встроенных пресета. Файлы-шаблоны
+# .docx печать не читает. Зависимости стенда (python-docx/qrcode/Pillow)
+# импортируются лениво: офлайн их нет — generate_bypass вернет generated=False
+# с причиной (не 500).
+# ---------------------------------------------------------------------------
 
-    from docx import Document
-    from docxtpl import DocxTemplate
+# Шрифт печатной формы бланка (константа вёрстки, не настройка).
+BLANK_FONT_NAME = "Times New Roman"
 
-    base = Document()
-    for line in template_body.splitlines():
-        base.add_paragraph(line)
-    buf = io.BytesIO()
-    base.save(buf)
-    buf.seek(0)
-    tpl = DocxTemplate(buf)
-    tpl.render(context)
-    out = io.BytesIO()
-    tpl.save(out)
-    return out.getvalue()
+# Два встроенных пресета оформления; выбирает blank_layout из снимка заявки.
+# Числа — константы вёрстки печатной формы: поля страницы (В/П/Н/Л, мм), кегль
+# обычного текста и заголовка, сторона QR (мм), сетка полей шапки, заливка
+# шапки таблицы, доли ширины колонок таблицы шагов.
+LAYOUT_PRESETS: Dict[str, dict] = {
+    "office": {
+        "margins_mm": (20, 15, 18, 15),
+        "font_pt": 11,
+        "title_pt": 14,
+        "qr_mm": 30,
+        "grid_info": True,
+        "shade_header": True,
+        "step_widths": (0.07, 0.55, 0.26, 0.12),
+    },
+    "line": {
+        "margins_mm": (12, 10, 12, 10),
+        "font_pt": 9,
+        "title_pt": 11,
+        "qr_mm": 20,
+        "grid_info": False,
+        "shade_header": False,
+        "step_widths": (0.06, 0.56, 0.26, 0.12),
+    },
+}
+
+# Макет по умолчанию, если в снимке пусто или значение не из списка пресетов
+# (дефолт совпадает с default='office' миграции 0012).
+DEFAULT_BLANK_LAYOUT = "office"
+
+# Подписи полей шапки бланка: (подпись, ключ контекста).
+_HEADER_FIELDS = (
+    ("ФИО", "fio"),
+    ("Должность", "position"),
+    ("Служба", "department"),
+    ("Табельный номер", "tab_num"),
+    ("Предприятие", "enterprise"),
+)
+
+# Колонки таблицы шагов.
+_STEP_HEADERS = ("№", "Этап", "Ответственный", "Отметка/дата")
+
+# Теги текста этапа, разрешённые к печати (визуальный редактор отдаёт HTML):
+# начертание и перенос строки. Остальные теги — обычный текст без разметки,
+# содержимое служебных тегов на бланок не попадает вовсе.
+_BOLD_TAGS = frozenset({"b", "strong"})
+_ITALIC_TAGS = frozenset({"i", "em"})
+_UNDERLINE_TAGS = frozenset({"u"})
+_BREAK_TAGS = frozenset({"br", "p", "li"})
+_HIDDEN_TAGS = frozenset(
+    {
+        "script", "style", "head", "title", "noscript", "template",
+        "iframe", "object", "embed", "svg", "math",
+    }
+)
+_HTML_TAG_RE = re.compile(r"<\s*(/?)\s*([a-zA-Z][a-zA-Z0-9]*)[^>]*>")
 
 
-def _render_docx_from_file(
-    template_path: str | Path, context: Dict[str, object], url: str
-) -> bytes:
-    """DOCX через python-docx-template (docxtpl) из НАСТОЯЩЕГО .docx-файла.
+def resolve_blank_layout(value: object) -> str:
+    """Макет бланка по значению снимка: office|line; всё прочее (пусто, мусор) —
+    office. Единая точка выбора макета для печати и ответа API (blank_kind)."""
+    name = str(value or "").strip().lower()
+    return name if name in LAYOUT_PRESETS else DEFAULT_BLANK_LAYOUT
 
-    Шапка/строки/подвал/вёрстка живут в файле; {{ qr }} подменяется
-    сгенерированным QR (InlineImage; размер 30x30 мм — константа вёрстки,
-    не настройка). Ожидает docxtpl/qrcode (стенд), как _render_docx_stand."""
-    from docx.shared import Mm
-    from docxtpl import DocxTemplate, InlineImage
 
-    tpl = DocxTemplate(template_path)
-    render_context = dict(context)
-    render_context["qr"] = InlineImage(
-        tpl, io.BytesIO(_render_qr_png(url)), width=Mm(30), height=Mm(30)
+def _blank_title(context: Dict[str, object]) -> str:
+    """Название бланка на бланке: снимок blank_name, иначе вид документа."""
+    return (
+        str(context.get("blank_name") or "").strip()
+        or str(context.get("doc_type_code") or "").strip()
+        or "Бланк"
     )
-    tpl.render(render_context)
-    out = io.BytesIO()
-    tpl.save(out)
-    return out.getvalue()
+
+
+def _printable_width_mm(document: object) -> float:
+    """Ширина наборной полосы страницы, мм (поля из пресета)."""
+    from docx.shared import Emu
+
+    section = document.sections[0]
+    # Разность длин Emu — обычный int, в миллиметры возвращает сам Emu.
+    return Emu(section.page_width - section.left_margin - section.right_margin).mm
+
+
+def _docx_document(preset: dict):
+    """Пустой документ A4 под макет: поля страницы и базовый шрифт."""
+    from docx import Document
+    from docx.shared import Mm, Pt
+
+    document = Document()
+    section = document.sections[0]
+    section.page_width, section.page_height = Mm(210), Mm(297)
+    top, right, bottom, left = preset["margins_mm"]
+    section.top_margin, section.right_margin = Mm(top), Mm(right)
+    section.bottom_margin, section.left_margin = Mm(bottom), Mm(left)
+    style = document.styles["Normal"]
+    style.font.name = BLANK_FONT_NAME
+    style.font.size = Pt(preset["font_pt"])
+    return document
+
+
+def _shade_cell(cell: object, color: str = "D9D9D9") -> None:
+    """Заливка ячейки (шапка таблицы офисного пресета)."""
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    shading = OxmlElement("w:shd")
+    shading.set(qn("w:val"), "clear")
+    shading.set(qn("w:fill"), color)
+    cell._tc.get_or_add_tcPr().append(shading)
+
+
+def _add_runs(
+    paragraph: object,
+    text: str,
+    *,
+    bold: bool = False,
+    italic: bool = False,
+    underline: bool = False,
+) -> None:
+    """Текст в абзац с начертанием; переносы строк — разрывом прогона."""
+    for index, line in enumerate(text.split("\n")):
+        if index:
+            paragraph.add_run().add_break()
+        if not line:
+            continue
+        run = paragraph.add_run(line)
+        run.bold = bold
+        run.italic = italic
+        run.underline = underline
+
+
+def _add_stage_text(paragraph: object, text: str, *, bold: bool = False) -> None:
+    """Текст этапа (может прийти HTML из визуального редактора) в абзац DOCX.
+
+    В печать идут только разрешённые теги (_BOLD_TAGS/_ITALIC_TAGS/
+    _UNDERLINE_TAGS/_BREAK_TAGS); содержимое служебных тегов выбрасывается,
+    любые другие теги идут обычным текстом без разметки. Свой санитайзер не
+    пишем: ПДн-поля вычищает sanitize_context, здесь только отбор тегов,
+    разрешённых к печати (контракт фазы).
+    """
+    cur_bold, cur_italic, cur_underline = bold, False, False
+    hidden: List[str] = []
+    emitted = False
+    pos = 0
+    for match in _HTML_TAG_RE.finditer(text):
+        closing, tag = match.group(1) == "/", match.group(2).lower()
+        chunk, pos = text[pos : match.start()], match.end()
+        # Текст печатается, пока не открыт служебный тег: внутри него (script,
+        # style и т.п.) на бланок не попадает ничего.
+        if chunk and not hidden:
+            _add_runs(
+                paragraph,
+                unescape(chunk),
+                bold=cur_bold,
+                italic=cur_italic,
+                underline=cur_underline,
+            )
+            emitted = True
+        if tag in _HIDDEN_TAGS:
+            if hidden:
+                if closing and hidden[-1] == tag:
+                    hidden.pop()
+            elif not closing:
+                hidden.append(tag)
+            continue
+        if hidden:
+            continue
+        if tag in _BREAK_TAGS:
+            if not closing and emitted:
+                paragraph.add_run().add_break()
+                emitted = True
+        elif tag in _BOLD_TAGS:
+            cur_bold = not closing
+        elif tag in _ITALIC_TAGS:
+            cur_italic = not closing
+        elif tag in _UNDERLINE_TAGS:
+            cur_underline = not closing
+    tail = text[pos:]
+    if tail and not hidden:
+        _add_runs(
+            paragraph,
+            unescape(tail),
+            bold=cur_bold,
+            italic=cur_italic,
+            underline=cur_underline,
+        )
+
+
+def _add_blank_header(document: object, context: Dict[str, object], preset: dict) -> None:
+    """Шапка бланка: название, поля сотрудника, QR на заявку (qr_url контекста)."""
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.shared import Mm, Pt
+
+    title = document.add_paragraph()
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    heading = title.add_run(_blank_title(context))
+    heading.bold = True
+    heading.font.size = Pt(preset["title_pt"])
+    values = [
+        (label, str(context.get(key) or "").strip()) for label, key in _HEADER_FIELDS
+    ]
+    if preset["grid_info"]:
+        # Офисный пресет: поля шапки сеткой (таблица без границ).
+        grid = document.add_table(rows=len(values), cols=2)
+        label_mm = 35.0
+        width_mm = _printable_width_mm(document)
+        for row, (label, value) in zip(grid.rows, values):
+            row.cells[0].width = Mm(label_mm)
+            row.cells[1].width = Mm(max(10.0, width_mm - label_mm))
+            cell = row.cells[0].paragraphs[0]
+            cell.add_run(label + ": ").bold = True
+            row.cells[1].paragraphs[0].add_run(value)
+    else:
+        # Линейный пресет: поля шапки списком, компактнее.
+        for label, value in values:
+            paragraph = document.add_paragraph()
+            paragraph.add_run(label + ": ").bold = True
+            paragraph.add_run(value)
+    qr_url = str(context.get("qr_url") or "").strip()
+    if not qr_url:
+        return
+    picture = document.add_paragraph()
+    picture.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    picture.add_run().add_picture(
+        io.BytesIO(_render_qr_png(qr_url)),
+        width=Mm(preset["qr_mm"]),
+        height=Mm(preset["qr_mm"]),
+    )
+    caption = document.add_paragraph()
+    caption.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    note = caption.add_run(qr_url)
+    note.font.size = Pt(max(6, preset["font_pt"] - 3))
+
+
+def _step_responsible(step: Dict[str, object]) -> List[str]:
+    """Ответственные шага на бланке — список строк.
+
+    ФИО всех персональных исполнителей снимка (assignee_names — их подставляет
+    documents._fill_step_fio по логинам), по одному в строке: колонка узкая,
+    а отметку/подпись каждый ставит напротив своей фамилии. Прежнее одиночное
+    fio — как есть. Пустой снимок (групповой этап) — группа AD печатается как
+    есть, на бумаге её пишут от руки."""
+    names = [
+        str(name).strip() for name in (step.get("assignee_names") or []) if str(name).strip()
+    ]
+    if names:
+        return names
+    single = str(step.get("fio") or "").strip()
+    return [single or str(step.get("owner") or "").strip()]
+
+
+def _step_marks(step: Dict[str, object]) -> list[str]:
+    """Отметка/дата шага: статус и дата выполнения; без даты — место под росчерк."""
+    done_at = str(step.get("done_at") or "").strip()
+    return [
+        line
+        for line in (str(step.get("status") or "").strip(), done_at or "_" * 10)
+        if line
+    ]
+
+
+def _add_steps_table(
+    document: object, context: Dict[str, object], preset: dict
+) -> None:
+    """Таблица шагов: № | этап с его пунктами | ответственные | отметка/дата.
+
+    В колонке «Ответственный» печатаются ВСЕ ответственные шага (реестровый этап
+    с несколькими исполнителями), по одному в строке."""
+    from docx.shared import Mm
+
+    steps = [step for step in (context.get("steps") or []) if isinstance(step, dict)]
+    table = document.add_table(rows=1, cols=len(_STEP_HEADERS))
+    if preset["shade_header"]:
+        table.style = "Table Grid"
+    table.autofit = False
+    width_mm = _printable_width_mm(document)
+    widths = [Mm(width_mm * share) for share in preset["step_widths"]]
+    for index, column in enumerate(table.columns):
+        column.width = widths[index]
+    for index, cell in enumerate(table.rows[0].cells):
+        cell.width = widths[index]
+        cell.paragraphs[0].add_run(_STEP_HEADERS[index]).bold = True
+        if preset["shade_header"]:
+            _shade_cell(cell)
+    for position, step in enumerate(steps, start=1):
+        row = table.add_row()
+        for index, cell in enumerate(row.cells):
+            cell.width = widths[index]
+        row.cells[0].paragraphs[0].add_run(str(step.get("order") or position))
+        stage = row.cells[1].paragraphs[0]
+        _add_stage_text(stage, str(step.get("title") or "").strip(), bold=True)
+        for line in step.get("stage_lines") or []:
+            text = str(line).strip()
+            if text:
+                _add_stage_text(row.cells[1].add_paragraph(), text)
+        responsible_cell = row.cells[2]
+        for index, name in enumerate(_step_responsible(step)):
+            paragraph = (
+                responsible_cell.paragraphs[0] if index == 0
+                else responsible_cell.add_paragraph()
+            )
+            paragraph.add_run(name)
+        mark_cell = row.cells[3]
+        for index, line in enumerate(_step_marks(step)):
+            paragraph = (
+                mark_cell.paragraphs[0] if index == 0 else mark_cell.add_paragraph()
+            )
+            paragraph.add_run(line)
+
+
+def _add_blank_footer(
+    document: object, context: Dict[str, object], preset: dict
+) -> None:
+    """Подвал бланка: номер заявки, название бланка и его версия (снимок)."""
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    version = context.get("blank_version")
+    parts = [
+        str(context.get("request_id") or "").strip(),
+        _blank_title(context) + (f" v{version}" if version else ""),
+    ]
+    footer = document.sections[0].footer.paragraphs[0]
+    footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    footer.add_run(" · ".join(part for part in parts if part))
+
+
+def build_blank_document(context: Dict[str, object]) -> bytes:
+    """Бланк заявки как DOCX: собирается из данных (python-docx), не из файла.
+
+    Макет — из снимка blank_layout (office|line, дефолт office, см.
+    resolve_blank_layout), шапка берёт blank_name и поля сотрудника, шаги
+    печатаются таблицей с ответственными — ВСЕМИ по снимку (ФИО подставил
+    documents.py по логинам assignee_names, по строке на ответственного), группы
+    AD — как есть, QR — на qr_url из контекста (его кладёт
+    generate_bypass: URL заявки). ПДн-поля вычищает sanitize_context.
+    Заявку без шагов не печатает пустым документом — печать отвечает 422
+    (documents.print_bypass). Ожидает python-docx/qrcode/Pillow (стенд);
+    офлайн ImportError разбирает generate_bypass (generated=False).
+    """
+    safe = sanitize_context(dict(context))
+    preset = LAYOUT_PRESETS[resolve_blank_layout(safe.get("blank_layout"))]
+    document = _docx_document(preset)
+    _add_blank_header(document, safe, preset)
+    _add_steps_table(document, safe, preset)
+    _add_blank_footer(document, safe, preset)
+    buf = io.BytesIO()
+    document.save(buf)
+    return buf.getvalue()
 
 
 def _render_qr_png(url: str) -> bytes:
@@ -518,39 +800,32 @@ def _missing_library(exc: BaseException) -> str:
 def generate_bypass(
     request_id: str,
     version: str,
-    template_body: str,
     context: Dict[str, object],
     base_url: str,
     files_dir: str,
-    template_file: str | None = None,
 ) -> BypassResult:
-    """Собрать бегунок: DOCX (python-docx-template) -> PDF (LibreOffice) + QR.
+    """Собрать бланк заявки: DOCX (python-docx) -> PDF (LibreOffice) + QR.
 
-    template_file — имя .docx-файла шаблона в FILES_DIR/templates/: если задано
-    и файл есть на диске — рендер из файла (вёрстка из .docx), иначе фолбэк
-    на текстовый body (template_body). sanitize_context применяется ДО
-    добавления steps/qr (эти ключи не под фильтр ПДн).
+    Оформление целиком из данных: build_blank_document по контексту (снимок
+    blank_layout, шапка, таблица шагов со всеми ответственными); файлы-шаблоны
+    .docx и ключ настроек doc_templates удалены. qr_url кладёт сам
+    generate_bypass — payload QR и подпись под картинкой это URL заявки;
+    sanitize_context применяется ДО сборки (qr_url/steps под фильтр ПДн
+    не подпадают).
 
-    Офлайн (нет python-docx-template/qrcode/PIL) или нет soffice —
+    Офлайн (нет python-docx/qrcode/PIL) или нет soffice —
     BypassResult(generated=False, reason=...): файлы не записываются в документы
     (в БД только мета успешной генерации). QR payload — URL заявки.
     Причина сбоя конвертации — код возврата soffice и хвост его stderr.
     Прочие сбои не глотаются: пишем в лог и пробрасываем наружу.
     """
-    safe = sanitize_context(dict(context, request_id=request_id))
     url = request_url(base_url, request_id)
+    safe = sanitize_context(dict(context, request_id=request_id, qr_url=url))
     try:
-        if template_file:
-            template_path = Path(files_dir) / "templates" / template_file
-            if template_path.is_file():
-                docx_bytes = _render_docx_from_file(template_path, safe, url)
-            else:
-                docx_bytes = _render_docx_stand(template_body, safe)
-        else:
-            docx_bytes = _render_docx_stand(template_body, safe)
+        docx_bytes = build_blank_document(safe)
         qr_bytes = _render_qr_png(url)
     except ImportError as exc:
-        # Офлайн: нет python-docx-template/qrcode/PIL (в т.ч. вложенный импорт).
+        # Офлайн: нет python-docx/qrcode/PIL (в т.ч. вложенный импорт).
         # Называем саму библиотеку, а не только класс исключения.
         return BypassResult(
             generated=False,
@@ -560,7 +835,7 @@ def generate_bypass(
             ),
         )
     except Exception:
-        # Настоящий сбой (шаблон, QR, файлы) — под «офлайн» его прятать нельзя.
+        # Настоящий сбой (сборка бланка, QR, файлы) — под «офлайн» его прятать нельзя.
         _LOGGER.exception("Ошибка генерации бегунка по заявке %s", request_id)
         raise
     out_dir = Path(files_dir)

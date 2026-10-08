@@ -902,3 +902,193 @@ describe("RequestCard", () => {
     expect(screen.queryByRole("button", { name: "Отозвать заявку" })).not.toBeInTheDocument();
   });
 });
+
+// Шаги с несколькими ответственными (миграция 0013): ФИО по логинам,
+// прогресс «N из M согласовали», режим шага и отметки ответственных.
+describe("RequestCard: шаг с несколькими ответственными", () => {
+  // Состав ответственных шага (снимок логинов) и группа-владелец этапа.
+  const MULTI_SAMS = ["sidorova.as", "petrov.pp", "kozlov.da"];
+  const MULTI_NAMES: Record<string, string> = {
+    "sidorova.as": "Сидорова Анна Сергеевна",
+    "petrov.pp": "Петров Пётр Петрович",
+    "kozlov.da": "Козлов Дмитрий Андреевич",
+  };
+
+  // Шаг с тремя ответственными: последовательный режим, прогресс 2 из 3.
+  function multiStep(
+    overrides: Partial<RequestOut["steps"][number]> = {},
+  ): RequestOut["steps"][number] {
+    return {
+      order: 1,
+      owner_group: "SED_STEP_OK",
+      resolver: "by_user",
+      assignee: "sidorova.as",
+      owner_name: "Сидорова Анна Сергеевна",
+      assignees: MULTI_SAMS,
+      approval_mode: "sequential",
+      approved_count: 2,
+      assignee_count: 3,
+      can_act: false,
+      status: "ожидает",
+      expires_at: "2026-10-05T10:00:00+00:00",
+      ...overrides,
+    };
+  }
+
+  // Заявка с одним таким шагом.
+  function multiRequest(
+    overrides: Partial<RequestOut["steps"][number]> = {},
+    fio: string | null = "Громов Игорь Олегович",
+  ): RequestOut {
+    return requestWith(fio, "На согласовании", "REQ-0001", [multiStep(overrides)]);
+  }
+
+  // ФИО ответственных по логинам приходят из состава группы AD.
+  function mockGroupMembers(): void {
+    vi.mocked(getAdGroupMembers).mockResolvedValue(
+      MULTI_SAMS.map((sam) => ({
+        sam,
+        display_name: MULTI_NAMES[sam],
+        mail: "",
+        department: "",
+        title: "",
+      })),
+    );
+  }
+
+  // Последовательный шаг: ФИО по логинам, прогресс «2 из 3 согласовали» и
+  // режим «отметки всех ответственных»; логины в UI не выводятся.
+  it("последовательный шаг: ФИО ответственных, прогресс 2 из 3 и режим", async () => {
+    mockGroupMembers();
+    vi.mocked(getRequest).mockResolvedValue(multiRequest());
+
+    renderCard();
+    await waitFor(() => expect(screen.getByLabelText("Шаги заявки")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(
+        screen.getByText(
+          `Ответственные: ${MULTI_NAMES["sidorova.as"]}, ${MULTI_NAMES["petrov.pp"]}, ${MULTI_NAMES["kozlov.da"]}`,
+        ),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.getByText("2 из 3 согласовали")).toBeInTheDocument();
+    expect(screen.getByText("отметки всех ответственных")).toBeInTheDocument();
+    // Логины ответственных не выводятся.
+    expect(screen.queryByText(/sidorova\.as/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/kozlov\.da/)).not.toBeInTheDocument();
+    // can_act=false — кнопок решения нет.
+    expect(screen.queryByRole("button", { name: "Согласовать" })).not.toBeInTheDocument();
+  });
+
+  // Параллельный режим шага показывается словами, а не кодом.
+  it("параллельный шаг: режим «согласование любым из ответственных»", async () => {
+    mockGroupMembers();
+    vi.mocked(getRequest).mockResolvedValue(
+      multiRequest({ approval_mode: "parallel", approved_count: 0 }),
+    );
+
+    renderCard();
+    await waitFor(() => expect(screen.getByLabelText("Шаги заявки")).toBeInTheDocument());
+    expect(screen.getByText("согласование любым из ответственных")).toBeInTheDocument();
+    expect(screen.getByText("0 из 3 согласовали")).toBeInTheDocument();
+  });
+
+  // Отметки ответственных: список «кто, когда, решение, комментарий». Чужие
+  // отметки приходят с sam=null — решение и комментарий видны, логин нет.
+  it("последовательный шаг: чужие отметки видны, свои логины не показываются", async () => {
+    mockGroupMembers();
+    vi.mocked(getRequest).mockResolvedValue(
+      multiRequest({
+        approvals: [
+          {
+            sam: "sidorova.as",
+            at: "2026-10-05T09:00:00+00:00",
+            decision: "approve",
+            comment: "Возражений нет",
+          },
+          // Чужая отметка непривилегированному: логин скрыт бэкендом.
+          { sam: null, at: "2026-10-05T10:30:00+00:00", decision: "approve", comment: null },
+        ],
+      }),
+    );
+
+    renderCard();
+    await waitFor(() => expect(screen.getByLabelText("Шаги заявки")).toBeInTheDocument());
+    const marks = await screen.findByLabelText("Отметки шага 1");
+    expect(within(marks).getByText(/Сидорова Анна Сергеевна/)).toBeInTheDocument();
+    expect(within(marks).getByText(/Возражений нет/)).toBeInTheDocument();
+    // Чужая отметка: решение видно, автор — нейтральной подписью, без логина.
+    expect(within(marks).getByText(/Ответственный/)).toBeInTheDocument();
+    expect(within(marks).getAllByText(/согласовал/)).toHaveLength(2);
+    expect(marks.textContent).not.toContain("kozlov.da");
+  });
+
+  // Параллельный шаг у того, кто может действовать (can_act): кнопки есть,
+  // после отметки — «отметка учтена», шаг остаётся «На согласовании», окно-попу
+  // не закрывается (ждём остальных), повторных кнопок нет.
+  it("параллельный шаг: после моей отметки ждём остальных, кнопок больше нет", async () => {
+    mockGroupMembers();
+    vi.mocked(me).mockResolvedValue({
+      sam: "petrov.pp",
+      fio: "Петров Пётр Петрович",
+      groups: ["SED_STEP_OK"],
+      role: "owner",
+    });
+    const before = multiRequest(
+      { approval_mode: "parallel", approved_count: 0, can_act: true },
+      null,
+    );
+    const after = multiRequest({
+      approval_mode: "parallel",
+      approved_count: 1,
+      can_act: false,
+      approvals: [
+        { sam: "petrov.pp", at: "2026-10-05T11:00:00+00:00", decision: "approve", comment: null },
+      ],
+    });
+    vi.mocked(getRequest)
+      .mockResolvedValueOnce(before)
+      .mockResolvedValue(after);
+    vi.mocked(decideStep).mockResolvedValue(after);
+    const close = vi.spyOn(window, "close").mockImplementation(() => undefined);
+
+    renderCard("REQ-0001", "owner");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Согласовать" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Согласовать" }));
+
+    await waitFor(() =>
+      expect(vi.mocked(decideStep)).toHaveBeenCalledWith("REQ-0001", 1, "approve", undefined),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByText("Ваша отметка учтена, ожидаются отметки остальных ответственных"),
+      ).toBeInTheDocument(),
+    );
+    // Шаг ждёт остальных: заявка «На согласовании», прогресс 1 из 3, окно открыто.
+    expect(
+      screen.getByText(/^Этап: карточка заявки · Статус: На согласовании$/),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(screen.getAllByText("1 из 3 согласовали").length).toBeGreaterThan(0));
+    expect(close).not.toHaveBeenCalled();
+    // Повторную отметку бэкенд не примет (409) — кнопки больше не предлагаем.
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Согласовать" })).not.toBeInTheDocument(),
+    );
+    clearOpener();
+  });
+
+  // Непривилегированному приходит только его логин в assignees, но счётчики
+  // от бэкенда полные: прогресс «1 из 3», а ответственные — его одна строка.
+  it("владелец шага: урезанный assignees не ломает прогресс", async () => {
+    mockGroupMembers();
+    vi.mocked(getRequest).mockResolvedValue(
+      multiRequest({ assignees: ["petrov.pp"], approved_count: 1 }),
+    );
+
+    renderCard("REQ-0001", "owner");
+    await waitFor(() => expect(screen.getByLabelText("Шаги заявки")).toBeInTheDocument());
+    expect(screen.getByText("1 из 3 согласовали")).toBeInTheDocument();
+    expect(screen.getByText("Ответственные: Петров Пётр Петрович")).toBeInTheDocument();
+    expect(screen.queryByText(/sidorova\.as/)).not.toBeInTheDocument();
+  });
+});

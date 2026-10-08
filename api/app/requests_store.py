@@ -201,6 +201,55 @@ def _stage_lines_value(value: object) -> list:
     return []
 
 
+def _sams_value(value: object) -> list[str]:
+    """Снимок ответственных шага (jsonb assignees): логины без пустых и повторов.
+
+    Мусор в колонке — пустой список: права по assignees тогда прежние (assignee /
+    группа / реестр этапа), выдача заявки не падает."""
+    sams: list[str] = []
+    for item in _stage_lines_value(value):
+        sam = item.strip()
+        if sam and sam not in sams:
+            sams.append(sam)
+    return sams
+
+
+def _approvals_value(value: object) -> list[dict]:
+    """Отметки шага (jsonb approvals) в виде [{sam, at, decision, comment}].
+
+    Разбираются те же формы, что у jsonb в остальном хранилище (список из БД или
+    строка JSON). Запись без логина или не-словарь пропускается: логин в отметке
+    обязателен (кто согласовал), остальное может быть пустым. Мусор — пустой
+    список, тогда шаг ждёт отметок как новый."""
+    if isinstance(value, list):
+        items = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except ValueError:
+            return []
+        items = parsed if isinstance(parsed, list) else []
+    else:
+        return []
+    approvals: list[dict] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        sam = str(item.get("sam") or "").strip()
+        if not sam:
+            continue
+        comment = str(item.get("comment") or "").strip() or None
+        approvals.append(
+            {
+                "sam": sam,
+                "at": str(item.get("at") or ""),
+                "decision": str(item.get("decision") or ""),
+                "comment": comment,
+            }
+        )
+    return approvals
+
+
 class InMemoryRequestsStore:
     """Офлайн-хранилище заявок (словарь процесса), интерфейс RequestsStore."""
 
@@ -305,8 +354,10 @@ class DbRequestsStore:
     require_comment; base_code nullable без FK (в модели _Request его нет).
     Миграция 0008 (справочники маршрута) добавила снимок подбора: у заявки —
     profile_id/service_id/service_name, у шага — stage_id/stage_code/
-    stage_title/stage_lines (jsonb)/profile_step_id. Снимок пишется и читается
-    на обоих путях (create и update — шаги перезаписываются целиком).
+    stage_title/stage_lines (jsonb)/profile_step_id. Миграция 0013 (несколько
+    ответственных) добавила у шага assignees (jsonb-список логинов),
+    approval_mode и approvals (jsonb-отметки). Снимок пишется и читается на
+    обоих путях (create и update — шаги перезаписываются целиком).
     Статусы и route_origin в БД — кодами ('draft'/'manual'), в модели — русскими
     строками контракта ('Черновик'/'custom'); маппинг — словарями выше.
     Ошибки БД оборачиваются в RequestsUnavailable (503), как DbSettingsStore
@@ -317,7 +368,8 @@ class DbRequestsStore:
         "id, code, enterprise, tab_num, initiated_by_hr, route_origin, status, "
         "fio, department, position, category, escalation_hours, "
         "subject, content, doc_type_code, "
-        "profile_id, service_id, service_name"
+        "profile_id, service_id, service_name, "
+        "blank_id, blank_name, blank_version, blank_layout"
     )
 
     _SELECT_REQUESTS = text(
@@ -344,6 +396,7 @@ class DbRequestsStore:
           status, fio, department, position, category, escalation_hours,
           subject, content, doc_type_code,
           profile_id, service_id, service_name,
+          blank_id, blank_name, blank_version, blank_layout,
           created_at, updated_at
         )
         VALUES (
@@ -351,6 +404,7 @@ class DbRequestsStore:
           :status, :fio, :department, :position, :category, :escalation_hours,
           :subject, :content, :doc_type_code,
           :profile_id, :service_id, :service_name,
+          :blank_id, :blank_name, :blank_version, :blank_layout,
           :created_at, :updated_at
         )
         RETURNING id
@@ -372,6 +426,10 @@ class DbRequestsStore:
             profile_id = :profile_id,
             service_id = :service_id,
             service_name = :service_name,
+            blank_id = :blank_id,
+            blank_name = :blank_name,
+            blank_version = :blank_version,
+            blank_layout = :blank_layout,
             updated_at = :updated_at
         WHERE code = :code
         """
@@ -387,7 +445,8 @@ class DbRequestsStore:
     _STEP_COLUMNS = (
         "request_id, step_order, owner_group, done_by, status, resolver, "
         "assignee, require_comment, done_at, expires_at, comment, "
-        "stage_id, stage_code, stage_title, stage_lines, profile_step_id"
+        "stage_id, stage_code, stage_title, stage_lines, profile_step_id, "
+        "assignees, approval_mode, approvals"
     )
     _SELECT_STEPS_BY_REQUEST = text(
         f"""
@@ -409,13 +468,15 @@ class DbRequestsStore:
         INSERT INTO request_steps (
           request_id, step_order, owner_group, done_by, status, resolver,
           assignee, require_comment, done_at, expires_at, comment,
-          stage_id, stage_code, stage_title, stage_lines, profile_step_id
+          stage_id, stage_code, stage_title, stage_lines, profile_step_id,
+          assignees, approval_mode, approvals
         )
         VALUES (
           :request_id, :step_order, :owner_group, :done_by, :status, :resolver,
           :assignee, :require_comment, :done_at, :expires_at, :comment,
           :stage_id, :stage_code, :stage_title, CAST(:stage_lines AS jsonb),
-          :profile_step_id
+          :profile_step_id,
+          CAST(:assignees AS jsonb), :approval_mode, CAST(:approvals AS jsonb)
         )
         """
     )
@@ -475,7 +536,8 @@ class DbRequestsStore:
         )
 
     def _step_params(self, request_id: int, step: _Step) -> dict:
-        """Параметры вставки шага (статус/resolver — кодами БД, stage_lines — jsonb)."""
+        """Параметры вставки шага (статус/resolver — кодами БД, stage_lines,
+        assignees и approvals — jsonb)."""
         return {
             "request_id": request_id,
             "step_order": step.order,
@@ -493,6 +555,10 @@ class DbRequestsStore:
             "stage_title": step.stage_title,
             "stage_lines": json.dumps(step.stage_lines or [], ensure_ascii=False),
             "profile_step_id": step.profile_step_id,
+            # Миграция 0013: снимок ответственных, режим шага и собранные отметки.
+            "assignees": json.dumps(step.assignees or [], ensure_ascii=False),
+            "approval_mode": step.approval_mode,
+            "approvals": json.dumps(step.approvals or [], ensure_ascii=False, default=str),
         }
 
     @staticmethod
@@ -514,6 +580,11 @@ class DbRequestsStore:
             "profile_id": request.profile_id,
             "service_id": request.service_id,
             "service_name": request.service_name,
+            # Снимок бланка: правка справочника не меняет выданную заявку.
+            "blank_id": getattr(request, "blank_id", None),
+            "blank_name": getattr(request, "blank_name", None),
+            "blank_version": getattr(request, "blank_version", None),
+            "blank_layout": getattr(request, "blank_layout", None),
         }
 
     def _build_request(self, row, step_rows: list) -> _Request:
@@ -523,7 +594,11 @@ class DbRequestsStore:
         from .requests import _Step as _StepModel
 
         return _RequestModel(
-            id=row.code,
+            id=row.code,            blank_id=getattr(row, "blank_id", None),
+            blank_name=getattr(row, "blank_name", None),
+            blank_version=getattr(row, "blank_version", None),
+            blank_layout=getattr(row, "blank_layout", None),
+
             status=request_status_from_db(row.status),
             route_origin=route_origin_from_db(row.route_origin),
             enterprise=row.enterprise,
@@ -557,6 +632,9 @@ class DbRequestsStore:
                     stage_title=step_row.stage_title,
                     stage_lines=_stage_lines_value(step_row.stage_lines),
                     profile_step_id=step_row.profile_step_id,
+                    assignees=_sams_value(step_row.assignees),
+                    approval_mode=step_row.approval_mode,
+                    approvals=_approvals_value(step_row.approvals),
                 )
                 for step_row in step_rows
             ],
@@ -564,8 +642,6 @@ class DbRequestsStore:
 
     def create(self, request: _Request) -> None:
         """Новая заявка: dismissal_requests + все шаги одной транзакцией."""
-        from .requests import _Request as _RequestModel
-
         try:
             with self._session_factory() as session:
                 now = datetime.now(timezone.utc)
@@ -623,8 +699,6 @@ class DbRequestsStore:
     def update(self, request: _Request) -> None:
         """Записать заявку и заменить её шаги (шаги — цельный список модели;
         повторная вставка переживает и отметки владельца, и правку маршрута)."""
-        from .requests import _Request as _RequestModel
-
         try:
             with self._session_factory() as session:
                 internal = session.execute(

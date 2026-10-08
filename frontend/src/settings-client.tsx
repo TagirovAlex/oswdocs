@@ -31,25 +31,6 @@ export interface SettingsTemplate {
   steps: SettingsTemplateStep[];
 }
 
-// Шаблон бегунка (settings.doc_templates[]): служба + категория + тело DOCX
-// (текстовый фолбэк) либо имя .docx-файла в FILES_DIR/templates/ (file).
-export interface SettingsDocTemplate {
-  service: string;
-  category: string;
-  body: string;
-  // Имя .docx-файла бланка в FILES_DIR/templates/; null/отсутствует — текстовый body.
-  file?: string | null;
-  // Набор должностей (position_sets): бланк для этих должностей;
-  // null/пусто — бланк по умолчанию.
-  position_set?: string | null;
-}
-
-// Именованный набор должностей (settings.position_sets): название + титулы AD.
-export interface PositionSet {
-  name: string;
-  positions: string[];
-}
-
 // Шаблон письма (settings.mail_templates[]): код события + тема + HTML-тело.
 export interface SettingsMailTemplate {
   code: string;
@@ -155,12 +136,8 @@ export interface SettingsData {
   position_escalation: Record<string, number> | null;
   // Шаблоны маршрутов (templates).
   templates: SettingsTemplate[] | null;
-  // Шаблоны бегунков (doc_templates).
-  doc_templates: SettingsDocTemplate[] | null;
   // Шаблоны писем (mail_templates).
   mail_templates: SettingsMailTemplate[] | null;
-  // Именованные наборы должностей для привязки бланков (position_sets).
-  position_sets: PositionSet[] | null;
   // Подключения к базам 1С (onec_bases; пароль маскируется в GET).
   onec_bases: SettingsOnecBase[] | null;
   // Дата/время последней синхронизации предприятий (read-only, пишет синхронизация).
@@ -203,12 +180,8 @@ export interface ContentSettingsData {
   position_escalation: Record<string, number> | null;
   // Шаблоны маршрутов (templates).
   templates: SettingsTemplate[] | null;
-  // Шаблоны бегунков (doc_templates).
-  doc_templates: SettingsDocTemplate[] | null;
   // Шаблоны писем (mail_templates).
   mail_templates: SettingsMailTemplate[] | null;
-  // Именованные наборы должностей для привязки бланков (position_sets).
-  position_sets: PositionSet[] | null;
   // Сколько сотрудников на страницу справочника (directory_page_size).
   directory_page_size?: number | null;
 }
@@ -333,29 +306,6 @@ export async function syncAdGroups(): Promise<AdGroupsSyncResult> {
     throw new ApiHttpError(res.status, "Ошибка синхронизации состава групп");
   }
   return (await res.json()) as AdGroupsSyncResult;
-}
-
-// GET /api/ad/titles: должности (title) из кэша состава групп AD —
-// подсказки для наборов должностей бланков (руководитель ОК + админ).
-export async function getAdTitles(): Promise<string[]> {
-  const token = getToken();
-  if (!token) {
-    throw new ApiHttpError(401, "Нет токена");
-  }
-  let res: Response;
-  try {
-    res = await fetch("/api/ad/titles", {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-  } catch {
-    throw new Error("Сервис недоступен");
-  }
-  if (res.status === 401) throw new ApiHttpError(401, "Сессия истекла");
-  if (res.status === 403) throw new ApiHttpError(403, "Доступ запрещён");
-  if (res.status === 503) throw new ApiHttpError(503, "Сервис недоступен");
-  if (!res.ok) throw new ApiHttpError(res.status, "Ошибка загрузки должностей");
-  const data = (await res.json()) as { items?: unknown };
-  return Array.isArray(data.items) ? data.items.filter((t): t is string => typeof t === "string") : [];
 }
 
 // Запрос к /api/doc-types с Bearer-токеном (POST/PATCH/DELETE — только админ).
@@ -507,81 +457,8 @@ export async function deleteBackup(name: string): Promise<{ ok: boolean }> {
   return requestSettings<{ ok: boolean }>(`/api/archive/files/${encodeURIComponent(name)}`, "DELETE");
 }
 
-// ---------------------------------------------------------------------------
-// Файлы бланков .docx (doc_templates[].file): загрузка/скачивание/удаление/
-// предпросмотр. Хранятся в FILES_DIR/templates/, в settings — только имя файла;
-// текстовый body остаётся фолбэком, когда file не задан. Только админ.
-// ---------------------------------------------------------------------------
-
-// Результат предпросмотра бланка (POST .../preview): generated=false с reason —
-// НЕ ошибка (нет LibreOffice/шаблона), текст показывает редактор.
-export interface DocTemplatePreviewResult {
-  // Флаг успешной генерации PDF.
-  generated: boolean;
-  // PDF рендера на тестовых данных (base64; при generated=false — null).
-  pdf_b64: string | null;
-  // Причина, почему бланк не сгенерирован (generated=false).
-  reason?: string | null;
-}
-
-// POST /api/settings/doc-templates/files/upload: импорт .docx-бланка (multipart;
-// Content-Type ставит браузер с границей — вручную нельзя). previous — имя
-// старого файла при замене (удаляется на сервере); без него — новая загрузка.
-export async function uploadDocTemplateFile(file: File, previous?: string): Promise<{ name: string }> {
-  const token = getToken();
-  if (!token) {
-    throw new ApiHttpError(401, "Нет токена");
-  }
-  const form = new FormData();
-  form.append("file", file);
-  if (previous) form.append("previous", previous);
-  let res: Response;
-  try {
-    res = await fetch("/api/settings/doc-templates/files/upload", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}` },
-      body: form,
-    });
-  } catch {
-    throw new Error("Сервис недоступен");
-  }
-  if (res.status === 401) throw new ApiHttpError(401, "Сессия истекла");
-  if (res.status === 403) throw new ApiHttpError(403, "Настройки — только админам");
-  if (res.status === 422) throw new ApiHttpError(422, "Неверные значения настроек");
-  if (res.status === 503) throw new ApiHttpError(503, "Сервис настроек недоступен");
-  if (!res.ok) throw new ApiHttpError(res.status, "Ошибка загрузки файла бланка");
-  return (await res.json()) as { name: string };
-}
-
-// GET /api/settings/doc-templates/files/{name}/download: скачивание файла бланка.
-// Качаем blob-ом с Bearer-токеном (прямая навигация заголовок не передала бы).
-export async function downloadDocTemplateFile(name: string): Promise<void> {
-  const token = getToken();
-  const res = await fetch(`/api/settings/doc-templates/files/${encodeURIComponent(name)}/download`, {
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
-  });
-  if (!res.ok) throw new ApiHttpError(res.status, "Не удалось скачать файл бланка");
-  const url = URL.createObjectURL(await res.blob());
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = name;
-  document.body?.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 60_000);
-}
-
-// DELETE /api/settings/doc-templates/files/{name}: удалить файл бланка (только
-// админ); ответ — {ok: true}; при отсутствии файла бэкенд отвечает 404.
-export async function deleteDocTemplateFile(name: string): Promise<void> {
-  await requestSettings<{ ok: boolean }>(`/api/settings/doc-templates/files/${encodeURIComponent(name)}`, "DELETE");
-}
-
-// POST /api/settings/doc-templates/files/{name}/preview: рендер файла бланка на
-// тестовых данных → PDF (base64 в ответе); generated=false + reason — не ошибка.
-export async function previewDocTemplateFile(name: string): Promise<DocTemplatePreviewResult> {
-  return requestSettings<DocTemplatePreviewResult>(
-    `/api/settings/doc-templates/files/${encodeURIComponent(name)}/preview`,
-    "POST",
-  );
-}
+// Файлы-шаблоны .docx (doc_templates[].file) больше не используются: по решению
+// человека документ печати собирается из данных бланка из справочника. Поэтому
+// ключи настроек doc_templates/position_sets и методы загрузки/скачивания/замены/
+// удаления/предпросмотра .docx из клиента убраны; справочник бланков — в
+// requests-client (getBlanks/getBlankSteps/setBlankSteps).

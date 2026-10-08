@@ -16,6 +16,7 @@ import {
   getEmployeeCard,
   getEnterprises,
   getMyLinks,
+  getRouteBlanks,
   getRoutingCatalogs,
   getStepGroups,
   previewRoute,
@@ -31,8 +32,10 @@ import type {
   EmployeeHit,
   Enterprise,
   MyLink,
+  RouteBlank,
   RouteMode,
   RoutePreview,
+  RoutePreviewBlank,
   RoutingCatalogStage,
   StepGroup,
 } from "./requests-client";
@@ -205,6 +208,12 @@ export function CreateForm(props: CreateFormProps) {
   const [docTypes, setDocTypes] = useState<DocType[]>([]);
   const [docTypesError, setDocTypesError] = useState<string>("");
   const [docTypeCode, setDocTypeCode] = useState<string>("");
+  // Бланк из справочника (GET /api/requests/route/blanks): выбирает ОК, его
+  // шаги становятся маршрутом заявки. Пусто — маршрут подбирается по службе,
+  // если это разрешено настройкой blank_autopick (autopick в ответе).
+  const [blanks, setBlanks] = useState<RouteBlank[]>([]);
+  const [blanksError, setBlanksError] = useState<string>("");
+  const [blankId, setBlankId] = useState<string>("");
   // Тема и содержание заявки (обязательные поля макета) и комментарий (правая панель).
   const [subject, setSubject] = useState<string>("");
   const [content, setContent] = useState<string>("");
@@ -399,6 +408,26 @@ export function CreateForm(props: CreateFormProps) {
     };
   }, []);
 
+  // Доступные бланки для выбора ОК (GET /api/requests/route/blanks): только
+  // активные бланки справочника, без ПДн. Ошибка загрузки — примечанием, форма
+  // продолжает работать (бланк не уходит, маршрут подбирается по службе).
+  useEffect(() => {
+    let alive = true;
+    getRouteBlanks()
+      .then((items) => {
+        if (alive) {
+          setBlanks(items);
+          setBlanksError("");
+        }
+      })
+      .catch((e: unknown) => {
+        if (alive) setBlanksError(e instanceof Error ? e.message : "Ошибка загрузки бланков");
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
   // Группы-владельцы шагов — из settings (GET /api/step-groups), без хардкода.
   // Недоступность — понятный текст, форма продолжает работать.
   useEffect(() => {
@@ -461,6 +490,7 @@ export function CreateForm(props: CreateFormProps) {
       dismissed_stages: dismissedStages,
       added_stages: addedStages,
       ...(managerSam !== "" ? { manager: managerSam } : {}),
+      ...(blankId !== "" ? { blank_id: Number(blankId) } : {}),
     })
       .then((data) => {
         if (previewSeq.current !== seq) return;
@@ -484,6 +514,7 @@ export function CreateForm(props: CreateFormProps) {
     dismissedStages,
     addedStages,
     managerSam,
+    blankId,
   ]);
 
 // Подтвердить связь 1С↔AD для выбранного сотрудника: кандидат в AD один (иначе
@@ -641,6 +672,16 @@ const confirmLink = async () => {
   // данных) — для создания они необязательны.
   const empTotalPages = empTotal > 0 ? Math.max(1, Math.ceil(empTotal / EMP_SEARCH_PAGE_SIZE)) : 0;
   const employeeReady = fio.trim() !== "" && tabNum.trim() !== "";
+  // Выбранный бланк: подпись селекта — название и число шагов, пояснение бланка
+  // (description) идёт подсказкой под селектом.
+  const selectedBlank = blanks.find((b) => String(b.id) === blankId) ?? null;
+  // Автоподстановка бланка по службе выключена (настройка blank_autopick) — без
+  // выбора бланка маршрут собран не будет: предупреждаем до создания.
+  const blankAutopick = blanks.length > 0 ? blanks[0].autopick : true;
+  // Снимок выбранного бланка в предпросмотре (blank) — по подбору по службе
+  // приходит прежнее значение (вид бланка печати, строка office/line).
+  const previewBlank: RoutePreviewBlank | null =
+    preview && typeof preview.blank === "object" ? preview.blank : null;
   // Готовность маршрута: в auto — этапы подобраны (blocks не отправляются),
   // в custom — заполнены блоки конструктора, как раньше.
   // Этап «Руководитель» (manager_ad) из предпросмотра: кого нашли в AD и почему
@@ -932,7 +973,8 @@ const confirmLink = async () => {
   }
 
   // Сброс формы: после успешного создания и по кнопке «Отмена». Вид документа
-  // возвращается к первому активному, остальные поля пусты. created НЕ трогаем —
+  // возвращается к первому активному, бланк сбрасывается (выбирает человек),
+  // остальные поля пусты. created НЕ трогаем —
   // статус «Заявка … создана» остаётся видимым.
   function resetForm(): void {
     setEnterprise("");
@@ -951,6 +993,7 @@ const confirmLink = async () => {
     setContent("");
     setComment("");
     setDocTypeCode(docTypes.length > 0 ? docTypes[0].code : "");
+    setBlankId("");
     setBlocks([]);
     setRouteMode("auto");
     setPreview(null);
@@ -1004,6 +1047,7 @@ const confirmLink = async () => {
         subject,
         content,
         ...(docTypeCode !== "" ? { doc_type_code: docTypeCode } : {}),
+        ...(blankId !== "" ? { blank_id: Number(blankId) } : {}),
         ...(baseCode !== "" ? { base_code: baseCode } : {}),
         ...(adSam !== "" ? { ad_sam: adSam } : {}),
         ...(managerSam !== "" ? { manager: managerSam } : {}),
@@ -1258,6 +1302,43 @@ const confirmLink = async () => {
             </fieldset>
           )}
 
+          {/* Бланк из справочника (GET /api/requests/route/blanks): название и
+              число шагов в подписи, описание бланка — подсказкой. Выбор задаёт
+              этапы маршрута заявки; без него маршрут подбирается по службе,
+              если это разрешено настройкой blank_autopick. */}
+          <label className="sed-field">
+            Бланк
+            <select
+              aria-label="Бланк"
+              value={blankId}
+              onChange={(e) => {
+                markTouched();
+                setBlankId(e.target.value);
+              }}
+            >
+              <option value="">— выберите бланк —</option>
+              {blanks.map((blank) => (
+                <option key={blank.id} value={String(blank.id)} title={blank.description ?? ""}>
+                  {blank.name} ({blank.step_count} шаг.)
+                </option>
+              ))}
+            </select>
+          </label>
+          {blanksError && <div className="sed-note">Бланки: {blanksError}</div>}
+          {selectedBlank && selectedBlank.description && (
+            <div className="sed-note">{selectedBlank.description}</div>
+          )}
+          {blanks.length === 0 && !blanksError && (
+            <div className="sed-note">
+              Активных бланков нет — заведите бланк в настройках (вкладка «Бланки»).
+            </div>
+          )}
+          {!selectedBlank && !blankAutopick && (
+            <div className="sed-note">
+              Без выбора бланка маршрут собран не будет: подстановка бланка по службе выключена.
+            </div>
+          )}
+
           {/* Вид документа (селект из GET /api/doc-types, только активные),
               тема и содержание — обязательные поля макета (DESIGN.md п.1.12). */}
           <label className="sed-field">
@@ -1430,6 +1511,13 @@ const confirmLink = async () => {
               )}
               {preview && (
                 <>
+                  {previewBlank && (
+                    <div className="sed-block">
+                      Бланк: <strong>{previewBlank.name}</strong>
+                      {` · шагов: ${previewBlank.step_count}`}
+                      {previewBlank.version != null && ` · версия ${previewBlank.version}`}
+                    </div>
+                  )}
                   <div className="sed-block">
                     Профиль: <strong>{preview.profile?.name ?? "—"}</strong>
                   </div>

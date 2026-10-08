@@ -37,6 +37,21 @@ export interface Folder {
   depth?: number;
 }
 
+// Режим шага с несколькими ответственными (миграция 0013): parallel —
+// согласование любым из ответственных (отметка одного закрывает шаг),
+// sequential — отметки всех ответственных.
+export type StepApprovalMode = "sequential" | "parallel";
+
+// Отметка ответственного по шагу (StepApprovalOut). sam — это sAMAccountName:
+// бэкенд отдаёт его только привилегированным и владельцу своей отметки, у чужих
+// отметок sam=null (сами решения и комментарии при этом видны).
+export interface StepApproval {
+  sam: string | null;
+  at: string;
+  decision: string;
+  comment?: string | null;
+}
+
 // Шаг маршрута (RequestOut.steps).
 export interface RequestStep {
   order: number;
@@ -66,6 +81,17 @@ export interface RequestStep {
   done_by?: string | null;
   done_at?: string | null;
   comment?: string | null;
+  // Несколько ответственных (миграция 0013): снимок логинов, режим шага и
+  // собранные отметки. assignee — первый из assignees (прежний UI/выборки),
+  // поэтому ФИО берём по логинам отдельно (см. request-card).
+  assignees?: string[];
+  approvals?: StepApproval[];
+  approval_mode?: StepApprovalMode | null;
+  // Прогресс отметок «N из M согласовали»: считает бэкенд по полному снимку,
+  // поэтому показывается и непривилегированному, у которого в assignees
+  // остаётся только собственный логин.
+  approved_count?: number;
+  assignee_count?: number;
 }
 
 // Заявка из API (RequestOut). fio у владельца — null (ПДн режет сервер).
@@ -135,6 +161,9 @@ export interface CreateRequestBody {
   content: string;
   // Вид документа (GET /api/doc-types; пустой справочник — поле не уходит).
   doc_type_code?: string;
+  // Бланк из справочника (GET /api/requests/route/blanks; выбирает ОК). В auto
+  // его шаги становятся маршрутом заявки, в custom бланк указывать не обязательно.
+  blank_id?: number;
   // Режим маршрута: auto — сборка из профиля службы (по умолчанию), custom —
   // ручной конструктор (blocks/steps). В auto блоки не отправляются.
   route_mode?: RouteMode;
@@ -197,6 +226,19 @@ export interface RoutePreviewBody {
   // Замена руководителя (логин AD): показываем в предпросмотре именно того,
   // кто пойдёт в маршрут, вместо того, кто найден по manager_dn из AD.
   manager?: string;
+  // Бланк из справочника: его шаги и ответственные — в предпросмотре. Не задан —
+  // маршрут подбирается по службе (если включена настройка blank_autopick).
+  blank_id?: number;
+}
+
+// Снимок выбранного бланка в предпросмотре (RoutePreviewBlankOut).
+export interface RoutePreviewBlank {
+  id: number;
+  code: string;
+  name: string;
+  layout: string | null;
+  version: number | null;
+  step_count: number;
 }
 
 // Ответ предпросмотра маршрута (RoutePreviewOut). reason — причина подбора
@@ -207,7 +249,12 @@ export interface RoutePreview {
   service: RoutePreviewService | null;
   reason: string;
   stages: RoutePreviewStage[];
-  blank: string | null;
+  // Выбранный бланк — снимок (RoutePreviewBlank); при подборе по службе прежнее
+  // значение — вид бланка печати из справочника служб (office/line, строка).
+  blank: RoutePreviewBlank | string | null;
+  // Откуда взят маршрут: chosen — бланк выбрал ОК, autopick — подобран по службе
+  // (запасной механизм, настройка blank_autopick).
+  blank_source?: "chosen" | "autopick" | null;
   // Предупреждение для ОК: например, сотрудник не найден в AD — маршрут по
   // службе не подбирается, печать пойдёт бланком по умолчанию.
   notice?: string | null;
@@ -601,6 +648,140 @@ export async function getRoutingCatalogs(): Promise<RoutingCatalogs> {
   return requestJson<RoutingCatalogs>("/api/settings/routing/catalogs");
 }
 
+// --- Бланки (справочник blanks/blank_steps) --------------------------------
+
+// Бланк для выбора при создании заявки (RouteBlankOut; GET
+// /api/requests/route/blanks): только активные бланки, без ПДн. step_count —
+// число шагов (для подписи в селекте). autopick — включена ли автоподстановка
+// бланка по службе (настройка blank_autopick): если выключена, без выбора
+// бланка маршрут собран не будет.
+export interface RouteBlank {
+  id: number;
+  code: string;
+  name: string;
+  description: string | null;
+  layout: string | null;
+  step_count: number;
+  autopick: boolean;
+}
+
+// GET /api/requests/route/blanks: доступные бланки для селекта ОК (роль как у
+// создания заявки). Пустой список — выбирать нечего, форма покажет подсказку.
+export async function getRouteBlanks(): Promise<RouteBlank[]> {
+  return requestJson<RouteBlank[]>("/api/requests/route/blanks");
+}
+
+// Бланк справочника админа (строка GET /api/settings/routing/blanks): все,
+// включая отключённые. step_count — число шагов в составе.
+export interface BlankRow {
+  id: number;
+  code: string;
+  name: string;
+  doc_type_code: string | null;
+  description: string | null;
+  layout: string;
+  active: boolean;
+  version: number;
+  updated_at?: string | null;
+  updated_by?: string | null;
+  step_count?: number | null;
+}
+
+// Тело POST /api/settings/routing/blanks (BlankCatalogIn). layout — встроенный
+// пресет печати (office|line), файлов-шаблонов нет.
+export interface BlankInput {
+  code: string;
+  name: string;
+  doc_type_code?: string | null;
+  description?: string | null;
+  layout?: "office" | "line";
+  active?: boolean;
+}
+
+// Тело PUT /api/settings/routing/blanks/{id} (BlankCatalogUpdateIn): код бланка
+// неизменен, поэтому его нет среди полей.
+export type BlankPatch = Omit<BlankInput, "code">;
+
+// Шаг бланка с текстом этапа (строка GET /api/settings/routing/blanks/{id}/steps).
+// title/stage_lines — из approval_stages; stage_lines — список пунктов, каждый
+// может содержать HTML визуального редактора.
+export interface BlankStepRow {
+  blank_id: number;
+  stage_id: number;
+  step_order: number;
+  optional_override: boolean | null;
+  require_comment_override: boolean | null;
+  stage_code: string | null;
+  title: string | null;
+  stage_lines: string[];
+  owner_kind: string | null;
+  owner_group: string | null;
+  optional: boolean | null;
+  print_assignee: boolean | null;
+  require_comment: boolean | null;
+  stage_active: boolean | null;
+}
+
+// Шаг в теле PUT /api/settings/routing/blanks/{id}/steps (BlankStepIn).
+// null в переопределениях — «взять значение этапа» (optional/require_comment).
+export interface BlankStepInput {
+  stage_id: number;
+  step_order: number;
+  optional_override?: boolean | null;
+  require_comment_override?: boolean | null;
+}
+
+// GET /api/settings/routing/blanks: справочник бланков (только админ, иначе 403).
+export async function getBlanks(): Promise<BlankRow[]> {
+  return requestJson<BlankRow[]>("/api/settings/routing/blanks");
+}
+
+// POST /api/settings/routing/blanks: создать бланк (409 на дубль кода).
+export async function createBlank(payload: BlankInput): Promise<{ id: number; code: string }> {
+  return requestJson<{ id: number; code: string }>("/api/settings/routing/blanks", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+// PUT /api/settings/routing/blanks/{id}: частичная правка бланка.
+export async function updateBlank(blankId: number, patch: BlankPatch): Promise<{ id: number }> {
+  return requestJson<{ id: number }>(`/api/settings/routing/blanks/${blankId}`, {
+    method: "PUT",
+    body: JSON.stringify(patch),
+  });
+}
+
+// GET /api/settings/routing/blanks/{id}/steps: состав шагов бланка с текстом этапов.
+export async function getBlankSteps(blankId: number): Promise<BlankStepRow[]> {
+  return requestJson<BlankStepRow[]>(`/api/settings/routing/blanks/${blankId}/steps`);
+}
+
+// PUT /api/settings/routing/blanks/{id}/steps: полная замена состава шагов
+// (одна транзакция, версия бланка растёт; этап вне маршрутов — 422).
+export async function setBlankSteps(
+  blankId: number,
+  steps: BlankStepInput[],
+): Promise<{ blank_id: number; count: number }> {
+  return requestJson<{ blank_id: number; count: number }>(
+    `/api/settings/routing/blanks/${blankId}/steps`,
+    { method: "PUT", body: JSON.stringify({ steps }) },
+  );
+}
+
+// PUT /api/settings/routing/stages/{id}: правка этапа справочника. title и
+// stage_lines приходят из визуального редактора (HTML), поэтому в них
+// допустима разметка — её санирует рендер печати (см. api/app/docs.py).
+export async function updateRoutingStage(
+  stageId: number,
+  patch: { title?: string; stage_lines?: string[] },
+): Promise<{ id: number; updated: string }> {
+  return requestJson<{ id: number; updated: string }>(`/api/settings/routing/stages/${stageId}`, {
+    method: "PUT",
+    body: JSON.stringify(patch),
+  });
+}
+
 // POST /api/requests/{id}/print: генерация бегунка (ОК/админ). При отсутствии
 // LibreOffice/шаблона — generated=false с reason (не ошибка); при успехе PDF —
 // base64 (pdf_b64), версии не создаются.
@@ -871,6 +1052,14 @@ export async function syncLinks(): Promise<AdSyncResult> {
 // Логика совпадает с stepOwnerCell в request-card.
 function stepOwnerLabel(step: RequestStep | undefined): string {
   if (!step) return "—";
+  // Несколько ответственных (миграция 0013): ФИО каждого в списке заявок
+  // недоступно (бэкенд отдаёт логины, а список их не резолвит), поэтому
+  // показываем число ответственных и прогресс отметок. Считаем по
+  // assignee_count: непривилегированному assignees урезан до его логина.
+  const total = step.assignee_count ?? step.assignees?.length ?? 0;
+  if (total > 1) {
+    return `Ответственные: ${total} · ${step.approved_count ?? 0} из ${total} согласовали`;
+  }
   if (step.owner_name) return step.owner_name;
   if (step.resolver === "by_user") return "Персональный исполнитель";
   return step.owner_group || "—";

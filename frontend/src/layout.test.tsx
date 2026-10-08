@@ -394,6 +394,41 @@ describe("SedLayout", () => {
     expect(row.step).toBe("Персональный исполнитель");
   });
 
+  // Шаг с несколькими ответственными (миграция 0013): ФИО каждого в списке
+  // недоступно (бэкенд отдаёт логины), поэтому подпись шага — число
+  // ответственных и прогресс отметок. Считаем по assignee_count: у
+  // непривилегированного assignees урезан до его логина.
+  it("шаг с несколькими ответственными: подпись — ответственные и прогресс", () => {
+    const multi: RequestOut["steps"] = [
+      {
+        order: 1,
+        owner_group: "SED_STEP_OK",
+        resolver: "by_user",
+        assignee: "sidorova.as",
+        owner_name: "Сидорова Анна Сергеевна",
+        assignees: ["sidorova.as", "petrov.pp", "kozlov.da"],
+        approval_mode: "sequential",
+        approved_count: 2,
+        assignee_count: 3,
+        can_act: false,
+        status: "ожидает",
+        expires_at: "2026-10-05T10:00:00+00:00",
+      },
+    ];
+    const row = toRequestRow(
+      requestWith("Громов Игорь Олегович", "На согласовании", "REQ-0001", multi),
+    );
+    expect(row.ownerName).toBe("Ответственные: 3 · 2 из 3 согласовали");
+    expect(row.step).toBe("Ответственные: 3 · 2 из 3 согласовали");
+    // Непривилегированному пришёл только его логин — подпись та же (счётчики
+    // от бэкенда полные), чужих логинов в списке нет.
+    const own = multi.map((s) => ({ ...s, assignees: ["sidorova.as"] }));
+    const rowOwn = toRequestRow(
+      requestWith("Громов Игорь Олегович", "На согласовании", "REQ-0001", own),
+    );
+    expect(rowOwn.ownerName).toBe("Ответственные: 3 · 2 из 3 согласовали");
+  });
+
   // Групповой шаг (ФИО нет) — название группы, а не логин согласующего.
   it("групповой шаг в колонке согласующего — название группы", async () => {
     vi.mocked(getFolders).mockResolvedValue(folders);

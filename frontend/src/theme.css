@@ -786,8 +786,8 @@ fieldset textarea {
   color: var(--sed-text);
 }
 
-/* Многострочные поля настроек (textarea) — на всю ширину блока (бланки бегунков,
-   шаблоны писем, текст письма, адресаты). Высота — атрибутом rows у поля. */
+/* Многострочные поля настроек (textarea) — на всю ширину блока (текст письма,
+   адресаты). Высота — атрибутом rows у поля. */
 fieldset textarea {
   width: 100%;
   box-sizing: border-box;
@@ -943,27 +943,6 @@ fieldset textarea {
   flex-wrap: wrap;
 }
 
-/* Пейджер модалки: всё в один ряд без переноса (при узком окне — скролл). */
-.sed-pager--single {
-  flex-wrap: nowrap;
-  gap: 6px;
-  overflow-x: auto;
-}
-
-/* Кнопки-номера пейджера модалки: одинаковые квадраты, ровный ряд. */
-.sed-pager--single button[aria-label^="Страница"] {
-  min-width: 32px;
-  padding-left: 6px;
-  padding-right: 6px;
-  text-align: center;
-}
-
-/* Счётчик страниц — в конце ряда, не разбивает кнопки. */
-.sed-pager--single [role="status"] {
-  white-space: nowrap;
-  margin-left: auto;
-}
-
 .sed-pager select {
   border: 1px solid var(--sed-border);
   border-radius: 4px;
@@ -1037,4 +1016,69 @@ fieldset textarea {
   height: 1px;
   overflow: hidden;
   clip: rect(0 0 0 0);
+}
+
+/* Выбранная строка справочника бланков (состав открыт этой строки). */
+.sed-table__row--active td {
+  background: var(--sed-primary-soft);
+}
+
+/* Блок «Текст этапа» в справочнике бланков: визуальные редакторы этапа. */
+.sed-blanktext {
+  border: 1px solid var(--sed-border);
+  border-radius: var(--sed-radius);
+  padding: 8px;
+  margin-top: 8px;
+  background: var(--sed-panel);
+}
+
+.sed-blanktext__line {
+  margin-top: 8px;
+}
+
+/* Визуальный редактор текста этапа (TipTap): панель кнопок + область ввода. */
+.sed-rte {
+  margin-top: 8px;
+}
+
+.sed-rte__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.sed-rte__btn {
+  padding: 2px 6px;
+  font-size: 12px;
+}
+
+/* Активная кнопка форматирования (каретка в полужирном, список включён). */
+.sed-rte__btn--on {
+  background: var(--sed-primary-soft);
+  border-color: var(--sed-primary);
+}
+
+.sed-rte__field {
+  border: 1px solid var(--sed-border);
+  border-radius: var(--sed-radius);
+  background: var(--sed-surface);
+  color: var(--sed-text);
+  margin-top: 4px;
+  padding: 4px 6px;
+  min-height: 32px;
+}
+
+.sed-rte__field .ProseMirror {
+  outline: none;
+  min-height: 24px;
+}
+
+.sed-rte__field p {
+  margin: 4px 0;
+}
+
+.sed-rte__field ul,
+.sed-rte__field ol {
+  margin: 4px 0;
+  padding-left: 20px;
 }

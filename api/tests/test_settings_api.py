@@ -21,7 +21,6 @@ from app.config import Settings, get_settings  # noqa: E402
 from app.main import app  # noqa: E402
 from app.settings_routes import (  # noqa: E402
     CONTENT_KEYS,
-    INFRA_KEYS,
     SETTINGS_KEYS,
     SMTP_PASSWORD_MASK,
     SettingsUnavailable,
@@ -61,10 +60,6 @@ SEED_VALUES = {
         ' "steps": [{"owner_group": "SED_STEP_BUH"},'
         ' {"owner_group": "SED_STEP_HR", "require_comment": true}]}]'
     ),
-    "doc_templates": (
-        '[{"service": "Служба вымышленного учета", "category": "линейный",'
-        ' "body": "Бегунок увольнения: {{ fio }}, {{ department }}"}]'
-    ),
     "mail_templates": (
         '[{"code": "assigned", "subject": "Заявка {{ request_id }}",'
         ' "body_html": "<html>Заявка {{ request_id }} назначена {{ fio }}</html>"}]'
@@ -102,7 +97,6 @@ CONTRACT_VALUES = {
         {"code": "ENT_PRIMER_2", "name": "Предприятие Пример-2"},
     ],
     "allowed_ad_groups": ["SED_HR", "SED_ADMINS", "SED_STEP_EXEC"],
-    "position_sets": None,
     "position_to_category": {"Старший вымышленный кассир": "линейный"},
     "position_escalation": {},
     "templates": [
@@ -113,13 +107,6 @@ CONTRACT_VALUES = {
                 {"owner_group": "SED_STEP_BUH"},
                 {"owner_group": "SED_STEP_HR", "require_comment": True},
             ],
-        }
-    ],
-    "doc_templates": [
-        {
-            "service": "Служба вымышленного учета",
-            "category": "линейный",
-            "body": "Бегунок увольнения: {{ fio }}, {{ department }}",
         }
     ],
     "mail_templates": [
@@ -138,6 +125,7 @@ CONTRACT_VALUES = {
     "schedule_ad_groups_sync": None,
     "schedule_hr_dismissals_sync": None,
     "hr_dismissals_synced_at": None,
+    "blank_autopick": None,
 }
 
 # Контент-часть контракта: только ключи CONTENT_KEYS (для GET/PUT /settings/content).
@@ -178,13 +166,6 @@ UPDATED_VALUES = {
             "steps": [{"owner_group": "SED_STEP_HR"}],
         }
     ],
-    "doc_templates": [
-        {
-            "service": "Служба вымышленного учета",
-            "category": "руководитель",
-            "body": "Бегунок руководителя: {{ fio }}, {{ position }}",
-        }
-    ],
     "mail_templates": [
         {
             "code": "reminder",
@@ -211,9 +192,7 @@ UPDATED_VALUES = {
     "schedule_ad_groups_sync": None,
     "schedule_hr_dismissals_sync": None,
     "hr_dismissals_synced_at": None,
-    "position_sets": [
-        {"name": "Руководители", "positions": ["Директор"]},
-    ],
+    "blank_autopick": None,
 }
 
 
@@ -504,8 +483,6 @@ def test_settings_put_wrong_types_422(client, admin_headers, mock_store):
         dict(CONTRACT_VALUES, templates="not-a-list"),
         dict(CONTRACT_VALUES, templates=[{"service": "S", "category": "C"}]),
         dict(CONTRACT_VALUES, templates=[{"service": "S", "category": "C", "steps": [{"resolver": "by_group"}]}]),
-        dict(CONTRACT_VALUES, doc_templates="not-a-list"),
-        dict(CONTRACT_VALUES, doc_templates=[{"service": "S", "category": "C"}]),
         dict(CONTRACT_VALUES, mail_templates="not-a-list"),
         dict(CONTRACT_VALUES, mail_templates=[{"code": "assigned"}]),
     ]
@@ -769,20 +746,6 @@ def test_settings_put_groups_with_names_422(client, admin_headers, mock_store):
     assert mock_store._data["allowed_ad_groups"] == before
 
 
-def test_settings_content_put_position_sets_200(client, hr_admin_headers, mock_store):
-    """Наборы должностей: PUT объектов {name, positions} — 200, в БД сид-формат."""
-    sets = [
-        {"name": "Руководители", "positions": ["Директор", "Главный бухгалтер"]},
-        {"name": "Линейные", "positions": []},
-    ]
-    response = client.put(
-        "/settings/content", json={"position_sets": sets}, headers=hr_admin_headers
-    )
-    assert response.status_code == 200, response.text
-    assert response.json()["position_sets"] == sets
-    assert json.loads(mock_store._data["position_sets"]) == sets
-
-
 def test_settings_content_put_ignores_infra_keys(client, hr_admin_headers, mock_store):
     """Чужие (инфра) ключи в теле контента игнорируются: не 422, в БД не пишутся."""
     response = client.put(
@@ -851,3 +814,91 @@ def test_settings_audit_not_written_on_403(client, hr_headers, mock_store):
     """Отказ по роли в аудит не пишется (события нет)."""
     client.get("/settings", headers=hr_headers)
     assert audit_log.all() == []
+
+
+# --- doc_templates/position_sets вне контракта (бланки печатаются из данных) ---
+
+REMOVED_KEYS = ("doc_templates", "position_sets")
+
+
+def test_removed_doc_template_keys_not_in_settings_contract(client, admin_headers, mock_store):
+    """Ключей doc_templates/position_sets в контракте GET/PUT /settings нет.
+
+    Печать бланка собирает документ из данных заявки (docs.build_blank_document),
+    файлы-шаблоны .docx как источник оформления удалены, наборы должностей для
+    их привязки — тоже. doc_types остаётся (классификация, blanks.doc_type_code)."""
+    for key in REMOVED_KEYS:
+        assert key not in SETTINGS_KEYS
+        assert key not in CONTENT_KEYS
+        assert key not in CONTRACT_VALUES
+    assert "doc_types" not in SETTINGS_KEYS  # виды документов — таблица, не ключ
+    body = client.get("/settings", headers=admin_headers).json()
+    for key in REMOVED_KEYS:
+        assert key not in body
+
+
+def test_removed_doc_template_keys_ignored_by_put(client, admin_headers, mock_store):
+    """Присылка удалённых ключей в PUT — не 422 и не запись: поля не в модели."""
+    response = client.put(
+        "/settings",
+        json={
+            "doc_templates": [{"service": "Служба вымышленного учета",
+                               "category": "линейный", "body": "Бегунок {{ fio }}"}],
+            "position_sets": [{"name": "Руководители", "positions": ["Директор"]}],
+        },
+        headers=admin_headers,
+    )
+    assert response.status_code == 200, response.text
+    for key in REMOVED_KEYS:
+        assert key not in response.json()
+        assert key not in mock_store._data
+
+
+def test_removed_doc_template_keys_ignored_by_content_put(
+    client, hr_admin_headers, mock_store
+):
+    """То же на контент-эндпоинте: удалённые ключи игнорируются, в БД не пишутся."""
+    response = client.put(
+        "/settings/content",
+        json={"doc_templates": [], "position_sets": [], "approval_ttl_days": 4},
+        headers=hr_admin_headers,
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["approval_ttl_days"] == 4
+    for key in REMOVED_KEYS:
+        assert key not in mock_store._data
+
+
+def test_doc_template_file_routes_are_gone(client, admin_headers, hr_admin_headers):
+    """Ручки файлов-бланков .docx удалены из настроек (404), авторизации нет."""
+    for headers in (admin_headers, hr_admin_headers):
+        assert client.get(
+            "/settings/doc-templates/files/a.docx/download", headers=headers
+        ).status_code == 404
+        assert client.delete(
+            "/settings/doc-templates/files/a.docx", headers=headers
+        ).status_code == 404
+        assert client.post(
+            "/settings/doc-templates/files/a.docx/preview", headers=headers
+        ).status_code == 404
+    assert client.post(
+        "/settings/doc-templates/files/upload",
+        files={"file": ("blank.docx", b"docx-bytes", "application/octet-stream")},
+        headers=admin_headers,
+    ).status_code == 404
+
+
+def test_settings_put_persists_blank_autopick(client, admin_headers, mock_store):
+    """Автоподстановка бланка по службе — переключатель админа (запасной механизм)."""
+    response = client.put(
+        "/settings", json={**UPDATED_VALUES, "blank_autopick": "on"}, headers=admin_headers
+    )
+    assert response.status_code == 200, response.text
+    assert json.loads(mock_store.get("blank_autopick")) == "on"
+
+
+def test_blank_autopick_off_by_default(monkeypatch):
+    """Ключа нет — автоподстановка выключена (бланк выбирает ОК), ключ не зашит в код."""
+    from app.requests import _blank_autopick_enabled
+
+    assert _blank_autopick_enabled() is False

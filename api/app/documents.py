@@ -1,15 +1,16 @@
 # Документы заявок (W3a): мета сгенерированных бегунков (таблица documents из
 # 0001) + эндпоинты печати и выдачи PDF. Файлы генерирует docs.generate_bypass
-# (модульная функция — тесты подменяют её, на стенде — python-docx-template +
-# LibreOffice + qrcode). Шаблоны бегунков — из таблицы settings (doc_templates)
-# через DbSettingsStore (read_setting_value), хардкода шаблонов нет.
+# (модульная функция — тесты подменяют её, на стенде — python-docx + LibreOffice
+# + qrcode). Оформление бланка собирается из данных заявки и снимка бланка
+# (docs.build_blank_document, макет blank_layout); файлы-шаблоны .docx и ключ
+# настроек doc_templates удалены — печати нечего читать.
 # Печать — только ОК/админы; чтение мета/PDF — ОК/админы и владелец своего шага.
 # ПДн владельцу не светят: отдаются только пути/версии/QR, PDF не парсится.
 
 from __future__ import annotations
 
 import base64
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
@@ -25,9 +26,8 @@ from .config import Settings, get_settings
 from .deps import CurrentUser, get_current_user
 from .docs import (
     build_bypass_context,
-    find_doc_template,
     generate_bypass,
-    manual_bypass_body,
+    resolve_blank_layout,
 )
 from .requests import (
     _get_request_or_404,
@@ -307,84 +307,43 @@ def _enterprise_name(settings_store: DbSettingsStore, code: object) -> str:
     return str(code or "")
 
 
-def _blank_kind(request: object, routing_store: object | None) -> str | None:
-    """Признак бланка службы сотрудника (office/line) из справочника служб AD.
-
-    Приоритетнее категории заявки: категория приходит из position_to_category,
-    который наполняется вручную и на стенде пуст, а признак службы — из AD.
-    Нет справочника/доступа — None (тогда печать идёт по категории заявки)."""
-    service_id = getattr(request, "service_id", None)
-    if not service_id or routing_store is None:
-        return None
-    try:
-        services = routing_store.list_services()
-    except Exception:
-        return None
-    for item in services:
-        if item.get("id") == service_id:
-            return (item.get("blank_kind") or "").strip() or None
-    return None
-
-
 def _fill_step_fio(context: dict, routing_store: object | None) -> None:
-    """Подставить ФИО персональных исполнителей шагов (из зеркала AD users).
+    """Подставить ФИО ответственных шагов (из зеркала AD users).
 
-    На бланке колонка «Должность/ФИО»: должность берётся из этапа, ФИО — логин
-    исполнителя, разложенный здесь. Пустой assignee (групповой этап) — ФИО нет:
-    на бумаге его пишут от руки, как в исходных бланках. Зеркало недоступно или
-    логина нет в users — оставляем пустым (печать не падает)."""
+    На бланке колонка «Ответственный»: должность берётся из этапа, ФИО — логины
+    ответственных снимка (assignees), разложенные здесь по одному на
+    ответственного в assignee_names (у шага их может быть несколько);
+    прежнее поле fio — ФИО первого. Пустой снимок (групповой этап) — ФИО нет:
+    на бумаге группу AD пишут от руки, как в исходных бланках. Зеркало
+    недоступно или логина нет в users — оставляем логин (печать не падает).
+    Один логин на нескольких шагах карточку читаем один раз."""
     if routing_store is None:
         return
+    cards: dict[str, dict | None] = {}
     for step in context.get("steps") or []:
-        sam = str(step.get("assignee") or "").strip()
-        if not sam or step.get("fio"):
+        logins = [
+            str(sam).strip()
+            for sam in (step.get("assignees") or [])
+            if str(sam).strip()
+        ]
+        if not logins:
+            single = str(step.get("assignee") or "").strip()
+            logins = [single] if single else []
+        if not logins:
             continue
-        try:
-            card = routing_store.user_card(sam)
-        except Exception:
-            card = None
-        name = str((card or {}).get("fio_full") or "").strip()
-        step["fio"] = name or sam
+        names = []
+        for sam in logins:
+            if sam not in cards:
+                try:
+                    cards[sam] = routing_store.user_card(sam)
+                except Exception:
+                    cards[sam] = None
+            name = str((cards[sam] or {}).get("fio_full") or "").strip()
+            names.append(name or sam)
+        step["assignee_names"] = names
+        if not step.get("fio"):
+            step["fio"] = names[0]
 
-
-def _bypass_body(
-    request: object, doc_templates: object, position_sets: object = None,
-    routing_store: object | None = None,
-) -> tuple[tuple[str | None, str | None], str | None]:
-    """((тело, имя .docx-файла), вид бланка) для печати бегунка.
-
-    Шаблон doc_templates по службе+категории и набору должностей сотрудника
-    (body — текстовый фолбэк, file — настоящий .docx-шаблон), иначе ручной
-    конструктор из шагов; нет шаблона и нет шагов — (None, None) (422).
-
-    Служба заявки неизвестна (нет blank_kind) — печатаем бланк по умолчанию
-    (office) и возвращаем вид бланка: бумага ОК нужна всегда, а молчаливый
-    текстовый фолбэк выглядел бы как поломка. Если и office-бланка нет —
-    отдаём текстовый конструктор из шагов, как раньше."""
-    kind = _blank_kind(request, routing_store) or request.category
-    template = find_doc_template(
-        doc_templates, request.department, kind,
-        getattr(request, "position", None), position_sets,
-    )
-    fallback = False
-    if template is None and not kind and _blank_kind(request, routing_store) is None:
-        # Служба не определена — пробуем офисный бланк по умолчанию.
-        template = find_doc_template(
-            doc_templates, request.department, "office",
-            getattr(request, "position", None), position_sets,
-        )
-        fallback = template is not None
-    if template is not None:
-        # Вид бланка: из найденного шаблона (service/category пустой = wildcard),
-        # иначе — из признака службы/категории заявки.
-        kind_out = str(template.get("category") or kind or "").strip() or None
-        return (
-            template.get("body") or "",
-            template.get("file") or None,
-        ), kind_out
-    if not request.steps:
-        return (None, None), None
-    return (manual_bypass_body(request), None), None
 
 @router.post("/requests/{request_id}/print")
 def print_bypass(
@@ -394,7 +353,14 @@ def print_bypass(
     store: RequestsStore = Depends(get_requests_store),
     settings_store: DbSettingsStore = Depends(get_settings_store),
 ) -> dict:
-    """Печать бегунка (ОК/админ): печатная форма ТЕКУЩЕГО состояния заявки.
+    """Печать бланка (ОК/админ): печатная форма ТЕКУЩЕГО состояния заявки.
+
+    Документ собирается из данных заявки и снимка бланка
+    (docs.build_blank_document: макет blank_layout office|line, шапка, таблица
+    шагов с ВСЕМИ ответственными каждого шага, QR на заявку). Файлы-шаблоны
+    .docx и ключ настроек doc_templates удалены; вид бланка службы AD
+    (blank_kind) в выборе оформления больше не участвует. Пустые шаги — 422,
+    а не пустой документ.
 
     Вариант 1 (решение пользователя): версии не накапливаются и документы в БД
     НЕ пишутся. PDF отдаётся base64 в ответе, временные файлы (docx/pdf/qr)
@@ -404,34 +370,26 @@ def print_bypass(
     _require_hr(user)
     try:
         request = _get_request_or_404(store, request_id)
-        doc_templates = read_setting_value(settings_store, "doc_templates")
-        position_sets = read_setting_value(settings_store, "position_sets")
     except RequestsUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except SettingsUnavailable as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    (body, template_file), blank_kind = _bypass_body(
-        request, doc_templates, position_sets, _routing_store_or_none()
-    )
-    if body is None and template_file is None:
+    context = build_bypass_context(request)
+    # Макет бланка — из снимка заявки (office по умолчанию), не по службе AD.
+    blank_kind = resolve_blank_layout(context.get("blank_layout"))
+    if not context.get("steps"):
         raise HTTPException(
             status_code=422,
-            detail="Нет шаблона бегунка и нет шагов: задайте doc_templates или маршрут",
+            detail="В заявке нет шагов маршрута: бланк печатать нечего",
         )
-    # Фиксированная метка временных файлов — не версия документа.
-    context = build_bypass_context(request)
-    # ФИО исполнителей этагов подставляем из зеркала AD (в колонку «Должность/ФИО»).
+    # ФИО ответственных этапов подставляем из зеркала AD (в колонку «Ответственный»).
     _fill_step_fio(context, _routing_store_or_none())
     # Предприятие — названием из справочника (код 1С в бланке нечитаем).
     context["enterprise"] = _enterprise_name(settings_store, request.enterprise)
     result = generate_bypass(
         request_id=request.id,
         version="current",
-        template_body=body or "",
         context=context,
         base_url=settings.APP_BASE_URL,
         files_dir=settings.FILES_DIR,
-        template_file=template_file,
     )
     if not result.generated:
         return {"generated": False, "reason": result.reason, "pdf_b64": None}
@@ -456,14 +414,15 @@ def print_bypass(
             action="document.print",
             entity="request",
             entity_id=request.id,
-            detail="печать бегунка (вариант 1, без сохранения версии)",
+            detail="печать бланка (вариант 1, без сохранения версии)",
         )
     )
     return {
         "generated": True,
         "reason": None,
         "pdf_b64": base64.b64encode(pdf_bytes).decode("ascii"),
-        # Вид напечатанного бланка (office/line) — для UI и разбора «почему тот бланок».
+        # Макет напечатанного бланка (office/line) — из снимка заявки; для UI
+        # и разбора «почему тот бланок».
         "blank_kind": blank_kind,
     }
 

@@ -104,6 +104,9 @@ export function RequestCard(props: RequestCardProps) {
   // Логин текущей сессии (GET /auth/me): нужен для кнопки «Удалить» у автора.
   // Не загрузился — кнопок удаления у не-админов просто нет, карточка работает.
   const [mySam, setMySam] = useState<string>("");
+  // ФИО своей учётной записи — подпись своей отметки в шаге с несколькими
+  // ответственными (бэкенд отдаёт в отметках только логины).
+  const [myFio, setMyFio] = useState<string>("");
   // История изменений (GET /api/requests/{id}/history) и комментарии заявки.
   const [history, setHistory] = useState<RequestHistoryItem[]>([]);
   const [historyError, setHistoryError] = useState<string>("");
@@ -168,10 +171,14 @@ export function RequestCard(props: RequestCardProps) {
     let alive = true;
     me()
       .then((user) => {
-        if (alive) setMySam(user.sam);
+        if (!alive) return;
+        setMySam(user.sam);
+        setMyFio(user.fio ?? "");
       })
       .catch(() => {
-        if (alive) setMySam("");
+        if (!alive) return;
+        setMySam("");
+        setMyFio("");
       });
     return () => {
       alive = false;
@@ -279,13 +286,22 @@ export function RequestCard(props: RequestCardProps) {
   // должность исполнителя — из карточки сотрудника по employee_key шага.
   // Состав запрашиваем для ВСЕХ групповых шагов (критерий — как в isGroupStep):
   // наличие owner_name (наименования из справочника) его не отменяет, иначе
-  // в «Сотруднике» остаётся название группы вместо людей.
+  // в «Сотруднике» остаётся название группы вместо людей. Тот же состав —
+  // источник ФИО по логинам ответственных (assignees) у шага с несколькими
+  // ответственными, если владелец шага — группа (owner_group не логин).
   useEffect(() => {
     if (!card) return;
     let alive = true;
     const groups = new Set<string>();
     card.steps.forEach((s) => {
-      if (!s.assignee && s.resolver !== "by_user" && s.owner_group) groups.add(s.owner_group);
+      const group = s.owner_group;
+      if (!group) return;
+      if (!s.assignee && s.resolver !== "by_user") {
+        groups.add(group);
+        return;
+      }
+      const assignees = s.assignees ?? [];
+      if (isMultiAssigneeStep(s) && !assignees.includes(group)) groups.add(group);
     });
     groups.forEach((group) => {
       getAdGroupMembers(group)
@@ -458,10 +474,99 @@ export function RequestCard(props: RequestCardProps) {
     return text.replace(/[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]/g, " ");
   }
 
-  // Колонка «Сотрудник»: персональным — ФИО как раньше; групповым — только
+  // Шаг с несколькими ответственными (миграция 0013). Признак и счётчик —
+  // от бэкенда (assignee_count считается по полному снимку): непривилегированному
+  // в assignees остаётся только собственный логин, поэтому по длине массива
+  // режим шага не определяем.
+  function stepAssigneeCount(step: RequestStep): number {
+    return step.assignee_count ?? step.assignees?.length ?? 0;
+  }
+  function isMultiAssigneeStep(step: RequestStep): boolean {
+    return stepAssigneeCount(step) > 1;
+  }
+
+  // ФИО ответственного по логину: бэкенд отдаёт логины, а ФИО каждого — там,
+  // где оно в карточке уже есть: у первого ответственного (assignee →
+  // owner_name), у участников групп AD (тот же состав, что у группового шага)
+  // и у самого пользователя (/auth/me). Нет ФИО — нейтральная подпись:
+  // логины чужих ответственных в UI не выводятся (бэкенд их и не отдаёт).
+  function assigneeFio(step: RequestStep, sam: string | null): string | null {
+    if (!sam) return null;
+    if (step.assignee === sam && step.owner_name) return step.owner_name;
+    if (mySam !== "" && sam === mySam && myFio !== "") return myFio;
+    const groups = Object.keys(groupMembers);
+    for (const group of groups) {
+      const hit = (groupMembers[group] ?? []).find((m) => m.sam === sam);
+      if (hit?.display_name) return hit.display_name;
+    }
+    return null;
+  }
+
+  // Подпись отметки без ФИО: логин в UI не выводится.
+  function assigneeLabel(step: RequestStep, sam: string | null): string {
+    return assigneeFio(step, sam) ?? "Ответственный";
+  }
+
+  // Режим шага словами (для малознакового approval_mode и его отсутствия):
+  // parallel — согласование любым из ответственных, sequential — отметки всех.
+  function stepModeLabel(step: RequestStep): string {
+    return step.approval_mode === "parallel"
+      ? "согласование любым из ответственных"
+      : "отметки всех ответственных";
+  }
+
+  // Решение из отметки — по значениям контракта decide_step; неизвестное
+  // показываем как пришло.
+  function approvalDecisionLabel(decision: string): string {
+    if (decision === "approve") return "согласовал";
+    if (decision === "reject") return "отказал";
+    if (decision === "return") return "вернул";
+    return decision;
+  }
+
+  // Колонка «Сотрудник» шага с несколькими ответственными: ФИО по логинам
+  // assignees, прогресс «N из M согласовали» и режим шага. Отметки ответственных
+  // (последовательный шаг) — в колонке «Комментарий» (см. stepApprovalsNode).
+  function stepAssigneesNode(step: RequestStep) {
+    const assignees = step.assignees ?? [];
+    const total = stepAssigneeCount(step);
+    const done = step.approved_count ?? 0;
+    const names = assignees.map((sam) => assigneeLabel(step, sam)).join(", ");
+    return (
+      <>
+        <div className="sed-note">Ответственные: {names}</div>
+        <div className="sed-note">
+          {done} из {total} согласовали
+        </div>
+        <div className="sed-note">{stepModeLabel(step)}</div>
+      </>
+    );
+  }
+
+  // Отметки ответственных по шагу: кто, когда, решение, комментарий. Чужие
+  // отметки приходят с sam=null — решение и комментарий видны, логин нет.
+  function stepApprovalsNode(step: RequestStep) {
+    const approvals = step.approvals ?? [];
+    if (approvals.length === 0) return null;
+    return (
+      <ul aria-label={`Отметки шага ${stepLabel(step.order)}`} className="sed-list">
+        {approvals.map((mark, i) => (
+          <li key={`${mark.sam ?? "mark"}-${i}`}>
+            <strong>{assigneeLabel(step, mark.sam)}</strong> · {historyWhen(mark.at)} ·{" "}
+            {approvalDecisionLabel(mark.decision)}
+            {mark.comment ? ` — ${mark.comment}` : ""}
+          </li>
+        ))}
+      </ul>
+    );
+  }
+
+  // Колонка «Сотрудник»: персональным — ФИО как раньше; шагу с несколькими
+  // ответственными — их список и прогресс; групповым — только
   // ФИО участников списком без сворачивания (должность — в колонке
   // «Должность», у участников её не дублируем); при недоступности — группа.
   function stepExecutorsNode(step: RequestStep) {
+    if (isMultiAssigneeStep(step)) return stepAssigneesNode(step);
     if (!isGroupStep(step)) return stepOwnerNode(step);
     const members: AdGroupMember[] =
       step.owner_group ? (groupMembers[step.owner_group] ?? []) : [];
@@ -475,26 +580,33 @@ export function RequestCard(props: RequestCardProps) {
     );
   }
 
-  async function refreshRequest(): Promise<void> {
+  async function refreshRequest(): Promise<RequestOut | null> {
     try {
-      setCard(await getRequest(requestId));
+      const data = await getRequest(requestId);
+      setCard(data);
       setCardError("");
+      return data;
     } catch (e: unknown) {
       setCardError(e instanceof Error ? e.message : "Ошибка загрузки карточки");
+      return null;
     }
   }
 
-  async function runAction(action: () => Promise<unknown>, okMessage: string): Promise<boolean> {
+  // Действие с перезагрузкой карточки: возвращает обновлённую карточку (null —
+  // ошибка запроса), чтобы вызывающий увидел состояние шагов после действия.
+  async function runAction(
+    action: () => Promise<unknown>,
+    okMessage: string,
+  ): Promise<RequestOut | null> {
     setCardActionError("");
     setCardActionStatus("");
     try {
       await action();
       setCardActionStatus(okMessage);
-      await refreshRequest();
-      return true;
+      return await refreshRequest();
     } catch (e: unknown) {
       setCardActionError(e instanceof Error ? e.message : "Действие не выполнено");
-      return false;
+      return null;
     }
   }
 
@@ -516,13 +628,25 @@ export function RequestCard(props: RequestCardProps) {
     // Отказ: форму закрываем сразу, не дожидаясь ответа. После запроса карточка
     // приходит обновлённой — показываем то, что в ней есть (can_act бэкенда).
     setActStepHidden(decision === "reject");
-    const ok = await runAction(
+    const updated = await runAction(
       () => decideStep(requestId, order, decision, text || undefined),
       "Отметка сохранена",
     );
     setActStepHidden(false);
-    if (!ok) return;
+    if (!updated) return;
     setDecisionComment("");
+    // Шаг с несколькими ответственными после моей отметки остаётся «На
+    // согласовании» (закрывает его любой ответственный — параллельный, либо
+    // все — последовательный): окно не закрываем, показываем, что учтено и
+    // ждём остальных. Повторную отметку бэкенд не примет (409), поэтому
+    // после перезагрузки can_act у шага уже false и кнопок нет.
+    const step = updated.steps.find((s) => s.order === order);
+    if (decision === "approve" && step && isMultiAssigneeStep(step) && step.status === "ожидает") {
+      setCardActionStatus(
+        "Ваша отметка учтена, ожидаются отметки остальных ответственных",
+      );
+      return;
+    }
     // Согласование завершает работу с карточкой — закрываем окно-попу.
     if (decision === "approve") closeIfPopup();
   }
@@ -780,6 +904,14 @@ export function RequestCard(props: RequestCardProps) {
               {actStep && (
                 <div aria-label="Решение владельца" className="sed-mt-8">
                   <h4>Моё решение · Шаг {stepLabel(actStep.order)}</h4>
+                  {/* Шаг с несколькими ответственными: режим и прогресс отметок —
+                      после моей отметки шаг остаётся «На согласовании». */}
+                  {isMultiAssigneeStep(actStep) && (
+                    <div className="sed-note">
+                      Ответственные: {stepAssigneeCount(actStep)} · {stepModeLabel(actStep)} ·{" "}
+                      {actStep.approved_count ?? 0} из {stepAssigneeCount(actStep)} согласовали
+                    </div>
+                  )}
                   <label className="sed-field">
                     Комментарий к решению
                     <textarea
@@ -896,7 +1028,12 @@ export function RequestCard(props: RequestCardProps) {
                           <td>{stepExecutorsNode(step)}</td>
                           <td>{step.status}</td>
                           <td>{step.expires_at.slice(0, 10)}</td>
-                          <td>{step.comment ?? "—"}</td>
+                          {/* Отметки ответственных (шаг с несколькими
+                              ответственными) — под комментарием шага. */}
+                          <td>
+                            {step.comment ?? "—"}
+                            {stepApprovalsNode(step)}
+                          </td>
                         </tr>
                       )),
                     )}

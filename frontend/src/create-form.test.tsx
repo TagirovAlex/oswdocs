@@ -7,8 +7,8 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiHttpError, me } from "./auth-client";
 import { CreateForm } from "./create-form";
-import { createRequest, getAdGroupMembers, getEmployeeCard, getEnterprises, getMyLinks, getRoutingCatalogs, getStepGroups, linkEmployee, previewRoute, searchAd, searchEmployees, submitRequest } from "./requests-client";
-import type { AdGroupMember, RoutePreview } from "./requests-client";
+import { createRequest, getAdGroupMembers, getEmployeeCard, getEnterprises, getMyLinks, getRouteBlanks, getRoutingCatalogs, getStepGroups, linkEmployee, previewRoute, searchAd, searchEmployees, submitRequest } from "./requests-client";
+import type { AdGroupMember, RouteBlank, RoutePreview } from "./requests-client";
 
 // Мок клиента заявок; чистые функции — реальные.
 vi.mock("./requests-client", async (importOriginal) => {
@@ -26,6 +26,7 @@ vi.mock("./requests-client", async (importOriginal) => {
     getMyLinks: vi.fn(),
     previewRoute: vi.fn(),
     linkEmployee: vi.fn(),
+    getRouteBlanks: vi.fn(),
     getRoutingCatalogs: vi.fn(),
   };
 });
@@ -101,6 +102,29 @@ const routePreview: RoutePreview = {
   blank: "office",
 };
 
+// Доступные бланки для селекта ОК (GET /api/requests/route/blanks): активные
+// бланки без ПДн; autopick повторяется в каждой строке.
+const routeBlanks: RouteBlank[] = [
+  {
+    id: 10,
+    code: "uvol_base",
+    name: "Увольнение (базовый)",
+    description: "Пояснение для сотрудника ОК",
+    layout: "office",
+    step_count: 2,
+    autopick: false,
+  },
+  {
+    id: 11,
+    code: "uvol_line",
+    name: "Увольнение (линейный)",
+    description: null,
+    layout: "line",
+    step_count: 1,
+    autopick: false,
+  },
+];
+
 // Справочник маршрутов админа (GET /api/settings/routing/catalogs): активные этапы.
 const routingCatalogs = {
   stages: [
@@ -127,10 +151,13 @@ beforeEach(() => {
   vi.mocked(submitRequest).mockReset();
   vi.mocked(getMyLinks).mockReset();
   vi.mocked(previewRoute).mockReset();
+  vi.mocked(getRouteBlanks).mockReset();
   vi.mocked(getRoutingCatalogs).mockReset();
   // По умолчанию маршрут подбирается по профилю, справочник этапов доступен.
   vi.mocked(previewRoute).mockResolvedValue(routePreview);
   vi.mocked(getRoutingCatalogs).mockResolvedValue(routingCatalogs);
+  // По умолчанию доступных бланков нет: тесты выбора бланка задают свой список.
+  vi.mocked(getRouteBlanks).mockResolvedValue([]);
   // По умолчанию связки АД-1С нет: инициатор — readonly-текст (старое поведение).
   vi.mocked(getMyLinks).mockResolvedValue([]);
   vi.mocked(me).mockReset();
@@ -1622,4 +1649,179 @@ it("предлагает подтвердить связь с AD и после �
   await waitFor(() =>
     expect(screen.queryByRole("button", { name: "Подтвердить связь с AD" })).toBeNull(),
   );
+});
+
+// --- Выбор бланка при создании заявки ----------------------------------------
+
+describe("CreateForm: выбор бланка", () => {
+  // Селект бланка: название и число шагов в подписи, описание — подсказкой.
+  it("селект бланка показывает название, число шагов и описание", async () => {
+    vi.mocked(getRouteBlanks).mockResolvedValue(routeBlanks);
+
+    render(<CreateForm role="hr" />);
+    const select = (await screen.findByLabelText("Бланк")) as HTMLSelectElement;
+    expect(within(select).getByRole("option", { name: "Увольнение (базовый) (2 шаг.)" })).toBeInTheDocument();
+    expect(within(select).getByRole("option", { name: "Увольнение (линейный) (1 шаг.)" })).toBeInTheDocument();
+    // Пустое значение — «не выбран»; молчаливого выбора по умолчанию нет.
+    expect(select).toHaveValue("");
+
+    fireEvent.change(select, { target: { value: "10" } });
+    // Пояснение бланка показывается под селектом.
+    expect(screen.getByText("Пояснение для сотрудника ОК")).toBeInTheDocument();
+  });
+
+  // Выбранный бланк уходит в предпросмотр и в создание заявки.
+  it("выбранный бланк уходит в предпросмотр и в создание", async () => {
+    vi.mocked(getRouteBlanks).mockResolvedValue(routeBlanks);
+    vi.mocked(searchEmployees).mockRejectedValue(new ApiHttpError(503, "Клиент 1С не настроен"));
+    vi.mocked(previewRoute).mockImplementation(async (body) => ({
+      ...routePreview,
+      blank:
+        body.blank_id === 10
+          ? {
+              id: 10,
+              code: "uvol_base",
+              name: "Увольнение (базовый)",
+              layout: "office",
+              version: 3,
+              step_count: 2,
+            }
+          : routePreview.blank,
+      blank_source: body.blank_id === 10 ? "chosen" : "autopick",
+    }));
+    vi.mocked(createRequest).mockResolvedValue({
+      id: "REQ-0300",
+      status: "Черновик",
+      route_origin: "template",
+      department: "Цех № 1",
+      position: "Слесарь",
+      created_by: "petrov.pp",
+      steps: [],
+    });
+
+    render(<CreateForm role="hr" />);
+    await fillEmployeeManually("auto");
+    const select = screen.getByLabelText("Бланк") as HTMLSelectElement;
+    fireEvent.change(select, { target: { value: "10" } });
+
+    // Предпросмотр запрошен с blank_id, снимок бланка показан.
+    await waitFor(() =>
+      expect(previewRoute).toHaveBeenLastCalledWith(
+        expect.objectContaining({ blank_id: 10 }),
+      ),
+    );
+    await waitFor(() => expect(screen.getByText(/Бланк:/)).toHaveTextContent("Увольнение (базовый)"));
+    expect(screen.getByText(/Бланк:/)).toHaveTextContent("шагов: 2");
+
+    // blank_id уходит и в создание заявки.
+    fireEvent.click(screen.getByText("Создать"));
+    await waitFor(() => expect(createRequest).toHaveBeenCalled());
+    expect(vi.mocked(createRequest).mock.calls[0][0].blank_id).toBe(10);
+  });
+
+  // Пустой справочник бланков: подсказка вместо неработающего селекта.
+  it("пустой справочник бланков: подсказка и выбор бланка не уходит", async () => {
+    vi.mocked(getRouteBlanks).mockResolvedValue([]);
+    vi.mocked(searchEmployees).mockRejectedValue(new ApiHttpError(503, "Клиент 1С не настроен"));
+    vi.mocked(createRequest).mockResolvedValue({
+      id: "REQ-0301",
+      status: "Черновик",
+      route_origin: "template",
+      department: "Цех № 1",
+      position: "Слесарь",
+      created_by: "petrov.pp",
+      steps: [],
+    });
+
+    render(<CreateForm role="hr" />);
+    await screen.findByLabelText("Бланк");
+    expect(screen.getByText(/Активных бланков нет/)).toBeInTheDocument();
+
+    await fillEmployeeManually("auto");
+    fireEvent.click(screen.getByText("Создать"));
+    await waitFor(() => expect(createRequest).toHaveBeenCalled());
+    // Бланк не выбран — поле в тело не уходит (маршрут подбирает бэкенд).
+    expect(vi.mocked(createRequest).mock.calls[0][0].blank_id).toBeUndefined();
+  });
+
+  // Автоподстановка выключена (blank_autopick=off): без выбора бланка маршрут не
+  // соберётся — форма предупреждает до создания.
+  it("без выбора бланка при выключенной автоподстановке — предупреждение", async () => {
+    vi.mocked(getRouteBlanks).mockResolvedValue(routeBlanks);
+
+    render(<CreateForm role="hr" />);
+    const select = await screen.findByLabelText("Бланк");
+    expect(screen.getByText(/подстановка бланка по службе выключена/)).toBeInTheDocument();
+
+    // После выбора бланка предупреждение пропадает.
+    fireEvent.change(select, { target: { value: "11" } });
+    await waitFor(() =>
+      expect(screen.queryByText(/подстановка бланка по службе выключена/)).not.toBeInTheDocument(),
+    );
+  });
+
+  // 422 предпросмотра «бланк не выбран» — текст со списком бланков от API.
+  it("422 «выберите бланк» показывается со списком бланков", async () => {
+    vi.mocked(getRouteBlanks).mockResolvedValue(routeBlanks);
+    vi.mocked(searchEmployees).mockRejectedValue(new ApiHttpError(503, "Клиент 1С не настроен"));
+    vi.mocked(previewRoute).mockRejectedValue(
+      new ApiHttpError(
+        422,
+        "Бланк должен быть выбран сотрудником ОК. Доступные бланки: " +
+          "Увольнение (базовый), Увольнение (линейный)",
+      ),
+    );
+
+    render(<CreateForm role="hr" />);
+    await fillEmployeeManually("auto");
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Бланк должен быть выбран сотрудником ОК");
+    expect(alert).toHaveTextContent("Увольнение (базовый)");
+    // Ручной режим остаётся путём (маршрут собирается конструктором).
+    await switchToManualRoute();
+    expect(screen.getByText("Добавить последовательный блок")).toBeInTheDocument();
+  });
+
+  // 422 при создании без бланка (бэкенд требует выбор) — текст со списком.
+  it("422 при создании без бланка показывает список бланков", async () => {
+    vi.mocked(getRouteBlanks).mockResolvedValue(routeBlanks);
+    vi.mocked(searchEmployees).mockRejectedValue(new ApiHttpError(503, "Клиент 1С не настроен"));
+    vi.mocked(createRequest).mockRejectedValue(
+      new ApiHttpError(
+        422,
+        "Бланк должен быть выбран сотрудником ОК. Доступные бланки: Увольнение (базовый)",
+      ),
+    );
+
+    render(<CreateForm role="hr" />);
+    await fillEmployeeManually("auto");
+    fireEvent.click(screen.getByText("Создать"));
+
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent("Увольнение (базовый)"),
+    );
+  });
+
+  // Сброс формы после создания: выбор бланка не переносится в следующую заявку.
+  it("после создания выбор бланка сбрасывается", async () => {
+    vi.mocked(getRouteBlanks).mockResolvedValue(routeBlanks);
+    vi.mocked(searchEmployees).mockRejectedValue(new ApiHttpError(503, "Клиент 1С не настроен"));
+    vi.mocked(createRequest).mockResolvedValue({
+      id: "REQ-0302",
+      status: "Черновик",
+      route_origin: "template",
+      department: "Цех № 1",
+      position: "Слесарь",
+      created_by: "petrov.pp",
+      steps: [],
+    });
+
+    render(<CreateForm role="hr" />);
+    await fillEmployeeManually("auto");
+    fireEvent.change(screen.getByLabelText("Бланк"), { target: { value: "10" } });
+    fireEvent.click(screen.getByText("Создать"));
+
+    await waitFor(() => expect(screen.getByLabelText("Бланк")).toHaveValue(""));
+  });
 });

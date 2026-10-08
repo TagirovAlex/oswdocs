@@ -30,6 +30,6 @@ ldap3>=2.9
 # пакет libreoffice через pip НЕ ставится, см. Dockerfile) ---
 # Имя пакета на PyPI — docxtpl (импорт: from docxtpl import DocxTemplate);
 # "python-docx-template" — только название проекта/репозитория, пакета нет.
-docxtpl>=0.4
+python-docx>=1.1
 qrcode>=7.4
 pillow>=10.0 # qrcode без Pillow не умеет писать PNG (img.save(format="PNG")) — нужен для QR бегунка.

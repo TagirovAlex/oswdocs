@@ -4,6 +4,10 @@
 # (list[dict] из app.routing_store), на выходе — решение RoutePick; ни одного
 # обращения к БД, AD или 1С. Хранилище справочников — app/routing_store.py.
 #
+# Бланк (миграция 0012) — запасной/основной источник шагов вместо профиля:
+# его состав приходит из справочника blank_steps, профиль при этом остаётся
+# справочной подсказкой (см. pick_blank_steps).
+#
 # ПРИЗНАК ПОДБОРА reason — машинно читаемый токен: базовый (service_profile /
 # default_profile / service_not_registered / profile_not_found), к нему через
 # «+» дописываются пометки (service_duplicates, Dismissed=..., Added=...).
@@ -274,6 +278,35 @@ def apply_dismissals_and_additions(
         service=picked.service,
         reason=_join_reason(picked.reason, *tokens),
         stages=kept,
+    )
+
+
+def pick_blank_steps(picked: RoutePick, blank_steps: list[dict]) -> RoutePick:
+    """Шаги выбранного бланка вместо шагов профиля (бланк выбирает человек).
+
+    blank_steps — строки DbRoutingStore.list_blank_steps: этап присоединён join'ом,
+    поэтому строка этапа доступна целиком. Порядок — step_order; этап, отключённый
+    позже (stage_active = FALSE), в маршрут не попадает. Флаг «опционален»:
+    optional_override шага бланка, а если он NULL — optional этапа (как у шага
+    профиля).
+
+    Профиль, служба и признак подбора остаются от базового подбора (picked):
+    для выбранного бланка они справочная подсказка, а этапы задаёт бланк. Так же
+    работают снятия/добавления этапов — их применяет вызывающий через
+    apply_dismissals_and_additions."""
+    stages: list[tuple[dict, bool]] = []
+    for item in blank_steps or []:
+        if not isinstance(item, dict) or not item.get("stage_active", True):
+            continue
+        override = item.get("optional_override")
+        optional = bool(item.get("optional")) if override is None else bool(override)
+        stages.append((_stage_view(item), optional))
+    stages.sort(key=lambda pair: (_step_order(pair[0]), _stage_id(pair[0])))
+    return RoutePick(
+        profile=picked.profile,
+        service=picked.service,
+        reason=picked.reason,
+        stages=stages,
     )
 
 

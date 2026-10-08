@@ -9,20 +9,12 @@
 
 from __future__ import annotations
 
-import base64
-import io
 import json
 import os
-import shutil
-import tempfile
-import zipfile
 from collections.abc import Mapping, Sequence
-from pathlib import Path
 from typing import Literal
-from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import bindparam, create_engine, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -31,12 +23,6 @@ from sqlalchemy.orm import sessionmaker
 from .audit import AuditEvent, audit_log
 from .config import Settings, get_settings
 from .deps import CurrentUser, get_current_user
-from .docs import (
-    _convert_to_pdf_report,
-    _render_docx_from_file,
-    _soffice_binary,
-    request_url,
-)
 from .routing_store import DbRoutingStore, RoutingUnavailable, get_routing_store
 
 router = APIRouter(tags=["настройки"])
@@ -51,9 +37,12 @@ class DocTypeConflict(Exception):
 
 
 # Прикладные ключи админки (состав — контракт B2 GET/PUT /settings, дополнен
-# W3a: doc_templates/mail_templates — бегунки и письма; W5a: scan_allowed_types —
+# W3a: mail_templates — письма; W5a: scan_allowed_types —
 # MIME-allowlist сканов; SMTP: smtp_host/smtp_port/smtp_from/smtp_user/smtp_password —
 # параметры релея из settings; пароль маскируется в GET и пишется только при вводе).
+# Фаза «Справочник бланков»: файлы-шаблоны .docx как источник оформления
+# удалены — ключи doc_templates/position_sets и ручки файлов-бланков больше не
+# в контракте (печать собирает бланок из данных, docs.build_blank_document).
 # Фаза 2: ключи разделены на КОНТЕНТ (руководитель ОК + админ) и ИНФРА (только админ);
 # SETTINGS_KEYS — полный набор (контент + инфра).
 # Группы доступа: access_groups (инфра, правит ТОЛЬКО admin) — AD-группы, дающие
@@ -72,9 +61,7 @@ CONTENT_KEYS: tuple[str, ...] = (
     "position_to_category",
     "position_escalation",
     "templates",
-    "doc_templates",
     "mail_templates",
-    "position_sets",
 )
 
 INFRA_KEYS: tuple[str, ...] = (
@@ -101,6 +88,7 @@ INFRA_KEYS: tuple[str, ...] = (
     "schedule_ad_groups_sync",
     "schedule_hr_dismissals_sync",
     "hr_dismissals_synced_at",
+    "blank_autopick",
 )
 
 # SETTINGS_KEYS: полный набор (контент + инфра). Поля onec_enterprises_synced_at,
@@ -552,34 +540,6 @@ class TemplateItem(BaseModel):
     steps: list[TemplateStepItem] = Field(description="Шаги шаблона по порядку")
 
 
-class DocTemplateItem(BaseModel):
-    """Шаблон бегунка (W3a): служба + категория → текст-шаблон DOCX (Jinja)
-    и/или имя .docx-файла (H): при наличии file печать рендерит вёрстку файла,
-    иначе — текстовый body фолбэком (старые бланки не ломаются)."""
-
-    service: str = Field(description="Служба увольняемого (поле 1С)")
-    category: str = Field(description="Категория (МОЛ/линейный/руководитель)")
-    body: str = Field(description="Тело бегунка с плейсхолдерами {{ fio }} и др.")
-    file: str | None = Field(
-        default=None,
-        description="Имя .docx-файла шаблона в FILES_DIR/templates/ (необязательно)",
-    )
-    position_set: str | None = Field(
-        default=None,
-        description="Набор должностей (position_sets) — бланк для этих должностей; пусто — по умолчанию",
-    )
-
-
-class PositionSetItem(BaseModel):
-    """Именованный набор должностей для привязки бланков: название + титулы
-    AD (как в кэше ad_group_members; сравнение — без учёта регистра/пробелов)."""
-
-    name: str = Field(description="Название набора (ссылка из бланка)")
-    positions: list[str] = Field(
-        default_factory=list, description="Должности (title из AD)"
-    )
-
-
 class MailTemplateItem(BaseModel):
     """Шаблон письма (W3a): код события v1 + тема и Jinja-HTML тело."""
 
@@ -765,14 +725,8 @@ class SettingsPayload(BaseModel):
     templates: list[TemplateItem] | None = Field(
         default=None, description="Шаблоны маршрутов (служба+категория→шаги)"
     )
-    doc_templates: list[DocTemplateItem] | None = Field(
-        default=None, description="Шаблоны бегунков (служба+категория→тело DOCX)"
-    )
     mail_templates: list[MailTemplateItem] | None = Field(
         default=None, description="Шаблоны писем (код события→тема+HTML-тело)"
-    )
-    position_sets: list[PositionSetItem] | None = Field(
-        default=None, description="Наборы должностей для привязки бланков"
     )
     onec_bases: list[OnecBaseItem] | None = Field(
         default=None, description="Подключения к базам 1С (OData, пароль маскируется)"
@@ -796,6 +750,14 @@ class SettingsPayload(BaseModel):
         description=(
             "Расписание прохода по регистру кадровых данных 1С (регламент worker): "
             "mode interval/daily; без расписания — раз в 7 дней"
+        ),
+    )
+    blank_autopick: str | None = Field(
+        default=None,
+        description=(
+            "Автоподстановка бланка по службе (запасной механизм): on — подставлять "
+            "профиль маршрута, если сотрудник ОК бланк не выбрал; off (по умолчанию) — "
+            "бланк выбирает человек"
         ),
     )
 
@@ -830,14 +792,8 @@ class ContentSettingsPayload(BaseModel):
     templates: list[TemplateItem] | None = Field(
         default=None, description="Шаблоны маршрутов (служба+категория→шаги)"
     )
-    doc_templates: list[DocTemplateItem] | None = Field(
-        default=None, description="Шаблоны бегунков (служба+категория→тело DOCX)"
-    )
     mail_templates: list[MailTemplateItem] | None = Field(
         default=None, description="Шаблоны писем (код события→тема+HTML-тело)"
-    )
-    position_sets: list[PositionSetItem] | None = Field(
-        default=None, description="Наборы должностей для привязки бланков"
     )
 
 
@@ -1434,6 +1390,108 @@ class RouteProfileStepsIn(BaseModel):
         return self
 
 
+class BlankCatalogIn(BaseModel):
+    """Новый бланк (blanks, миграция 0012): набор шагов из справочника этапов.
+
+    doc_type_code — вид документа (doc_types.code) как классификация, на печать
+    не влияет; оформление печати задаёт layout (встроенные пресеты office|line),
+    файлов-шаблонов нет."""
+
+    code: str = Field(pattern=_ROUTE_CODE_PATTERN, description="Код бланка (snake_case, уникален)")
+    name: str = Field(min_length=1, description="Наименование бланка")
+    doc_type_code: str | None = Field(
+        default=None, description="Вид документа (doc_types.code) — классификация"
+    )
+    description: str | None = Field(
+        default=None, description="Пояснение для сотрудника ОК (селект бланка)"
+    )
+    layout: Literal["office", "line"] = Field(
+        default="office", description="Макет печати бланка"
+    )
+    active: bool = Field(default=True, description="Активен бланк (active=false — вне формы заявки)")
+
+    @model_validator(mode="after")
+    def _check_blank(self) -> "BlankCatalogIn":
+        """Пробелы по краям срезаются, пустые необязательные поля — None."""
+        self.name = self.name.strip()
+        self.doc_type_code = (self.doc_type_code or "").strip() or None
+        self.description = (self.description or "").strip() or None
+        if not self.name:
+            raise ValueError("Наименование бланка не может быть пустым")
+        return self
+
+
+class BlankCatalogUpdateIn(BaseModel):
+    """Правка бланка (частичное обновление; код бланка неизменен, как у профиля)."""
+
+    name: str | None = Field(default=None, min_length=1, description="Наименование бланка")
+    doc_type_code: str | None = Field(
+        default=None, description="Вид документа (doc_types.code) — классификация"
+    )
+    description: str | None = Field(
+        default=None, description="Пояснение для сотрудника ОК (селект бланка)"
+    )
+    layout: Literal["office", "line"] | None = Field(
+        default=None, description="Макет печати бланка"
+    )
+    active: bool | None = Field(default=None, description="Активен бланк")
+
+    @model_validator(mode="after")
+    def _check_blank(self) -> "BlankCatalogUpdateIn":
+        """Переданные поля нормализуются: пустые строки — None, имя не пустое."""
+        if self.name is not None:
+            self.name = self.name.strip()
+            if not self.name:
+                raise ValueError("Наименование бланка не может быть пустым")
+        if self.doc_type_code is not None:
+            self.doc_type_code = self.doc_type_code.strip() or None
+        if self.description is not None:
+            self.description = self.description.strip() or None
+        return self
+
+
+class BlankStepIn(BaseModel):
+    """Шаг бланка: этап, порядок и переопределения флагов этапа.
+
+    Переопределения null — «брать значение этапа» (optional/require_comment),
+    поэтому незаданный шаг ведёт себя как сам этап."""
+
+    stage_id: int = Field(ge=1, description="Этап маршрута (approval_stages.id)")
+    step_order: int = Field(
+        ge=1, description="Порядок шага в бланке (с 1, без повторов)"
+    )
+    optional_override: bool | None = Field(
+        default=None, description="Этап необязательный для этого бланка (null — как в этапе)"
+    )
+    require_comment_override: bool | None = Field(
+        default=None, description="Комментарий обязателен для этого бланка (null — как в этапе)"
+    )
+
+
+class BlankStepsIn(BaseModel):
+    """Состав бланка целиком: переданные шаги заменяют прежние (одна транзакция,
+    версия бланка увеличивается).
+
+    Порядок уникален внутри бланка: в БД на этом PK (blank_id, step_order),
+    поэтому повтор — 422 на границе, а не конфликт из хранилища."""
+
+    steps: list[BlankStepIn] = Field(
+        default_factory=list, description="Шаги бланка по порядку (пусто — бланк без этапов)"
+    )
+
+    @model_validator(mode="after")
+    def _check_orders(self) -> "BlankStepsIn":
+        """Повторы порядка внутри бланка — 422 (иначе отказ хранилища)."""
+        orders = [step.step_order for step in self.steps]
+        duplicates = sorted({order for order in orders if orders.count(order) > 1})
+        if duplicates:
+            raise ValueError(
+                "Порядок шагов бланка должен быть уникален: повторяются %s"
+                % ", ".join(str(order) for order in duplicates)
+            )
+        return self
+
+
 def _int_or_none(value: object) -> int | None:
     """Целое из значения справочника; нечисло/пусто — None."""
     try:
@@ -1472,7 +1530,7 @@ def read_routing_catalogs(
     store: DbRoutingStore = Depends(get_routing_store),
 ) -> dict:
     """Справочники маршрута одним ответом (для загрузки UI админки): службы,
-    профили, этапы, шаги профилей и состав этапов (реестры).
+    профили, этапы, шаги профилей, состав этапов и бланки (реестры).
 
     Только admin, иначе 403; хранилище недоступно — 503. Шаги профилей читаются
     ОДНИМ запросом по всем профилям (list_all_profile_steps), иначе на каждый
@@ -1490,6 +1548,10 @@ def read_routing_catalogs(
             for stage in stages
             if stage.get("id")
         }
+        # Заглушки справочника в офлайн-фикстурах list_blanks не имеют — раздел
+        # пустой, а не 500 (у боевого DbRoutingStore метод есть).
+        blanks_reader = getattr(store, "list_blanks", None)
+        blanks = blanks_reader() if callable(blanks_reader) else []
     except RoutingUnavailable as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
@@ -1508,6 +1570,7 @@ def read_routing_catalogs(
         "stages": stages,
         "profile_steps": profile_steps,
         "rosters": rosters,
+        "blanks": blanks,
     }
 
 
@@ -1675,244 +1738,120 @@ def replace_profile_steps(
     return {"profile_id": profile_id, "count": len(items)}
 
 
-# --- Файлы .docx-шаблонов бегунков (H): импорт/скачивание/замена/предпросмотр.
-# Хранение — FILES_DIR/templates/ (права контейнера api/worker), в settings —
-# только имя файла (поле file шаблона doc_templates). Доступ — как у контент-
-# настроек (doc_templates — контент-ключ): админ + руководитель ОК.
+# --- Бланки (миграция 0012: blanks/blank_steps) --- админ-эндпоинты, доступ
+# только admin (как профили и этапы). Создание/правка — с аудитом в
+# routing_store (entity=blank); здесь только проверки границы (409 на дубль
+# кода) и чтение с audit_log.
 
-# Фиктивный контекст тест-рендера (валидация импорта/предпросмотра): вымышленные
-# значения, не настройки и не ПДн реальных сотрудников. В контекст — только
-# поля TEMPLATES.md + steps + qr (qr добавляет _render_docx_from_file).
-_DUMMY_TEMPLATE_URL = request_url("https://sed.example.local", "REQ-0000")
-_DUMMY_TEMPLATE_CONTEXT = {
-    "request_id": "REQ-0000",
-    "fio": "Иванов Иван Иванович",
-    "department": "Служба",
-    "position": "Должность",
-    "category": "линейный",
-    "enterprise": "Предприятие",
-    "steps": [{"order": 1, "owner": "Группа", "status": "На согласовании"}],
-}
-
-
-def _templates_dir(files_dir: str) -> Path:
-    """Каталог файлов шаблонов бегунков: FILES_DIR/templates (volume files)."""
-    return Path(files_dir) / "templates"
-
-
-def _template_path(files_dir: str, name: str) -> Path | None:
-    """Путь к файлу шаблона внутри FILES_DIR/templates/: только basename
-    (защита от path traversal); None — имя уводит за пределы каталога."""
-    templates_dir = _templates_dir(files_dir)
-    candidate = templates_dir / Path(name).name
+@router.get("/settings/routing/blanks")
+def list_routing_blanks(
+    user: CurrentUser = Depends(get_current_user),
+    store: DbRoutingStore = Depends(get_routing_store),
+) -> list[dict]:
+    """Бланки из справочника (только admin, иначе 403): все, включая
+    отключённые (active=false) — админка их правит. Хранилище недоступно — 503."""
+    _require_admin(user)
     try:
-        inside = candidate.resolve().is_relative_to(templates_dir.resolve())
-    except OSError:
-        inside = False
-    return candidate if inside else None
-
-
-def _docxtpl_available() -> bool:
-    """Есть ли docxtpl на машине (стенд): тест-рендер и предпросмотр возможны
-    только с ним; офлайн — структурной проверки достаточно."""
-    import importlib.util
-
-    return importlib.util.find_spec("docxtpl") is not None
-
-
-def _validate_docx_structure(content: bytes) -> None:
-    """Проверка zip-структуры .docx: [Content_Types].xml + word/document.xml.
-    Не zip / нет обязательных частей — HTTPException(400) с понятным текстом."""
-    try:
-        with zipfile.ZipFile(io.BytesIO(content)) as archive:
-            names = set(archive.namelist())
-    except zipfile.BadZipFile as exc:
+        return store.list_blanks()
+    except RoutingUnavailable as exc:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Файл не является .docx: не zip-архив",
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
-    if "[Content_Types].xml" not in names:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Файл не является .docx: отсутствует [Content_Types].xml",
-        )
-    if "word/document.xml" not in names:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Файл не является .docx: отсутствует word/document.xml",
-        )
 
 
-def _save_template_file(files_dir: str, content: bytes) -> str:
-    """Сохранить .docx-шаблон в FILES_DIR/templates/ и проверить его.
-
-    Структурная проверка (zip) — всегда; тест-рендер фиктивным контекстом —
-    только если docxtpl есть (офлайн структурной проверки достаточно).
-    Имя — уникальное (uuid4 + .docx). Ошибка валидации/рендера —
-    HTTPException(400), файл при этом не остаётся."""
-    _validate_docx_structure(content)
-    templates_dir = _templates_dir(files_dir)
-    templates_dir.mkdir(parents=True, exist_ok=True)
-    stored_name = uuid4().hex + ".docx"
-    target = templates_dir / stored_name
-    target.write_bytes(content)
-    if not _docxtpl_available():
-        return stored_name
+@router.post("/settings/routing/blanks", status_code=status.HTTP_201_CREATED)
+def create_routing_blank(
+    payload: BlankCatalogIn,
+    user: CurrentUser = Depends(get_current_user),
+    store: DbRoutingStore = Depends(get_routing_store),
+) -> dict:
+    """Создать бланк (только admin): код уникален (409, сверка со всем
+    справочником, включая отключённые). Состав шагов задаётся отдельно
+    (PUT .../{id}/steps). Аудит — в routing_store (blank.create)."""
+    _require_admin(user)
     try:
-        _render_docx_from_file(target, _DUMMY_TEMPLATE_CONTEXT, _DUMMY_TEMPLATE_URL)
-    except Exception as exc:
-        target.unlink(missing_ok=True)
+        _reject_known_code(store.list_blanks(), payload.code, "Бланк")
+        blank_id = store.create_blank(
+            {
+                "code": payload.code,
+                "name": payload.name,
+                "doc_type_code": payload.doc_type_code,
+                "description": payload.description,
+                "layout": payload.layout,
+                "active": payload.active,
+                "actor": user.sam,
+            }
+        )
+    except RoutingUnavailable as exc:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Шаблон не рендерится фиктивным контекстом: {exc}",
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
-    return stored_name
+    return {"id": blank_id, "code": payload.code}
 
 
-@router.post("/settings/doc-templates/files/upload")
-def upload_doc_template_file(
-    file: UploadFile = File(..., description="Файл .docx шаблона бегунка (multipart)"),
-    previous: str | None = Form(
-        default=None,
-        description="Имя старого файла для замены (удаляется после сохранения нового)",
-    ),
+@router.put("/settings/routing/blanks/{blank_id}")
+def update_routing_blank(
+    blank_id: int,
+    payload: BlankCatalogUpdateIn,
     user: CurrentUser = Depends(get_current_user),
-    settings: Settings = Depends(get_settings),
+    store: DbRoutingStore = Depends(get_routing_store),
 ) -> dict:
-    """Импорт .docx-шаблона бегунка (контент: админ + руководитель ОК).
-
-    Валидация: расширение .docx, zip-структура, тест-рендер фиктивным
-    контекстом (если docxtpl есть). Файл — в FILES_DIR/templates/ с уникальным
-    именем (uuid4 + .docx); опциональный previous удаляется после успешного
-    сохранения нового. Ответ — имя файла для поля file шаблона doc_templates."""
-    _require_content_admin(user)
-    if not (file.filename or "").lower().endswith(".docx"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Файл шаблона должен иметь расширение .docx",
-        )
-    content = file.file.read()
-    name = _save_template_file(settings.FILES_DIR, content)
-    if previous:
-        old = _template_path(settings.FILES_DIR, previous)
-        if old is not None and old.is_file():
-            try:
-                old.unlink()
-            except OSError:
-                pass  # старый файл не удалили — новый уже сохранён
-    audit_log.append(
-        AuditEvent(
-            actor=user.sam,
-            action="settings.update",
-            entity="settings",
-            entity_id="doc_templates.files",
-            detail=f"upload:{name}",
-        )
-    )
-    return {"name": name}
-
-
-@router.get("/settings/doc-templates/files/{name}/download")
-def download_doc_template_file(
-    name: str,
-    user: CurrentUser = Depends(get_current_user),
-    settings: Settings = Depends(get_settings),
-) -> FileResponse:
-    """Скачать .docx-файл шаблона (контент: админ + руководитель ОК).
-
-    Имя — только basename (внутри FILES_DIR/templates/); файла нет — 404."""
-    _require_content_admin(user)
-    target = _template_path(settings.FILES_DIR, name)
-    if target is None or not target.is_file():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Файл шаблона не найден",
-        )
-    audit_log.append(
-        AuditEvent(
-            actor=user.sam,
-            action="settings.read",
-            entity="settings",
-            entity_id=f"doc_templates.files.{target.name}",
-        )
-    )
-    return FileResponse(
-        str(target),
-        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        filename=target.name,
-    )
-
-
-@router.delete("/settings/doc-templates/files/{name}")
-def delete_doc_template_file(
-    name: str,
-    user: CurrentUser = Depends(get_current_user),
-    settings: Settings = Depends(get_settings),
-) -> dict:
-    """Удалить .docx-файл шаблона (контент: админ + руководитель ОК).
-
-    Имя — только basename; файла нет — 404; успех — {"ok": true}."""
-    _require_content_admin(user)
-    target = _template_path(settings.FILES_DIR, name)
-    if target is None or not target.is_file():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Файл шаблона не найден",
-        )
-    target.unlink()
-    audit_log.append(
-        AuditEvent(
-            actor=user.sam,
-            action="settings.update",
-            entity="settings",
-            entity_id=f"doc_templates.files.{target.name}",
-        )
-    )
-    return {"ok": True}
-
-
-@router.post("/settings/doc-templates/files/{name}/preview")
-def preview_doc_template_file(
-    name: str,
-    user: CurrentUser = Depends(get_current_user),
-    settings: Settings = Depends(get_settings),
-) -> dict:
-    """Предпросмотр шаблона: рендер фиктивным контекстом → PDF (LibreOffice).
-
-    Файлы — во временном каталоге (подчищается); ответ — base64 PDF либо
-    {"generated": false, "reason": ...} (не 500): офлайн без docxtpl/soffice —
-    причина, а не ошибка."""
-    _require_content_admin(user)
-    target = _template_path(settings.FILES_DIR, name)
-    if target is None or not target.is_file():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Файл шаблона не найден",
-        )
-    if not _docxtpl_available():
-        return {"generated": False, "reason": "офлайн: нет библиотеки docxtpl"}
-    workdir = Path(tempfile.mkdtemp(prefix="sed_tpl_preview_"))
+    """Изменить бланк (только admin): частичное обновление полей (код неизменен),
+    аудит — в routing_store (blank.update)."""
+    _require_admin(user)
+    updates = payload.model_dump(mode="json", exclude_unset=True)
     try:
-        docx_bytes = _render_docx_from_file(
-            target, _DUMMY_TEMPLATE_CONTEXT, _DUMMY_TEMPLATE_URL
-        )
-        docx_path = workdir / (target.stem + "_preview.docx")
-        docx_path.write_bytes(docx_bytes)
-        report = _convert_to_pdf_report(str(docx_path), str(workdir), _soffice_binary())
-        if report.pdf_path is None:
-            return {"generated": False, "reason": report.detail or "PDF не создан"}
-        pdf_bytes = Path(report.pdf_path).read_bytes()
-    except Exception as exc:
-        return {"generated": False, "reason": str(exc)}
-    finally:
-        shutil.rmtree(workdir, ignore_errors=True)
-    audit_log.append(
-        AuditEvent(
-            actor=user.sam,
-            action="settings.read",
-            entity="settings",
-            entity_id=f"doc_templates.files.{target.name}",
-            detail="preview",
-        )
-    )
-    return {"generated": True, "pdf_b64": base64.b64encode(pdf_bytes).decode("ascii")}
+        store.update_blank(blank_id, {**updates, "actor": user.sam})
+    except RoutingUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    return {"id": blank_id, "updated": ",".join(sorted(updates))}
+
+
+@router.get("/settings/routing/blanks/{blank_id}/steps")
+def read_blank_steps(
+    blank_id: int,
+    user: CurrentUser = Depends(get_current_user),
+    store: DbRoutingStore = Depends(get_routing_store),
+) -> list[dict]:
+    """Состав шагов бланка вместе с этапами (для редактора админки): по порядку,
+    текст этапа и вид исполнителя приложены (stage_lines — список)."""
+    _require_admin(user)
+    try:
+        return store.list_blank_steps(blank_id)
+    except RoutingUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+
+
+@router.put("/settings/routing/blanks/{blank_id}/steps")
+def replace_blank_steps(
+    blank_id: int,
+    payload: BlankStepsIn,
+    user: CurrentUser = Depends(get_current_user),
+    store: DbRoutingStore = Depends(get_routing_store),
+) -> dict:
+    """Заменить состав шагов бланка (только admin): переданные шаги полностью
+    заменяют прежние одной транзакцией, версия бланка увеличивается, этапы
+    должны существовать и быть активны (иначе 422, состав не меняется).
+    Аудит — в routing_store (blank.steps.update)."""
+    _require_admin(user)
+    items = [
+        {
+            "stage_id": step.stage_id,
+            "step_order": step.step_order,
+            "optional_override": step.optional_override,
+            "require_comment_override": step.require_comment_override,
+        }
+        for step in payload.steps
+    ]
+    try:
+        store.set_blank_steps(blank_id, items, user.sam)
+    except RoutingUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    return {"blank_id": blank_id, "count": len(items)}
+
