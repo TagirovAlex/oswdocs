@@ -619,6 +619,62 @@ def store_with_employee():
 
 # --- Состояние связи 1С↔AD в предпросмотре и подтверждение при создании ------
 
+def test_create_without_link_returns_422_not_500(
+    client, hr_headers, store_with_employee, settings_override
+):
+    """Связи 1С↔AD нет: 422 с действием, а не 500.
+
+    Текст 422 собирается через фабрику чтения AD (_resolve_dependency(get_ad_reader)).
+    Регрессия: фабрика зовётся без аргументов — подстановка настроек в неё давала
+    TypeError и превращала понятный 422 в 500.
+    """
+    from app.employees import get_ad_reader as real_get_ad_reader
+    from app.main import app
+
+    # Убираем подмену: проверяем боевой путь вызова фабрики (в офлайн-тесте её
+    # вызов без AD ничего не читает — важна сама сигнатура вызова).
+    app.dependency_overrides.pop(real_get_ad_reader, None)
+    try:
+        response = client.post(
+            "/requests",
+            json={
+                "enterprise": "ENT",
+                "tab_num": "001",
+                "fio": "Сказочников Иван Тестович",
+                "department": "Цех Тестовый",
+                "position": "Тестировщик",
+                "subject": "Увольнение",
+                "content": "Проверка 422 без связи",
+            },
+            headers=hr_headers,
+        )
+    finally:
+        app.dependency_overrides[real_get_ad_reader] = lambda: _offline_reader()
+    assert response.status_code == 422, response.text
+    # Текст зависит от того, нашёлся ли кандидат в AD: офлайн-читатель ничего не
+    # отдаёт, поэтому проверяем сам факт 422 и подсказку про оформление связи.
+    detail = response.json()["detail"]
+    assert "Связь 1С↔AD не оформлена" in detail or "не найден в AD" in detail
+    assert "1С" in detail and "AD" in detail
+
+
+def _offline_reader():
+    """Чтение AD в офлайн-тесте: одна вымышленная запись (ничего не ходит в LDAP)."""
+    from app.ad_reader import AdReader, AdReaderSettings, InMemoryCache
+
+    return AdReader(
+        settings=AdReaderSettings(
+            ad_url="ldaps://mock.local:636",
+            base_dn="OU=SED,DC=example,DC=local",
+            reader_dn="CN=sed-reader,OU=SED,DC=example,DC=local",
+            cache_ttl_seconds=60,
+            timeout_seconds=1.0,
+        ),
+        gateway=FakeGateway([_ad_entry("t.ivan", "Сказочников Иван Тестович")]),
+        cache=InMemoryCache(),
+    )
+
+
 def test_preview_reports_need_link_with_candidate(client, hr_headers, store_with_employee, settings_override):
     """В AD запись есть, связи нет: предпросмотр предлагает её подтвердить.
 

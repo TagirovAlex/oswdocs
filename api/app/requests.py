@@ -935,7 +935,7 @@ def _missing_ad_card_detail(body: "CreateRequestIn") -> str:
     Человек может быть в AD, но без подтверждённой связи — тогда достаточно
     подтвердить связь (кнопка в предпросмотре), а не идти в другой раздел."""
     fio = _employee_fio(body, body.tab_num)
-    candidates = _ad_candidates(_resolve_dependency(get_ad_reader, get_settings()), fio)
+    candidates = _ad_candidates(_resolve_dependency(get_ad_reader), fio)
     if len(candidates) == 1:
         return (
             "Связь 1С↔AD не оформлена, хотя в AD есть «%s» (%s). Подтвердите связь в "
