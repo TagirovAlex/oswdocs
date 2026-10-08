@@ -1466,6 +1466,11 @@ class BlankStepIn(BaseModel):
     require_comment_override: bool | None = Field(
         default=None, description="Комментарий обязателен для этого бланка (null — как в этапе)"
     )
+    approval_mode: Literal["sequential", "parallel"] | None = Field(
+        default=None,
+        description="Режим шага: parallel — закрывает любой из ответственных, "
+        "sequential — все ответственные (null — как в этапе, то есть sequential)",
+    )
 
 
 class BlankStepsIn(BaseModel):
@@ -1844,6 +1849,7 @@ def replace_blank_steps(
             "step_order": step.step_order,
             "optional_override": step.optional_override,
             "require_comment_override": step.require_comment_override,
+            "approval_mode": step.approval_mode,
         }
         for step in payload.steps
     ]

@@ -60,6 +60,14 @@ def _int_or_none(value: object) -> int | None:
         return None
 
 
+def _approval_mode_or_default(value: object) -> str:
+    """Режим шага бланка: parallel — любой из ответственных, иначе sequential
+    («все ответственные»). Неизвестное значение и None — sequential: режим по
+    умолчанию безопаснее (шаг не закроется чужой отметкой)."""
+    text_value = str(value or "").strip().casefold()
+    return "parallel" if text_value == "parallel" else "sequential"
+
+
 def _override_or_none(value: object) -> bool | None:
     """Переопределение флага шага профиля: None — брать значение из этапа."""
     if value is None:
@@ -264,9 +272,9 @@ class DbRoutingStore:
     _INSERT_BLANK_STEP = text(
         """
         INSERT INTO blank_steps (blank_id, stage_id, step_order, optional_override,
-                                 require_comment_override, updated_at)
+                                 require_comment_override, approval_mode, updated_at)
         VALUES (:blank_id, :stage_id, :step_order, :optional_override,
-                :require_comment_override, now())
+                :require_comment_override, :approval_mode, now())
         """
     )
     # Версия бланка растёт при замене состава шагов: blank_version из снимка
@@ -731,8 +739,10 @@ class DbRoutingStore:
         (аудит blank.steps.update).
 
         items — список {stage_id, step_order, optional_override,
-        require_comment_override}; optional_override/require_comment_override = None
-        означают «взять из этапа». Этап вне маршрутов (active = FALSE) или
+        require_comment_override, approval_mode}; optional_override/
+        require_comment_override = None означают «взять из этапа», approval_mode
+        = None — «все ответственные» (sequential, как до разделения режимов).
+        Этап вне маршрутов (active = FALSE) или
         несуществующий — 422 с перечнем (как у профиля): такой шаг не попал бы
         ни в одну заявку. Уникальность порядка в бланке (PK (blank_id,
         step_order)) проверяет схема запроса на границе — дубль порядка до сюда
@@ -753,6 +763,9 @@ class DbRoutingStore:
                     "optional_override": _override_or_none(item.get("optional_override")),
                     "require_comment_override": _override_or_none(
                         item.get("require_comment_override")
+                    ),
+                    "approval_mode": _approval_mode_or_default(
+                        item.get("approval_mode")
                     ),
                 }
             )

@@ -930,6 +930,7 @@ function BlanksEditor() {
       step_order: order,
       optional_override: null,
       require_comment_override: null,
+      approval_mode: "sequential",
       stage_code: catalog.code,
       title: catalog.title,
       stage_lines: [],
@@ -982,6 +983,7 @@ function BlanksEditor() {
           step_order: i + 1,
           optional_override: s.optional_override ?? null,
           require_comment_override: s.require_comment_override ?? null,
+          approval_mode: s.approval_mode ?? null,
         })),
       );
       setSaved("Состав бланка сохранён");
@@ -1224,6 +1226,7 @@ function BlanksEditor() {
                   <th scope="col">Этап</th>
                   <th scope="col">Необязательный</th>
                   <th scope="col">Комментарий</th>
+                  <th scope="col">Режим</th>
                   <th scope="col">Действия</th>
                 </tr>
               </thead>
@@ -1274,6 +1277,20 @@ function BlanksEditor() {
                               {choice.title}
                             </option>
                           ))}
+                        </select>
+                      </td>
+                      <td>
+                        <select
+                          aria-label={`Режим шага ${i + 1}`}
+                          value={step.approval_mode ?? "sequential"}
+                          onChange={(e) =>
+                            patchStep(i, {
+                              approval_mode: e.target.value as "sequential" | "parallel",
+                            })
+                          }
+                        >
+                          <option value="sequential">все ответственные</option>
+                          <option value="parallel">любой ответственный</option>
                         </select>
                       </td>
                       <td>

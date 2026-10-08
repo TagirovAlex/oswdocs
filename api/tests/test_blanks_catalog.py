@@ -400,11 +400,26 @@ class FakeBlankStore:
 
     def set_blank_steps(self, blank_id: int, items: list[dict], actor: str) -> None:
         self._count("set_blank_steps")
+        # Режим шага нормализуется боевым хранилищем (миграция 0013): parallel или
+        # sequential, всё прочее — «все ответственные».
         self.steps = [
-            {"blank_id": blank_id, "optional_override": None,
-             "require_comment_override": None, **item}
+            {
+                "blank_id": blank_id,
+                "optional_override": None,
+                "require_comment_override": None,
+                **item,
+                "approval_mode": (
+                    "parallel"
+                    if str(item.get("approval_mode") or "").strip().casefold() == "parallel"
+                    else "sequential"
+                ),
+            }
             for item in items
         ]
+
+    def steps_for(self, blank_id: int) -> list[dict]:
+        """Состав бланка для проверок теста (тот же срез, что list_blank_steps)."""
+        return [dict(item) for item in self.steps if item["blank_id"] == blank_id]
 
 
 @pytest.fixture
@@ -574,3 +589,55 @@ def test_catalogs_contains_blanks_and_keeps_existing_keys(
     assert [item["code"] for item in body["blanks"]] == [BLANK_CODE]
     for key in ("services", "profiles", "stages", "profile_steps", "rosters"):
         assert key in body
+
+
+def test_set_blank_steps_keeps_approval_mode_and_defaults_sequential():
+    """Режим шага пишется в blank_steps; без режима — sequential («все»)."""
+    session = FakeSession([[FakeRow({"id": STAGE_BOSS}), FakeRow({"id": STAGE_BUH})]])
+    _store(session).set_blank_steps(
+        BLANK_ID,
+        [
+            {"stage_id": STAGE_BOSS, "step_order": 1, "approval_mode": "parallel"},
+            {"stage_id": STAGE_BUH, "step_order": 2, "approval_mode": "что-то"},
+        ],
+        "adm.petrov",
+    )
+    inserts = _params_with(session, "INSERT INTO blank_steps")
+    assert [item["approval_mode"] for item in inserts] == ["parallel", "sequential"]
+    joined = " ".join(_sqls(session))
+    assert "approval_mode" in joined
+
+
+def test_blank_steps_422_on_unknown_approval_mode(
+    client, admin_headers, settings_override, blanks_store
+):
+    """Режим вне parallel/sequential — 422 на границе, состав не меняется."""
+    created = client.post("/settings/routing/blanks", json=_blank_body(), headers=admin_headers)
+    blank_id = created.json()["id"]
+    status = client.put(
+        f"/settings/routing/blanks/{blank_id}/steps",
+        json={"steps": [{"stage_id": STAGE_BOSS, "step_order": 1,
+                         "approval_mode": "как-нибудь"}]},
+        headers=admin_headers,
+    )
+    assert status.status_code == 422, status.text
+    assert blanks_store.steps_for(blank_id) == []
+
+
+def test_blank_steps_mode_round_trip(client, admin_headers, settings_override, blanks_store):
+    """Режим шага сохраняется в составе бланка и возвращается при чтении."""
+    created = client.post("/settings/routing/blanks", json=_blank_body(), headers=admin_headers)
+    blank_id = created.json()["id"]
+    replaced = client.put(
+        f"/settings/routing/blanks/{blank_id}/steps",
+        json={"steps": [
+            {"stage_id": STAGE_BOSS, "step_order": 1, "approval_mode": "parallel"},
+            {"stage_id": STAGE_BUH, "step_order": 2},
+        ]},
+        headers=admin_headers,
+    )
+    assert replaced.status_code == 200, replaced.text
+    rows = client.get(f"/settings/routing/blanks/{blank_id}/steps", headers=admin_headers)
+    assert rows.status_code == 200, rows.text
+    modes = [(row["stage_id"], row.get("approval_mode")) for row in rows.json()]
+    assert modes == [(STAGE_BOSS, "parallel"), (STAGE_BUH, "sequential")]

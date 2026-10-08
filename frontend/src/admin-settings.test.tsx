@@ -7,6 +7,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AdminSettings } from "./admin-settings";
 import { ApiHttpError } from "./auth-client";
+import type { BlankStepRow } from "./requests-client";
 import {
   createBlank,
   getBlankSteps,
@@ -164,13 +165,14 @@ const blanks = [
   },
 ];
 
-const blankSteps = [
+const blankSteps: BlankStepRow[] = [
   {
     blank_id: 10,
     stage_id: 1,
     step_order: 1,
     optional_override: null,
     require_comment_override: null,
+    approval_mode: "parallel",
     stage_code: "rukovoditel",
     title: "Непосредственный руководитель",
     stage_lines: ["Ознакомить с приказом"],
@@ -187,6 +189,7 @@ const blankSteps = [
     step_order: 2,
     optional_override: true,
     require_comment_override: true,
+    approval_mode: "sequential",
     stage_code: "buhgalteriya",
     title: "Бухгалтерия",
     stage_lines: [],
@@ -888,6 +891,9 @@ describe("AdminSettings", () => {
     expect(within(rows[1]).getByRole("button", { name: "Опустить шаг 2" })).toBeDisabled();
 
     // Шаг 1 обязательный: переопределение «как в этапе», значение показано подсказкой.
+    // Режим шага — из справочника (миграция 0013): первый шаг параллельный.
+    expect(within(rows[0]).getByLabelText("Режим шага 1")).toHaveValue("parallel");
+    expect(within(rows[1]).getByLabelText("Режим шага 2")).toHaveValue("sequential");
     expect(within(rows[0]).getByLabelText("Необязательность шага 1")).toHaveValue("");
     expect(within(rows[0]).getByText("в этапе: обязательный")).toBeInTheDocument();
     // Шаг 2 в бланке необязательный и с обязательным комментарием.
@@ -922,14 +928,28 @@ describe("AdminSettings", () => {
     fireEvent.change(add, { target: { value: "3" } });
     fireEvent.click(screen.getByRole("button", { name: "Добавить этап" }));
     await waitFor(() => expect(screen.getByRole("button", { name: "Удалить шаг 2" })).toBeInTheDocument());
+    // Режим первого шага меняем с parallel на sequential («все ответственные»).
+    fireEvent.change(screen.getByLabelText("Режим шага 1"), { target: { value: "sequential" } });
     fireEvent.click(screen.getByRole("button", { name: "Сохранить состав" }));
 
     await waitFor(() =>
       expect(setBlankSteps).toHaveBeenCalledWith(10, [
         // Порядок после перестановки: бухгалтерия первой (её флаги из бланка).
-        { stage_id: 2, step_order: 1, optional_override: true, require_comment_override: true },
-        // Добавленный этап — без переопределений («как в этапе»).
-        { stage_id: 3, step_order: 2, optional_override: null, require_comment_override: null },
+        {
+          stage_id: 2,
+          step_order: 1,
+          optional_override: true,
+          require_comment_override: true,
+          approval_mode: "sequential",
+        },
+        // Добавленный этап — без переопределений и режима («как в этапе»).
+        {
+          stage_id: 3,
+          step_order: 2,
+          optional_override: null,
+          require_comment_override: null,
+          approval_mode: "sequential",
+        },
       ]),
     );
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Состав бланка сохранён"));

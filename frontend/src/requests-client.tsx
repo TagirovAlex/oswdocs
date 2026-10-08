@@ -711,6 +711,9 @@ export interface BlankStepRow {
   step_order: number;
   optional_override: boolean | null;
   require_comment_override: boolean | null;
+  // Режим шага бланка: parallel — закрывает любой из ответственных,
+  // sequential — все (null — как в этапе, то есть sequential).
+  approval_mode?: StepApprovalMode | null;
   stage_code: string | null;
   title: string | null;
   stage_lines: string[];
@@ -729,6 +732,7 @@ export interface BlankStepInput {
   step_order: number;
   optional_override?: boolean | null;
   require_comment_override?: boolean | null;
+  approval_mode?: StepApprovalMode | null;
 }
 
 // GET /api/settings/routing/blanks: справочник бланков (только админ, иначе 403).
