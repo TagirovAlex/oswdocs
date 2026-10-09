@@ -863,13 +863,31 @@ const confirmLink = async () => {
   }
 
   // Переключение режима маршрута: в custom предпросмотр не нужен.
-  function changeRouteMode(mode: RouteMode): void {
-    markTouched();
-    setRouteMode(mode);
-    if (mode === "custom") setAddStageOpen(false);
-    // Модалка AD — часть ручного конструктора: в auto её закрываем.
-    if (mode === "auto" && adPanelBlock !== null) closeAdPanel();
+function changeRouteMode(mode: RouteMode): void {
+  markTouched();
+  setRouteMode(mode);
+  // Переключение между режимами
+  if (routeMode === "auto" && mode === "custom") {
+    // переход с auto → custom: очистить авто‑состояния, блоки и связанные
+    setDismissedStages([]);
+    setAddedStages([]);
+    setBlankId("");
+    setBlocks([]);
+    setAddStageOpen(false);
+    setPreview(null);
+    setPreviewError("");
+  } else if (routeMode === "custom" && mode === "auto") {
+    // переход с custom → auto: удалить все блоки, группы и очистить preview
+    setBlocks([]);
+    setGroupPick({});
+    setGroupMembers({});
+    setPreview(null);
+    setPreviewError("");
   }
+  // Модалка AD — часть ручного конструктора: в auto её закрываем.
+  if (mode === "auto" && adPanelBlock !== null) closeAdPanel();
+}
+
 
   // Конструктор маршрута: добавление/удаление блоков и шагов (→ dirty).
 
@@ -1066,31 +1084,31 @@ const confirmLink = async () => {
         subject,
         content,
         ...(docTypeCode !== "" ? { doc_type_code: docTypeCode } : {}),
-        ...(blankId !== "" ? { blank_id: Number(blankId) } : {}),
         ...(baseCode !== "" ? { base_code: baseCode } : {}),
         ...(adSam !== "" ? { ad_sam: adSam } : {}),
         ...(managerSam !== "" ? { manager: managerSam } : {}),
         route_mode: routeMode,
-        // auto: маршрут собирает бэкенд из профиля — блоки НЕ отправляются.
         ...(routeMode === "auto"
           ? {
-              dismissed_stages: dismissedStages,
-              // Шаг бланка снимается по номеру (кода этапа у него нет).
-              dismissed_step_orders: dismissedStepOrders,
-              added_stages: addedStages,
-            }
+            blank_id: Number(blankId),
+            dismissed_stages: dismissedStages,
+            dismissed_step_orders: dismissedStepOrders,
+            added_stages: addedStages,
+          }
           : {
-              blocks: blocks.map((b) => ({
-                mode: b.mode,
-                // Шаг-группа уходит owner_group + by_group; шаг-сотрудник — sam.
-                steps: b.steps.map((s) =>
-                  s.kind === "group"
-                    ? { owner_group: s.owner_group ?? s.display_name, resolver: s.resolver }
-                    : { sam: s.sam },
-                ),
-              })),
-            }),
+            blocks: blocks.map((b) => ({
+              mode: b.mode,
+              kind: b.kind,
+              steps: b.steps.map((s) =>
+                s.kind === "group"
+                  ? { owner_group: s.owner_group ?? s.display_name, resolver: s.resolver }
+                  : { sam: s.sam },
+              ),
+            })),
+          }),
       };
+
+
       // Повтор «Отправить» после сбоя submit переиспользует тот же черновик,
       // ТОЛЬКО если данные формы не изменились. При правках создаём новый
       // черновик: иначе изменения не применились бы и молча потерялись.
