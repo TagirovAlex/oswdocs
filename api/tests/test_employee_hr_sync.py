@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import sys
 from datetime import date, timedelta
+from types import SimpleNamespace
 
 import pytest
 
@@ -24,10 +25,10 @@ ENT = "Предприятие-Тест"
 BASE = "zup"
 
 
-def _row(tab, fio, ref=None, dismissal=None, ad_sam=None):
+def _row(tab, fio, ref=None, dismissal=None, ad_sam=None, base_code=BASE):
     return {
         "enterprise": ENT,
-        "base_code": BASE,
+        "base_code": base_code,
         "tab_num": tab,
         "fio": fio,
         "department": None,
@@ -123,6 +124,201 @@ def test_update_dismissals_ignores_other_base():
 def test_update_dismissals_empty_rows():
     store = _store()
     assert store.update_dismissals(BASE, []) == 0
+
+
+# --- Чтение строки по ключу заявки (печать бланка) ----------------------------
+# Печать бланка подставляет {dismissal_date}/{manager} по строке СПЕЦИАЛЬНОГО
+# сотрудника заявки. Рабочая выборка справочника увольняемого не отдаёт, поэтому
+# чтение отдельное: точное по табелю и БЕЗ отсечения по дате увольнения.
+
+
+def test_find_by_request_key_returns_dismissed_row():
+    """InMemory: уволенный находится по ключу заявки, хотя в выдаче его нет."""
+    store = _store()
+    assert "004" not in {row["tab_num"] for row in store.search(ENT, "", 50)}
+    found = store.find_by_request_key(ENT, BASE, "004")
+    assert found == {
+        "enterprise": ENT,
+        "base_code": BASE,
+        "tab_num": "004",
+        "ad_sam": None,
+        "dismissal_date": (date.today() - timedelta(days=1)).isoformat(),
+    }
+    # Работающий сотрудник читается тем же способом, пустая дата — увольнения не было.
+    assert store.find_by_request_key(ENT, BASE, "001")["dismissal_date"] is None
+
+
+def test_find_by_request_key_exact_match():
+    """InMemory: совпадение ТОЧНОЕ (не по подстроке), база уточняет выборку."""
+    store = _store()
+    store.upsert_many(
+        [
+            _row(
+                "004",
+                "Уволен Гусев (вторая база)",
+                ref="ref-4b",
+                dismissal=date.today().isoformat(),
+                base_code=BASE + "_2",
+            ),
+        ]
+    )
+    assert store.find_by_request_key(ENT, BASE, "00") is None
+    assert store.find_by_request_key(ENT, "другая", "004") is None
+    assert store.find_by_request_key(ENT, "", "004")["base_code"] == BASE
+    assert store.find_by_request_key(ENT, BASE + "_2", "004")["base_code"] == (
+        BASE + "_2"
+    )
+
+
+class _FakeRow:
+    """Строка результата как у SQLAlchemy: значения отдаёт отображение _mapping."""
+
+    def __init__(self, values: dict) -> None:
+        self._mapping = dict(values)
+
+
+class _FakeSession:
+    """Сессия-мок DbEmployeeSyncStore: одна строка результата, SQL запоминается."""
+
+    def __init__(self, row=None):
+        self.row = _FakeRow(row) if row is not None else None
+        self.calls: list[tuple[str, dict]] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        return False
+
+    def execute(self, statement, params=None):
+        self.calls.append((str(statement), dict(params or {})))
+        return SimpleNamespace(first=lambda: self.row)
+
+
+def _db_store(session):
+    """DbEmployeeSyncStore с подменённой сессией (движок не создаётся)."""
+    from app.employee_sync import DbEmployeeSyncStore
+
+    store = object.__new__(DbEmployeeSyncStore)
+    store._engine = None
+    store._session_factory = lambda: session
+    return store
+
+
+def test_find_by_request_key_sql_keeps_dismissed():
+    """Боевой SQL по ключу заявки: dismissal_date выбран, увольнение не отсекается.
+
+    Именно этот запрос ломал печать: без dismissal_date в выборке плейсхолдер
+    {dismissal_date} был пуст, а отсечение по CURRENT_DATE убирало строку
+    увольняемого целиком (и {manager} тоже)."""
+    session = _FakeSession(
+        {
+            "enterprise": ENT,
+            "base_code": BASE,
+            "tab_num": "004",
+            "ad_sam": "vymyshlennyy.gusev",
+            "dismissal_date": "2026-05-01",
+        }
+    )
+    store = _db_store(session)
+    found = store.find_by_request_key(ENT, BASE, "004")
+    sql, params = session.calls[-1]
+    # Колонка даты увольнения выбирается...
+    assert "dismissal_date" in sql.split("FROM employees")[0]
+    # ...подбор по табелю точный (без LIKE)...
+    assert "tab_num = :tab_num" in sql and "ILIKE" not in sql
+    # ...уволенные не отсекаются (условие рабочей выборки не подставляется)...
+    assert "CURRENT_DATE" not in sql
+    # ...и передаются точные параметры ключа заявки.
+    assert params == {"enterprise": ENT, "base_code": BASE, "tab_num": "004"}
+    assert found == {
+        "enterprise": ENT,
+        "base_code": BASE,
+        "tab_num": "004",
+        "ad_sam": "vymyshlennyy.gusev",
+        "dismissal_date": "2026-05-01",
+    }
+    # Строки нет — None, а не исключение и не пустой словарь.
+    assert _db_store(_FakeSession(None)).find_by_request_key(ENT, BASE, "004") is None
+
+
+# --- Подстановка кадровых плейсхолдеров печати (app.documents) ----------------
+
+
+class _FakeUserCards:
+    """Зеркало AD users: карточка сотрудника и его руководителя."""
+
+    def __init__(self) -> None:
+        self._cards = {
+            "vymyshlennyy": {
+                "sam": "vymyshlennyy",
+                "manager_dn": "CN=Boss,OU=SED,DC=example,DC=local",
+            },
+            "boss": {"sam": "boss", "fio_full": "Вымышленнов Борис Тестович"},
+        }
+
+    def user_card(self, sam):
+        return self._cards.get(str(sam or "").strip().casefold())
+
+    def manager_sam_by_dn(self, manager_dn):
+        return "boss" if manager_dn else None
+
+
+class _BrokenEmployeeStore:
+    """Зеркало сотрудников упало (503/нет БД) — печать не должна падать."""
+
+    def find_by_request_key(self, enterprise, base_code, tab_num):
+        raise RuntimeError("справочник сотрудников недоступен")
+
+
+def test_fill_hr_placeholders_reads_employee_by_request_key():
+    """{dismissal_date}/{manager} берутся у уволенного по ключу заявки.
+
+    Персоны вымышленные; сотрудник уволен (в выдаче справочника его нет), но печать
+    бланка обязана получить и дату, и руководителя."""
+    from app.documents import _fill_hr_placeholders
+    from app.docs import blank_placeholders
+
+    store = InMemoryEmployeeSyncStore()
+    store.upsert_many(
+        [
+            _row(
+                "Т-000777",
+                "Вымышленнов Иван Тестович",
+                ref="ref-777",
+                ad_sam="vymyshlennyy",
+                dismissal=(date.today() - timedelta(days=1)).isoformat(),
+            )
+        ]
+    )
+    context: dict = {}
+    request = SimpleNamespace(enterprise=ENT, base_code=BASE, tab_num="Т-000777")
+    _fill_hr_placeholders(context, request, _FakeUserCards(), store)
+
+    values = blank_placeholders(context)
+    assert values["dismissal_date"] == (
+        date.today() - timedelta(days=1)
+    ).strftime("%d.%m.%Y")
+    assert values["manager"] == "Вымышленнов Борис Тестович"
+    assert values["date"]  # дата печати всегда есть
+
+
+def test_fill_hr_placeholders_empty_when_mirror_unavailable():
+    """Зеркало упало или строки нет — печать не падает, плейсхолдеры пустые."""
+    from app.documents import _fill_hr_placeholders
+    from app.docs import blank_placeholders
+
+    request = SimpleNamespace(enterprise=ENT, base_code=BASE, tab_num="Т-000777")
+    context: dict = {}
+    _fill_hr_placeholders(context, request, _FakeUserCards(), _BrokenEmployeeStore())
+    values = blank_placeholders(context)
+    assert values["dismissal_date"] == "" and values["manager"] == ""
+
+    # Зеркало есть, сотрудника нет — те же пустые значения.
+    context = {}
+    _fill_hr_placeholders(context, request, _FakeUserCards(), InMemoryEmployeeSyncStore())
+    values = blank_placeholders(context)
+    assert values["dismissal_date"] == "" and values["manager"] == ""
 
 
 # --- Регламентный проход: расписание -----------------------------------------

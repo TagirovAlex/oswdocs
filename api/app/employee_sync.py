@@ -72,6 +72,20 @@ def _norm_people(values: list[str] | None) -> list[str]:
     return [value.strip().lower() for value in (values or []) if value and value.strip()]
 
 
+def _request_row(row: dict) -> dict:
+    """Строка справочника для чтения по ключу заявки (только нужные поля).
+
+    ФИО/должность/подразделение сюда не берутся: печати бланка они не нужны,
+    а лишние ПДн в строке зеркала только лишние."""
+    return {
+        "enterprise": row.get("enterprise"),
+        "base_code": row.get("base_code"),
+        "tab_num": row.get("tab_num"),
+        "ad_sam": row.get("ad_sam"),
+        "dismissal_date": row.get("dismissal_date"),
+    }
+
+
 class EmployeeSyncStore(Protocol):
     """Интерфейс хранилища локального справочника: единый для in-memory и Postgres."""
 
@@ -104,6 +118,21 @@ class EmployeeSyncStore(Protocol):
         списка пусты — хранилище не запрашивается вовсе и возвращает [].
         Строки — как в search (enterprise/base_code/tab_num/fio/department/
         position/ad_sam/ad_status)."""
+        ...
+
+    def find_by_request_key(
+        self, enterprise: str, base_code: str, tab_num: str
+    ) -> dict | None:
+        """Строка СПЕЦИАЛЬНОГО сотрудника по ключу заявки (печать бланка).
+
+        Ключ заявки — предприятие/база/табельный номер, совпадение ТОЧНОЕ
+        (без LIKE); пустой base_code — база не уточняется, и при нескольких
+        базах берётся первая по коду (ORDER BY base_code), чтобы выбор строки
+        был детерминированным. Уволенные НЕ отсекаются: строка увольняемого
+        рабочим поиском справочника как раз не отдаётся (дата увольнения <=
+        сегодня), а печати он и нужен.
+        Поля строки: enterprise/base_code/tab_num/ad_sam/dismissal_date.
+        Строки нет — None."""
         ...
 
     def upsert_many(self, rows: list[dict]) -> int:
@@ -215,6 +244,29 @@ class InMemoryEmployeeSyncStore:
 
     def count_matching(self, enterprise: str, q: str) -> int:
         return len(self.search(enterprise, q, len(self._rows)))
+
+    def find_by_request_key(
+        self, enterprise: str, base_code: str, tab_num: str
+    ) -> dict | None:
+        """Строка сотрудника по ключу заявки — того же человека, включая уволенного.
+
+        Совпадение ТОЧНОЕ (как в DbEmployeeSyncStore.find_by_request_key), база
+        уточняет выборку, если передана; уволенные не отсекаются (печати они и
+        нужны). Строки нет — None."""
+        wanted_enterprise = str(enterprise or "").strip()
+        wanted_base = str(base_code or "").strip()
+        wanted_tab = str(tab_num or "").strip()
+        if not wanted_enterprise or not wanted_tab:
+            return None
+        for row in self._rows.values():
+            if row.get("enterprise") != wanted_enterprise:
+                continue
+            if row.get("tab_num") != wanted_tab:
+                continue
+            if wanted_base and row.get("base_code") != wanted_base:
+                continue
+            return _request_row(row)
+        return None
 
     def find_by_people(
         self, enterprise: str, sam_list: list[str], tab_list: list[str]
@@ -330,6 +382,21 @@ class DbEmployeeSyncStore:
           AND ({where})
         ORDER BY fio, tab_num
         """
+    # Чтение строки по ключу заявки (печать бланка): совпадение ТОЧНОЕ по табелю
+    # внутри предприятия (без LIKE — иначе нашлась бы похожая строка другого
+    # сотрудника) и БЕЗ отсечения уволенных: увольняемого рабочая выборка
+    # справочника как раз не отдаёт, а напечатать его бланк надо.
+    _FIND_BY_REQUEST_KEY_SQL = text(
+        """
+        SELECT enterprise, base_code, tab_num, ad_sam, dismissal_date
+        FROM employees
+        WHERE enterprise = :enterprise
+          AND tab_num = :tab_num
+          AND (:base_code = '' OR base_code = :base_code)
+        ORDER BY base_code
+        LIMIT 1
+        """
+    )
 
     def __init__(self, database_url: str) -> None:
         self._engine = create_engine(database_url, pool_pre_ping=True)
@@ -423,6 +490,25 @@ class DbEmployeeSyncStore:
                 "Справочник сотрудников недоступен: %s" % exc
             ) from exc
         return [self._to_dict(row) for row in rows]
+
+    def find_by_request_key(
+        self, enterprise: str, base_code: str, tab_num: str
+    ) -> dict | None:
+        try:
+            with self._session_factory() as session:
+                row = session.execute(
+                    self._FIND_BY_REQUEST_KEY_SQL,
+                    {
+                        "enterprise": enterprise,
+                        "base_code": (base_code or "").strip(),
+                        "tab_num": tab_num,
+                    },
+                ).first()
+        except SQLAlchemyError as exc:
+            raise EmployeeSyncUnavailable(
+                "Справочник сотрудников недоступен: %s" % exc
+            ) from exc
+        return _request_row(dict(row._mapping)) if row is not None else None
 
     def upsert_many(self, rows: list[dict]) -> int:
         params = [

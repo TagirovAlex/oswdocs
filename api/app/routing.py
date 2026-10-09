@@ -4,9 +4,10 @@
 # (list[dict] из app.routing_store), на выходе — решение RoutePick; ни одного
 # обращения к БД, AD или 1С. Хранилище справочников — app/routing_store.py.
 #
-# Бланк (миграция 0012) — запасной/основной источник шагов вместо профиля:
-# его состав приходит из справочника blank_steps, профиль при этом остаётся
-# справочной подсказкой (см. pick_blank_steps).
+# Бланк (миграции 0012/0014) — основной источник шагов вместо профиля: его
+# состав приходит из справочника blank_steps как самостоятельные шаги (свой текст
+# и свой исполнитель), профиль при этом остаётся справочной подсказкой
+# (см. pick_blank_steps).
 #
 # ПРИЗНАК ПОДБОРА reason — машинно читаемый токен: базовый (service_profile /
 # default_profile / service_not_registered / profile_not_found), к нему через
@@ -284,23 +285,21 @@ def apply_dismissals_and_additions(
 def pick_blank_steps(picked: RoutePick, blank_steps: list[dict]) -> RoutePick:
     """Шаги выбранного бланка вместо шагов профиля (бланк выбирает человек).
 
-    blank_steps — строки DbRoutingStore.list_blank_steps: этап присоединён join'ом,
-    поэтому строка этапа доступна целиком. Порядок — step_order; этап, отключённый
-    позже (stage_active = FALSE), в маршрут не попадает. Флаг «опционален»:
-    optional_override шага бланка, а если он NULL — optional этапа (как у шага
-    профиля).
+    blank_steps — строки DbRoutingStore.list_blank_steps: это самостоятельные
+    шаги (свой текст title/stage_lines и свой исполнитель executor_kind +
+    assignees/owner_group), этапа у них нет. Порядок — step_order; флаг
+    «опционален» — optional шага. Отключать шаг бланка нечем (active у него
+    нет), поэтому в маршрут попадает каждый переданный шаг.
 
     Профиль, служба и признак подбора остаются от базового подбора (picked):
-    для выбранного бланка они справочная подсказка, а этапы задаёт бланк. Так же
-    работают снятия/добавления этапов — их применяет вызывающий через
-    apply_dismissals_and_additions."""
+    для выбранного бланка они справочная подсказка, а шаги задаёт бланк. Так же
+    работают снятия/добавления этапов (коды этапов) — их применяет вызывающий
+    через apply_dismissals_and_additions."""
     stages: list[tuple[dict, bool]] = []
     for item in blank_steps or []:
-        if not isinstance(item, dict) or not item.get("stage_active", True):
+        if not isinstance(item, dict):
             continue
-        override = item.get("optional_override")
-        optional = bool(item.get("optional")) if override is None else bool(override)
-        stages.append((_stage_view(item), optional))
+        stages.append((dict(item), bool(item.get("optional", False))))
     stages.sort(key=lambda pair: (_step_order(pair[0]), _stage_id(pair[0])))
     return RoutePick(
         profile=picked.profile,

@@ -17,20 +17,6 @@ export interface StepGroupRef {
   name: string;
 }
 
-// Шаг шаблона маршрута (settings.templates[].steps[]).
-export interface SettingsTemplateStep {
-  owner_group: string;
-  resolver?: string | null;
-  require_comment?: boolean | null;
-}
-
-// Шаблон маршрута (settings.templates[]): служба + категория + шаги владельцев.
-export interface SettingsTemplate {
-  service: string;
-  category: string;
-  steps: SettingsTemplateStep[];
-}
-
 // Шаблон письма (settings.mail_templates[]): код события + тема + HTML-тело.
 export interface SettingsMailTemplate {
   code: string;
@@ -130,12 +116,8 @@ export interface SettingsData {
   // Группы доступа — владельцы шагов (allowed_ad_groups): id группы AD
   // либо пара {id, name} с читаемым наименованием для карточки заявки.
   allowed_ad_groups: (string | StepGroupRef)[] | null;
-  // Должность → категория (position_to_category).
-  position_to_category: Record<string, string> | null;
   // Эскалация по должностям, часов (position_escalation).
   position_escalation: Record<string, number> | null;
-  // Шаблоны маршрутов (templates).
-  templates: SettingsTemplate[] | null;
   // Шаблоны писем (mail_templates).
   mail_templates: SettingsMailTemplate[] | null;
   // Подключения к базам 1С (onec_bases; пароль маскируется в GET).
@@ -174,12 +156,8 @@ export interface ContentSettingsData {
   // Группы доступа — владельцы шагов (allowed_ad_groups): id группы AD
   // либо пара {id, name} с читаемым наименованием для карточки заявки.
   allowed_ad_groups: (string | StepGroupRef)[] | null;
-  // Должность → категория (position_to_category).
-  position_to_category: Record<string, string> | null;
   // Эскалация по должностям, часов (position_escalation).
   position_escalation: Record<string, number> | null;
-  // Шаблоны маршрутов (templates).
-  templates: SettingsTemplate[] | null;
   // Шаблоны писем (mail_templates).
   mail_templates: SettingsMailTemplate[] | null;
   // Сколько сотрудников на страницу справочника (directory_page_size).

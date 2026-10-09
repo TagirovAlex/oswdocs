@@ -13,7 +13,8 @@ import io
 import os
 import sys
 import zipfile
-from datetime import timedelta
+from datetime import date, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 
@@ -25,8 +26,10 @@ from app.docs import (  # noqa: E402
     DEFAULT_BLANK_LAYOUT,
     LAYOUT_PRESETS,
     BypassResult,
+    blank_placeholders,
     build_blank_document,
     generate_bypass,
+    render_blank_text,
     resolve_blank_layout,
 )
 from app.main import app  # noqa: E402
@@ -54,7 +57,27 @@ FAKE_BLANK = "Бланк вымышленного увольнения"
 FAKE_STAGE = "Бухгалтерия вымышленная"
 FAKE_ASSIGNEE_FIO = "Бухгалтер Вымышленный"
 FAKE_GROUP = "SED_STEP_BUH"
+FAKE_SUBJECT = "Вымышленная тема заявки"
+FAKE_CONTENT = "Вымышленное содержание заявки"
+FAKE_MANAGER_FIO = "Руководитель Вымышленный"
+FAKE_DATE = "2026-10-01"
+FAKE_DISMISSAL_DATE = "2026-10-15"
 QR_URL = BASE_URL + "/requests/REQ-0001"
+
+# Шапка и подвал бланка из снимка заявки: HTML редактора и список строк с
+# плейсхолдерами контракта печати.
+FAKE_HEADER = (
+    "<p><b>Акт вымышленного увольнения</b> № {tab_num}</p>"
+    "<p>Сотрудник: {fio}, {position}</p>"
+    "<p>Служба: {department}; предприятие: {enterprise}</p>"
+    "<p>Печать: {date}; увольнение: {dismissal_date}</p>"
+    "<p>{subject} — {content}</p>"
+    "<p>Бланк {blank_name}, {steps}, руководитель {manager}</p>"
+)
+FAKE_FOOTER = [
+    "Подпись сотрудника ____________________",
+    "Дата: {date}, ФИО: {fio}",
+]
 
 
 def _b64(value: str) -> str:
@@ -86,6 +109,11 @@ def _context(**overrides) -> dict:
         "blank_version": 2,
         "blank_layout": "office",
         "qr_url": QR_URL,
+        "subject": FAKE_SUBJECT,
+        "content": FAKE_CONTENT,
+        "date": FAKE_DATE,
+        "dismissal_date": FAKE_DISMISSAL_DATE,
+        "manager": FAKE_MANAGER_FIO,
         "steps": [
             {
                 "order": 1,
@@ -132,6 +160,17 @@ def _steps_rows(blob: bytes) -> list[list[str]]:
     """Строки таблицы шагов (последняя таблица документа)."""
     table = _opened(blob).tables[-1]
     return [[cell.text for cell in row.cells] for row in table.rows]
+
+
+def _body_paragraphs(blob: bytes) -> list:
+    """Абзацы тела документа по порядку (таблицы в них не входят)."""
+    return _opened(blob).paragraphs
+
+
+def _body_blocks(blob: bytes) -> list[str]:
+    """Типы блоков тела документа по порядку: p — абзац, tbl — таблица."""
+    body = _opened(blob).element.body
+    return [child.tag.split("}")[-1] for child in body]
 
 
 def _request(**overrides) -> _Request:
@@ -405,8 +444,314 @@ def test_build_blank_document_breaks_line_on_allowed_tag():
 
 
 # ---------------------------------------------------------------------------
-# generate_bypass: DOCX из данных -> PDF (LibreOffice), без файлов-шаблонов
+# Шапка и подвал бланка из снимка заявки + плейсхолдеры печати
 # ---------------------------------------------------------------------------
+
+def test_build_blank_document_header_html_comes_from_snapshot():
+    """Шапка в снимке печатается как шапка бланка; сетку полей она заменяет."""
+    blob = build_blank_document(_context(blank_header_html=FAKE_HEADER))
+    paragraphs = [paragraph.text for paragraph in _body_paragraphs(blob)]
+    # Заголовок бланка печатается как было, пользовательская шапка — под ним.
+    assert paragraphs[0] == FAKE_BLANK
+    assert paragraphs[1] == "Акт вымышленного увольнения № " + FAKE_TAB_NUM
+    assert paragraphs[2] == f"Сотрудник: {FAKE_FIO}, {FAKE_POSITION}"
+    assert f"Бланк {FAKE_BLANK}, количество шагов: 2, руководитель {FAKE_MANAGER_FIO}" in paragraphs
+    # Шапка заменяет сетку полей: подписей полей на бланке нет, таблица шагов одна.
+    assert "Табельный номер" not in _docx_text(blob)
+    assert len(_opened(blob).tables) == 1
+
+
+def test_build_blank_document_header_html_keeps_allowed_formatting():
+    """Начертания разрешённых тегов шапки работают, как у текста этапа."""
+    blob = build_blank_document(
+        _context(blank_header_html="<p>Акт <b>срочный</b> и <i>важный</i></p>")
+    )
+    paragraphs = _opened(blob).paragraphs
+    runs = [run for run in paragraphs[1].runs]
+    bold = [run.text for run in runs if run.bold]
+    italic = [run.text for run in runs if run.italic]
+    assert bold == ["срочный"]
+    assert italic == ["важный"]
+
+
+def test_build_blank_document_header_html_is_sanitized():
+    """Скрипты, iframe, обработчики событий и внешние ресурсы на бланок не идут."""
+    blob = build_blank_document(
+        _context(
+            blank_header_html=(
+                "<p>Акт <b>вымышленный</b> по заявке {fio}</p>"
+                "<p><script>alert(1)</script></p>"
+                "<p><iframe src=\"https://вымышленный-ресурс/кадр\"></iframe></p>"
+                "<p><img src=\"https://вымышленный-ресурс/картинка.png\" "
+                "onerror=\"alert(2)\"></p>"
+            )
+        )
+    )
+    text = _docx_text(blob)
+    assert "alert" not in text
+    assert "onerror" not in text
+    assert "вымышленный-ресурс" not in text
+    assert "<img" not in text
+    paragraphs = [paragraph.text for paragraph in _body_paragraphs(blob)]
+    assert paragraphs[1] == f"Акт вымышленный по заявке {FAKE_FIO}"
+
+
+def test_build_blank_document_header_placeholder_value_stays_plain_text():
+    """Значение {content}/{subject} печатается текстом: разметка из значения
+    не разрывает абзац шапки и не даёт начертания.
+
+    Порядок печати: в HTML-шапку значение подставляется ЭКРАНИРОВАННЫМ, поэтому
+    </p> из свободного текста заявки не добавляет абзац, а <b>/<script> не
+    разбираются как теги бланка (структура документа от значения не зависит)."""
+    header = (
+        "<p><b>Акт вымышленного увольнения</b></p>"
+        "<p>Содержание: {content}</p>"
+        "<p>Тема: {subject}</p>"
+    )
+    markup = "</p><b>жирно</b> и <script>alert(1)</script>"
+    blob = build_blank_document(
+        _context(
+            subject=f"тема {markup}",
+            content=f"прощайте {markup}",
+            blank_header_html=header,
+        )
+    )
+    # Шапка из разметки без значений: столько же абзацев — значение ни одного
+    # не добавило (его </p> не разорвал абзацы шапки).
+    plain = build_blank_document(
+        _context(subject="тема", content="прощайте", blank_header_html=header)
+    )
+    paragraphs = _body_paragraphs(blob)
+    assert len(paragraphs) == len(_body_paragraphs(plain))
+    # Значение напечатано символами текста: разметка из него осталась текстом.
+    assert [paragraph.text for paragraph in paragraphs[1:4]] == [
+        "Акт вымышленного увольнения",
+        f"Содержание: прощайте {markup}",
+        f"Тема: тема {markup}",
+    ]
+    # Начертание осталось только у разметки самой шапки, значение его не дало.
+    bold = [run.text for paragraph in paragraphs for run in paragraph.runs if run.bold]
+    assert bold == [FAKE_BLANK, "Акт вымышленного увольнения"]
+
+
+def test_build_blank_document_placeholder_markup_does_not_break_print():
+    """Разметка в значении плейсхолдера не роняет печать ни в одном месте бланка.
+
+    Шапка (HTML) — значение экранируется, подвал — обычная подстановка в текст;
+    в обоих случаях документ собирается, значение печатается символами, а шапка,
+    таблица шагов и подвал на месте."""
+    markup = "</p><b>жирно</b> <script>alert(1)</script>"
+    context = _context(
+        subject=markup,
+        content=markup,
+        blank_header_html="<p>Содержание: {content}</p>",
+        blank_footer_lines=["Подпись {subject}", "Подпись {не_существует}"],
+    )
+    context["steps"] = [
+        dict(context["steps"][0], title="Этап {content}", stage_lines=["Пункт {subject}"])
+    ]
+    blob = build_blank_document(context)
+    paragraphs = [paragraph.text for paragraph in _body_paragraphs(blob)]
+    assert paragraphs[1] == f"Содержание: {markup}"
+    # Подвал печатается целиком, неизвестный плейсхолдер остаётся текстом.
+    assert paragraphs[-2:] == [f"Подпись {markup}", "Подпись {не_существует}"]
+    # Содержащее значение из {content} печатается в тексте шага, документ цел.
+    assert len(_opened(blob).tables) == 1
+    assert _docx_names(blob)[0] == "[Content_Types].xml"
+
+
+def test_build_blank_document_without_header_html_keeps_field_grid():
+    """Шапки в снимке нет — прежнее поведение: офисный пресет печатает сетку полей."""
+    grid = _opened(build_blank_document(_context())).tables[0]
+    assert [row.cells[0].text.strip() for row in grid.rows] == [
+        "ФИО:", "Должность:", "Служба:", "Табельный номер:", "Предприятие:",
+    ]
+    assert grid.cell(0, 1).text == FAKE_FIO
+    # Линейный пресет — те же поля списком.
+    line = _body_paragraphs(build_blank_document(_context(blank_layout="line")))
+    assert f"Табельный номер: {FAKE_TAB_NUM}" in [
+        paragraph.text for paragraph in line
+    ]
+
+
+def test_build_blank_document_footer_lines_come_after_steps_table():
+    """Строки подвала печатаются после таблицы шагов, по порядку и по центру."""
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    blob = build_blank_document(
+        _context(blank_footer_lines=list(FAKE_FOOTER), date=None, fio=FAKE_FIO)
+    )
+    # Последние блоки тела — абзацы подвала, таблица шагов перед ними.
+    blocks = _body_blocks(blob)
+    assert blocks[-1] == "sectPr"
+    assert blocks[-3:-1] == ["p", "p"]
+    assert "tbl" in blocks[:-3]
+    paragraphs = _body_paragraphs(blob)
+    assert paragraphs[-2].text == FAKE_FOOTER[0]
+    assert paragraphs[-1].text == f"Дата: , ФИО: {FAKE_FIO}"
+    assert all(p.alignment == WD_ALIGN_PARAGRAPH.CENTER for p in paragraphs[-2:])
+
+
+def test_build_blank_document_without_footer_lines_prints_nothing():
+    """Подвала в снимке нет (или он пустой/из пробелов) — ничего не печатаем."""
+    for lines in (None, [], [" ", ""]):
+        blob = build_blank_document(_context(blank_footer_lines=lines))
+        assert _body_blocks(blob)[-2:] == ["tbl", "sectPr"]
+
+
+def test_build_blank_document_substitutes_all_placeholders():
+    """Плейсхолдеры контракта печатаются значениями (шапка, подвал, текст шага)."""
+    context = _context(
+        blank_header_html=FAKE_HEADER, blank_footer_lines=list(FAKE_FOOTER)
+    )
+    context["steps"] = [
+        dict(
+            context["steps"][0],
+            title="Согласование {fio}",
+            stage_lines=["Должность {position}", "Табельный {tab_num}"],
+        )
+    ]
+    text = _docx_text(build_blank_document(context))
+    for expected in (
+        FAKE_FIO,                    # {fio}
+        FAKE_POSITION,               # {position}
+        FAKE_SERVICE,                # {department}
+        FAKE_TAB_NUM,                # {tab_num}
+        FAKE_ENTERPRISE_NAME,        # {enterprise}
+        FAKE_BLANK,                  # {blank_name}
+        FAKE_SUBJECT,                # {subject}
+        FAKE_CONTENT,                # {content}
+        "01.10.2026",                # {date}, формат ДД.ММ.ГГГГ
+        "15.10.2026",                # {dismissal_date}
+        "количество шагов: 1",       # {steps} по числу шагов заявки
+        FAKE_MANAGER_FIO,            # {manager}
+    ):
+        assert expected in text, expected
+    # Неподставленных плейсхолдеров на бланке не осталось.
+    assert "{" not in text
+
+
+def test_build_blank_document_unknown_placeholder_stays_text():
+    """Неизвестный плейсхолдер остаётся текстом: печать не падает."""
+    blob = build_blank_document(
+        _context(
+            blank_header_html="<p>{не_существует} и {unknown} для {fio}</p>",
+            blank_footer_lines=["Подпись {steps_count}"],
+        )
+    )
+    paragraphs = [paragraph.text for paragraph in _body_paragraphs(blob)]
+    assert paragraphs[1] == f"{{не_существует}} и {{unknown}} для {FAKE_FIO}"
+    assert paragraphs[-1] == "Подпись {steps_count}"
+
+
+def test_build_blank_document_placeholders_without_dates_are_empty():
+    """Нет даты/руководителя в контексте — плейсхолдеры печатаются пустыми."""
+    blob = build_blank_document(
+        _context(
+            date=None,
+            dismissal_date="",
+            manager=None,
+            blank_header_html="<p>Печать: [{date}] увольнение: [{dismissal_date}] "
+            "руководитель: [{manager}]</p>",
+        )
+    )
+    paragraphs = [paragraph.text for paragraph in _body_paragraphs(blob)]
+    assert paragraphs[1] == "Печать: [] увольнение: [] руководитель: []"
+
+
+def test_blank_placeholders_formats_dates_and_step_count():
+    """Даты печатаются ДД.ММ.ГГГГ в любом разбираемом виде, {steps} — счётчик."""
+    values = blank_placeholders(_context())
+    assert values["date"] == "01.10.2026"
+    assert values["dismissal_date"] == "15.10.2026"
+    assert values["steps"] == "количество шагов: 2"
+    assert values["manager"] == FAKE_MANAGER_FIO
+    objects = blank_placeholders(
+        _context(date=datetime(2026, 10, 1), dismissal_date=date(2026, 10, 15))
+    )
+    assert objects["date"] == "01.10.2026"
+    assert objects["dismissal_date"] == "15.10.2026"
+    # Мусор в дате или её отсутствие — пусто (печать не падает).
+    assert blank_placeholders(_context(date="не дата", dismissal_date=None)) == {
+        **values,
+        "date": "",
+        "dismissal_date": "",
+    }
+
+
+def test_build_blank_document_step_text_substitutes_placeholders():
+    """Плейсхолдеры подставляются и в текст шага (название и пункты)."""
+    context = _context()
+    context["steps"] = [
+        {
+            "order": 1,
+            "owner": FAKE_GROUP,
+            "title": "Согласование {fio}",
+            "stage_lines": [
+                "Должность {position}",
+                "Табельный {tab_num}",
+                "Предприятие {enterprise}",
+                "{не_существует}",
+            ],
+            "fio": "",
+            "status": STEP_PENDING,
+            "done_at": "",
+        }
+    ]
+    assert _steps_rows(build_blank_document(context))[1][1].splitlines() == [
+        f"Согласование {FAKE_FIO}",
+        f"Должность {FAKE_POSITION}",
+        f"Табельный {FAKE_TAB_NUM}",
+        f"Предприятие {FAKE_ENTERPRISE_NAME}",
+        "{не_существует}",
+    ]
+
+
+def test_build_blank_document_step_placeholder_value_stays_plain_text():
+    """Значение {content}/{subject} в тексте шага печатается текстом: ни начертаний,
+    ни лишних абзацев из значения, печать не падает.
+
+    Порядок печати: в текст шага значение подставляется ЭКРАНИРОВАННЫМ (как в
+    HTML-шапке), поэтому </p>/<b>/<script> из свободного текста заявки не
+    разбираются как теги бланка — структура и начертания от значения не зависят.
+    Разметка САМОГО текста шага (теги бланка) печатается как раньше."""
+    markup = "</p><b>жирно</b> и <script>alert(1)</script>"
+    context = _context(subject=f"тема {markup}", content=f"прощайте {markup}")
+    context["steps"] = [
+        {
+            "order": 1,
+            "owner": FAKE_GROUP,
+            "title": "Этап <b>согласование</b> — {content}",
+            "stage_lines": ["Пункт {subject}", "Пункт {не_существует}"],
+            "fio": "",
+            "status": STEP_PENDING,
+            "done_at": "",
+        }
+    ]
+    blob = build_blank_document(context)
+    cell = _opened(blob).tables[-1].rows[1].cells[1]
+    # Абзацев в ячейке ровно по одному на название и на пункт этапа.
+    assert len(cell.paragraphs) == 3
+    # Значение напечатано символами текста, неизвестный плейсхолдер остался текстом.
+    assert [paragraph.text for paragraph in cell.paragraphs] == [
+        f"Этап согласование — прощайте {markup}",
+        f"Пункт тема {markup}",
+        "Пункт {не_существует}",
+    ]
+    # Начертание — только у разметки самого шага (название этапа печатается
+    # жирным), значение плейсхолдера начертания не дало.
+    bold = [run.text for paragraph in cell.paragraphs for run in paragraph.runs if run.bold]
+    assert bold == ["Этап ", "согласование"]
+    # Документ собран целиком (значение печать не сломало): таблица шагов на месте.
+    assert _docx_names(blob)[0] == "[Content_Types].xml"
+    table = _opened(blob).tables[-1]
+    assert table.rows[0].cells[0].text == "№"
+
+
+# ---------------------------------------------------------------------------
+# Генератор: DOCX из данных -> PDF (LibreOffice), без файлов-шаблонов
+# ---------------------------------------------------------------------------
+
 
 def test_generate_bypass_signature_has_no_template_arguments():
     """Пути через файлы-шаблоны в печати нет: ни body, ни .docx-файла."""
@@ -513,6 +858,57 @@ def test_print_ignores_doc_templates_setting(client, requests_store, monkeypatch
     assert base64.b64decode(response.json()["pdf_b64"]) == b"%PDF-1.4 fake"
 
 
+def test_print_passes_header_footer_snapshot_to_document(
+    client, requests_store, monkeypatch, tmp_path
+):
+    """Печать берёт шапку/подвал и тему/содержание из снимка заявки."""
+    requests_store.create(
+        _request(
+            blank_header_html=FAKE_HEADER,
+            blank_footer_lines=list(FAKE_FOOTER),
+            subject=FAKE_SUBJECT,
+            content=FAKE_CONTENT,
+        )
+    )
+    captured = {}
+    pdf = tmp_path / "bypass.pdf"
+    pdf.write_bytes(b"%PDF-1.4 fake")
+
+    def fake(**kwargs):
+        captured.update(kwargs)
+        return _fake_result(str(pdf))
+
+    monkeypatch.setattr("app.documents.generate_bypass", fake)
+    response = client.post("/requests/REQ-0001/print", headers=_hr_headers())
+    assert response.status_code == 200, response.text
+    context = captured["context"]
+    assert context["blank_header_html"] == FAKE_HEADER
+    assert context["blank_footer_lines"] == list(FAKE_FOOTER)
+    assert context["subject"] == FAKE_SUBJECT
+    assert context["content"] == FAKE_CONTENT
+
+
+def test_print_without_header_footer_snapshot(
+    client, requests_store, monkeypatch, tmp_path
+):
+    """Заявка без шапки/подвала в снимке: печать получает пустые значения."""
+    requests_store.create(_request())
+    captured = {}
+    pdf = tmp_path / "bypass.pdf"
+    pdf.write_bytes(b"%PDF-1.4 fake")
+
+    def fake(**kwargs):
+        captured.update(kwargs)
+        return _fake_result(str(pdf))
+
+    monkeypatch.setattr("app.documents.generate_bypass", fake)
+    response = client.post("/requests/REQ-0001/print", headers=_hr_headers())
+    assert response.status_code == 200, response.text
+    context = captured["context"]
+    assert context["blank_header_html"] == ""
+    assert context["blank_footer_lines"] == []
+
+
 def test_print_422_without_steps(client, requests_store):
     """Шагов нет — 422 с понятным текстом (даже при заполненном doc_templates)."""
     requests_store.create(_request(steps=[]))
@@ -549,3 +945,151 @@ def test_print_forbidden_for_step_owner(client, requests_store):
     }
     assert client.post("/requests/REQ-0001/print", headers=owner).status_code == 403
     assert client.post("/requests/REQ-0001/print", headers={}).status_code == 401
+
+
+class _FakeEmployeeStore:
+    """Зеркало сотрудников: одна строка по табелю (тестовая подмена)."""
+
+    def __init__(self, rows=None, fail=False) -> None:
+        self.rows = rows if rows is not None else [
+            {
+                "enterprise": "ENT",
+                "tab_num": "Т-000777",
+                "fio": "Вымышленнов Иван Тестович",
+                "ad_sam": "vymyshlannyy",
+                "dismissal_date": "2026-11-30",
+            }
+        ]
+        self.fail = fail
+
+    def search(self, enterprise, q, limit, offset=0):
+        if self.fail:
+            raise RuntimeError("зеркало сотрудников недоступно")
+        return [dict(row) for row in self.rows]
+
+    def find_by_request_key(self, enterprise, base_code, tab_num):
+        # Боевой контракт: точное совпадение по предприятию/табелю, база
+        # уточняет выборку, увольнение НЕ отсекается (печати нужна дата).
+        if self.fail:
+            raise RuntimeError("зеркало сотрудников недоступно")
+        wanted = str(tab_num or "").strip().casefold()
+        for row in self.rows:
+            if str(row.get("tab_num") or "").strip().casefold() != wanted:
+                continue
+            if str(row.get("enterprise") or enterprise) != str(enterprise):
+                continue
+            if base_code and str(row.get("base_code") or "") != str(base_code):
+                continue
+            return dict(row)
+        return None
+
+
+class _FakeUserCards:
+    """Зеркало AD users: карточки сотрудника и руководителя (тестовая подмена)."""
+
+    def __init__(self, cards=None, managers=None) -> None:
+        # None - значения по умолчанию, пустой словарь - «данных нет» (важно для теста).
+        self.cards = {
+            "vymyshlannyy": {
+                "sam": "vymyshlannyy",
+                "manager_dn": "CN=Ruk,OU=SED,DC=example,DC=local",
+            },
+            "Ruk": {"sam": "Ruk", "fio_full": "Вымышленнова Мария Тестовна", "manager_dn": None},
+        } if cards is None else cards
+        self.managers = (
+            {"CN=Ruk,OU=SED,DC=example,DC=local": "Ruk"} if managers is None else managers
+        )
+
+    def user_card(self, sam):
+        # Ключи в тесте смешанного регистра, поиск логина - без учёта регистра.
+        wanted = str(sam or "").strip().casefold()
+        for key, value in self.cards.items():
+            if str(key).strip().casefold() == wanted:
+                return dict(value)
+        return None
+
+    def manager_sam_by_dn(self, manager_dn):
+        return self.managers.get(str(manager_dn or "").strip())
+
+
+def test_hr_placeholders_filled_from_mirrors():
+    """{date} — дата печати, {dismissal_date} — из кадровых данных, {manager} — ФИО руководителя."""
+    from app.documents import _fill_hr_placeholders
+
+    context = {}
+    request = SimpleNamespace(enterprise="ENT", tab_num="Т-000777")
+    _fill_hr_placeholders(context, request, _FakeUserCards(), _FakeEmployeeStore())
+
+    values = blank_placeholders(context)
+    assert values["dismissal_date"] == "30.11.2026"
+    assert values["manager"] == "Вымышленнова Мария Тестовна"
+    assert values["date"]  # дата печати всегда есть
+
+
+def test_hr_placeholders_empty_when_mirror_unavailable():
+    """Зеркала недоступны или сотрудник не найден — печать не падает, поля пустые."""
+    from app.documents import _fill_hr_placeholders
+
+    context = {}
+    request = SimpleNamespace(enterprise="ENT", tab_num="Т-000777")
+
+    _fill_hr_placeholders(context, request, None, _FakeEmployeeStore(fail=True))
+    values = blank_placeholders(context)
+    assert values["dismissal_date"] == "" and values["manager"] == ""
+
+    context = {}
+    _fill_hr_placeholders(context, request, _FakeUserCards(), _FakeEmployeeStore(rows=[]))
+    values = blank_placeholders(context)
+    assert values["dismissal_date"] == "" and values["manager"] == ""
+
+
+def test_hr_placeholders_manager_absent_in_ad():
+    """Руководителя в AD нет — {manager} пустой, печать не падает."""
+    from app.documents import _fill_hr_placeholders
+
+    context = {}
+    request = SimpleNamespace(enterprise="ENT", tab_num="Т-000777")
+    _fill_hr_placeholders(
+        context, request, _FakeUserCards(managers={}), _FakeEmployeeStore()
+    )
+    values = blank_placeholders(context)
+    assert values["manager"] == ""
+    assert values["dismissal_date"] == "30.11.2026"
+
+
+def test_employee_row_uses_request_key_lookup():
+    """Строка сотрудника читается по ключу заявки (предприятие/база/табель).
+
+    Точность совпадения обеспечивает сам запрос хранилища (проверяется в
+    test_employee_hr_sync.py), здесь — отбор строки заглушкой."""
+    from app.documents import _employee_row
+
+    store = _FakeEmployeeStore(
+        rows=[
+            {"enterprise": "ENT", "tab_num": "Т-0007", "fio": "Похожий Тестов"},
+            {
+                "enterprise": "ENT",
+                "base_code": "zup",
+                "tab_num": "Т-000777",
+                "fio": "Вымышленнов Иван Тестович",
+            },
+        ]
+    )
+    found = _employee_row(store, "ENT", "zup", "  Т-000777  ")
+    assert found and found["fio"] == "Вымышленнов Иван Тестович"
+    # База не совпала — это другой сотрудник, строки нет (печать не падает).
+    assert _employee_row(store, "ENT", "drugaia", "Т-000777") is None
+
+
+def test_render_blank_text_escapes_values_for_html_header():
+    """В HTML-шапке значения плейсхолдеров печатаются текстом, а не разметкой.
+
+    Свободный текст заявки ({content}) не должен разрывать абзац шапки и не
+    должен превращаться в начертание."""
+    context = {"content": "прощайте </p><b>жирно</b>", "fio": "Вымышленнов И.Т."}
+    escaped = render_blank_text("{content} — {fio}", context, escape=True)
+    assert "&lt;/p&gt;" in escaped and "<b>" not in escaped
+    assert escaped == "прощайте &lt;/p&gt;&lt;b&gt;жирно&lt;/b&gt; — Вымышленнов И.Т."
+    # Обычный текст (подвал, шаги) подставляется как есть — без разметки.
+    plain = render_blank_text("{content}", context)
+    assert plain == context["content"]

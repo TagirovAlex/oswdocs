@@ -43,6 +43,9 @@ class DocTypeConflict(Exception):
 # Фаза «Справочник бланков»: файлы-шаблоны .docx как источник оформления
 # удалены — ключи doc_templates/position_sets и ручки файлов-бланков больше не
 # в контракте (печать собирает бланок из данных, docs.build_blank_document).
+# Фаза «Самостоятельный бланк» (2026-10-08): легаси-ключи templates и
+# position_to_category удалены целиком — маршрут задаёт бланк (его шаги) либо
+# сотрудник ОК вручную.
 # Фаза 2: ключи разделены на КОНТЕНТ (руководитель ОК + админ) и ИНФРА (только админ);
 # SETTINGS_KEYS — полный набор (контент + инфра).
 # Группы доступа: access_groups (инфра, правит ТОЛЬКО admin) — AD-группы, дающие
@@ -58,9 +61,7 @@ CONTENT_KEYS: tuple[str, ...] = (
     "require_paper_signature",
     "enterprises",
     "allowed_ad_groups",
-    "position_to_category",
     "position_escalation",
-    "templates",
     "mail_templates",
 )
 
@@ -202,6 +203,29 @@ def _clean_groups(raw: object) -> set[str]:
     """Список AD-групп из значения настройки: строки либо объекты {id, name}
     (значим id), только непустые без пробелов вокруг; битые отбрасываются."""
     return {item["id"] for item in _groups_with_names(raw)}
+
+
+def _clean_lines(values: list[str] | None) -> list[str]:
+    """Список строк текста бланка/шага: обрезка краёв, пустые отбрасываются,
+    порядок сохраняется (текст печати не должен терять строки по порядку)."""
+    lines: list[str] = []
+    for value in values or []:
+        line = str(value or "").strip()
+        if line:
+            lines.append(line)
+    return lines
+
+
+def _clean_logins(values: list[str] | None) -> list[str]:
+    """Логины согласующих шага: обрезка краёв, без пустых и повторов.
+
+    Повтор логина в одном шаге бессмысленен (отметка всё равно одна), поэтому
+    дубли отбрасываются, порядок сохраняется."""
+    logins: list[str] = []
+    for line in _clean_lines(values):
+        if line not in logins:
+            logins.append(line)
+    return logins
 
 
 def resolve_allowed_groups(
@@ -522,24 +546,6 @@ class StepGroupItem(BaseModel):
     name: str = Field(default="", description="Читаемое наименование (пусто — равно id)")
 
 
-class TemplateStepItem(BaseModel):
-    """Шаг шаблона маршрута (контракт B2: группа + опциональные резолвер/флаг)."""
-
-    owner_group: str = Field(description="Группа-владелец шага из settings")
-    resolver: str | None = Field(default=None, description="Резолвер исполнителя")
-    require_comment: bool | None = Field(
-        default=None, description="Комментарий обязателен даже при согласии"
-    )
-
-
-class TemplateItem(BaseModel):
-    """Шаблон маршрута: служба + категория → шаги (формат settings.templates)."""
-
-    service: str = Field(description="Служба увольняемого (поле 1С)")
-    category: str = Field(description="Категория (МОЛ/линейный/руководитель)")
-    steps: list[TemplateStepItem] = Field(description="Шаги шаблона по порядку")
-
-
 class MailTemplateItem(BaseModel):
     """Шаблон письма (W3a): код события v1 + тема и Jinja-HTML тело."""
 
@@ -716,14 +722,8 @@ class SettingsPayload(BaseModel):
         default=None,
         description="Группы ручного конструктора шагов (id либо {id, name})",
     )
-    position_to_category: dict[str, str] | None = Field(
-        default=None, description="Должность 1С → категория"
-    )
     position_escalation: dict[str, int] | None = Field(
         default=None, description="Должность → часы эскалации"
-    )
-    templates: list[TemplateItem] | None = Field(
-        default=None, description="Шаблоны маршрутов (служба+категория→шаги)"
     )
     mail_templates: list[MailTemplateItem] | None = Field(
         default=None, description="Шаблоны писем (код события→тема+HTML-тело)"
@@ -783,14 +783,8 @@ class ContentSettingsPayload(BaseModel):
         default=None,
         description="Группы ручного конструктора шагов (id либо {id, name})",
     )
-    position_to_category: dict[str, str] | None = Field(
-        default=None, description="Должность 1С → категория"
-    )
     position_escalation: dict[str, int] | None = Field(
         default=None, description="Должность → часы эскалации"
-    )
-    templates: list[TemplateItem] | None = Field(
-        default=None, description="Шаблоны маршрутов (служба+категория→шаги)"
     )
     mail_templates: list[MailTemplateItem] | None = Field(
         default=None, description="Шаблоны писем (код события→тема+HTML-тело)"
@@ -1391,11 +1385,12 @@ class RouteProfileStepsIn(BaseModel):
 
 
 class BlankCatalogIn(BaseModel):
-    """Новый бланк (blanks, миграция 0012): набор шагов из справочника этапов.
+    """Новый бланк (blanks, миграции 0012/0014): шапка, подвал и свои шаги.
 
     doc_type_code — вид документа (doc_types.code) как классификация, на печать
     не влияет; оформление печати задаёт layout (встроенные пресеты office|line),
-    файлов-шаблонов нет."""
+    файлов-шаблонов нет. header_html — шапка (HTML TipTap, санируется при печати),
+    footer_lines — подвал (список строк)."""
 
     code: str = Field(pattern=_ROUTE_CODE_PATTERN, description="Код бланка (snake_case, уникален)")
     name: str = Field(min_length=1, description="Наименование бланка")
@@ -1409,6 +1404,10 @@ class BlankCatalogIn(BaseModel):
         default="office", description="Макет печати бланка"
     )
     active: bool = Field(default=True, description="Активен бланк (active=false — вне формы заявки)")
+    header_html: str | None = Field(default=None, description="Шапка бланка (HTML TipTap)")
+    footer_lines: list[str] = Field(
+        default_factory=list, description="Подвал бланка (строки печати)"
+    )
 
     @model_validator(mode="after")
     def _check_blank(self) -> "BlankCatalogIn":
@@ -1416,6 +1415,8 @@ class BlankCatalogIn(BaseModel):
         self.name = self.name.strip()
         self.doc_type_code = (self.doc_type_code or "").strip() or None
         self.description = (self.description or "").strip() or None
+        self.header_html = (self.header_html or "").strip() or None
+        self.footer_lines = _clean_lines(self.footer_lines)
         if not self.name:
             raise ValueError("Наименование бланка не может быть пустым")
         return self
@@ -1435,6 +1436,10 @@ class BlankCatalogUpdateIn(BaseModel):
         default=None, description="Макет печати бланка"
     )
     active: bool | None = Field(default=None, description="Активен бланк")
+    header_html: str | None = Field(default=None, description="Шапка бланка (HTML TipTap)")
+    footer_lines: list[str] | None = Field(
+        default=None, description="Подвал бланка (строки печати)"
+    )
 
     @model_validator(mode="after")
     def _check_blank(self) -> "BlankCatalogUpdateIn":
@@ -1447,30 +1452,68 @@ class BlankCatalogUpdateIn(BaseModel):
             self.doc_type_code = self.doc_type_code.strip() or None
         if self.description is not None:
             self.description = self.description.strip() or None
+        if self.header_html is not None:
+            self.header_html = self.header_html.strip() or None
+        if self.footer_lines is not None:
+            self.footer_lines = _clean_lines(self.footer_lines)
         return self
 
 
 class BlankStepIn(BaseModel):
-    """Шаг бланка: этап, порядок и переопределения флагов этапа.
+    """Шаг бланка: самостоятельный шаг со своим текстом и своими согласующими.
 
-    Переопределения null — «брать значение этапа» (optional/require_comment),
-    поэтому незаданный шаг ведёт себя как сам этап."""
+    Этапа у шага нет: текст задаёт title/stage_lines, исполнителя — executor_kind
+    с assignees (people), owner_group (ad_group) или руководитель сотрудника в AD
+    (manager_ad). Пара people/ad_group проверяется здесь же (422), а группа AD —
+    против справочника групп шагов в эндпоинте (_require_known_step_group)."""
 
-    stage_id: int = Field(ge=1, description="Этап маршрута (approval_stages.id)")
     step_order: int = Field(
         ge=1, description="Порядок шага в бланке (с 1, без повторов)"
     )
-    optional_override: bool | None = Field(
-        default=None, description="Этап необязательный для этого бланка (null — как в этапе)"
+    title: str = Field(min_length=1, description="Название шага бланка")
+    stage_lines: list[str] = Field(
+        default_factory=list, description="Текст шага (строки; HTML TipTap допускается)"
     )
-    require_comment_override: bool | None = Field(
-        default=None, description="Комментарий обязателен для этого бланка (null — как в этапе)"
+    executor_kind: Literal["people", "ad_group", "manager_ad"] = Field(
+        default="people", description="Вид исполнителя шага"
+    )
+    assignees: list[str] = Field(
+        default_factory=list, description="Логины согласующих (для executor_kind=people)"
+    )
+    owner_group: str | None = Field(
+        default=None, description="Группа AD (для executor_kind=ad_group)"
     )
     approval_mode: Literal["sequential", "parallel"] | None = Field(
         default=None,
         description="Режим шага: parallel — закрывает любой из ответственных, "
-        "sequential — все ответственные (null — как в этапе, то есть sequential)",
+        "sequential — все ответственные (null — sequential)",
     )
+    optional: bool = Field(default=False, description="Шаг необязательный для маршрута")
+    require_comment: bool = Field(
+        default=False, description="Комментарий обязателен даже при согласии"
+    )
+
+    @model_validator(mode="after")
+    def _check_step(self) -> "BlankStepIn":
+        """Нормализация и проверка пары executor_kind/исполнитель (422).
+
+        people без согласующих и ad_group без группы — ошибка данных, а не
+        хранилища: шаг без исполнителя согласовать было бы некому."""
+        self.title = self.title.strip()
+        self.stage_lines = _clean_lines(self.stage_lines)
+        self.assignees = _clean_logins(self.assignees)
+        self.owner_group = (self.owner_group or "").strip() or None
+        if not self.title:
+            raise ValueError("Название шага бланка не может быть пустым")
+        if self.executor_kind == "people" and not self.assignees:
+            raise ValueError(
+                "Шаг с executor_kind=people обязан содержать согласующих (assignees)"
+            )
+        if self.executor_kind == "ad_group" and not self.owner_group:
+            raise ValueError(
+                "Шаг с executor_kind=ad_group обязан содержать группу AD (owner_group)"
+            )
+        return self
 
 
 class BlankStepsIn(BaseModel):
@@ -1481,7 +1524,7 @@ class BlankStepsIn(BaseModel):
     поэтому повтор — 422 на границе, а не конфликт из хранилища."""
 
     steps: list[BlankStepIn] = Field(
-        default_factory=list, description="Шаги бланка по порядку (пусто — бланк без этапов)"
+        default_factory=list, description="Шаги бланка по порядку (пусто — бланк без шагов)"
     )
 
     @model_validator(mode="after")
@@ -1743,10 +1786,10 @@ def replace_profile_steps(
     return {"profile_id": profile_id, "count": len(items)}
 
 
-# --- Бланки (миграция 0012: blanks/blank_steps) --- админ-эндпоинты, доступ
-# только admin (как профили и этапы). Создание/правка — с аудитом в
+# --- Бланки (миграции 0012/0014: blanks/blank_steps) --- админ-эндпоинты,
+# доступ только admin (как профили и этапы). Создание/правка — с аудитом в
 # routing_store (entity=blank); здесь только проверки границы (409 на дубль
-# кода) и чтение с audit_log.
+# кода, 422 на неизвестную группу AD шага) и чтение с audit_log.
 
 @router.get("/settings/routing/blanks")
 def list_routing_blanks(
@@ -1771,8 +1814,9 @@ def create_routing_blank(
     store: DbRoutingStore = Depends(get_routing_store),
 ) -> dict:
     """Создать бланк (только admin): код уникален (409, сверка со всем
-    справочником, включая отключённые). Состав шагов задаётся отдельно
-    (PUT .../{id}/steps). Аудит — в routing_store (blank.create)."""
+    справочником, включая отключённые). Шапка/подвал — вместе с бланком, состав
+    шагов задаётся отдельно (PUT .../{id}/steps). Аудит — в routing_store
+    (blank.create)."""
     _require_admin(user)
     try:
         _reject_known_code(store.list_blanks(), payload.code, "Бланк")
@@ -1784,6 +1828,8 @@ def create_routing_blank(
                 "description": payload.description,
                 "layout": payload.layout,
                 "active": payload.active,
+                "header_html": payload.header_html,
+                "footer_lines": payload.footer_lines,
                 "actor": user.sam,
             }
         )
@@ -1801,8 +1847,8 @@ def update_routing_blank(
     user: CurrentUser = Depends(get_current_user),
     store: DbRoutingStore = Depends(get_routing_store),
 ) -> dict:
-    """Изменить бланк (только admin): частичное обновление полей (код неизменен),
-    аудит — в routing_store (blank.update)."""
+    """Изменить бланк (только admin): частичное обновление полей (код неизменен,
+    шапка/подвал включительно), аудит — в routing_store (blank.update)."""
     _require_admin(user)
     updates = payload.model_dump(mode="json", exclude_unset=True)
     try:
@@ -1820,8 +1866,8 @@ def read_blank_steps(
     user: CurrentUser = Depends(get_current_user),
     store: DbRoutingStore = Depends(get_routing_store),
 ) -> list[dict]:
-    """Состав шагов бланка вместе с этапами (для редактора админки): по порядку,
-    текст этапа и вид исполнителя приложены (stage_lines — список)."""
+    """Собственные шаги бланка (для редактора админки): по порядку, с текстом
+    шага (stage_lines — список) и видом исполнителя; этапа у шага нет."""
     _require_admin(user)
     try:
         return store.list_blank_steps(blank_id)
@@ -1837,25 +1883,39 @@ def replace_blank_steps(
     payload: BlankStepsIn,
     user: CurrentUser = Depends(get_current_user),
     store: DbRoutingStore = Depends(get_routing_store),
+    settings_store: DbSettingsStore = Depends(get_settings_store),
 ) -> dict:
     """Заменить состав шагов бланка (только admin): переданные шаги полностью
-    заменяют прежние одной транзакцией, версия бланка увеличивается, этапы
-    должны существовать и быть активны (иначе 422, состав не меняется).
-    Аудит — в routing_store (blank.steps.update)."""
+    заменяют прежние одной транзакцией, версия бланка увеличивается.
+
+    Проверки границы (состав не меняется при отказе): people без согласующих и
+    ad_group без группы — 422 в схеме запроса, группа вне справочника групп
+    шагов (allowed_ad_groups) — 422 здесь. Аудит — в routing_store
+    (blank.steps.update)."""
     _require_admin(user)
     items = [
         {
-            "stage_id": step.stage_id,
             "step_order": step.step_order,
-            "optional_override": step.optional_override,
-            "require_comment_override": step.require_comment_override,
+            "title": step.title,
+            "stage_lines": step.stage_lines,
+            "executor_kind": step.executor_kind,
+            "assignees": step.assignees,
+            "owner_group": step.owner_group,
+            "optional": step.optional,
+            "require_comment": step.require_comment,
             "approval_mode": step.approval_mode,
         }
         for step in payload.steps
     ]
     try:
+        for step in payload.steps:
+            _require_known_step_group(settings_store, step.owner_group)
         store.set_blank_steps(blank_id, items, user.sam)
     except RoutingUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    except SettingsUnavailable as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc

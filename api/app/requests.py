@@ -2,8 +2,8 @@
 # Хранилище — зависимость get_requests_store: in-memory на офлайне/в тестах,
 # Postgres (DbRequestsStore) на стенде; логика эндпоинтов не зависит от
 # реализации (интерфейс RequestsStore в requests_store.py).
-# Прикладные настройки (position_to_category/escalation, approval_ttl_days,
-# require_comment, templates) — из таблицы settings на стенде (волна A1);
+# Прикладные настройки (position_escalation, approval_ttl_days,
+# require_comment) — из таблицы settings на стенде (волна A1);
 # здесь — injectable-заглушка get_route_settings (дефолты нейтральные,
 # реальные значения — только через settings/тестовые оверрайды).
 # Статусы README п.1: Черновик → На согласовании → На доработке →
@@ -50,6 +50,7 @@ from .routing import (
     REASON_PROFILE_NOT_FOUND,
     REASON_SERVICE_NOT_REGISTERED,
     RoutePick,
+    _join_reason,
     apply_dismissals_and_additions,
     pick_blank_steps,
     pick_profile,
@@ -93,33 +94,18 @@ RESOLVERS = (
 )
 
 
-class RouteStepTemplate(BaseModel):
-    """Шаг шаблона из настроек (без ПДн: только группа/резолвер/флаги)."""
-
-    owner_group: str = Field(description="Группа-владелец шага из settings")
-    resolver: str = Field(default="by_group", description="Резолвер исполнителя")
-    require_comment: bool = Field(default=False, description="Комментарий обязателен даже при согласии")
-
-
-class RouteTemplate(BaseModel):
-    """Шаблон маршрута: служба + категория → шаги."""
-
-    service: str = Field(description="Служба увольняемого (поле 1С)")
-    category: str = Field(description="Категория (МОЛ/линейный/руководитель)")
-    steps: list[RouteStepTemplate] = Field(description="Шаги шаблона по порядку")
-
-
 class RouteSettings(BaseModel):
-    """Прикладные настройки маршрута (на стенде — строка таблицы settings)."""
+    """Прикладные настройки маршрута (на стенде — строка таблицы settings).
+
+    Ключи templates/position_to_category сняты (решение человека 2026-10-08,
+    самостоятельный бланк): маршрут задаёт бланк (его шаги) либо ручной
+    конструктор blocks/steps, а подбор по службе — запасной путь за настройкой
+    blank_autopick."""
 
     approval_ttl_days: int = Field(default=3, description="TTL отметок шагов в днях")
-    position_to_category: dict[str, str] = Field(
-        default_factory=dict, description="Должность 1С → категория"
-    )
     position_escalation: dict[str, int] = Field(
         default_factory=dict, description="Должность → часы эскалации (пусто=выкл)"
     )
-    templates: list[RouteTemplate] = Field(default_factory=list)
 
 
 # Глобал offline-заглушки (стенд подменит чтением settings из БД).
@@ -184,7 +170,7 @@ class CreateRequestIn(BaseModel):
     department: str = Field(description="Служба увольняемого (поле 1С)")
     position: str = Field(description="Должность увольняемого (поле 1С)")
     category: str | None = Field(
-        default=None, description="Категория; пусто — вывести из position_to_category"
+        default=None, description="Категория заявки (задаёт ОК; из справочника не выводится)"
     )
     subject: str = Field(description="Тема заявки (карточка)")
     content: str = Field(description="Содержание заявки (карточка)")
@@ -218,6 +204,13 @@ class CreateRequestIn(BaseModel):
     )
     dismissed_stages: list[str] = Field(
         default_factory=list, description="Коды этапов, снятых ОК из маршрута (auto)"
+    )
+    dismissed_step_orders: list[int] = Field(
+        default_factory=list,
+        description=(
+            "Номера (step_order) шагов бланка, снятых ОК из маршрута (auto); "
+            "у шага бланка нет кода этапа, поэтому его снимают по номеру"
+        ),
     )
     added_stages: list[str] = Field(
         default_factory=list, description="Коды этапов, добавленных ОК в конец маршрута (auto)"
@@ -352,6 +345,10 @@ class StepOut(BaseModel):
         default=None,
         description="Режим шага: sequential (закрывают все ответственные) либо parallel (любой)",
     )
+    optional: bool = Field(
+        default=True,
+        description="Шаг можно снять из маршрута (снимок признака из справочника)",
+    )
     approved_count: int = Field(default=0, description="Сколько ответственных согласовали")
     assignee_count: int = Field(default=0, description="Сколько ответственных у шага")
 
@@ -405,6 +402,12 @@ class RequestOut(BaseModel):
     blank_layout: str | None = Field(
         default=None, description="Макет печати бланка на момент выдачи (office/line)"
     )
+    blank_header_html: str | None = Field(
+        default=None, description="Шапка бланка на момент выдачи (HTML, снимок)"
+    )
+    blank_footer_lines: list[str] = Field(
+        default_factory=list, description="Подвал бланка на момент выдачи (строки, снимок)"
+    )
     escalation_hours: int | None = None
     created_by: str | None = Field(
         default=None,
@@ -445,6 +448,11 @@ class _Step(BaseModel):
     assignees: list[str] = Field(default_factory=list)
     approval_mode: str | None = None
     approvals: list[dict] = Field(default_factory=list)
+    # Снимок признака «шаг можно снять» из справочника (optional шага бланка или
+    # этапа профиля; миграция 0015 хранит его в request_steps). Правка справочника
+    # уже выданную заявку не меняет. Дефолт TRUE — как у колонки в миграции 0015:
+    # шаг выдан до неё не блокируется и снять его можно.
+    optional: bool = True
 
 
 class _Request(BaseModel):
@@ -471,14 +479,17 @@ class _Request(BaseModel):
     service_id: int | None = None
     service_name: str | None = None
     is_manager: bool = False
-    # Снимок выбранного бланка (миграция 0012): ссылка на справочник плюс копия
-    # названия/версии/макета — правка справочника не меняет уже выданную заявку
-    # (её шаги хранят снимок этапов в request_steps). Заполняется в режиме auto;
-    # в custom бланк не обязателен.
+    # Снимок выбранного бланка (миграции 0012/0014): ссылка на справочник плюс
+    # копия названия/версии/макета и текстов печати (шапка/подвал) — правка
+    # справочника не меняет уже выданную заявку (её шаги хранят снимок текстов
+    # шага в request_steps). Заполняется в режиме auto; в custom бланк не
+    # обязателен.
     blank_id: int | None = None
     blank_name: str | None = None
     blank_version: int | None = None
     blank_layout: str | None = None
+    blank_header_html: str | None = None
+    blank_footer_lines: list[str] = Field(default_factory=list)
 
 
 # --- Офлайн-хранилище (тесты/локаль без БД); на стенде эндпоинты получают
@@ -513,23 +524,6 @@ def _require_hr(user: CurrentUser) -> None:
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Ручной маршрут и правки — только разрешенной группе",
         )
-
-
-def _resolve_category(route: RouteSettings, position: str, explicit: str | None) -> str | None:
-    """Категория: явная от ОК важнее; подсказка из position_to_category — иначе None."""
-    if explicit:
-        return explicit
-    return route.position_to_category.get(position)
-
-
-def _find_template(route: RouteSettings, service: str, category: str | None) -> RouteTemplate | None:
-    """Подбор шаблона только по службе+категории (поля 1С); нет — None (fallback)."""
-    if not category:
-        return None
-    for template in route.templates:
-        if template.service == service and template.category == category:
-            return template
-    return None
 
 
 # --- Кодирование блоков маршрута в step_order (без смены схемы БД) ---
@@ -571,8 +565,37 @@ def _mode_for_order(order: int) -> str:
     return STEP_APPROVAL_PARALLEL if _block_info(order)[1] else STEP_APPROVAL_SEQUENTIAL
 
 
+def _executor_kind(value: object) -> str:
+    """Вид исполнителя шага бланка: ad_group/manager_ad, всё прочее и пустое —
+    people (согласующие назначает человек списком логинов)."""
+    kind = str(value or "").strip().casefold()
+    if kind in ("ad_group", "manager_ad"):
+        return kind
+    return "people"
+
+
+def _blank_assignees(value: object) -> list[str]:
+    """Логины согласующих из строки шага бланка: обрезка краёв, без пустых и
+    повторов (порядок снимка сохраняется)."""
+    assignees: list[str] = []
+    for item in value or []:
+        login = str(item or "").strip()
+        if login and login not in assignees:
+            assignees.append(login)
+    return assignees
+
+
+def _needs_manager(row: dict) -> bool:
+    """Требует ли строка маршрута руководителя сотрудника (manager_ad).
+
+    Строка шага бланка — по executor_kind, строка этапа маршрута — по owner_kind."""
+    if _is_blank_step(row):
+        return _executor_kind(row.get("executor_kind")) == "manager_ad"
+    return str(row.get("owner_kind") or "") == "manager_ad"
+
+
 def _build_steps(
-    specs: list[StepSpec] | list[RouteStepTemplate],
+    specs: list[StepSpec],
     ttl_days: int,
     manager: str | None,
     now: datetime,
@@ -617,10 +640,8 @@ def _build_steps(
                 )
         return steps
     for index, spec in enumerate(specs):
-        # sam/assignee есть только у ручного шага (у RouteStepTemplate из шаблона
-        # маршрута таких полей нет) — поэтому getattr.
-        personal = getattr(spec, "sam", None)
-        spec_assignee = getattr(spec, "assignee", None)
+        personal = spec.sam
+        spec_assignee = spec.assignee
         resolver = spec.resolver if spec.resolver in RESOLVERS else "by_group"
         assignee = spec_assignee
         if personal:
@@ -903,6 +924,12 @@ def _step_from_stage(
     require_comment = (
         bool(stage_row.get("require_comment")) if override is None else bool(override)
     )
+    # Снимок «этап можно снять»: optional_override шага профиля, иначе optional
+    # этапа (как в app.routing pick_profile) — миграция 0015.
+    optional_override = stage_row.get("optional_override")
+    optional = (
+        bool(stage_row.get("optional")) if optional_override is None else bool(optional_override)
+    )
     if owner_kind == "stage_roster":
         assignees = [str(sam).strip() for sam in (roster_sams or []) if str(sam).strip()]
     else:
@@ -926,6 +953,80 @@ def _step_from_stage(
         profile_step_id=_int_or_none(stage_row.get("profile_step_id")),
         assignees=assignees,
         approval_mode=_approval_mode(stage_row.get("approval_mode")),
+        optional=optional,
+    )
+
+
+def _is_blank_step(row: dict) -> bool:
+    """Строка это самостоятельный шаг бланка, а не этап маршрута.
+
+    Различающий признак — executor_kind: у шага бланка он есть всегда (вид
+    исполнителя people/ad_group/manager_ad), у строки этапа маршрута его нет
+    (там owner_kind)."""
+    return isinstance(row, dict) and "executor_kind" in row
+
+
+def _step_from_blank_step(
+    blank_step: dict,
+    order: int,
+    manager_sam: str | None,
+    ttl_days: int,
+    now: datetime,
+) -> _Step:
+    """Шаг заявки из строки шага бланка: свой текст и свой исполнитель.
+
+    executor_kind — вид исполнителя шага бланка (миграция 0014):
+    people — список логинов согласующих (assignees), ad_group — группа AD
+    (owner_group), manager_ad — руководитель сотрудника в AD (замена
+    руководителя от ОК приоритетнее); без руководителя — 422, назначать такой
+    шаг не на кого.
+
+    owner_group шага обязателен (_Step): у персонального шага это первый
+    ответственный (как в _build_steps), у группового — группа AD, у
+    manager_ad — руководитель. Режим шага — из строки бланка, иначе sequential
+    («все ответственные»)."""
+    kind = _executor_kind(blank_step.get("executor_kind"))
+    assignees = _blank_assignees(blank_step.get("assignees"))
+    owner_group = str(blank_step.get("owner_group") or "").strip()
+    assignee: str | None = None
+    resolver = "by_group"
+    if kind == "people":
+        # Персональный шаг: резолвер by_user, ответственные — все из снимка,
+        # assignee — первый (прежние выборки, печать и письма).
+        resolver = "by_user"
+        assignee = assignees[0] if assignees else None
+    elif kind == "manager_ad":
+        resolver = "ad_direct_manager"
+        assignee = str(manager_sam or "").strip() or None
+        if not assignee:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Не найден руководитель сотрудника в AD, укажите замену "
+                    "(manager) для шага manager_ad"
+                ),
+            )
+        assignees = [assignee]
+    title = str(blank_step.get("title") or "").strip()
+    return _Step(
+        order=order,
+        owner_group=owner_group or assignee or title or f"blank-step-{order}",
+        resolver=resolver,
+        assignee=assignee or (assignees[0] if assignees else None),
+        require_comment=bool(blank_step.get("require_comment")),
+        expires_at=now + timedelta(days=ttl_days),
+        owner_kind=kind,
+        stage_title=title or None,
+        stage_lines=[
+            str(line)
+            for line in (blank_step.get("stage_lines") or [])
+            if isinstance(line, str) and line.strip()
+        ],
+        assignees=assignees,
+        approval_mode=_approval_mode(blank_step.get("approval_mode")),
+        # Снимок «шаг можно снять» (миграция 0015): правка справочника уже
+        # выданную заявку не меняет.
+        optional=bool(blank_step.get("optional")),
     )
 
 
@@ -1157,7 +1258,7 @@ def _blank_row(store: DbRoutingStore, blank_id: int) -> dict | None:
 
 
 def _blank_step_rows(store: DbRoutingStore, blank: dict) -> list[dict]:
-    """Состав шагов бланка (с этапом) из справочника; заглушка без метода — []."""
+    """Свои шаги бланка из справочника (без этапа); заглушка без метода — []."""
     reader = getattr(store, "list_blank_steps", None)
     if not callable(reader):
         return []
@@ -1166,7 +1267,11 @@ def _blank_step_rows(store: DbRoutingStore, blank: dict) -> list[dict]:
 
 
 def _blank_or_422(store: DbRoutingStore, blank_id: int) -> dict:
-    """Бланк маршрута: существует и активен, иначе 422 с понятным текстом."""
+    """Бланк маршрута: существует, активен и не пуст, иначе 422 с понятным текстом.
+
+    Пустой бланк (шагов нет) выбрать нельзя: маршрут заявке нечем задать. Счётчик
+    шагов пустым не приходит (step_count из blank_by_id); None — офлайн-заглушка
+    без счётчика, тогда проверка не выполняется (fail-soft)."""
     blank = _blank_row(store, blank_id)
     if not blank:
         raise HTTPException(
@@ -1183,14 +1288,116 @@ def _blank_or_422(store: DbRoutingStore, blank_id: int) -> dict:
                 _blank_list_text(_available_blanks(store)),
             ),
         )
+    steps = _int_or_none(blank.get("step_count"))
+    if steps == 0:
+        raise HTTPException(
+            status_code=422,
+            detail="Бланк «%s» без шагов — выбрать другой.%s"
+            % (
+                str(blank.get("name") or blank.get("code") or "?"),
+                _blank_list_text(_available_blanks(store)),
+            ),
+        )
     return blank
 
 
 def _blank_required_detail(blanks: list[dict]) -> str:
-    """422 «бланк не выбран»: что сделать и из чего выбирать (список бланков)."""
+    """422 «бланк не выбран»: два варианта (выбрать бланк ИЛИ задать маршрут
+    вручную) и список доступных бланков."""
     return (
-        "Выберите бланк — он задаёт список шагов и ответственных. "
-        "Автоподстановка бланка по службе выключена.%s" % _blank_list_text(blanks)
+        "Выберите бланк — он задаёт список шагов и ответственных, — либо задайте "
+        "маршрут вручную (route_mode=custom с blocks/steps). Автоподстановка "
+        "бланка по службе выключена.%s" % _blank_list_text(blanks)
+    )
+
+
+def _blank_required_422(store: DbRoutingStore) -> None:
+    """Бланк не выбран, автоподстановка по службе выключена — 422 с вариантами.
+
+    Единая точка для предпросмотра и создания: условие и текст обязаны
+    совпадать, иначе ОК увидит в предпросмотре маршрут и упрётся в отказ
+    только при отправке."""
+    raise HTTPException(
+        status_code=422, detail=_blank_required_detail(_available_blanks(store))
+    )
+
+
+def _dismiss_blank_steps(picked: RoutePick, orders: list[int]) -> RoutePick:
+    """Снятие шага бланка по номеру шага (dismissed_step_orders).
+
+    У шага бланка нет кода этапа, поэтому dismissed_stages его не касается:
+    шаг снимают по номеру blank_steps.step_order — тем же, что сотрудник ОК
+    задаёт в справочнике (решение человека 2026-10-08). Снятие идёт по
+    шагам бланка; этапы профиля и ручного маршрута по-прежнему снимаются
+    кодами (dismissed_stages) и добавление — added_stages.
+
+    Валидация строгая, молчаливого пропуска нет: сотрудник ОК отправил бы
+    маршрут не тот, что показал в предпросмотре.
+      — номер не входит в состав шагов бланка — 422 с перечнем номеров;
+      — номер указывает на обязательный шаг (optional=false) — 422: снять
+        его нельзя, снимок optional в предпросмотре об этом говорит;
+      — сняты все шаги — 422: заявке нечем задавать маршрут.
+    Причина подбора дополняется пометкой DismissedStep=номера (как
+    Dismissed=коды у этапов).
+    """
+    wanted = {int(item) for item in (orders or [])}
+    if not wanted:
+        return picked
+    blank_orders = {
+        _int_or_none(stage.get("step_order"))
+        for stage, _ in picked.stages
+        if _is_blank_step(stage)
+    }
+    blank_orders.discard(None)
+    known = ", ".join(str(item) for item in sorted(blank_orders)) or "—"
+    unknown = sorted(order for order in wanted if order not in blank_orders)
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Шаги %s в маршруте нет — снять можно шаги бланка с номерами %s. "
+                "Обновите предпросмотр маршрута."
+                % (
+                    ", ".join(str(item) for item in unknown),
+                    known,
+                )
+            ),
+        )
+    kept: list[tuple[dict, bool]] = []
+    dropped: list[int] = []
+    for stage, optional in picked.stages:
+        order = _int_or_none(stage.get("step_order")) if _is_blank_step(stage) else None
+        if order in wanted:
+            if not optional:
+                title = str(
+                    stage.get("title") or stage.get("stage_title") or ""
+                ).strip() or "без названия"
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "Шаг №%d («%s») обязательный — снять его нельзя."
+                        % (int(order), title)
+                    ),
+                )
+            dropped.append(int(order))  # type: ignore[arg-type]
+        else:
+            kept.append((stage, optional))
+    if not kept:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Сняты все шаги маршрута — верните хотя бы один шаг "
+                "(dismissed_step_orders пуст должен быть)."
+            ),
+        )
+    return RoutePick(
+        profile=picked.profile,
+        service=picked.service,
+        reason=_join_reason(
+            picked.reason,
+            "DismissedStep=%s" % ",".join(str(item) for item in sorted(dropped)),
+        ),
+        stages=kept,
     )
 
 
@@ -1209,8 +1416,10 @@ def _auto_route(
 
     Профиль не подобран — 422 с причиной подбора: молча уходить в ручной
     маршрут нельзя (заявка получила бы не тот маршрут, который заказан). Исключение
-    — выбранный бланк (blank_id): он задаёт этапы сам, а профиль службы остаётся
-    справочной подсказкой и без него маршрут собирается.
+    — выбранный бланк (blank_id): он задаёт шаги сам, а профиль службы остаётся
+    справочной подсказкой и без него маршрут собирается. Бланк не выбран и
+    автоподстановка по службе выключена (blank_autopick) — 422 с вариантами
+    (выбрать бланк или задать маршрут вручную): тихо подставлять профиль нельзя.
 
     Подбор профиля идёт в два вызова pick_profile: список этапов справочника
     читается по id профиля (list_profile_steps), а профиль выбирается по службе.
@@ -1239,10 +1448,27 @@ def _auto_route(
     picked = pick_profile(department, services, profiles, [])
     blank: dict | None = None
     if body.blank_id is not None:
-        # Бланк выбрал ОК: он задаёт шаги и ответственных, поэтому профиль службы
+        # Бланк выбрал ОК: он задаёт шаги и ответственные, поэтому профиль службы
         # — только справочная подсказка, и его отсутствие маршруту не мешает.
         blank = _blank_or_422(store, body.blank_id)
         picked = pick_blank_steps(picked, _blank_step_rows(store, blank))
+        if not picked.stages:
+            # Состав пуст (счётчик шагов в заглушке может отсутствовать) — маршрут
+            # заявке задавать нечем.
+            raise HTTPException(
+                status_code=422,
+                detail="Бланк «%s» без шагов — выберите другой.%s"
+                % (
+                    str(blank.get("name") or blank.get("code") or "?"),
+                    _blank_list_text(_available_blanks(store)),
+                ),
+            )
+    elif not _blank_autopick_enabled():
+        # Бланк не выбран и автоподстановка выключена: маршрут по справочникам
+        # молча собирать нельзя (заявка получила бы не тот маршрут, который
+        # заказан). Понятный 422 с обоими вариантами: выбрать бланк или задать
+        # маршрут вручную (текст тот же, что в предпросмотре).
+        _blank_required_422(store)
     elif picked.profile is None:
         raise HTTPException(status_code=422, detail=_route_reason_detail(picked))
     else:
@@ -1258,6 +1484,10 @@ def _auto_route(
         body.added_stages,
         store.list_stages() if body.added_stages else [],
     )
+    # Снятие шага бланка по номеру шага (у него нет кода этапа — dismissed_stages
+    # его не касается). Применяется после снятий по кодам: номера относятся к
+    # маршруту без снятых этапов.
+    picked = _dismiss_blank_steps(picked, body.dismissed_step_orders)
     manager_dn = str((card or {}).get("manager_dn") or "").strip()
     manager_sam: str | None = str(body.manager or "").strip() or None
     if manager_sam is None and manager_dn:
@@ -1265,8 +1495,7 @@ def _auto_route(
             manager_dn, store, _resolve_dependency(get_ad_reader)
         )[0]
     if manager_sam is None and any(
-        str(stage_row.get("owner_kind") or "") == "manager_ad"
-        for stage_row, _optional in picked.stages
+        _needs_manager(stage_row) for stage_row, _optional in picked.stages
     ):
         # Причина важна для ОК: подсказываем именно действие, а не «укажите замену»
         # без указания, где её указать.
@@ -1284,10 +1513,13 @@ def _auto_route(
             ),
         )
     # Ответственные этапа-реестра — снимок состава на момент выдачи заявки
-    # (миграция 0013): один SELECT на этап, кэш на этот вызов.
+    # (миграция 0013): один SELECT на этап, кэш на этот вызов. У шага бланка
+    # реестра нет — согласующие задаёт сам шаг (assignees).
     roster = _RosterResolver(store)
     steps = [
-        _step_from_stage(
+        _step_from_blank_step(stage_row, index, manager_sam, route.approval_ttl_days, now)
+        if _is_blank_step(stage_row)
+        else _step_from_stage(
             stage_row,
             index,
             manager_sam,
@@ -1313,6 +1545,12 @@ def _auto_route(
         "blank_name": str((blank or {}).get("name") or "") or None,
         "blank_version": _int_or_none((blank or {}).get("version")),
         "blank_layout": str((blank or {}).get("layout") or "") or None,
+        "blank_header_html": str((blank or {}).get("header_html") or "") or None,
+        "blank_footer_lines": [
+            str(line).strip()
+            for line in ((blank or {}).get("footer_lines") or [])
+            if isinstance(line, str) and line.strip()
+        ],
     }
 
 
@@ -1868,6 +2106,7 @@ def _public_view(
                     for item in s.approvals
                 ],
                 approval_mode=s.approval_mode,
+                optional=s.optional,
                 approved_count=len(_approved_sams(s)),
                 assignee_count=len(s.assignees),
             )
@@ -1897,6 +2136,8 @@ def _public_view(
         blank_name=request.blank_name,
         blank_version=request.blank_version,
         blank_layout=request.blank_layout,
+        blank_header_html=request.blank_header_html,
+        blank_footer_lines=list(request.blank_footer_lines or []),
         escalation_hours=request.escalation_hours,
         created_by=request.created_by if privileged else None,
         steps=steps,
@@ -2196,6 +2437,10 @@ class RoutePreviewIn(BaseModel):
     dismissed_stages: list[str] = Field(
         default_factory=list, description="Коды этапов, снятых из маршрута"
     )
+    dismissed_step_orders: list[int] = Field(
+        default_factory=list,
+        description="Номера (step_order) шагов бланка, снятых из маршрута (auto)",
+    )
     added_stages: list[str] = Field(
         default_factory=list, description="Коды этапов, добавленных в конец маршрута"
     )
@@ -2227,7 +2472,14 @@ class RoutePreviewStageOut(BaseModel):
     code: str | None = None
     title: str | None = None
     stage_lines: list[str] = Field(default_factory=list)
-    owner_kind: str = Field(default="ad_group", description="Источник исполнителя этапа")
+    owner_kind: str = Field(default="ad_group", description="Источник исполнителя шага")
+    step_order: int | None = Field(
+        default=None,
+        description=(
+            "Номер шага бланка (blank_steps.step_order) — по нему снимают шаг "
+            "бланка; у этапа маршрута null (его снимают по коду)"
+        ),
+    )
     owner_group: str | None = None
     owner_name: str | None = Field(
         default=None,
@@ -2349,25 +2601,42 @@ def _preview_stages(
     roster: _RosterResolver,
     fio: _FioResolver,
 ) -> list[RoutePreviewStageOut]:
-    """Этапы предпросмотра: исполнитель и причина блокировки по каждому этапу.
+    """Этапы предпросмотра: исполнитель и причина блокировки по каждому шагу.
 
-    Исполнитель по owner_kind: manager_ad — ФИО руководителя из AD, ad_group —
-    наименование группы из allowed_ad_groups, stage_roster — ФИО состава этапа.
-    Этап, который нечем закрыть, остаётся в ответе с blocked_reason (в отличие от
-    создания заявки, где manager_ad без руководителя даёт 422)."""
+    Исполнитель по виду шага: у шага бланка — executor_kind (people — ФИО
+    согласующих, ad_group — наименование группы из allowed_ad_groups, manager_ad
+    — ФИО руководителя из AD), у этапа маршрута — owner_kind (ad_group —
+    наименование группы, stage_roster — ФИО состава этапа). Шаг, который нечем
+    закрыть, остаётся в ответе с blocked_reason (в отличие от создания заявки,
+    где manager_ad без руководителя даёт 422)."""
     stages: list[RoutePreviewStageOut] = []
     for stage_row, optional in picked.stages:
-        owner_kind = str(stage_row.get("owner_kind") or "ad_group")
+        # Шаг бланка несёт executor_kind, этап маршрута — owner_kind; в ответе
+        # оба идут в owner_kind (источник исполнителя).
+        is_blank_step = _is_blank_step(stage_row)
+        owner_kind = (
+            _executor_kind(stage_row.get("executor_kind"))
+            if is_blank_step
+            else str(stage_row.get("owner_kind") or "ad_group")
+        )
         owner_group = str(stage_row.get("owner_group") or "").strip() or None
         stage_id = _int_or_none(stage_row.get("stage_id", stage_row.get("id")))
+        assignees = _blank_assignees(stage_row.get("assignees"))
         blocked_reason: str | None = None
         if owner_kind == "manager_ad":
             owner_name = manager_name
             if not manager_sam:
                 blocked_reason = (
-                    "Не найден руководитель сотрудника в AD — этап нельзя закрыть "
+                    "Не найден руководитель сотрудника в AD — шаг нельзя закрыть "
                     "(укажите замену)"
                 )
+        elif owner_kind == "people":
+            owner_name = (
+                ", ".join(name for name in (fio.fio(sam) for sam in assignees) if name)
+                or None
+            )
+            if not assignees:
+                blocked_reason = "Не заданы согласующие шага (assignees)"
         elif owner_kind == "stage_roster":
             owner_name = fio.roster_name(roster, stage_id) or None
             if not owner_name:
@@ -2375,11 +2644,14 @@ def _preview_stages(
         else:
             owner_name = group_names.get(owner_group) if owner_group else None
             if not owner_group:
-                blocked_reason = "Не задана группа-владелец этапа (owner_group)"
+                blocked_reason = "Не задана группа-владелец шага (owner_group)"
         stages.append(
             RoutePreviewStageOut(
                 stage_id=stage_id,
                 code=str(stage_row.get("code") or stage_row.get("stage_code") or "") or None,
+                step_order=(
+                    _int_or_none(stage_row.get("step_order")) if is_blank_step else None
+                ),
                 title=str(stage_row.get("stage_title") or stage_row.get("title") or "") or None,
                 stage_lines=[
                     str(line)
@@ -2476,7 +2748,7 @@ def _link_state(
 def _route_preview(body: RoutePreviewIn, ad_reader: object | None) -> RoutePreviewOut:
     """Маршрут заявки по справочникам без создания заявки (предпросмотр для ОК).
 
-    Выбранный бланк (blank_id) — основной путь: этапы и ответственные берутся из
+    Выбранный бланк (blank_id) — основной путь: шаги и ответственные берутся из
     его состава (blank_steps), профиль службы остаётся справочной подсказкой.
     Бланк не выбран — маршрут подбирается по службе (pick_profile), но только если
     включена автоподстановка (настройка blank_autopick): иначе 422 со списком
@@ -2491,25 +2763,24 @@ def _route_preview(body: RoutePreviewIn, ad_reader: object | None) -> RoutePrevi
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Хранилище справочников маршрута недоступно",
         )
-    # Бланк выбирает ОК. Не выбран и автоподстановка выключена — 422 со списком
-    # бланков, но только когда выбирать есть что: справочник пуст (офлайн/стенд до
-    # сида), выбирать нечего — тогда остаётся прежний подбор по службе.
+    # Бланк выбирает ОК. Не выбран и автоподстановка по службе выключена — маршрут
+    # заявке задавать нечем: 422 с тем же текстом и кодом, что при создании
+    # (см. _blank_required_422 и _auto_route) — предпросмотр не должен обещать
+    # маршрут, который создание не примет.
     blank: dict | None = None
     blank_rows: list[dict] = []
     if body.blank_id is not None:
         blank = _blank_or_422(store, body.blank_id)
         blank_rows = _blank_step_rows(store, blank)
     elif not _blank_autopick_enabled():
-        available = _available_blanks(store)
-        if available:
-            raise HTTPException(status_code=422, detail=_blank_required_detail(available))
+        _blank_required_422(store)
     sam = _employee_sam(body)
     card = store.user_card(sam) if sam else None
     department = _ad_or_body((card or {}).get("dept_ad"), body.department or "")
     # Нет карточки AD или пустая служба — маршрут по профилю службы не собрать:
     # объясняем это в предпросмотре (создание в auto вернёт 422, см. _auto_route).
     link_state, link_candidate = _link_state(body, store, sam, ad_reader)
-    notice = None
+    notice: str | None = None
     if card is None and link_state == LINK_STATE_NEED_LINK:
         notice = (
             "Связь 1С↔AD не оформлена, хотя в AD есть «%s» (%s): подтвердите связь — "
@@ -2550,6 +2821,9 @@ def _route_preview(body: RoutePreviewIn, ad_reader: object | None) -> RoutePrevi
         body.added_stages,
         store.list_stages() if body.added_stages else [],
     )
+    # Снятие шага бланка по номеру шага — тем же кодом, что в создании заявки
+    # (предпросмотр не должен обещать маршрут, который создание не примет).
+    picked = _dismiss_blank_steps(picked, body.dismissed_step_orders)
     fio_resolver = _FioResolver(store)
     manager_sam, manager_name = _preview_manager(store, ad_reader, card)
     # Замена руководителя, выбранная ОК, приоритетнее того, что нашли в AD:
@@ -2656,10 +2930,11 @@ def list_route_blanks(
 ) -> list[RouteBlankOut]:
     """Доступные бланки для селекта ОК (роль как у создания заявки).
 
-    Только активные бланки: отключённый выбрать нельзя. autopick (состояние
-    запасного механизма подбора по службе) повторяется в каждой строке — форма
-    показывает по нему, что маршрут без выбора бланка собран не будет. Путь
-    объявлен до /requests/{request_id}/..., чтобы не конфликтовать с заявкой."""
+    Только активные бланки с шагами (step_count > 0): пустой бланк выбрать
+    нельзя — маршрут заявке нечем задать. autopick (состояние запасного механизма
+    подбора по службе) повторяется в каждой строке — форма показывает по нему,
+    что маршрут без выбора бланка собран не будет. Путь объявлен до
+    /requests/{request_id}/..., чтобы не конфликтовать с заявкой по id."""
     settings.ensure_read_only()
     _require_hr(user)
     store = _routing_store_or_none()
@@ -2686,7 +2961,7 @@ def list_route_blanks(
             autopick=autopick,
         )
         for item in blanks
-        if item.get("id")
+        if item.get("id") and (_int_or_none(item.get("step_count")) or 0) > 0
     ]
 
 
@@ -2698,11 +2973,13 @@ def create_request(
     route: RouteSettings = Depends(get_route_settings),
     store: RequestsStore = Depends(get_requests_store),
 ) -> RequestOut:
-    """Создание заявки от ОК: шаблон по службе/категории, иначе ручной конструктор.
+    """Создание заявки от ОК: маршрут из бланка (auto), иначе ручной конструктор.
 
-    В режиме auto выбранный ОК бланк (blank_id) задаёт этапы маршрута, а его
-    снимок (blank_id/blank_name/blank_version/blank_layout) пишется в заявку.
-    В custom маршрут задаёт конструктор, бланк указывать не обязательно."""
+    В режиме auto выбранный ОК бланк (blank_id) задаёт шаги маршрута, а его
+    снимок (blank_id/blank_name/blank_version/blank_layout + шапка/подвал) пишется
+    в заявку. Бланк не выбран и автоподстановка по службе выключена — 422 с
+    вариантами (см. _auto_route); в custom маршрут задаёт конструктор, бланк
+    указывать не обязательно."""
     settings.ensure_read_only()
     _require_hr(user)
     if body.doc_type_code:
@@ -2718,12 +2995,14 @@ def create_request(
                 status_code=422, detail="Неизвестный вид документа (doc_type_code)"
             )
     now = _utcnow()
-    category = _resolve_category(route, body.position, body.category)
-    # Снимок подбора маршрута по справочникам (route_mode = auto); для custom
-    # и шаблона остаётся None — тогда поля profile/service в ответе пустые.
+    # Категория задаёт ОК: справочник «должность → категория» (position_to_category)
+    # снят вместе с шаблонами маршрута, выводить категорию больше не из чего.
+    category = body.category
+    # Снимок подбора маршрута по справочникам (route_mode = auto); для ручного
+    # маршрута остаётся None — тогда поля profile/service в ответе пустые.
     auto: dict | None = None
     if body.blocks is not None:
-        # Явный конструктор ОК (блоками) — приоритетнее шаблона и steps.
+        # Явный конструктор ОК (блоками) — приоритетнее steps.
         for block in body.blocks:
             if len(block.steps) > 99:
                 raise HTTPException(
@@ -2737,31 +3016,27 @@ def create_request(
         steps = _build_steps([], route.approval_ttl_days, body.manager, now, blocks=body.blocks)
         origin = "custom"
     else:
-        template = _find_template(route, body.department, category)
-        if template is not None:
-            steps = _build_steps(template.steps, route.approval_ttl_days, body.manager, now)
-            origin = "template"
-        elif body.steps:
-            # Fallback без шаблона — только ручной маршрут от разрешенной группы.
+        if body.steps:
+            # Ручной маршрут от разрешенной группы — только явными шагами ОК.
             steps = _build_steps(body.steps, route.approval_ttl_days, body.manager, now)
             origin = "custom"
         elif body.route_mode == "auto":
-            # Маршрут из справочников по службе сотрудника: данные берём из AD,
-            # профиль/этапы — из справочников. Профиль не найден — 422 с причиной
-            # (см. _auto_route), молчаливого отката в ручной маршрут нет.
+            # Маршрут из справочников: выбранный бланк (его шаги) либо запасной
+            # подбор по службе за blank_autopick. Маршрут не собрался — 422 с
+            # причиной (см. _auto_route), молчаливого отката в ручной маршрут нет.
             auto = _auto_route_entry(body, route, now)
             steps = auto["steps"]
-            # Маршрут собран из профиля-шаблона: origin=template (в БД CHECK
+            # Маршрут собран из справочника: origin=template (в БД CHECK
             # migration 0001 допускает только 'template'/'manual').
             origin = "template"
         else:
             raise HTTPException(
                 status_code=422,
-                detail="Шаблон не найден: задайте ручной маршрут (steps)",
+                detail="Маршрут не задан: выберите бланк или задайте маршрут вручную (steps)",
             )
     # Данные сотрудника для auto — из карточки AD (пустые не затирают тело).
-    # Категория и эскалация считаются выше по полям 1С тела: справочники
-    # категорий/эскалации ключуются должностью 1С, а не должностью из AD.
+    # Категорию задаёт ОК, эскалация считается выше по должности 1С тела
+    # (справочник эскалации ключуется должностью 1С, а не должностью из AD).
     department = auto["department"] if auto else body.department
     position = auto["position"] if auto else body.position
     try:
@@ -2791,6 +3066,8 @@ def create_request(
             blank_name=auto["blank_name"] if auto else None,
             blank_version=auto["blank_version"] if auto else None,
             blank_layout=auto["blank_layout"] if auto else None,
+            blank_header_html=auto["blank_header_html"] if auto else None,
+            blank_footer_lines=list(auto["blank_footer_lines"] if auto else []),
         )
         store.create(request)
     except RequestsUnavailable as exc:

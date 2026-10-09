@@ -1,7 +1,7 @@
 # Хранилище справочников маршрута согласования (службы, профили, этапы,
 # состав этапа, бланки): таблицы ad_services/route_profiles/approval_stages/
 # stage_assignees/route_profile_steps из миграции 0008 и blanks/blank_steps из
-# миграции 0012. Слой доступа — raw SQL
+# миграций 0012/0014. Слой доступа — raw SQL
 # (SQLAlchemy text()), без ORM-моделей; приложение отдаёт маршрут наружу
 # функциями app.routing (подбор профиля и этапов), этот модуль только БД.
 # Запись только в свои таблицы и audit_log; в AD/1С не пишем, users — только
@@ -35,8 +35,18 @@ class RoutingUnavailable(Exception):
 # здесь (payload целиком в SQL не подставляется).
 _SERVICE_FIELDS = ("dept_name", "status", "blank_kind", "route_profile_id")
 _PROFILE_FIELDS = ("code", "name", "service_id", "active")
-# Бланки (миграция 0012): код уникален, макет — пресет печати office|line.
-_BLANK_FIELDS = ("code", "name", "doc_type_code", "description", "layout", "active")
+# Бланки (миграции 0012/0014): код уникален, макет — пресет печати office|line,
+# header_html/footer_lines — шапка и подвал бланка (текст печати).
+_BLANK_FIELDS = (
+    "code",
+    "name",
+    "doc_type_code",
+    "description",
+    "layout",
+    "active",
+    "header_html",
+    "footer_lines",
+)
 _STAGE_FIELDS = (
     "code",
     "title",
@@ -49,7 +59,7 @@ _STAGE_FIELDS = (
     "active",
 )
 # Колонки jsonb: в UPDATE требуют явного CAST (:stage_lines).
-_JSONB_FIELDS = ("stage_lines",)
+_JSONB_FIELDS = ("stage_lines", "footer_lines")
 
 
 def _int_or_none(value: object) -> int | None:
@@ -68,6 +78,15 @@ def _approval_mode_or_default(value: object) -> str:
     return "parallel" if text_value == "parallel" else "sequential"
 
 
+def _executor_kind_or_default(value: object) -> str:
+    """Вид исполнителя шага бланка: people/ad_group/manager_ad, всё прочее и пустое
+    — people (согласующие назначает человек списком логинов)."""
+    text_value = str(value or "").strip().casefold()
+    if text_value in ("ad_group", "manager_ad"):
+        return text_value
+    return "people"
+
+
 def _override_or_none(value: object) -> bool | None:
     """Переопределение флага шага профиля: None — брать значение из этапа."""
     if value is None:
@@ -76,8 +95,11 @@ def _override_or_none(value: object) -> bool | None:
 
 
 def _stage_lines(value: object) -> list:
-    """stage_lines из БД: jsonb приходит списком, из строки JSON — разбираем,
-    мусор — пустой список (колонка бланка не должна ронять маршрут)."""
+    """jsonb-список строк из БД: jsonb приходит списком, из строки JSON — разбираем,
+    мусор — пустой список (колонка бланка не должна ронять маршрут).
+
+    Используется для любых списков-колонок справочника: stage_lines этапа и шага
+    бланка, footer_lines бланка, assignees шага бланка."""
     if isinstance(value, list):
         return list(value)
     if isinstance(value, str) and value.strip():
@@ -88,6 +110,16 @@ def _stage_lines(value: object) -> list:
         if isinstance(parsed, list):
             return parsed
     return []
+
+
+def _logins(value: object) -> list[str]:
+    """Логины согласующих из jsonb: строки без пустых и повторов (порядок прежний)."""
+    logins: list[str] = []
+    for item in _stage_lines(value):
+        login = str(item).strip()
+        if login and login not in logins:
+            logins.append(login)
+    return logins
 
 
 def _rows_to_dicts(rows) -> list[dict]:
@@ -222,22 +254,27 @@ class DbRoutingStore:
         """
     )
 
-    # Бланки (миграция 0012): step_count — счётчик из подзапроса, а не join с
-    # blank_steps (одна выборка справочника, а не запрос на каждый бланк).
+    # Бланки (миграция 0012, поля шапки/подвала — 0014): step_count — счётчик из
+    # подзапроса, а не join с blank_steps (одна выборка справочника, а не запрос
+    # на каждый бланк).
     _LIST_BLANKS = text(
         """
         SELECT b.id, b.code, b.name, b.doc_type_code, b.description, b.layout,
                b.active, b.version, b.updated_at, b.updated_by,
+               b.header_html, b.footer_lines,
                (SELECT count(*) FROM blank_steps bs WHERE bs.blank_id = b.id) AS step_count
         FROM blanks b
         WHERE (CAST(:active_only AS BOOLEAN) = FALSE OR b.active = TRUE)
         ORDER BY b.code, b.id
         """
     )
+    # Бланк по id: step_count нужен выдаче заявки — пустой бланк выбрать нельзя.
     _BLANK_BY_ID = text(
         """
         SELECT id, code, name, doc_type_code, description, layout, active, version,
-               updated_at, updated_by
+               updated_at, updated_by, header_html, footer_lines,
+               (SELECT count(*) FROM blank_steps bs WHERE bs.blank_id = blanks.id)
+                 AS step_count
         FROM blanks
         WHERE id = :blank_id
         """
@@ -245,36 +282,33 @@ class DbRoutingStore:
     _INSERT_BLANK = text(
         """
         INSERT INTO blanks (code, name, doc_type_code, description, layout, active,
-                            updated_at, updated_by)
+                            header_html, footer_lines, updated_at, updated_by)
         VALUES (:code, :name, :doc_type_code, :description,
-                COALESCE(:layout, 'office'), COALESCE(:active, TRUE), now(), :actor)
+                COALESCE(:layout, 'office'), COALESCE(:active, TRUE), :header_html,
+                CAST(:footer_lines AS jsonb), now(), :actor)
         RETURNING id
         """
     )
-    # Шаги бланка вместе с этапом (как у шагов профиля): выдаче заявке нужен
-    # текст этапа (title/stage_lines), вид исполнителя и режим шага
-    # (approval_mode, миграция 0013: параллельный — любой из ответственных,
-    # последовательный — все), админке — состав.
+    # Шаги бланка — самостоятельные шаги (миграция 0014): свой текст и свой
+    # исполнитель, join с этапом больше не нужен (stage_id — наследие, NULL).
     _LIST_BLANK_STEPS = text(
         """
-        SELECT bs.blank_id, bs.stage_id, bs.step_order, bs.optional_override,
-               bs.require_comment_override, bs.approval_mode,
-               s.code AS stage_code, s.title AS title, s.stage_lines, s.owner_kind,
-               s.owner_group, s.optional, s.print_assignee, s.require_comment,
-               s.active AS stage_active
-        FROM blank_steps bs
-        JOIN approval_stages s ON s.id = bs.stage_id
-        WHERE bs.blank_id = :blank_id
-        ORDER BY bs.step_order, s.id
+        SELECT blank_id, step_order, title, stage_lines, executor_kind,
+               assignees, owner_group, optional, require_comment, approval_mode
+        FROM blank_steps
+        WHERE blank_id = :blank_id
+        ORDER BY step_order
         """
     )
     _DELETE_BLANK_STEPS = text("DELETE FROM blank_steps WHERE blank_id = :blank_id")
     _INSERT_BLANK_STEP = text(
         """
-        INSERT INTO blank_steps (blank_id, stage_id, step_order, optional_override,
-                                 require_comment_override, approval_mode, updated_at)
-        VALUES (:blank_id, :stage_id, :step_order, :optional_override,
-                :require_comment_override, :approval_mode, now())
+        INSERT INTO blank_steps (blank_id, step_order, title, stage_lines,
+                                 executor_kind, assignees, owner_group, optional,
+                                 require_comment, approval_mode, updated_at)
+        VALUES (:blank_id, :step_order, :title, CAST(:stage_lines AS jsonb),
+                :executor_kind, CAST(:assignees AS jsonb), :owner_group, :optional,
+                :require_comment, :approval_mode, now())
         """
     )
     # Версия бланка растёт при замене состава шагов: blank_version из снимка
@@ -666,16 +700,23 @@ class DbRoutingStore:
 
     def list_blanks(self, active_only: bool = False) -> list[dict]:
         """Бланки из справочника (по умолчанию — все, включая отключённые);
-        step_count — число шагов бланка."""
+        step_count — число шагов бланка, footer_lines всегда списком."""
         with self._session() as session:
             rows = session.execute(self._LIST_BLANKS, {"active_only": active_only}).all()
-        return _rows_to_dicts(rows)
+        items = _rows_to_dicts(rows)
+        for item in items:
+            item["footer_lines"] = _stage_lines(item.get("footer_lines"))
+        return items
 
     def blank_by_id(self, blank_id: int) -> dict | None:
-        """Бланк по id; отсутствует — None."""
+        """Бланк по id со счётчиком шагов (step_count); отсутствует — None."""
         with self._session() as session:
             row = session.execute(self._BLANK_BY_ID, {"blank_id": blank_id}).first()
-        return dict(row._mapping) if row is not None else None
+        if row is None:
+            return None
+        blank = dict(row._mapping)
+        blank["footer_lines"] = _stage_lines(blank.get("footer_lines"))
+        return blank
 
     def create_blank(self, data: dict) -> int:
         """Создать бланк с аудитом (blank.create). Возвращает id.
@@ -694,6 +735,8 @@ class DbRoutingStore:
                     "description": params["description"],
                     "layout": params["layout"],
                     "active": params["active"],
+                    "header_html": params["header_html"],
+                    "footer_lines": params["footer_lines"],
                     "actor": actor,
                 },
             ).first()
@@ -722,8 +765,9 @@ class DbRoutingStore:
             session.commit()
 
     def list_blank_steps(self, blank_id: int) -> list[dict]:
-        """Шаги бланка вместе с этапом (по step_order, id этапа): выдаче заявке
-        нужен текст этапа и вид исполнителя, stage_lines всегда списком."""
+        """Собственные шаги бланка по step_order (без join с этапом): выдаче
+        заявке нужен текст шага и вид исполнителя, stage_lines и assignees всегда
+        списками."""
         with self._session() as session:
             rows = session.execute(
                 self._LIST_BLANK_STEPS, {"blank_id": blank_id}
@@ -731,6 +775,7 @@ class DbRoutingStore:
         items = _rows_to_dicts(rows)
         for item in items:
             item["stage_lines"] = _stage_lines(item.get("stage_lines"))
+            item["assignees"] = _logins(item.get("assignees"))
         return items
 
     def set_blank_steps(self, blank_id: int, items: list[dict], actor: str) -> None:
@@ -738,54 +783,44 @@ class DbRoutingStore:
         переданные — вставляются в порядке step_order, версия бланка растёт
         (аудит blank.steps.update).
 
-        items — список {stage_id, step_order, optional_override,
-        require_comment_override, approval_mode}; optional_override/
-        require_comment_override = None означают «взять из этапа», approval_mode
-        = None — «все ответственные» (sequential, как до разделения режимов).
-        Этап вне маршрутов (active = FALSE) или
-        несуществующий — 422 с перечнем (как у профиля): такой шаг не попал бы
-        ни в одну заявку. Уникальность порядка в бланке (PK (blank_id,
-        step_order)) проверяет схема запроса на границе — дубль порядка до сюда
-        не доходит.
+        items — список {step_order, title, stage_lines, executor_kind, assignees,
+        owner_group, optional, require_comment, approval_mode}; approval_mode =
+        None — «все ответственные» (sequential, как до разделения режимов).
+        Шаг самостоятельный: этап не проверяется (его у шага нет), а состав
+        согласующих и группа AD проверяет схема запроса на границе — здесь 422
+        не бывает. Битые элементы (без порядка или названия) пропускаются.
+        Уникальность порядка в бланке (PK (blank_id, step_order)) проверяет
+        схема запроса на границе — дубль порядка до сюда не доходит.
         """
         wanted: list[dict] = []
         for item in items or []:
             if not isinstance(item, dict):
                 continue
-            stage_id = _int_or_none(item.get("stage_id"))
             step_order = _int_or_none(item.get("step_order"))
-            if not stage_id or not step_order or step_order < 1:
+            title = str(item.get("title") or "").strip()
+            if not step_order or step_order < 1 or not title:
                 continue
             wanted.append(
                 {
-                    "stage_id": stage_id,
                     "step_order": step_order,
-                    "optional_override": _override_or_none(item.get("optional_override")),
-                    "require_comment_override": _override_or_none(
-                        item.get("require_comment_override")
+                    "title": title,
+                    # jsonb-колонки — строкой JSON (драйвер отдаёт в БД список, а
+                    # не ARRAY: CAST(:x AS jsonb) ждёт текст).
+                    "stage_lines": json.dumps(
+                        _stage_lines(item.get("stage_lines")), ensure_ascii=False
                     ),
-                    "approval_mode": _approval_mode_or_default(
-                        item.get("approval_mode")
+                    "executor_kind": _executor_kind_or_default(item.get("executor_kind")),
+                    "assignees": json.dumps(
+                        _logins(item.get("assignees")), ensure_ascii=False
                     ),
+                    "owner_group": str(item.get("owner_group") or "").strip() or None,
+                    "optional": bool(item.get("optional")),
+                    "require_comment": bool(item.get("require_comment")),
+                    "approval_mode": _approval_mode_or_default(item.get("approval_mode")),
                 }
             )
-        stage_ids = sorted({item["stage_id"] for item in wanted})
         actor = str(actor or "")
         with self._session() as session:
-            known: set[int] = set()
-            if stage_ids:
-                rows = session.execute(
-                    self._ACTIVE_STAGE_IDS, {"ids": stage_ids}
-                ).all()
-                known = {int(row[0]) for row in rows}
-            unknown = [stage_id for stage_id in stage_ids if stage_id not in known]
-            if unknown:
-                # 422 до DELETE: состав бланка остаётся прежним.
-                raise HTTPException(
-                    status_code=422,
-                    detail="Шаги бланка: этапы не найдены или отключены: %s"
-                    % ", ".join(str(stage_id) for stage_id in unknown),
-                )
             session.execute(self._DELETE_BLANK_STEPS, {"blank_id": blank_id})
             for item in sorted(wanted, key=lambda row: row["step_order"]):
                 session.execute(
@@ -796,8 +831,7 @@ class DbRoutingStore:
             )
             self._audit(
                 session, actor, "blank.steps.update", "blank", blank_id,
-                "шаги бланка обновлены",
-                {"steps": len(wanted), "stage_ids": stage_ids},
+                "шаги бланка обновлены", {"steps": len(wanted)},
             )
             session.commit()
 

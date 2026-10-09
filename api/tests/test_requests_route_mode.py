@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
 import sys
 
@@ -29,6 +30,7 @@ from app.requests import (  # noqa: E402
 )
 from app.requests_store import get_requests_store  # noqa: E402
 from app.routing_store import get_routing_store  # noqa: E402
+from app.settings_routes import get_settings_store  # noqa: E402
 
 TEST_ALLOWED = "SED_HR,SED_ADMINS"
 TEST_ADMINS = "SED_ADMINS"
@@ -219,6 +221,25 @@ class FakeRoutingStore:
         return self.manager_sams.get((manager_dn or "").strip())
 
 
+class SeededSettingsStore:
+    """Настройки в памяти; значения — строками в сид-формате (JSONB)."""
+
+    def __init__(self, values: dict[str, str] | None = None) -> None:
+        self.values: dict[str, str] = dict(values or {})
+
+    def get(self, key: str) -> str | None:
+        return self.values.get(key)
+
+    def set(self, key: str, value: str) -> None:
+        self.values[key] = value
+
+    def get_many(self, keys) -> dict[str, str | None]:
+        return {key: self.values.get(key) for key in keys}
+
+    def set_many(self, values) -> None:
+        self.values.update(values)
+
+
 def _b64(value: str) -> str:
     return base64.b64encode(value.encode("utf-8")).decode("ascii")
 
@@ -257,6 +278,18 @@ def route_override():
     app.dependency_overrides[get_route_settings] = lambda: route
     yield route
     app.dependency_overrides.pop(get_route_settings, None)
+
+
+@pytest.fixture(autouse=True)
+def blank_autopick_on():
+    """Запасной подбор маршрута по службе включён (blank_autopick="on").
+
+    Модуль проверяет именно этот путь (route_mode=auto без бланка): по контракту
+    BLANK_CONTRACT_V3 он включается только этой настройкой, а бланк выбирает ОК."""
+    store = SeededSettingsStore({"blank_autopick": json.dumps("on")})
+    app.dependency_overrides[get_settings_store] = lambda: store
+    yield store
+    app.dependency_overrides.pop(get_settings_store, None)
 
 
 @pytest.fixture

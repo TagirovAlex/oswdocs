@@ -25,10 +25,8 @@ INSERT INTO settings (key, value) VALUES
       {"code": "ENT_PRIMER_2", "name": "Предприятие «Пример-2» (вымышленное)"}]')
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
 
--- Соответствие должности категории (МОЛ/линейный/руководитель): заглушка, заполняется вручную после запуска.
-INSERT INTO settings (key, value) VALUES
-  ('position_to_category', '{}')
-ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
+-- Ключ position_to_category снят вместе с шаблонами маршрута (решение человека
+-- 2026-10-08): маршрут задаёт бланк или ручной конструктор.
 
 -- Включаемая эскалация по должности увольняемого: заглушка, заполняется вручную после запуска.
 INSERT INTO settings (key, value) VALUES

@@ -175,23 +175,22 @@ MAIL_TEMPLATES_SEED = json.dumps(
 
 
 def _blank_step(blank_id: int, step_order: int, stage_row: dict, mode: str) -> dict:
-    """Шаг бланка вместе с этапом (формат строки list_blank_steps, миграция 0013)."""
+    """Самостоятельный шаг бланка (формат строки list_blank_steps, миграция 0014).
+
+    Исполнитель шага — люди (people) со списком согласующих: у шага бланка своего
+    этапа-реестра нет, состав задаёт сам шаг. Название/текст берутся из вымышленного
+    этапа-эталона, чтобы тесты печати и писем не расходились с ожиданиями."""
     return {
         "blank_id": blank_id,
-        "stage_id": stage_row["id"],
         "step_order": step_order,
-        "optional_override": None,
-        "require_comment_override": None,
         "approval_mode": mode,
-        "stage_code": stage_row["code"],
         "title": stage_row["title"],
         "stage_lines": list(stage_row["stage_lines"]),
-        "owner_kind": stage_row["owner_kind"],
-        "owner_group": stage_row["owner_group"],
+        "executor_kind": "people",
+        "assignees": [sam for sam, _ in ROSTER],
+        "owner_group": None,
         "optional": stage_row["optional"],
-        "print_assignee": stage_row["print_assignee"],
         "require_comment": stage_row["require_comment"],
-        "stage_active": True,
     }
 
 
@@ -484,13 +483,13 @@ def _actions() -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def test_step_snapshot_has_all_active_roster_assignees(
+def test_step_snapshot_has_all_blank_step_assignees(
     client, requests_store, routing_store, settings_override, route_override
 ):
-    """Шаг-реестр: в снимок попадают все АКТИВНЫЕ участники, assignee — первый.
+    """Шаг бланка с людьми: в снимок попадают все согласующие шага, assignee — первый.
 
-    Отключённый участник реестра в снимок не берётся: состав читается только
-    активным (list_stage_assignees(active_only=True))."""
+    Состав задаёт сам шаг (assignees), а не реестр этапа: отключённый участник
+    в снимок не берётся, потому что его нет в шаге."""
     created = _create(client, _hr(), blank_id=BLANK_SEQ_ID)
     assert created.status_code == 201, created.text
     step = created.json()["steps"][0]
@@ -1050,6 +1049,7 @@ STEP_ROW = {
             "comment": None,
         }
     ],
+    "optional": True,
 }
 
 
@@ -1091,6 +1091,25 @@ def test_db_store_reads_step_snapshot_back():
         }
     ]
     assert session.commits == 0
+
+
+def test_db_store_writes_and_reads_step_optional():
+    """Снимок «шаг можно снять» пишется в INSERT и читается обратно (миграция 0015)."""
+    session = FakeSession([FakeRow({"id": 7})])
+    request = _snapshot_request()
+    request.steps[0].optional = False
+    _db_store(session).create(request)
+    params = [p for sql, p in session.calls if "INSERT INTO request_steps" in sql][0]
+    assert params["optional"] is False
+
+    session = FakeSession([dict(REQUEST_ROW), [dict(STEP_ROW, optional=False)]])
+    step = _db_store(session).get("REQ-0001").steps[0]
+    assert step.optional is False
+    # Строка без колонки (заявка выдана до миграции) — «шаг можно снять».
+    legacy = dict(STEP_ROW)
+    legacy.pop("optional")
+    step = _db_store(FakeSession([dict(REQUEST_ROW), [legacy]])).get("REQ-0001").steps[0]
+    assert step.optional is True
 
 
 def test_db_store_survives_jsonb_garbage_in_snapshot():

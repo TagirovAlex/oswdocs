@@ -18,7 +18,7 @@ from app.requests import (  # noqa: E402
     get_memory_requests_store,
     get_route_settings,
 )
-from app.requests import RouteSettings, RouteTemplate, RouteStepTemplate  # noqa: E402
+from app.requests import RouteSettings  # noqa: E402
 from app.requests_store import get_requests_store  # noqa: E402
 from app.settings_routes import SettingsUnavailable, get_settings_store  # noqa: E402
 
@@ -77,21 +77,12 @@ def settings_override():
 
 @pytest.fixture
 def route_override():
-    """Один шаблон (служба+линейный → 2 шага), как в test_requests."""
+    """Настройки маршрута без шаблонов (ключ templates снят).
+
+    Маршрут в этом файле задаёт ручной конструктор steps/blocks."""
     route = RouteSettings(
         approval_ttl_days=7,
-        position_to_category={FAKE_POSITION_LINE: "линейный"},
         position_escalation={},
-        templates=[
-            RouteTemplate(
-                service=FAKE_SERVICE,
-                category="линейный",
-                steps=[
-                    RouteStepTemplate(owner_group="SED_STEP_BUH"),
-                    RouteStepTemplate(owner_group="SED_STEP_HR"),
-                ],
-            )
-        ],
     )
     app.dependency_overrides[get_route_settings] = lambda: route
     yield route
@@ -129,7 +120,11 @@ def clean_state(requests_store):
 
 
 def _create(client, headers, **kw) -> object:
-    """Создание заявки с обязательным полем fio (Волна 1)."""
+    """Создание заявки с обязательным полем fio (Волна 1).
+
+    Маршрут по умолчанию — ручной (первый шаг у группы SED_STEP_BUH владельца
+    шага из conftest): шаблоны службы сняты, маршрут задаёт бланк либо
+    конструктор."""
     body = {
         "enterprise": FAKE_ENTERPRISE,
         "fio": FAKE_FIO,
@@ -138,6 +133,7 @@ def _create(client, headers, **kw) -> object:
         "position": FAKE_POSITION_LINE,
         "subject": "Вымышленная тема",
         "content": "Вымышленное содержание",
+        "steps": [{"owner_group": "SED_STEP_BUH"}],
     }
     body.update(kw)
     return client.post("/requests", json=body, headers=headers)
@@ -382,7 +378,8 @@ def test_folders_counts_by_status(
     assert client.post(f"/requests/{d['id']}/submit", headers=hr_headers).status_code == 200
     assert client.post(f"/requests/{d['id']}/withdraw", headers=hr_headers).status_code == 200
     # E — Согласовано (единственный шаг одобрен владельцем; маршрут задан
-    # блоками — у явного steps приоритет ниже шаблона).
+    # блоками — явный конструктор ОК, шаблоны службы сняты и в приоритете не
+    # участвуют).
     e = _create(
         client,
         hr_headers,

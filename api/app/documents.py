@@ -24,6 +24,7 @@ from sqlalchemy.orm import sessionmaker
 from .audit import AuditEvent, audit_log
 from .config import Settings, get_settings
 from .deps import CurrentUser, get_current_user
+from .employee_sync import get_employee_sync_store
 from .docs import (
     build_bypass_context,
     generate_bypass,
@@ -307,6 +308,73 @@ def _enterprise_name(settings_store: DbSettingsStore, code: object) -> str:
     return str(code or "")
 
 
+def _employee_row(
+    employee_store: object | None, enterprise: str, base_code: str, tab_num: str
+) -> dict | None:
+    """Строка зеркала сотрудников по ключу заявки (только чтение).
+
+    Отдельное чтение хранилища, а не поиск по подстроке: нужен СПЕЦИАЛЬНЫЙ
+    сотрудник заявки, причём и увольняемый (строку с dismissal_date <= сегодня
+    рабочая выборка справочника не отдаёт, а печати он и нужен). Нет зеркала,
+    строки нет или зеркало упало — None: печать не падает, плейсхолдер пустой."""
+    if employee_store is None or not enterprise or not tab_num:
+        return None
+    try:
+        row = employee_store.find_by_request_key(
+            str(enterprise), str(base_code or "").strip(), str(tab_num).strip()
+        )
+    except Exception:
+        return None
+    return row if isinstance(row, dict) else None
+
+
+def _manager_fio(routing_store: object | None, ad_sam: str) -> str:
+    """ФИО руководителя сотрудника по зеркалу AD users (только чтение).
+
+    Путь: карточка сотрудника -> manager_dn -> логин руководителя -> ФИО. Любой
+    шаг не найден или зеркало недоступно — пусто (плейсхолдер {manager} пустой)."""
+    if routing_store is None or not ad_sam:
+        return ""
+    try:
+        card = routing_store.user_card(ad_sam) or {}
+        manager_dn = str(card.get("manager_dn") or "").strip()
+        manager_sam = routing_store.manager_sam_by_dn(manager_dn) if manager_dn else None
+        if not manager_sam:
+            return ""
+        manager = routing_store.user_card(manager_sam) or {}
+    except Exception:
+        return ""
+    return str(manager.get("fio_full") or "").strip()
+
+
+def _fill_hr_placeholders(
+    context: dict,
+    request: object,
+    routing_store: object | None,
+    employee_store: object | None,
+) -> None:
+    """Значения для {date}, {dismissal_date}, {manager} из локальных зеркал.
+
+    {date} — дата печати (дата заявки в снимке не хранится, решение человека),
+    {dismissal_date} — дата увольнения из кадровых данных сотрудника
+    (миграция 0009), {manager} — ФИО руководителя из зеркала AD users. Всё только
+    на чтение; зеркало недоступно или данных нет — плейсхолдер пустой."""
+    from datetime import date as _date
+
+    context["date"] = _date.today()
+    employee = _employee_row(
+        employee_store,
+        str(getattr(request, "enterprise", "") or ""),
+        str(getattr(request, "base_code", "") or ""),
+        str(getattr(request, "tab_num", "") or ""),
+    )
+    if employee is not None:
+        context["dismissal_date"] = employee.get("dismissal_date")
+        context["manager"] = _manager_fio(
+            routing_store, str(employee.get("ad_sam") or "").strip()
+        )
+
+
 def _fill_step_fio(context: dict, routing_store: object | None) -> None:
     """Подставить ФИО ответственных шагов (из зеркала AD users).
 
@@ -352,6 +420,7 @@ def print_bypass(
     settings: Settings = Depends(get_settings),
     store: RequestsStore = Depends(get_requests_store),
     settings_store: DbSettingsStore = Depends(get_settings_store),
+    employee_store: object | None = Depends(get_employee_sync_store),
 ) -> dict:
     """Печать бланка (ОК/админ): печатная форма ТЕКУЩЕГО состояния заявки.
 
@@ -382,6 +451,9 @@ def print_bypass(
         )
     # ФИО ответственных этапов подставляем из зеркала AD (в колонку «Ответственный»).
     _fill_step_fio(context, _routing_store_or_none())
+    # Кадровые плейсхолдеры ({date}/{dismissal_date}/{manager}) — из локальных
+    # зеркал, только чтение; зеркало недоступно — пусто, печать не падает.
+    _fill_hr_placeholders(context, request, _routing_store_or_none(), employee_store)
     # Предприятие — названием из справочника (код 1С в бланке нечитаем).
     context["enterprise"] = _enterprise_name(settings_store, request.enterprise)
     result = generate_bypass(

@@ -87,6 +87,9 @@ export interface RequestStep {
   assignees?: string[];
   approvals?: StepApproval[];
   approval_mode?: StepApprovalMode | null;
+  // Снимок признака «шаг можно снять» (optional шага бланка/этапа профиля на
+  // момент выдачи заявки); см. StepOut.optional.
+  optional?: boolean;
   // Прогресс отметок «N из M согласовали»: считает бэкенд по полному снимку,
   // поэтому показывается и непривилегированному, у которого в assignees
   // остаётся только собственный логин.
@@ -120,6 +123,11 @@ export interface RequestOut {
   subject?: string | null;
   content?: string | null;
   doc_type_code?: string | null;
+  // Снимок шапки бланка (миграция 0014): blank_header_html — HTML шапки,
+  // blank_footer_lines — строки подвала. Печать идёт по снимку, поэтому правка
+  // бланка не меняет уже выданные заявки.
+  blank_header_html?: string | null;
+  blank_footer_lines?: string[];
   steps: RequestStep[];
 }
 
@@ -169,6 +177,9 @@ export interface CreateRequestBody {
   route_mode?: RouteMode;
   // Коды этапов, снятых ОК из маршрута (auto).
   dismissed_stages?: string[];
+  // Номера (step_order) шагов бланка, снятых ОК из маршрута (auto). У шага
+  // бланка нет кода этапа, поэтому его снимают по номеру.
+  dismissed_step_orders?: number[];
   // Коды этапов, добавленных ОК в конец маршрута (auto).
   added_stages?: string[];
   // Код базы 1С и логин AD сотрудника — источник карточки для auto-маршрута.
@@ -202,6 +213,9 @@ export interface RoutePreviewService {
 export interface RoutePreviewStage {
   stage_id: number | null;
   code: string | null;
+  // Номер шага бланка (blank_steps.step_order) — по нему снимают шаг бланка
+  // (dismissed_step_orders); у этапа маршрута null (его снимают по коду).
+  step_order?: number | null;
   title: string | null;
   stage_lines: string[];
   owner_kind: string;
@@ -222,6 +236,9 @@ export interface RoutePreviewBody {
   position?: string;
   // Снятые и добавленные этапы — те же коды, что уходят в создание.
   dismissed_stages?: string[];
+  // Номера (step_order) шагов бланка, снятых из маршрута — те же, что в
+  // создании заявки.
+  dismissed_step_orders?: number[];
   added_stages?: string[];
   // Замена руководителя (логин AD): показываем в предпросмотре именно того,
   // кто пойдёт в маршрут, вместо того, кто найден по manager_dn из AD.
@@ -685,6 +702,10 @@ export interface BlankRow {
   updated_at?: string | null;
   updated_by?: string | null;
   step_count?: number | null;
+  // Шапка бланка (HTML визуального редактора) и подвал (строки печати) —
+  // миграция 0014; оба поля редактируются в карточке бланка.
+  header_html?: string | null;
+  footer_lines?: string[];
 }
 
 // Тело POST /api/settings/routing/blanks (BlankCatalogIn). layout — встроенный
@@ -696,43 +717,48 @@ export interface BlankInput {
   description?: string | null;
   layout?: "office" | "line";
   active?: boolean;
+  header_html?: string | null;
+  footer_lines?: string[];
 }
 
 // Тело PUT /api/settings/routing/blanks/{id} (BlankCatalogUpdateIn): код бланка
 // неизменен, поэтому его нет среди полей.
 export type BlankPatch = Omit<BlankInput, "code">;
 
-// Шаг бланка с текстом этапа (строка GET /api/settings/routing/blanks/{id}/steps).
-// title/stage_lines — из approval_stages; stage_lines — список пунктов, каждый
-// может содержать HTML визуального редактора.
+// Вид исполнителя шага бланка (BlankStepIn.executor_kind): people — согласующие
+// из assignees (логины AD), ad_group — группа AD из owner_group, manager_ad —
+// руководитель сотрудника в AD (находит бэкенд при выдаче заявки).
+export type BlankStepExecutorKind = "people" | "ad_group" | "manager_ad";
+
+// Шаг бланка (строка GET /api/settings/routing/blanks/{id}/steps): шаг
+// самостоятельный, этапа у него нет. title — название шага, stage_lines — его
+// текст (список пунктов, каждый может содержать HTML визуального редактора).
 export interface BlankStepRow {
   blank_id: number;
-  stage_id: number;
   step_order: number;
-  optional_override: boolean | null;
-  require_comment_override: boolean | null;
+  title: string;
+  stage_lines: string[];
+  executor_kind: BlankStepExecutorKind;
+  assignees: string[];
+  owner_group: string | null;
   // Режим шага бланка: parallel — закрывает любой из ответственных,
   // sequential — все (null — как в этапе, то есть sequential).
   approval_mode?: StepApprovalMode | null;
-  stage_code: string | null;
-  title: string | null;
-  stage_lines: string[];
-  owner_kind: string | null;
-  owner_group: string | null;
-  optional: boolean | null;
-  print_assignee: boolean | null;
-  require_comment: boolean | null;
-  stage_active: boolean | null;
+  optional: boolean;
+  require_comment: boolean;
 }
 
 // Шаг в теле PUT /api/settings/routing/blanks/{id}/steps (BlankStepIn).
-// null в переопределениях — «взять значение этапа» (optional/require_comment).
 export interface BlankStepInput {
-  stage_id: number;
   step_order: number;
-  optional_override?: boolean | null;
-  require_comment_override?: boolean | null;
+  title: string;
+  stage_lines: string[];
+  executor_kind: BlankStepExecutorKind;
+  assignees: string[];
+  owner_group: string | null;
   approval_mode?: StepApprovalMode | null;
+  optional: boolean;
+  require_comment: boolean;
 }
 
 // GET /api/settings/routing/blanks: справочник бланков (только админ, иначе 403).

@@ -121,6 +121,8 @@ const OWNER_KIND_TEXT: Record<string, string> = {
   manager_ad: "руководитель из AD",
   ad_group: "группа AD",
   stage_roster: "состав этапа",
+  // Шаг бланка со своим списком согласующих (миграция 0014).
+  people: "согласующие",
 };
 
 // Состояние блока без указанного ключа: удалённый блок не должен оставлять в
@@ -256,6 +258,9 @@ export function CreateForm(props: CreateFormProps) {
   // Правки маршрута ОК: снятые и добавленные этапы (коды) — уходят и в
   // предпросмотр, и в создание.
   const [dismissedStages, setDismissedStages] = useState<string[]>([]);
+  // Номера шагов бланка (step_order), снятые ОК: у шага бланка нет кода этапа,
+  // поэтому его снимают по номеру (dismissed_step_orders), а не по коду.
+  const [dismissedStepOrders, setDismissedStepOrders] = useState<number[]>([]);
   const [addedStages, setAddedStages] = useState<string[]>([]);
   // Справочник этапов для «Добавить этап» (админский GET /settings/routing/
   // catalogs). Не-админу 403 — добавление необязательно, кнопки нет.
@@ -488,6 +493,7 @@ export function CreateForm(props: CreateFormProps) {
       ...(department !== "" ? { department } : {}),
       ...(position !== "" ? { position } : {}),
       dismissed_stages: dismissedStages,
+      dismissed_step_orders: dismissedStepOrders,
       added_stages: addedStages,
       ...(managerSam !== "" ? { manager: managerSam } : {}),
       ...(blankId !== "" ? { blank_id: Number(blankId) } : {}),
@@ -512,6 +518,7 @@ export function CreateForm(props: CreateFormProps) {
     department,
     position,
     dismissedStages,
+    dismissedStepOrders,
     addedStages,
     managerSam,
     blankId,
@@ -723,6 +730,8 @@ const confirmLink = async () => {
     setBaseCode(parts.length >= 2 ? parts[1] : "");
     setAdSam(hit.ad_sam ?? "");
     setDismissedStages([]);
+    // Сотрудник сменился — номера снятых шагов прежнего бланка не подходят.
+    setDismissedStepOrders([]);
     setAddedStages([]);
     // Новый сотрудник — прежняя замена руководителя не подходит.
     resetManagerPick();
@@ -760,6 +769,7 @@ const confirmLink = async () => {
     setBaseCode("");
     setAdSam("");
     setDismissedStages([]);
+    setDismissedStepOrders([]);
     setAddedStages([]);
     setPreview(null);
     setPreviewError("");
@@ -827,10 +837,18 @@ const confirmLink = async () => {
   }
 
   // Снятие/возврат этапа маршрута (auto): optional=false — этап обязательный,
-  // снять его нельзя (чекбокс неактивен).
-  function toggleStage(code: string, optional: boolean): void {
-    if (!optional || code === "") return;
+  // снять его нельзя (чекбокс неактивен). У шага бланка кода этапа нет, поэтому
+  // его снимают по номеру шага (step_order из предпросмотра).
+  function toggleStage(code: string, optional: boolean, stepOrder?: number | null): void {
+    if (!optional) return;
     markTouched();
+    if (code === "") {
+      if (stepOrder == null) return;
+      setDismissedStepOrders((prev) =>
+        prev.includes(stepOrder) ? prev.filter((n) => n !== stepOrder) : [...prev, stepOrder],
+      );
+      return;
+    }
     setDismissedStages((prev) =>
       prev.includes(code) ? prev.filter((c) => c !== code) : [...prev, code],
     );
@@ -1000,6 +1018,7 @@ const confirmLink = async () => {
     setPreviewError("");
     setPreviewLoading(false);
     setDismissedStages([]);
+    setDismissedStepOrders([]);
     setAddedStages([]);
     setAddStageOpen(false);
     setBaseCode("");
@@ -1054,7 +1073,12 @@ const confirmLink = async () => {
         route_mode: routeMode,
         // auto: маршрут собирает бэкенд из профиля — блоки НЕ отправляются.
         ...(routeMode === "auto"
-          ? { dismissed_stages: dismissedStages, added_stages: addedStages }
+          ? {
+              dismissed_stages: dismissedStages,
+              // Шаг бланка снимается по номеру (кода этапа у него нет).
+              dismissed_step_orders: dismissedStepOrders,
+              added_stages: addedStages,
+            }
           : {
               blocks: blocks.map((b) => ({
                 mode: b.mode,
@@ -1314,6 +1338,9 @@ const confirmLink = async () => {
               onChange={(e) => {
                 markTouched();
                 setBlankId(e.target.value);
+                // Другой бланк — номера снятых шагов прежнего к нему не относятся
+                // (сервер отверг бы их как отсутствующие в маршруте).
+                setDismissedStepOrders([]);
               }}
             >
               <option value="">— выберите бланк —</option>
@@ -1333,9 +1360,16 @@ const confirmLink = async () => {
               Активных бланков нет — заведите бланк в настройках (вкладка «Бланки»).
             </div>
           )}
+          {!selectedBlank && (
+            <div className="sed-note">
+              Бланк не выбран — задайте маршрут вручную (режим «Вручную» в блоке
+              «Маршрут согласования»).
+            </div>
+          )}
           {!selectedBlank && !blankAutopick && (
             <div className="sed-note">
-              Без выбора бланка маршрут собран не будет: подстановка бланка по службе выключена.
+              Без выбора бланка маршрут по профилю собран не будет: подстановка бланка по
+              службе выключена.
             </div>
           )}
 
@@ -1639,7 +1673,8 @@ const confirmLink = async () => {
                     </div>
                   )}
                   {/* Этапы: по умолчанию все включены; снятая галочка — код в
-                      dismissed_stages. optional=false — этап обязательный. */}
+                      dismissed_stages, а для шага бланка (кода этапа нет) — его
+                      номер в dismissed_step_orders. optional=false — обязательный. */}
               {preview && preview.stages.length === 0 && (
                 <div className="sed-note">Этапы не подобраны.</div>
               )}
@@ -1658,21 +1693,55 @@ const confirmLink = async () => {
                     {preview.stages.map((stage) => {
                       const code = stage.code ?? "";
                       const title = stage.title || code;
+                      // Шаг бланка этапа не имеет (code=null): его снимают по номеру
+                      // шага из предпросмотра. Номера нет — снять нечем (объясняем
+                      // прямо в строке).
+                      const order = stage.step_order ?? null;
+                      const blankLocked = code === "" && order === null;
+                      // Пока строка в предпросмотре — шаг в маршруте, значит галочка
+                      // включена: у шага бланка без номера снять его нечем.
+                      const checked =
+                        code === ""
+                          ? order === null || !dismissedStepOrders.includes(order)
+                          : !dismissedStages.includes(code);
                       return (
-                        <tr key={code !== "" ? code : `stage-${stage.stage_id ?? title}`}>
+                        <tr
+                          key={
+                            code !== ""
+                              ? code
+                              : `step-${order ?? stage.stage_id ?? title}`
+                          }
+                        >
                           <td>
                             <input
                               type="checkbox"
                               aria-label={`Этап ${title}`}
-                              checked={!dismissedStages.includes(code)}
-                              disabled={!stage.optional}
-                              title={stage.optional ? "Снять этап из маршрута" : "Этап обязательный"}
-                              onChange={() => toggleStage(code, stage.optional)}
+                              checked={checked}
+                              disabled={!stage.optional || blankLocked}
+                              title={
+                                blankLocked
+                                  ? "Шаг задан бланком — номера у него нет, снять вручную нельзя"
+                                  : stage.optional
+                                    ? code === ""
+                                      ? "Снять шаг бланка из маршрута"
+                                      : "Снять этап из маршрута"
+                                    : code === ""
+                                      ? "Шаг бланка обязательный"
+                                      : "Этап обязательный"
+                              }
+                              onChange={() => toggleStage(code, stage.optional, order)}
                             />
                           </td>
                           <td>
                             {title}
                             {!stage.optional && <span className="sed-sub"> (обязательный)</span>}
+                            {/* Номер шага бланка показываем, чтобы снятие было
+                                однозначным: у него нет кода этапа. Снять нельзя
+                                только когда номера нет либо шаг обязательный —
+                                это уже видно по подписи «(обязательный)». */}
+                            {code === "" && blankLocked && (
+                              <span className="sed-sub"> (шаг бланка — снять вручную нельзя)</span>
+                            )}
                             {stage.stage_lines.length > 0 && (
                               <div className="sed-sub">{stage.stage_lines.join(" · ")}</div>
                             )}

@@ -356,8 +356,12 @@ class DbRequestsStore:
     profile_id/service_id/service_name, у шага — stage_id/stage_code/
     stage_title/stage_lines (jsonb)/profile_step_id. Миграция 0013 (несколько
     ответственных) добавила у шага assignees (jsonb-список логинов),
-    approval_mode и approvals (jsonb-отметки). Снимок пишется и читается на
-    обоих путях (create и update — шаги перезаписываются целиком).
+    approval_mode и approvals (jsonb-отметки). Миграция 0014 добавила снимок
+    шапки/подвала бланка: blank_header_html и blank_footer_lines (jsonb).
+    Миграция 0015 добавила у шага optional — снимок признака «шаг можно снять»
+    (optional шага бланка/этапа профиля на момент выдачи заявки).
+    Снимок пишется и читается на обоих путях (create и update — шаги
+    перезаписываются целиком).
     Статусы и route_origin в БД — кодами ('draft'/'manual'), в модели — русскими
     строками контракта ('Черновик'/'custom'); маппинг — словарями выше.
     Ошибки БД оборачиваются в RequestsUnavailable (503), как DbSettingsStore
@@ -369,7 +373,8 @@ class DbRequestsStore:
         "fio, department, position, category, escalation_hours, "
         "subject, content, doc_type_code, "
         "profile_id, service_id, service_name, "
-        "blank_id, blank_name, blank_version, blank_layout"
+        "blank_id, blank_name, blank_version, blank_layout, "
+        "blank_header_html, blank_footer_lines"
     )
 
     _SELECT_REQUESTS = text(
@@ -397,6 +402,7 @@ class DbRequestsStore:
           subject, content, doc_type_code,
           profile_id, service_id, service_name,
           blank_id, blank_name, blank_version, blank_layout,
+          blank_header_html, blank_footer_lines,
           created_at, updated_at
         )
         VALUES (
@@ -405,6 +411,7 @@ class DbRequestsStore:
           :subject, :content, :doc_type_code,
           :profile_id, :service_id, :service_name,
           :blank_id, :blank_name, :blank_version, :blank_layout,
+          :blank_header_html, CAST(:blank_footer_lines AS jsonb),
           :created_at, :updated_at
         )
         RETURNING id
@@ -430,6 +437,8 @@ class DbRequestsStore:
             blank_name = :blank_name,
             blank_version = :blank_version,
             blank_layout = :blank_layout,
+            blank_header_html = :blank_header_html,
+            blank_footer_lines = CAST(:blank_footer_lines AS jsonb),
             updated_at = :updated_at
         WHERE code = :code
         """
@@ -446,7 +455,7 @@ class DbRequestsStore:
         "request_id, step_order, owner_group, done_by, status, resolver, "
         "assignee, require_comment, done_at, expires_at, comment, "
         "stage_id, stage_code, stage_title, stage_lines, profile_step_id, "
-        "assignees, approval_mode, approvals"
+        "assignees, approval_mode, approvals, optional"
     )
     _SELECT_STEPS_BY_REQUEST = text(
         f"""
@@ -469,14 +478,15 @@ class DbRequestsStore:
           request_id, step_order, owner_group, done_by, status, resolver,
           assignee, require_comment, done_at, expires_at, comment,
           stage_id, stage_code, stage_title, stage_lines, profile_step_id,
-          assignees, approval_mode, approvals
+          assignees, approval_mode, approvals, optional
         )
         VALUES (
           :request_id, :step_order, :owner_group, :done_by, :status, :resolver,
           :assignee, :require_comment, :done_at, :expires_at, :comment,
           :stage_id, :stage_code, :stage_title, CAST(:stage_lines AS jsonb),
           :profile_step_id,
-          CAST(:assignees AS jsonb), :approval_mode, CAST(:approvals AS jsonb)
+          CAST(:assignees AS jsonb), :approval_mode, CAST(:approvals AS jsonb),
+          :optional
         )
         """
     )
@@ -559,6 +569,9 @@ class DbRequestsStore:
             "assignees": json.dumps(step.assignees or [], ensure_ascii=False),
             "approval_mode": step.approval_mode,
             "approvals": json.dumps(step.approvals or [], ensure_ascii=False, default=str),
+            # Миграция 0015: снимок «шаг можно снять» (optional шага бланка или
+            # этапа профиля) — правка справочника заявку не меняет.
+            "optional": bool(step.optional),
         }
 
     @staticmethod
@@ -585,6 +598,12 @@ class DbRequestsStore:
             "blank_name": getattr(request, "blank_name", None),
             "blank_version": getattr(request, "blank_version", None),
             "blank_layout": getattr(request, "blank_layout", None),
+            # Шапка/подвал бланка (миграция 0014) — тоже снимок: печать идёт по
+            # состоянию бланка на момент выдачи, подвал — jsonb-список строк.
+            "blank_header_html": getattr(request, "blank_header_html", None),
+            "blank_footer_lines": json.dumps(
+                list(getattr(request, "blank_footer_lines", None) or []), ensure_ascii=False
+            ),
         }
 
     def _build_request(self, row, step_rows: list) -> _Request:
@@ -598,6 +617,10 @@ class DbRequestsStore:
             blank_name=getattr(row, "blank_name", None),
             blank_version=getattr(row, "blank_version", None),
             blank_layout=getattr(row, "blank_layout", None),
+            blank_header_html=getattr(row, "blank_header_html", None),
+            blank_footer_lines=_stage_lines_value(
+                getattr(row, "blank_footer_lines", None)
+            ),
 
             status=request_status_from_db(row.status),
             route_origin=route_origin_from_db(row.route_origin),
@@ -635,6 +658,9 @@ class DbRequestsStore:
                     assignees=_sams_value(step_row.assignees),
                     approval_mode=step_row.approval_mode,
                     approvals=_approvals_value(step_row.approvals),
+                    # optional — снимок признака «шаг можно снять» (миграция
+                    # 0015); getattr для совместимости с тестовыми строками.
+                    optional=bool(getattr(step_row, "optional", True)),
                 )
                 for step_row in step_rows
             ],

@@ -950,6 +950,142 @@ describe("CreateForm", () => {
     expect(vi.mocked(createRequest).mock.calls[0][0].dismissed_stages).toEqual(["buhgalteriya"]);
   });
 
+  // Свой шаг бланка не ссылается на этап справочника (code=null), поэтому его снимают
+  // не по коду, а по номеру шага (step_order из предпросмотра, dismissed_step_orders).
+  // Номер в предпросмотре не пришёл — снять нечем: чекбокс заблокирован, причина видна.
+  it("шаг бланка без номера: чекбокс снятия заблокирован с пояснением, клик маршрут не меняет", async () => {
+    vi.mocked(searchEmployees).mockRejectedValue(new ApiHttpError(503, "Клиент 1С не настроен"));
+    vi.mocked(previewRoute).mockResolvedValue({
+      ...routePreview,
+      stages: [
+        ...routePreview.stages,
+        {
+          stage_id: 7,
+          code: null,
+          step_order: null,
+          title: "Согласование сметы",
+          stage_lines: ["Строка шага бланка"],
+          owner_kind: "people",
+          owner_group: null,
+          owner_name: "Сидорова Анна Сергеевна",
+          optional: true,
+          blocked_reason: null,
+        },
+      ],
+    });
+    vi.mocked(createRequest).mockResolvedValue({
+      id: "REQ-0102",
+      status: "Черновик",
+      route_origin: "template",
+      department: "Цех № 1",
+      position: "Слесарь",
+      created_by: "petrov.pp",
+      steps: [],
+    });
+
+    render(<CreateForm role="hr" />);
+    await fillEmployeeManually("auto");
+
+    // Шаг бланка: галочка на месте (этап в маршруте), но снять его нельзя — и видно почему.
+    const box = screen.getByRole("checkbox", { name: "Этап Согласование сметы" });
+    expect(box).toBeChecked();
+    expect(box).toBeDisabled();
+    expect(box).toHaveAttribute(
+      "title",
+      "Шаг задан бланком — номера у него нет, снять вручную нельзя",
+    );
+    expect(screen.getByText(/снять вручную нельзя/)).toBeInTheDocument();
+
+    // Клик по заблокированному чекбоксу не трогает маршрут: предпросмотр не переспрашивается.
+    const callsBefore = vi.mocked(previewRoute).mock.calls.length;
+    fireEvent.click(box);
+    expect(vi.mocked(previewRoute).mock.calls.length).toBe(callsBefore);
+    expect(box).toBeChecked();
+
+    // Этапы профиля снимаются по-прежнему, шаг бланка в dismissed_stages не попадает.
+    fireEvent.click(screen.getByRole("checkbox", { name: "Этап Бухгалтерия" }));
+    await waitFor(() =>
+      expect(previewRoute).toHaveBeenLastCalledWith(
+        expect.objectContaining({ dismissed_stages: ["buhgalteriya"] }),
+      ),
+    );
+
+    fireEvent.click(screen.getByText("Создать"));
+    await waitFor(() => expect(createRequest).toHaveBeenCalled());
+    expect(vi.mocked(createRequest).mock.calls[0][0].dismissed_stages).toEqual(["buhgalteriya"]);
+    expect(vi.mocked(createRequest).mock.calls[0][0].dismissed_step_orders).toEqual([]);
+  });
+
+  // Необязательный шаг бланка снимается по своему номеру (у него нет кода этапа):
+  // номер уходит в dismissed_step_orders, а в dismissed_stages — ничего.
+  it("необязательный шаг бланка снимается по номеру в dismissed_step_orders", async () => {
+    const withBlankStep = {
+      ...routePreview,
+      stages: [
+        ...routePreview.stages,
+        {
+          stage_id: null,
+          code: null,
+          step_order: 2,
+          title: "Согласование сметы",
+          stage_lines: ["Строка шага бланка"],
+          owner_kind: "people" as const,
+          owner_group: null,
+          owner_name: "Сидорова Анна Сергеевна",
+          optional: true,
+          blocked_reason: null,
+        },
+        {
+          stage_id: null,
+          code: null,
+          step_order: 3,
+          title: "Подпись кассеты",
+          stage_lines: [],
+          owner_kind: "people" as const,
+          owner_group: null,
+          owner_name: "Сидорова Анна Сергеевна",
+          optional: false,
+          blocked_reason: null,
+        },
+      ],
+    };
+    vi.mocked(searchEmployees).mockRejectedValue(new ApiHttpError(503, "Клиент 1С не настроен"));
+    vi.mocked(previewRoute).mockImplementation(async (body) => ({
+      ...withBlankStep,
+      stages: withBlankStep.stages.filter((s) => !body.dismissed_step_orders?.includes(s.step_order ?? -1)),
+    }));
+    vi.mocked(createRequest).mockResolvedValue({
+      id: "REQ-0103",
+      status: "Черновик",
+      route_origin: "template",
+      department: "Цех № 1",
+      position: "Слесарь",
+      created_by: "petrov.pp",
+      steps: [],
+    });
+
+    render(<CreateForm role="hr" />);
+    await fillEmployeeManually("auto");
+
+    // Обязательный шаг бланка заблокирован — его снять нельзя.
+    const required = screen.getByRole("checkbox", { name: "Этап Подпись кассеты" });
+    expect(required).toBeDisabled();
+    expect(required).toHaveAttribute("title", "Шаг бланка обязательный");
+
+    // Необязательный — снимается по номеру шага (2), не по коду.
+    fireEvent.click(screen.getByRole("checkbox", { name: "Этап Согласование сметы" }));
+    await waitFor(() =>
+      expect(previewRoute).toHaveBeenLastCalledWith(
+        expect.objectContaining({ dismissed_step_orders: [2], dismissed_stages: [] }),
+      ),
+    );
+
+    fireEvent.click(screen.getByText("Создать"));
+    await waitFor(() => expect(createRequest).toHaveBeenCalled());
+    expect(vi.mocked(createRequest).mock.calls[0][0].dismissed_step_orders).toEqual([2]);
+    expect(vi.mocked(createRequest).mock.calls[0][0].dismissed_stages).toEqual([]);
+  });
+
   // Причину блокировки этапа (важно для ОК) показываем рядом с этапом.
   it("blocked_reason этапа показан рядом с этапом", async () => {
     vi.mocked(searchEmployees).mockRejectedValue(new ApiHttpError(503, "Клиент 1С не настроен"));
@@ -1758,6 +1894,38 @@ describe("CreateForm: выбор бланка", () => {
     await waitFor(() =>
       expect(screen.queryByText(/подстановка бланка по службе выключена/)).not.toBeInTheDocument(),
     );
+  });
+
+  // Без выбора бланка доступен ручной маршрут: форма подсказывает режим
+  // «Вручную», конструктор остаётся рабочим, а blank_id в тело не уходит.
+  it("без выбора бланка доступен ручной маршрут", async () => {
+    vi.mocked(getRouteBlanks).mockResolvedValue(routeBlanks);
+    vi.mocked(searchEmployees).mockRejectedValue(new ApiHttpError(503, "Клиент 1С не настроен"));
+    vi.mocked(searchAd).mockResolvedValue([adCandidate]);
+    vi.mocked(createRequest).mockResolvedValue({
+      id: "REQ-0303",
+      status: "Черновик",
+      route_origin: "custom",
+      department: "Цех № 1",
+      position: "Слесарь",
+      created_by: "petrov.pp",
+      steps: [],
+    });
+
+    render(<CreateForm role="hr" />);
+    await screen.findByLabelText("Бланк");
+    // Подсказка о ручном маршруте без бланка.
+    expect(screen.getByText(/Бланк не выбран — задайте маршрут вручную/)).toBeInTheDocument();
+
+    await fillEmployeeManually("custom");
+    await addAdExecutor();
+    fireEvent.click(screen.getByText("Создать"));
+
+    await waitFor(() => expect(createRequest).toHaveBeenCalled());
+    const body = vi.mocked(createRequest).mock.calls[0][0];
+    expect(body.blank_id).toBeUndefined();
+    expect(body.route_mode).toBe("custom");
+    expect(body.blocks).toHaveLength(1);
   });
 
   // 422 предпросмотра «бланк не выбран» — текст со списком бланков от API.

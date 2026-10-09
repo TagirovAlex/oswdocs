@@ -20,6 +20,10 @@ interface RichTextEditorProps {
   onChange: (html: string) => void;
   // Скрытая подпись под редактором (например, про печать); без неё — ничего.
   hint?: string;
+  // Запрос вставки текста извне (кнопки плейсхолдеров шапки бланка): текст
+  // вставляется в позицию курсора. seq — счётчик запросов: одинаковый текст
+  // вставляется повторно только с новым seq.
+  insert?: { text: string; seq: number } | null;
 }
 
 // Кнопки панели форматирования: подпись, aria-label, активное состояние и
@@ -53,7 +57,7 @@ export function richTextToPlain(html: string): string {
 
 // Визуальный редактор текста этапа: панель кнопок + область ввода.
 export function RichTextEditor(props: RichTextEditorProps) {
-  const { label, value, onChange, hint } = props;
+  const { label, value, onChange, hint, insert } = props;
   // Последнее значение, отправленное редактором: правки изнутри в effect не
   // возвращаются (иначе setContent на каждом вводе сбрасывал бы курсор).
   const emitted = useRef<string>(value);
@@ -77,6 +81,16 @@ export function RichTextEditor(props: RichTextEditorProps) {
     emitted.current = value;
     editor.commands.setContent(value, { emitUpdate: false });
   }, [editor, value]);
+
+  // Вставка текста извне (плейсхолдеры шапки бланка): в позицию курсора.
+  // Последний обработанный seq — чтобы один и тот же плейсхолдер вставлялся
+  // повторно по новому нажатию, а не игнорировался как «уже вставленный».
+  const insertedSeq = useRef(0);
+  useEffect(() => {
+    if (!editor || !insert || insert.seq === insertedSeq.current) return;
+    insertedSeq.current = insert.seq;
+    editor.chain().focus().insertContent(insert.text).run();
+  }, [editor, insert]);
 
   return (
     <div className="sed-rte">

@@ -1,7 +1,7 @@
 // Админка настроек: контент (руководитель ОК + админ) и инфра (только админ).
 // Значения — из settings БД (GET/PUT /api/settings для админа, /settings/content
-// для руководителя ОК), в коде не хардкодятся. Вкладки: Процесс / Справочники /
-// Шаблоны (контент) и Бланки / Инфра / Регламенты / Доступ и роли / Архивация
+// для руководителя ОК), в коде не хардкодятся. Вкладки: Процесс / Справочники
+// (контент) и Бланки / Инфра / Регламенты / Доступ и роли / Архивация
 // (только админ). Вкладка «Бланки» — справочник бланков из requests-client.
 import { useEffect, useState } from "react";
 import {
@@ -9,12 +9,12 @@ import {
   getBlankSteps,
   getBlanks,
   getDocTypes,
-  getRoutingCatalogs,
+  getStepGroups,
+  searchAd,
   setBlankSteps,
   updateBlank,
-  updateRoutingStage,
 } from "./requests-client";
-import type { BlankRow, BlankStepRow, DocType, RoutingCatalogStage } from "./requests-client";
+import type { AdCandidate, BlankRow, BlankStepRow, DocType, StepGroup } from "./requests-client";
 import {
   createDocType,
   deleteBackup,
@@ -41,8 +41,6 @@ import type {
   SettingsEnterprise,
   SettingsMailTemplate,
   SettingsOnecBase,
-  SettingsTemplate,
-  SettingsTemplateStep,
   StepGroupRef,
 } from "./settings-client";
 import { RichTextEditor, richTextToPlain } from "./rich-text";
@@ -54,13 +52,14 @@ interface AdminSettingsProps {
   role: Role;
 }
 
-// Вкладки админки: контент (Процесс/Справочники/Шаблоны) + Инфра, Регламенты,
-// Доступ и роли, Архивация и Бланки — только админ.
-const CONTENT_TABS = ["Процесс", "Справочники", "Шаблоны"] as const;
+// Вкладки админки: контент (Процесс/Справочники/Письма) + Инфра, Регламенты,
+// Доступ и роли, Архивация и Бланки — только админ. Легаси-вкладка «Шаблоны»
+// (ключи templates/position_to_category) удалена вместе с ключами настроек.
+const CONTENT_TABS = ["Процесс", "Справочники", "Письма"] as const;
 const ALL_TABS = [
   "Процесс",
   "Справочники",
-  "Шаблоны",
+  "Письма",
   "Бланки",
   "Инфра",
   "Регламенты",
@@ -68,26 +67,6 @@ const ALL_TABS = [
   "Архивация",
 ] as const;
 type SettingsTab = (typeof ALL_TABS)[number];
-
-// Пара «должность → категория» для формы (порядок строк сохраняется).
-interface PositionCategoryPair {
-  position: string;
-  category: string;
-}
-
-// Record (должность → категория) из API → список пар формы.
-function pairsFromRecord(record: Record<string, string> | null | undefined): PositionCategoryPair[] {
-  return Object.entries(record ?? {}).map(([position, category]) => ({ position, category }));
-}
-
-// Список пар формы → Record для PUT (пустая должность не пишется).
-function recordFromPairs(pairs: PositionCategoryPair[]): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const pair of pairs) {
-    if (pair.position.trim() !== "") out[pair.position] = pair.category;
-  }
-  return out;
-}
 
 // Редактор предприятий: список code+name, добавить/удалить/переименовать.
 function EnterprisesEditor(props: { value: SettingsEnterprise[]; onChange: (v: SettingsEnterprise[]) => void }) {
@@ -307,147 +286,6 @@ function AccessRolesEditor(props: { value: AccessRoleGroups; onChange: (v: Acces
           <div className="sed-note">{field.hint}</div>
         </label>
       ))}
-    </fieldset>
-  );
-}
-
-// Редактор соответствий «должность → категория»: пары, добавить/удалить/изменить.
-function PositionCategoryEditor(props: { value: PositionCategoryPair[]; onChange: (v: PositionCategoryPair[]) => void }) {
-  const { value, onChange } = props;
-  function update(index: number, patch: Partial<PositionCategoryPair>): void {
-    onChange(value.map((p, i) => (i === index ? { ...p, ...patch } : p)));
-  }
-  return (
-    <fieldset>
-      <legend>Должность → категория</legend>
-      {value.length === 0 && <div className="sed-note">не задано</div>}
-      {value.map((pair, i) => (
-        <div key={i} className="sed-editor-row">
-          <label>
-            Должность
-            <input
-              aria-label={`Должность ${i + 1}`}
-              value={pair.position}
-              onChange={(e) => update(i, { position: e.target.value })}
-            />
-          </label>
-          <label>
-            Категория
-            <input
-              aria-label={`Категория ${i + 1}`}
-              value={pair.category}
-              onChange={(e) => update(i, { category: e.target.value })}
-            />
-          </label>
-          <button
-            type="button"
-            className="sed-btn sed-btn--ghost"
-            onClick={() => onChange(value.filter((_, j) => j !== i))}
-          >
-            Удалить соответствие
-          </button>
-        </div>
-      ))}
-      <div className="sed-toolbar sed-mt-12">
-        <button
-          type="button"
-          className="sed-btn"
-          onClick={() => onChange([...value, { position: "", category: "" }])}
-        >
-          Добавить соответствие
-        </button>
-      </div>
-    </fieldset>
-  );
-}
-
-// Редактор шаблонов маршрутов: карточка (служба, категория, шаги owner_group).
-// Минимальный редактор: добавить/удалить шаблон, добавить/удалить/переименовать шаг.
-function TemplatesEditor(props: { value: SettingsTemplate[]; onChange: (v: SettingsTemplate[]) => void }) {
-  const { value, onChange } = props;
-  function updateTemplate(index: number, patch: Partial<SettingsTemplate>): void {
-    onChange(value.map((t, i) => (i === index ? { ...t, ...patch } : t)));
-  }
-  function addStep(index: number): void {
-    const step: SettingsTemplateStep = { owner_group: "" };
-    updateTemplate(index, { steps: [...value[index].steps, step] });
-  }
-  function updateStep(templateIndex: number, stepIndex: number, ownerGroup: string): void {
-    onChange(
-      value.map((t, i) =>
-        i !== templateIndex
-          ? t
-          : { ...t, steps: t.steps.map((s, j) => (j !== stepIndex ? s : { ...s, owner_group: ownerGroup })) },
-      ),
-    );
-  }
-  function removeStep(templateIndex: number, stepIndex: number): void {
-    onChange(
-      value.map((t, i) => (i !== templateIndex ? t : { ...t, steps: t.steps.filter((_, j) => j !== stepIndex) })),
-    );
-  }
-  return (
-    <fieldset>
-      <legend>Шаблоны маршрутов</legend>
-      {value.length === 0 && <div className="sed-note">не задано</div>}
-      {value.map((template, i) => (
-        <div key={i} className="sed-editor-card">
-          <label className="sed-field">
-            Служба
-            <input
-              aria-label={`Служба шаблона ${i + 1}`}
-              value={template.service}
-              onChange={(e) => updateTemplate(i, { service: e.target.value })}
-            />
-          </label>
-          <label className="sed-field">
-            Категория
-            <input
-              aria-label={`Категория шаблона ${i + 1}`}
-              value={template.category}
-              onChange={(e) => updateTemplate(i, { category: e.target.value })}
-            />
-          </label>
-          <div className="sed-mt-8">
-            {template.steps.length === 0 && <div className="sed-note">шагов нет</div>}
-            {template.steps.map((step, j) => (
-              <div key={j} className="sed-editor-row sed-editor-row--center">
-                <input
-                  aria-label={`Владелец шага ${i + 1}.${j + 1}`}
-                  value={step.owner_group}
-                  onChange={(e) => updateStep(i, j, e.target.value)}
-                />
-                <button type="button" className="sed-btn sed-btn--ghost" onClick={() => removeStep(i, j)}>
-                  Удалить шаг
-                </button>
-              </div>
-            ))}
-          </div>
-          <div className="sed-toolbar sed-mt-8">
-            <button type="button" className="sed-btn" onClick={() => addStep(i)}>
-              Добавить шаг
-            </button>
-          </div>
-          <div className="sed-toolbar sed-mt-8">
-            <button
-              type="button"
-              className="sed-btn sed-btn--ghost"
-              onClick={() => onChange(value.filter((_, j) => j !== i))}
-            >
-              Удалить шаблон
-            </button>
-          </div>
-        </div>
-      ))}
-      <div className="sed-toolbar sed-mt-12">
-        <button
-          type="button"
-          className="sed-btn"
-          onClick={() => onChange([...value, { service: "", category: "", steps: [] }])}
-        >
-          Добавить шаблон
-        </button>
-      </div>
     </fieldset>
   );
 }
@@ -771,7 +609,8 @@ function DocTypesEditor() {
 }
 
 // Карточка бланка в админке: код (только при создании — потом неизменен),
-// название, вид документа, описание, макет печати и активность.
+// название, вид документа, описание, макет печати, шапка (header_html),
+// подвал (footer_lines) и активность.
 interface BlankForm {
   // null — новый бланк; число — правка существующего.
   id: number | null;
@@ -781,6 +620,10 @@ interface BlankForm {
   description: string;
   layout: "office" | "line";
   active: boolean;
+  // Шапка бланка — HTML визуального редактора (печать санирует его бэкенд).
+  header_html: string;
+  // Подвал бланка — строки печати после таблицы шагов.
+  footer_lines: string[];
 }
 
 // Пустая карточка нового бланка; макет по умолчанию office — как в контракте
@@ -793,35 +636,64 @@ const EMPTY_BLANK_FORM: BlankForm = {
   description: "",
   layout: "office",
   active: true,
+  header_html: "",
+  footer_lines: [],
 };
 
-// Варианты переопределения флага шага бланка: пусто — «как в этапе» (в БД null),
-// да/нет — принудительное значение флага для этого бланка.
-const OVERRIDE_CHOICES: readonly { value: string; title: string }[] = [
-  { value: "", title: "как в этапе" },
-  { value: "true", title: "да" },
-  { value: "false", title: "нет" },
+// Плейсхолдеры подстановки в шапке/подвале бланка (контракт печати): список
+// задан решением человека, подстановка выполняется бэкендом при печати.
+const BLANK_PLACEHOLDERS: readonly string[] = [
+  "{fio}",
+  "{position}",
+  "{department}",
+  "{tab_num}",
+  "{enterprise}",
+  "{blank_name}",
+  "{subject}",
+  "{content}",
+  "{date}",
+  "{dismissal_date}",
+  "{steps}",
+  "{manager}",
 ];
 
-// Переопределение флага шага (null — «как в этапе») → значение селекта формы.
-function overrideValue(flag: boolean | null): string {
-  return flag === null || flag === undefined ? "" : String(flag);
-}
-
-// Значение селекта формы → переопределение флага шага ("" — «как в этапе»).
-function overrideFlag(value: string): boolean | null {
-  return value === "" ? null : value === "true";
+// Кнопки вставки плейсхолдера (набор один и тот же для шапки и подвала).
+function PlaceholderButtons(props: {
+  onInsert: (token: string) => void;
+  target: string;
+  // Цели нет (например, строк подвала ещё не заведено) — кнопки выключены.
+  disabled?: boolean;
+}) {
+  const { onInsert, target, disabled } = props;
+  return (
+    <div className="sed-toolbar sed-mt-8">
+      <span className="sed-sub">Плейсхолдеры:</span>
+      {BLANK_PLACEHOLDERS.map((token) => (
+        <button
+          key={token}
+          type="button"
+          className="sed-btn sed-btn--ghost"
+          aria-label={`Вставить ${token} в ${target}`}
+          disabled={disabled === true}
+          onClick={() => onInsert(token)}
+        >
+          {token}
+        </button>
+      ))}
+    </div>
+  );
 }
 
 // Вкладка «Бланки» (только админ): справочник бланков — карточка (код, название,
-// вид документа, описание, макет печати, активность) и состав шагов (добавление
-// этапа из справочника, порядок, необязательный этап, обязательный комментарий).
-// Текст этапа и его пунктов правится визуальным редактором (HTML уходит в те же
-// поля справочника этапов). Файлов-шаблонов .docx нет: печать собирается из данных.
+// вид документа, описание, макет печати, шапка, подвал, активность) и состав
+// СВОИХ шагов (название, текст, вид исполнителя, согласующие/группа AD, режим,
+// необязательный, обязательный комментарий). Этап из справочника у шага нет.
+// Файлов-шаблонов .docx нет: печать собирается из данных бланка.
 function BlanksEditor() {
   const [blanks, setBlanks] = useState<BlankRow[]>([]);
-  // Активные этапы-кандидаты для состава бланка (GET /settings/routing/catalogs).
-  const [stages, setStages] = useState<RoutingCatalogStage[]>([]);
+  // Группы-владельцы шагов из settings (GET /api/step-groups) — селект группы AD
+  // для шага с executor_kind=ad_group.
+  const [groups, setGroups] = useState<StepGroup[]>([]);
   // Виды документов (doc_types) — значение doc_type_code бланка.
   const [docTypes, setDocTypes] = useState<DocType[]>([]);
   const [loadError, setLoadError] = useState<string>("");
@@ -832,13 +704,16 @@ function BlanksEditor() {
   // id выбранного бланка (null — состав не открыт).
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [steps, setSteps] = useState<BlankStepRow[]>([]);
-  // Этап, выбранный в селекте добавления в состав бланка.
-  const [stageToAdd, setStageToAdd] = useState<string>("");
-  // Черновик текста этапа по id этапа (визуальный редактор): заполняется при
-  // первом раскрытии блока, дальше живёт в состоянии до сохранения или смены бланка.
-  const [stageText, setStageText] = useState<Record<number, { title: string; lines: string[] }>>({});
-  // id этапа, у которого раскрыт блок «Текст этапа» (null — закрыты все).
-  const [textOpen, setTextOpen] = useState<number | null>(null);
+  // Запрос подсказки согласующих (GET /api/ad/search) и найденные кандидаты:
+  // логины хранятся как есть, ФИО показываем, если AD его отдал.
+  const [adQuery, setAdQuery] = useState<string>("");
+  const [adHits, setAdHits] = useState<AdCandidate[]>([]);
+  const [adError, setAdError] = useState<string>("");
+  // Плейсхолдер шапки: текст для вставки и счётчик нажатий (вставка в редактор).
+  const [headerInsert, setHeaderInsert] = useState<{ text: string; seq: number } | null>(null);
+  const [insertSeq, setInsertSeq] = useState<number>(0);
+  // Индекс строки подвала, в которую вставляется плейсхолдер.
+  const [footerTarget, setFooterTarget] = useState<number>(0);
 
   // Список бланков после любой правки (step_count/version из ответа сервера).
   function loadBlanks(): void {
@@ -854,11 +729,11 @@ function BlanksEditor() {
 
   useEffect(() => {
     loadBlanks();
-    // Этапы и виды документов — для добавления шага и выбора вида документа.
-    // Справочник админский; недоступность не ломает список бланков.
-    getRoutingCatalogs()
-      .then((catalogs) => setStages((catalogs.stages ?? []).filter((s) => s.active)))
-      .catch(() => setStages([]));
+    // Группы шагов и виды документов — для выбора группы AD и вида документа.
+    // Справочники общие; недоступность не ломает список бланков.
+    getStepGroups()
+      .then((items) => setGroups(items))
+      .catch(() => setGroups([]));
     getDocTypes(false)
       .then((items) => setDocTypes(items))
       .catch(() => setDocTypes([]));
@@ -869,8 +744,9 @@ function BlanksEditor() {
     getBlankSteps(blankId)
       .then((items) => {
         setSteps(items);
-        setStageText({});
-        setTextOpen(null);
+        setAdQuery("");
+        setAdHits([]);
+        setAdError("");
       })
       .catch((e: unknown) => setError(e instanceof Error ? e.message : "Ошибка загрузки состава бланка"));
   }
@@ -883,7 +759,8 @@ function BlanksEditor() {
   }
 
   // Создание/правка карточки бланка. Код неизменен после создания — при правке
-  // он показывается read-only, поэтому в PUT не уходит.
+  // он показывается read-only, поэтому в PUT не уходит. Шапка и подвал уходят
+  // вместе с карточкой (снимок в заявку берёт бэкенд при выдаче).
   async function handleSaveForm(): Promise<void> {
     const name = form.name.trim();
     if (name === "") {
@@ -903,6 +780,8 @@ function BlanksEditor() {
       description: form.description === "" ? null : form.description,
       layout: form.layout,
       active: form.active,
+      header_html: form.header_html === "" ? null : form.header_html,
+      footer_lines: form.footer_lines,
     };
     try {
       if (form.id === null) {
@@ -921,35 +800,44 @@ function BlanksEditor() {
     }
   }
 
-  // Шаг из справочника этапов → строка состава бланка (значения флагов этапа
-  // подставляются на сервере при чтении состава).
-  function stepDraft(catalog: RoutingCatalogStage, blankId: number, order: number): BlankStepRow {
-    return {
-      blank_id: blankId,
-      stage_id: catalog.id,
-      step_order: order,
-      optional_override: null,
-      require_comment_override: null,
-      approval_mode: "sequential",
-      stage_code: catalog.code,
-      title: catalog.title,
-      stage_lines: [],
-      owner_kind: catalog.owner_kind,
-      owner_group: catalog.owner_group,
-      optional: catalog.optional,
-      print_assignee: null,
-      require_comment: null,
-      stage_active: catalog.active,
-    };
+  // Вставка плейсхолдера в шапку: текст уходит в визуальный редактор, который
+  // вставит его в позицию курсора и вернёт обновлённый HTML. Счётчик seq
+  // отделяет одинаковые нажатия друг от друга, поэтому состояние правится
+  // последовательно, без побочных эффектов внутри апдейтера.
+  function insertHeaderToken(token: string): void {
+    setHeaderInsert({ text: token, seq: insertSeq + 1 });
+    setInsertSeq(insertSeq + 1);
   }
 
-  // Добавление этапа в конец состава бланка (этап уже в составе не добавляем).
-  function addStage(): void {
-    if (selectedId === null || stageToAdd === "") return;
-    const catalog = stages.find((s) => String(s.id) === stageToAdd);
-    if (!catalog || steps.some((s) => s.stage_id === catalog.id)) return;
-    setSteps((prev) => [...prev, stepDraft(catalog, selectedId, prev.length + 1)]);
-    setStageToAdd("");
+  // Вставка плейсхолдера в выбранную строку подвала (обычный текст).
+  function insertFooterToken(token: string): void {
+    // Строк нет — вставлять некуда: кнопки выключены (disabled) на стороне UI.
+    setForm((prev) => {
+      const lines = [...prev.footer_lines];
+      const index = Math.min(Math.max(footerTarget, 0), Math.max(lines.length - 1, 0));
+      if (lines.length === 0) return prev;
+      lines[index] = `${lines[index]}${token}`;
+      return { ...prev, footer_lines: lines };
+    });
+  }
+
+  // Новый пустой шаг бланка в конец состава (заготовка под заполнение).
+  function addStep(): void {
+    setSteps((prev) => [
+      ...prev,
+      {
+        blank_id: selectedId ?? 0,
+        step_order: prev.length + 1,
+        title: "",
+        stage_lines: [],
+        executor_kind: "people",
+        assignees: [],
+        owner_group: null,
+        approval_mode: "sequential",
+        optional: false,
+        require_comment: false,
+      },
+    ]);
   }
 
   // Порядок шага: кнопки «вверх/вниз» (доступнее перетаскивания). step_order
@@ -969,9 +857,68 @@ function BlanksEditor() {
     setSteps((prev) => prev.map((s, i) => (i === index ? { ...s, ...patch } : s)));
   }
 
+  // Подсказки согласующих по ФИО (GET /api/ad/search, только чтение AD).
+  function searchAssignees(): void {
+    const q = adQuery.trim();
+    if (q === "") {
+      setAdHits([]);
+      setAdError("");
+      return;
+    }
+    searchAd(q)
+      .then((items) => {
+        setAdHits(items);
+        setAdError("");
+      })
+      .catch((e: unknown) => setAdError(e instanceof Error ? e.message : "Ошибка поиска сотрудников в AD"));
+  }
+
+  // Добавление согласующего к шагу по логину (логины хранятся как есть).
+  function addAssignee(index: number, sam: string): void {
+    const login = sam.trim();
+    if (login === "") return;
+    setSteps((prev) =>
+      prev.map((s, i) =>
+        i === index && !s.assignees.includes(login)
+          ? { ...s, assignees: [...s.assignees, login] }
+          : s,
+      ),
+    );
+  }
+
+  function removeAssignee(index: number, sam: string): void {
+    setSteps((prev) =>
+      prev.map((s, i) => (i === index ? { ...s, assignees: s.assignees.filter((a) => a !== sam) } : s)),
+    );
+  }
+
+  // Название шага пустое или для вида исполнителя не хватает данных — сервер
+  // ответит 422. Предупреждаем заранее и не отправляем некорректный состав.
+  function stepsProblem(): string {
+    for (let i = 0; i < steps.length; i++) {
+      const step = steps[i];
+      const no = i + 1;
+      if (step.title.trim() === "") {
+        return `Шаг ${no}: укажите название шага`;
+      }
+      if (step.executor_kind === "people" && step.assignees.length === 0) {
+        return `Шаг ${no}: добавьте хотя бы одного согласующего`;
+      }
+      if (step.executor_kind === "ad_group" && (step.owner_group ?? "") === "") {
+        return `Шаг ${no}: выберите группу AD`;
+      }
+    }
+    return "";
+  }
+
   // Сохранение состава: полная замена одной транзакцией (порядок — с 1).
   async function handleSaveSteps(): Promise<void> {
     if (selectedId === null) return;
+    const problem = stepsProblem();
+    if (problem !== "") {
+      setError(problem);
+      return;
+    }
     setError("");
     setSaved("");
     setBusy(true);
@@ -979,11 +926,16 @@ function BlanksEditor() {
       await setBlankSteps(
         selectedId,
         steps.map((s, i) => ({
-          stage_id: s.stage_id,
           step_order: i + 1,
-          optional_override: s.optional_override ?? null,
-          require_comment_override: s.require_comment_override ?? null,
+          title: s.title.trim(),
+          // Пустые пункты текста в PUT не уходят (бэкенд их и не хранит).
+          stage_lines: s.stage_lines.filter((line) => richTextToPlain(line) !== ""),
+          executor_kind: s.executor_kind,
+          assignees: s.assignees,
+          owner_group: s.executor_kind === "ad_group" ? s.owner_group : null,
           approval_mode: s.approval_mode ?? null,
+          optional: s.optional,
+          require_comment: s.require_comment,
         })),
       );
       setSaved("Состав бланка сохранён");
@@ -996,59 +948,17 @@ function BlanksEditor() {
     }
   }
 
-  // Раскрытие блока «Текст этапа»: черновик берётся из справочника один раз.
-  function openStageText(step: BlankStepRow): void {
-    setTextOpen(step.stage_id);
-    setStageText((prev) =>
-      prev[step.stage_id]
-        ? prev
-        : { ...prev, [step.stage_id]: { title: step.title ?? "", lines: [...step.stage_lines] } },
-    );
-  }
-
-  function patchStageText(stageId: number, patch: Partial<{ title: string; lines: string[] }>): void {
-    setStageText((prev) => {
-      const draft = prev[stageId] ?? { title: "", lines: [] };
-      return { ...prev, [stageId]: { ...draft, ...patch } };
-    });
-  }
-
-  // Сохранение текста этапа: HTML из визуального редактора уходит в те же поля
-  // справочника этапов (title/stage_lines), поэтому разметка попадёт в печать.
-  async function handleSaveStageText(stageId: number): Promise<void> {
-    const draft = stageText[stageId];
-    if (!draft) return;
-    const title = draft.title.trim();
-    if (richTextToPlain(title) === "") {
-      setError("Название этапа не может быть пустым");
-      return;
-    }
-    const lines = draft.lines.filter((line) => richTextToPlain(line) !== "");
-    setError("");
-    setSaved("");
-    setBusy(true);
-    try {
-      await updateRoutingStage(stageId, { title, stage_lines: lines });
-      setSaved("Текст этапа сохранён");
-      if (selectedId !== null) loadSteps(selectedId);
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Ошибка сохранения текста этапа");
-    } finally {
-      setBusy(false);
-    }
-  }
-
   const selectedBlank = blanks.find((b) => b.id === selectedId) ?? null;
-  // Свободные этапы для добавления: активные и ещё не добавленные в состав.
-  const addableStages = stages.filter((s) => !steps.some((step) => step.stage_id === s.id));
 
   return (
     <fieldset>
       <legend>Бланки (справочник заявок)</legend>
       <div className="sed-note">
-        Бланк — набор этапов из справочника. Его выбирает сотрудник ОК при создании
-        заявки: система формирует шаги и ответственных, а снимок бланка пишется в
-        заявку. Файлов-шаблонов .docx нет — печатный документ собирается из данных.
+        Бланк — набор СВОИХ шагов (название, текст, исполнитель). Его выбирает
+        сотрудник ОК при создании заявки: система формирует шаги и ответственных, а
+        снимок бланка (шапка, подвал, состав) пишется в заявку. Бланк без шагов
+        выбрать нельзя. Файлов-шаблонов .docx нет — печатный документ собирается из
+        данных.
       </div>
       {loadError && <div role="alert">Бланки: {loadError}</div>}
       {!loadError && blanks.length === 0 && <div className="sed-note">Бланков нет</div>}
@@ -1102,7 +1012,10 @@ function BlanksEditor() {
                           description: blank.description ?? "",
                           layout: blank.layout === "line" ? "line" : "office",
                           active: blank.active,
+                          header_html: blank.header_html ?? "",
+                          footer_lines: [...(blank.footer_lines ?? [])],
                         });
+                        setFooterTarget(0);
                       }}
                     >
                       Править
@@ -1196,6 +1109,84 @@ function BlanksEditor() {
             onChange={(e) => setForm({ ...form, description: e.target.value })}
           />
         </label>
+        {/* Шапка бланка (header_html): визуальный редактор + кнопки вставки
+            плейсхолдеров. Санирует HTML бэкенд при печати. */}
+        <div className="sed-mt-8">
+          <RichTextEditor
+            label="Шапка бланка"
+            value={form.header_html}
+            hint="Разметка попадёт в печатный документ; подставьте плейсхолдеры кнопками ниже."
+            insert={headerInsert}
+            onChange={(html) => setForm({ ...form, header_html: html })}
+          />
+          <PlaceholderButtons target="шапку" onInsert={insertHeaderToken} />
+        </div>
+
+        {/* Подвал бланка (footer_lines): список строк печати после таблицы шагов. */}
+        <fieldset className="sed-mt-8">
+          <legend>Подвал бланка</legend>
+          {form.footer_lines.length === 0 && <div className="sed-note">строк нет</div>}
+          {form.footer_lines.map((line, i) => (
+            <div key={i} className="sed-editor-row sed-editor-row--center">
+              <input
+                aria-label={`Строка подвала ${i + 1}`}
+                value={line}
+                onFocus={() => setFooterTarget(i)}
+                onClick={() => setFooterTarget(i)}
+                onChange={(e) =>
+                  setForm({
+                    ...form,
+                    footer_lines: form.footer_lines.map((l, k) => (k === i ? e.target.value : l)),
+                  })
+                }
+              />
+              <button
+                type="button"
+                className="sed-btn sed-btn--ghost"
+                aria-label={`Выбрать строку подвала ${i + 1}`}
+                onClick={() => setFooterTarget(i)}
+              >
+                Выбрать строку
+              </button>
+              <button
+                type="button"
+                className="sed-btn sed-btn--ghost"
+                aria-label={`Удалить строку подвала ${i + 1}`}
+                onClick={() =>
+                  setForm({
+                    ...form,
+                    footer_lines: form.footer_lines.filter((_, k) => k !== i),
+                  })
+                }
+              >
+                Удалить строку
+              </button>
+            </div>
+          ))}
+          <div className="sed-toolbar sed-mt-8">
+            <button
+              type="button"
+              className="sed-btn sed-btn--ghost"
+              onClick={() => {
+                setForm({ ...form, footer_lines: [...form.footer_lines, ""] });
+                setFooterTarget(form.footer_lines.length);
+              }}
+            >
+              Добавить строку подвала
+            </button>
+          </div>
+          <div className="sed-note">
+            {form.footer_lines.length === 0
+              ? "Добавьте строку, затем вставьте в неё плейсхолдер."
+              : `Плейсхолдер вставится в строку ${footerTarget + 1}.`}
+          </div>
+          <PlaceholderButtons
+            target="подвал"
+            onInsert={insertFooterToken}
+            disabled={form.footer_lines.length === 0}
+          />
+        </fieldset>
+
         <div className="sed-toolbar sed-mt-8">
           <button type="button" className="sed-btn" onClick={handleSaveForm} disabled={busy}>
             {form.id === null ? "Создать бланк" : "Сохранить бланк"}
@@ -1203,7 +1194,7 @@ function BlanksEditor() {
         </div>
       </div>
 
-      {/* Состав шагов выбранного бланка. */}
+      {/* Состав СВОИХ шагов выбранного бланка. */}
       {selectedBlank && (
         <div className="sed-editor-card">
           <div className="sed-blockcard__head">
@@ -1218,198 +1209,252 @@ function BlanksEditor() {
             </button>
           </div>
           {steps.length === 0 && <div className="sed-note">Шагов нет</div>}
-          {steps.length > 0 && (
-            <table className="sed-table" aria-label={`Состав бланка ${selectedBlank.code}`}>
-              <thead>
-                <tr>
-                  <th scope="col">№</th>
-                  <th scope="col">Этап</th>
-                  <th scope="col">Необязательный</th>
-                  <th scope="col">Комментарий</th>
-                  <th scope="col">Режим</th>
-                  <th scope="col">Действия</th>
-                </tr>
-              </thead>
-              <tbody>
-                {steps.map((step, i) => {
-                  const title = step.title || step.stage_code || `Этап #${step.stage_id}`;
-                  return (
-                    <tr key={`${step.stage_id}-${i}`}>
-                      <td>{i + 1}</td>
-                      <td>
-                        {title}
-                        <div className="sed-sub">
-                          {step.owner_kind === "manager_ad"
-                            ? "руководитель из AD"
-                            : step.owner_group ?? step.owner_kind ?? ""}
-                        </div>
-                      </td>
-                      <td>
-                        <select
-                          aria-label={`Необязательность шага ${i + 1}`}
-                          value={overrideValue(step.optional_override)}
-                          onChange={(e) =>
-                            patchStep(i, { optional_override: overrideFlag(e.target.value) })
-                          }
-                        >
-                          {OVERRIDE_CHOICES.map((choice) => (
-                            <option key={choice.value} value={choice.value}>
-                              {choice.title}
-                            </option>
-                          ))}
-                        </select>
-                        {step.optional_override === null && (
-                          <div className="sed-sub">
-                            в этапе: {step.optional ? "необязательный" : "обязательный"}
-                          </div>
-                        )}
-                      </td>
-                      <td>
-                        <select
-                          aria-label={`Комментарий шага ${i + 1}`}
-                          value={overrideValue(step.require_comment_override)}
-                          onChange={(e) =>
-                            patchStep(i, { require_comment_override: overrideFlag(e.target.value) })
-                          }
-                        >
-                          {OVERRIDE_CHOICES.map((choice) => (
-                            <option key={choice.value} value={choice.value}>
-                              {choice.title}
-                            </option>
-                          ))}
-                        </select>
-                      </td>
-                      <td>
-                        <select
-                          aria-label={`Режим шага ${i + 1}`}
-                          value={step.approval_mode ?? "sequential"}
-                          onChange={(e) =>
-                            patchStep(i, {
-                              approval_mode: e.target.value as "sequential" | "parallel",
-                            })
-                          }
-                        >
-                          <option value="sequential">все ответственные</option>
-                          <option value="parallel">любой ответственный</option>
-                        </select>
-                      </td>
-                      <td>
-                        <div className="sed-toolbar sed-mt-0">
-                          <button
-                            type="button"
-                            className="sed-btn sed-btn--ghost"
-                            aria-label={`Поднять шаг ${i + 1}`}
-                            disabled={i === 0}
-                            onClick={() => moveStep(i, -1)}
-                          >
-                            Вверх
-                          </button>
-                          <button
-                            type="button"
-                            className="sed-btn sed-btn--ghost"
-                            aria-label={`Опустить шаг ${i + 1}`}
-                            disabled={i === steps.length - 1}
-                            onClick={() => moveStep(i, 1)}
-                          >
-                            Вниз
-                          </button>
-                          <button
-                            type="button"
-                            className="sed-btn sed-btn--ghost"
-                            aria-label={`Текст этапа ${i + 1}`}
-                            onClick={() => openStageText(step)}
-                          >
-                            Текст этапа
-                          </button>
-                          <button
-                            type="button"
-                            className="sed-btn sed-btn--ghost"
-                            aria-label={`Удалить шаг ${i + 1}`}
-                            onClick={() => setSteps((prev) => prev.filter((_, j) => j !== i))}
-                          >
-                            Удалить
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          )}
-
-          {/* Текст этапа и его пунктов — визуальный редактор (HTML уходит в
-              справочник этапов; разметка попадёт в печать). */}
-          {textOpen !== null && stageText[textOpen] && (
-            <div className="sed-blanktext">
-              <RichTextEditor
-                label={`Название этапа ${textOpen}`}
-                value={stageText[textOpen].title}
-                hint="Разметка попадёт в печатный документ."
-                onChange={(html) => patchStageText(textOpen, { title: html })}
-              />
-              {stageText[textOpen].lines.map((line, li) => (
-                <div key={li} className="sed-blanktext__line">
-                  <RichTextEditor
-                    label={`Пункт этапа ${textOpen}.${li + 1}`}
-                    value={line}
-                    onChange={(html) =>
-                      patchStageText(textOpen, {
-                        lines: stageText[textOpen].lines.map((l, k) => (k === li ? html : l)),
-                      })
-                    }
-                  />
-                  <button
-                    type="button"
-                    className="sed-btn sed-btn--ghost"
-                    aria-label={`Удалить пункт этапа ${li + 1}`}
-                    onClick={() =>
-                      patchStageText(textOpen, {
-                        lines: stageText[textOpen].lines.filter((_, k) => k !== li),
-                      })
-                    }
-                  >
-                    Удалить пункт
-                  </button>
-                </div>
-              ))}
-              <div className="sed-toolbar sed-mt-8">
+          {steps.map((step, i) => (
+            <div key={i} className="sed-editor-card" aria-label={`Шаг ${i + 1}`}>
+              <div className="sed-blockcard__head">
+                <span className="sed-blockcard__title">Шаг {i + 1}</span>
+                <span className="sed-blockcard__spacer" />
                 <button
                   type="button"
                   className="sed-btn sed-btn--ghost"
-                  onClick={() =>
-                    patchStageText(textOpen, { lines: [...stageText[textOpen].lines, "<p></p>"] })
-                  }
+                  aria-label={`Поднять шаг ${i + 1}`}
+                  disabled={i === 0}
+                  onClick={() => moveStep(i, -1)}
                 >
-                  Добавить пункт
+                  Вверх
                 </button>
                 <button
                   type="button"
-                  className="sed-btn"
-                  disabled={busy}
-                  onClick={() => handleSaveStageText(textOpen)}
+                  className="sed-btn sed-btn--ghost"
+                  aria-label={`Опустить шаг ${i + 1}`}
+                  disabled={i === steps.length - 1}
+                  onClick={() => moveStep(i, 1)}
                 >
-                  Сохранить текст этапа
+                  Вниз
+                </button>
+                <button
+                  type="button"
+                  className="sed-btn sed-btn--ghost"
+                  aria-label={`Удалить шаг ${i + 1}`}
+                  onClick={() => setSteps((prev) => prev.filter((_, j) => j !== i))}
+                >
+                  Удалить
                 </button>
               </div>
+              <div className="sed-editor-row">
+                <label className="sed-field">
+                  Название шага
+                  <input
+                    aria-label={`Название шага ${i + 1}`}
+                    value={step.title}
+                    onChange={(e) => patchStep(i, { title: e.target.value })}
+                  />
+                </label>
+                <label className="sed-field">
+                  Вид исполнителя
+                  <select
+                    aria-label={`Вид исполнителя шага ${i + 1}`}
+                    value={step.executor_kind}
+                    onChange={(e) =>
+                      patchStep(i, { executor_kind: e.target.value as BlankStepRow["executor_kind"] })
+                    }
+                  >
+                    <option value="people">согласующие</option>
+                    <option value="ad_group">группа AD</option>
+                    <option value="manager_ad">руководитель сотрудника</option>
+                  </select>
+                </label>
+                <label className="sed-field">
+                  Режим
+                  <select
+                    aria-label={`Режим шага ${i + 1}`}
+                    value={step.approval_mode ?? "sequential"}
+                    onChange={(e) =>
+                      patchStep(i, {
+                        approval_mode: e.target.value as "sequential" | "parallel",
+                      })
+                    }
+                  >
+                    <option value="sequential">все ответственные</option>
+                    <option value="parallel">любой ответственный</option>
+                  </select>
+                </label>
+              </div>
+
+              {/* Исполнитель по списку согласующих: логины AD, ФИО подсказывает
+                  поиск AD (getEmployeeCard/поиск сотрудников — /api/ad/search). */}
+              {step.executor_kind === "people" && (
+                <div className="sed-mt-8">
+                  <div className="sed-sub">Согласующие (логины AD):</div>
+                  {step.assignees.length === 0 && (
+                    <div className="sed-note">
+                      Добавьте хотя бы одного согласующего — без согласующих шаг не сохранится.
+                    </div>
+                  )}
+                  {step.assignees.map((sam) => {
+                    const hit = adHits.find((c) => c.sam === sam);
+                    return (
+                      <div key={sam} className="sed-editor-row sed-editor-row--center">
+                        <span>
+                          {sam}
+                          {hit && hit.display_name ? ` — ${hit.display_name}` : ""}
+                        </span>
+                        <button
+                          type="button"
+                          className="sed-btn sed-btn--ghost"
+                          aria-label={`Удалить согласующего ${sam} из шага ${i + 1}`}
+                          onClick={() => removeAssignee(i, sam)}
+                        >
+                          Удалить согласующего
+                        </button>
+                      </div>
+                    );
+                  })}
+                  <div className="sed-editor-row sed-editor-row--center sed-mt-8">
+                    <input
+                      aria-label={`Логин согласующего шага ${i + 1}`}
+                      value={adQuery}
+                      onChange={(e) => setAdQuery(e.target.value)}
+                    />
+                    <button
+                      type="button"
+                      className="sed-btn sed-btn--ghost"
+                      onClick={searchAssignees}
+                    >
+                      Найти сотрудников
+                    </button>
+                    <button
+                      type="button"
+                      className="sed-btn sed-btn--ghost"
+                      aria-label={`Добавить согласующего в шаг ${i + 1}`}
+                      onClick={() => addAssignee(i, adQuery)}
+                    >
+                      Добавить по логину
+                    </button>
+                  </div>
+                  {adError && <div role="alert">{adError}</div>}
+                  {adHits.length > 0 && (
+                    <ul className="sed-list">
+                      {adHits.map((cand) => (
+                        <li key={cand.sam}>
+                          <button
+                            type="button"
+                            className="sed-btn sed-btn--ghost"
+                            aria-label={`Добавить согласующего ${cand.sam} в шаг ${i + 1}`}
+                            onClick={() => addAssignee(i, cand.sam)}
+                          >
+                            {cand.display_name || cand.sam} ({cand.sam})
+                            {cand.title ? ` — ${cand.title}` : ""}
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+
+              {/* Исполнитель — группа AD из справочника групп шагов. */}
+              {step.executor_kind === "ad_group" && (
+                <label className="sed-field sed-mt-8">
+                  Группа AD
+                  <select
+                    aria-label={`Группа AD шага ${i + 1}`}
+                    value={step.owner_group ?? ""}
+                    onChange={(e) =>
+                      patchStep(i, { owner_group: e.target.value === "" ? null : e.target.value })
+                    }
+                  >
+                    <option value="">— выберите группу —</option>
+                    {groups.map((group) => (
+                      <option key={group.id} value={group.id}>
+                        {group.name}
+                      </option>
+                    ))}
+                  </select>
+                  {(step.owner_group ?? "") === "" && (
+                    <div className="sed-note">Выберите группу AD — без неё шаг не сохранится.</div>
+                  )}
+                </label>
+              )}
+
+              {/* Исполнитель — руководитель сотрудника в AD: данных в бланке нет,
+                  бэкенд находит его при выдаче заявки. */}
+              {step.executor_kind === "manager_ad" && (
+                <div className="sed-note">
+                  Исполнитель — руководитель сотрудника из AD (находит сервер при выдаче
+                  заявки; если руководителя нет, заявка не создастся).
+                </div>
+              )}
+
+              <div className="sed-editor-row">
+                <label className="sed-field">
+                  <input
+                    type="checkbox"
+                    aria-label={`Шаг ${i + 1} необязательный`}
+                    checked={step.optional}
+                    onChange={(e) => patchStep(i, { optional: e.target.checked })}
+                  />
+                  Необязательный
+                </label>
+                <label className="sed-field">
+                  <input
+                    type="checkbox"
+                    aria-label={`Комментарий шага ${i + 1} обязателен`}
+                    checked={step.require_comment}
+                    onChange={(e) => patchStep(i, { require_comment: e.target.checked })}
+                  />
+                  Комментарий обязателен
+                </label>
+              </div>
+
+              {/* Текст шага и его пунктов — визуальный редактор (HTML уходит в
+                  stage_lines шага бланка; разметка попадёт в печать). */}
+              <div className="sed-blanktext">
+                {step.stage_lines.map((line, li) => (
+                  <div key={li} className="sed-blanktext__line">
+                    <RichTextEditor
+                      label={`Пункт шага ${i + 1}.${li + 1}`}
+                      value={line}
+                      onChange={(html) =>
+                        patchStep(i, {
+                          stage_lines: step.stage_lines.map((l, k) => (k === li ? html : l)),
+                        })
+                      }
+                    />
+                    <button
+                      type="button"
+                      className="sed-btn sed-btn--ghost"
+                      aria-label={`Удалить пункт шага ${i + 1}.${li + 1}`}
+                      onClick={() =>
+                        patchStep(i, { stage_lines: step.stage_lines.filter((_, k) => k !== li) })
+                      }
+                    >
+                      Удалить пункт
+                    </button>
+                  </div>
+                ))}
+                <div className="sed-toolbar sed-mt-8">
+                  <button
+                    type="button"
+                    className="sed-btn sed-btn--ghost"
+                    aria-label={`Добавить пункт шага ${i + 1}`}
+                    onClick={() => patchStep(i, { stage_lines: [...step.stage_lines, "<p></p>"] })}
+                  >
+                    Добавить пункт
+                  </button>
+                </div>
+              </div>
             </div>
-          )}
+          ))}
 
           <div className="sed-toolbar sed-mt-8">
-            <select
-              aria-label="Этап для добавления в бланк"
-              value={stageToAdd}
-              onChange={(e) => setStageToAdd(e.target.value)}
+            <button
+              type="button"
+              className="sed-btn sed-btn--ghost"
+              aria-label="Добавить шаг"
+              onClick={addStep}
             >
-              <option value="">— выберите этап —</option>
-              {addableStages.map((s) => (
-                <option key={s.id} value={String(s.id)}>
-                  {s.title || s.code}
-                </option>
-              ))}
-            </select>
-            <button type="button" className="sed-btn sed-btn--ghost" onClick={addStage} disabled={stageToAdd === ""}>
-              Добавить этап
+              Добавить шаг
             </button>
             <button type="button" className="sed-btn" onClick={handleSaveSteps} disabled={busy}>
               Сохранить состав
@@ -1666,8 +1711,6 @@ export function AdminSettings(props: AdminSettingsProps) {
   const [requireComment, setRequireComment] = useState<boolean | null>(null);
   const [enterprises, setEnterprises] = useState<SettingsEnterprise[]>([]);
   const [adGroups, setAdGroups] = useState<StepGroupRef[]>([]);
-  const [positionCategory, setPositionCategory] = useState<PositionCategoryPair[]>([]);
-  const [templates, setTemplates] = useState<SettingsTemplate[]>([]);
   const [mailTemplates, setMailTemplates] = useState<SettingsMailTemplate[]>([]);
   // Базы 1С: поля формы + параллельный признак «пароль задан» для placeholder.
   const [onecBases, setOnecBases] = useState<SettingsOnecBase[]>([]);
@@ -1733,9 +1776,7 @@ export function AdminSettings(props: AdminSettingsProps) {
         setRequireComment(data.require_comment);
         setEnterprises(data.enterprises ?? []);
         setAdGroups(toStepGroupRefs(data.allowed_ad_groups ?? []));
-        setPositionCategory(pairsFromRecord(data.position_to_category));
         setPositionEscalation(data.position_escalation);
-        setTemplates(data.templates ?? []);
         setMailTemplates(data.mail_templates ?? []);
         setError("");
       })
@@ -1771,9 +1812,7 @@ export function AdminSettings(props: AdminSettingsProps) {
       require_paper_signature: paperRequired,
       enterprises,
       allowed_ad_groups: adGroups,
-      position_to_category: recordFromPairs(positionCategory),
       position_escalation: positionEscalation,
-      templates,
       mail_templates: mailTemplates,
     };
     setBusy(true);
@@ -1805,12 +1844,12 @@ export function AdminSettings(props: AdminSettingsProps) {
         };
         const result = await saveSettings(full);
         setSaved(
-          `Сохранено: TTL=${result.approval_ttl_days} дн., сканы ${result.scan_retention_days} дн./${result.scan_max_mb} МБ, от ${result.smtp_from}, предприятий ${result.enterprises?.length ?? 0}, групп ${result.allowed_ad_groups?.length ?? 0}, шаблонов ${result.templates?.length ?? 0}`,
+          `Сохранено: TTL=${result.approval_ttl_days} дн., сканы ${result.scan_retention_days} дн./${result.scan_max_mb} МБ, от ${result.smtp_from}, предприятий ${result.enterprises?.length ?? 0}, групп ${result.allowed_ad_groups?.length ?? 0}`,
         );
       } else {
         const result = await saveSettingsContent(content);
         setSaved(
-          `Сохранено: TTL=${result.approval_ttl_days} дн., предприятий ${result.enterprises?.length ?? 0}, групп ${result.allowed_ad_groups?.length ?? 0}, шаблонов ${result.templates?.length ?? 0}`,
+          `Сохранено: TTL=${result.approval_ttl_days} дн., предприятий ${result.enterprises?.length ?? 0}, групп ${result.allowed_ad_groups?.length ?? 0}`,
         );
       }
     } catch (e: unknown) {
@@ -1921,18 +1960,14 @@ export function AdminSettings(props: AdminSettingsProps) {
               {groupSyncError && <span role="alert">{groupSyncError}</span>}
             </div>
           )}
-          <PositionCategoryEditor value={positionCategory} onChange={setPositionCategory} />
           {/* Виды документов — таблица doc_types; только админ (не контент-ключ settings). */}
           {isAdmin && <DocTypesEditor />}
           <EnterprisesEditor value={enterprises} onChange={setEnterprises} />
         </>
       )}
 
-      {activeTab === "Шаблоны" && (
-        <>
-          <TemplatesEditor value={templates} onChange={setTemplates} />
-          <MailTemplatesEditor value={mailTemplates} onChange={setMailTemplates} />
-        </>
+      {activeTab === "Письма" && (
+        <MailTemplatesEditor value={mailTemplates} onChange={setMailTemplates} />
       )}
 
       {/* Справочник бланков — только админ (вкладки инфраструктуры, как сейчас

@@ -71,9 +71,12 @@ BLANK_CODE = "uvol_mol"
 BLANK_NAME = "Увольнение вымышленного МОЛ"
 BLANK_VERSION = 4
 BLANK_STEP_COUNT = 3
+BLANK_HEADER = "<p>Увольнение {fio}</p>"
+BLANK_FOOTER = ["Подпись {fio}", "Дата {date}"]
 BLANK_LINE_ID = 31
 BLANK_LINE_CODE = "uvol_line"
 BLANK_OFF_ID = 32
+BLANK_EMPTY_ID = 33
 
 SERVICE_ROW = {
     "id": SERVICE_ID,
@@ -140,12 +143,14 @@ BLANK_ROW = {
     "code": BLANK_CODE,
     "name": BLANK_NAME,
     "doc_type_code": BLANK_CODE,
-    "description": "Вымышленный бланк с тремя этапами",
+    "description": "Вымышленный бланк с тремя шагами",
     "layout": "office",
     "active": True,
     "version": BLANK_VERSION,
     "updated_at": None,
     "updated_by": None,
+    "header_html": BLANK_HEADER,
+    "footer_lines": list(BLANK_FOOTER),
 }
 BLANK_LINE_ROW = dict(
     BLANK_ROW,
@@ -154,6 +159,8 @@ BLANK_LINE_ROW = dict(
     name="Увольнение вымышленного линейного",
     layout="line",
     version=1,
+    header_html=None,
+    footer_lines=[],
 )
 BLANK_OFF_ROW = dict(
     BLANK_ROW,
@@ -161,6 +168,15 @@ BLANK_OFF_ROW = dict(
     code="uvol_old",
     name="Бланк вымышленный старый",
     active=False,
+)
+# Активный бланк без шагов: выбрать его нельзя (маршрут заявке нечем задать).
+BLANK_EMPTY_ROW = dict(
+    BLANK_ROW,
+    id=BLANK_EMPTY_ID,
+    code="uvol_empty",
+    name="Бланк вымышленный пустой",
+    header_html=None,
+    footer_lines=[],
 )
 
 
@@ -185,24 +201,32 @@ def _profile_step(step_order: int, stage_row: dict) -> dict:
     }
 
 
-def _blank_step(blank_id: int, step_order: int, stage_row: dict) -> dict:
-    """Шаг бланка вместе с этапом (формат строки list_blank_steps)."""
-    return {
+def _blank_step(
+    blank_id: int,
+    step_order: int,
+    title: str,
+    executor_kind: str = "ad_group",
+    **kw,
+) -> dict:
+    """Самостоятельный шаг бланка (формат строки list_blank_steps, миграция 0014).
+
+    У шага свой текст (title/stage_lines) и свой исполнитель: people — список
+    логинов согласующих (assignees), ad_group — группа AD, manager_ad —
+    руководитель сотрудника. Этапа у шага нет."""
+    step = {
         "blank_id": blank_id,
-        "stage_id": stage_row["id"],
         "step_order": step_order,
-        "optional_override": None,
-        "require_comment_override": None,
-        "stage_code": stage_row["code"],
-        "title": stage_row["title"],
-        "stage_lines": list(stage_row["stage_lines"]),
-        "owner_kind": stage_row["owner_kind"],
-        "owner_group": stage_row["owner_group"],
-        "optional": stage_row["optional"],
-        "print_assignee": stage_row["print_assignee"],
-        "require_comment": stage_row["require_comment"],
-        "stage_active": True,
+        "title": title,
+        "stage_lines": ["Вымышленная строка шага"],
+        "executor_kind": executor_kind,
+        "assignees": [],
+        "owner_group": None,
+        "optional": False,
+        "require_comment": False,
+        "approval_mode": "sequential",
     }
+    step.update(kw)
+    return step
 
 
 def _steps(order_stages) -> list[dict]:
@@ -218,13 +242,22 @@ class FakeRoutingStore:
         self.profiles = [dict(PROFILE_ROW)]
         self.stages = [dict(row) for row in STAGES]
         self.profile_steps = _steps([STAGE_BUH_ROW, STAGE_BOSS_ROW])
-        self.blanks = [dict(row) for row in (BLANK_ROW, BLANK_LINE_ROW, BLANK_OFF_ROW)]
+        self.blanks = [
+            dict(row)
+            for row in (BLANK_ROW, BLANK_LINE_ROW, BLANK_OFF_ROW, BLANK_EMPTY_ROW)
+        ]
         # Порядок шагов бланка намеренно отличается от профиля: маршрут задаёт
         # бланк, а не профиль службы.
         self.blank_steps = [
-            _blank_step(BLANK_ID, 1, STAGE_BOSS_ROW),
-            _blank_step(BLANK_ID, 2, STAGE_BUH_ROW),
-            _blank_step(BLANK_ID, 3, STAGE_HR_ROW),
+            _blank_step(BLANK_ID, 1, "Руководитель сотрудника", "manager_ad",
+                        stage_lines=[]),
+            _blank_step(BLANK_ID, 2, "Бухгалтерия", "ad_group", owner_group=STEP_GROUP,
+                        stage_lines=["проверить расчёт"]),
+            _blank_step(BLANK_ID, 3, "Отдел кадров", "people",
+                        assignees=[ROSTER_SAM], stage_lines=["оформить прекращение"],
+                        approval_mode="parallel"),
+            _blank_step(BLANK_LINE_ID, 1, "Бухгалтерия", "ad_group",
+                        owner_group=STEP_GROUP),
         ]
         self.cards = {
             EMP_SAM: dict(EMP_CARD),
@@ -281,7 +314,13 @@ class FakeRoutingStore:
     def blank_by_id(self, blank_id: int) -> dict | None:
         self._count("blank_by_id")
         found = next((item for item in self.blanks if item["id"] == blank_id), None)
-        return dict(found) if found is not None else None
+        if found is None:
+            return None
+        row = dict(found)
+        row["step_count"] = len(
+            [s for s in self.blank_steps if s["blank_id"] == blank_id]
+        )
+        return row
 
     def list_blank_steps(self, blank_id: int) -> list[dict]:
         self._count("list_blank_steps")
@@ -500,39 +539,62 @@ def _create(client, headers, **kw):
 # --- Сборка шагов бланка (app.routing.pick_blank_steps) ---
 
 
-def test_pick_blank_steps_order_overrides_and_inactive_stage():
-    """Шаги бланка: порядок по step_order, флаги из override, отключённый этап — вон.
+def test_pick_blank_steps_order_and_own_flags():
+    """Шаги бланка: порядок по step_order, флаги и исполнитель — свои.
 
-    Профиль/служба/причина подбора остаются от базового RoutePick: для выбранного
-    бланка они справочная подсказка."""
+    Этапа у шага нет (нет stage_active/stage_id), поэтому в маршрут попадает
+    каждый переданный шаг; профиль/служба/причина подбора остаются от базового
+    RoutePick — для выбранного бланка они справочная подсказка."""
     base = pick_profile(FAKE_SERVICE, [dict(SERVICE_ROW)], [dict(PROFILE_ROW)], [])
     assert base.profile is not None
-    # Переопределение бланка (optional_override) важнее признака этапа в обе
-    # стороны: этап buh необязателен=False, этап hr необязателен=True.
     steps = [
         # Порядок задаётся не порядком строк, а step_order.
-        dict(_blank_step(BLANK_ID, 2, STAGE_HR_ROW), optional_override=False),
-        dict(_blank_step(BLANK_ID, 1, STAGE_BUH_ROW), optional_override=True),
-        dict(_blank_step(BLANK_ID, 4, STAGE_BOSS_ROW), stage_active=False),
+        _blank_step(BLANK_ID, 2, "Отдел кадров", "people",
+                    assignees=[ROSTER_SAM], optional=True),
+        _blank_step(BLANK_ID, 1, "Бухгалтерия", "ad_group", owner_group=STEP_GROUP),
     ]
     picked = pick_blank_steps(base, steps)
-    assert [str(stage.get("stage_code")) for stage, _ in picked.stages] == ["buh", "hr"]
-    assert [optional for _, optional in picked.stages] == [True, False]
+    assert [stage.get("title") for stage, _ in picked.stages] == [
+        "Бухгалтерия",
+        "Отдел кадров",
+    ]
+    assert [stage.get("executor_kind") for stage, _ in picked.stages] == [
+        "ad_group",
+        "people",
+    ]
+    assert [optional for _, optional in picked.stages] == [False, True]
+    assert picked.stages[1][0]["assignees"] == [ROSTER_SAM]
     assert picked.profile["id"] == PROFILE_ID
     assert picked.service["id"] == SERVICE_ID
     assert picked.reason == base.reason
 
 
+def test_pick_blank_steps_keeps_stage_lines_and_mode():
+    """Текст шага и режим из строки бланка доезжают до маршрута как есть."""
+    base = pick_profile(FAKE_SERVICE, [dict(SERVICE_ROW)], [dict(PROFILE_ROW)], [])
+    steps = [
+        _blank_step(BLANK_ID, 1, "Отдел кадров", "people",
+                    assignees=[ROSTER_SAM], stage_lines=["оформить", "передать"],
+                    approval_mode="parallel", require_comment=True),
+    ]
+    picked = pick_blank_steps(base, steps)
+    stage = picked.stages[0][0]
+    assert stage["stage_lines"] == ["оформить", "передать"]
+    assert stage["approval_mode"] == "parallel"
+    assert stage["require_comment"] is True
+
+
 # --- Список бланков для селекта ОК ---
 
 
-def test_route_blanks_lists_active_with_autopick_off(
+def test_route_blanks_lists_active_with_steps_and_autopick_off(
     client, hr, noauth_headers, settings_override, settings_store, routing_store
 ):
-    """Доступны только активные бланки; autopick выключен, пока ключа нет в settings.
+    """Доступны только активные бланки С ШАГАМИ; autopick выключен, пока ключа нет.
 
     Поля строки — то, что нужно форме: код, название, описание, макет, число
-    шагов. Отключённый бланк в выборку не попадает (выбрать его нельзя)."""
+    шагов. Отключённый и пустой бланки в выборку не попадают: ни отключённый
+    выбрать нельзя, ни пустой (маршрут заявке нечем задать)."""
     response = client.get("/requests/route/blanks", headers=hr)
     assert response.status_code == 200, response.text
     body = response.json()
@@ -542,6 +604,7 @@ def test_route_blanks_lists_active_with_autopick_off(
     assert body[0]["description"] == BLANK_ROW["description"]
     assert body[0]["layout"] == "office" and body[1]["layout"] == "line"
     assert body[0]["step_count"] == BLANK_STEP_COUNT
+    assert body[1]["step_count"] == 1
     assert [item["autopick"] for item in body] == [False, False]
     # Список бланков — только для создания заявки (роль как у POST /requests).
     assert client.get("/requests/route/blanks", headers=noauth_headers).status_code == 401
@@ -583,12 +646,19 @@ def test_preview_with_blank_uses_blank_steps_and_owners(
         "step_count": BLANK_STEP_COUNT,
     }
     stages = body["stages"]
-    assert [stage["code"] for stage in stages] == ["boss", "buh", "hr"]
-    assert [stage["stage_id"] for stage in stages] == [STAGE_BOSS, STAGE_BUH, STAGE_HR]
+    # Шаг бланка самостоятельный: своего этапа у него нет (code/stage_id пустые),
+    # зато есть название, текст и вид исполнителя.
+    assert [stage["title"] for stage in stages] == [
+        "Руководитель сотрудника",
+        "Бухгалтерия",
+        "Отдел кадров",
+    ]
+    assert [stage["code"] for stage in stages] == [None, None, None]
+    assert [stage["stage_id"] for stage in stages] == [None, None, None]
     assert [stage["owner_kind"] for stage in stages] == [
         "manager_ad",
         "ad_group",
-        "stage_roster",
+        "people",
     ]
     # Ответственные по тому же резолву, что и у подбора по профилю.
     assert stages[0]["owner_name"] == MANAGER_FIO and stages[0]["blocked_reason"] is None
@@ -606,7 +676,7 @@ def test_preview_with_blank_uses_blank_steps_and_owners(
 def test_preview_with_blank_uses_manager_override(
     client, hr, settings_override, settings_store, routing_store, ad_reader
 ):
-    """Ручная замена руководителя применяется к этапу manager_ad выбранного бланка."""
+    """Ручная замена руководителя применяется к шагу manager_ad выбранного бланка."""
     response = client.post(
         "/requests/route/preview",
         json=_preview_body(blank_id=BLANK_ID, manager=MANAGER_SAM),
@@ -614,24 +684,48 @@ def test_preview_with_blank_uses_manager_override(
     )
     assert response.status_code == 200, response.text
     boss = response.json()["stages"][0]
-    assert boss["code"] == "boss" and boss["blocked_reason"] is None
+    assert boss["title"] == "Руководитель сотрудника" and boss["blocked_reason"] is None
 
 
 def test_preview_without_blank_and_autopick_off_422_with_list(
     client, hr, settings_override, settings_store, routing_store, ad_reader
 ):
-    """Бланк не выбран и автоподстановка выключена — 422 со списком бланков."""
+    """Бланк не выбран, автоподстановка выключена — 422 с вариантами и списком.
+
+    Предпросмотр отказывает наравне с созданием (см.
+    test_create_and_preview_without_blank_agree): молчаливый маршрут в
+    предпросмотре обещал бы то, что создание не примет. Текст перечисляет оба
+    варианта — выбрать бланк или задать маршрут вручную; отключённый бланк в
+    списке не предлагается."""
     response = client.post("/requests/route/preview", json=_preview_body(), headers=hr)
     assert response.status_code == 422, response.text
     detail = response.json()["detail"]
     assert "Выберите бланк" in detail
     assert BLANK_NAME in detail and BLANK_LINE_ROW["name"] in detail
-    # Отключённый бланк в списке для выбора не предлагается.
     assert BLANK_OFF_ROW["name"] not in detail
     # Явное "off" ведёт себя так же, как отсутствие ключа.
     settings_store.values["blank_autopick"] = json.dumps("off")
     again = client.post("/requests/route/preview", json=_preview_body(), headers=hr)
-    assert again.status_code == 422 and "Выберите бланк" in again.json()["detail"]
+    assert again.status_code == 422
+    assert "Выберите бланк" in again.json()["detail"]
+
+
+def test_create_and_preview_without_blank_agree(
+    client, hr, settings_override, settings_store, requests_store, routing_store, ad_reader
+):
+    """Предпросмотр и создание без бланка отвечают одинаково — кодом и текстом.
+
+    Расхождение (200 с подсказкой в предпросмотре против 422 при отправке) путало
+    ОК: он видел готовый маршрут и упирался в отказ при создании."""
+    preview = client.post("/requests/route/preview", json=_preview_body(), headers=hr)
+    created = _create(client, hr, blank_id=None, route_mode="auto")
+    assert preview.status_code == created.status_code == 422, (
+        preview.text,
+        created.text,
+    )
+    assert preview.json()["detail"] == created.json()["detail"]
+    # Ни то, ни другое ничего не записало.
+    assert not requests_store.list_all()
 
 
 def test_preview_without_blank_autopick_on_picks_profile_by_service(
@@ -717,7 +811,11 @@ def test_preview_blank_keeps_link_state_and_notice(
     assert body["link_candidate"]["sam"] == CANDIDATE_SAM
     assert body["notice"] and "Связь 1С↔AD не оформлена" in body["notice"]
     assert body["blank_source"] == "chosen"
-    assert [stage["code"] for stage in body["stages"]] == ["boss", "buh", "hr"]
+    assert [stage["title"] for stage in body["stages"]] == [
+        "Руководитель сотрудника",
+        "Бухгалтерия",
+        "Отдел кадров",
+    ]
 
 
 # --- Создание заявки по выбранному бланку ---
@@ -726,9 +824,11 @@ def test_preview_blank_keeps_link_state_and_notice(
 def test_create_auto_with_blank_writes_snapshot(
     client, hr, settings_override, requests_store, routing_store, ad_reader
 ):
-    """auto + blank_id: шаги бланка в заявке и снимок blank_* (name/version/layout).
+    """auto + blank_id: свои шаги бланка в заявке и снимок blank_* (name/version/
+    layout/шапка/подвал).
 
-    Права/резолвы те же: группа-владелец, руководитель из AD, состав этапа."""
+    Права/резолвы прежние: группа-владелец, руководитель из AD, персональные
+    согласующие шага."""
     created = _create(client, hr, blank_id=BLANK_ID)
     assert created.status_code == 201, created.text
     body = created.json()
@@ -743,18 +843,65 @@ def test_create_auto_with_blank_writes_snapshot(
     assert stored.blank_name == BLANK_NAME
     assert stored.blank_version == BLANK_VERSION
     assert stored.blank_layout == "office"
-    # Шаги — состав бланка (порядок бланка, не профиля), снимок этапа в шаге.
-    assert [step.stage_code for step in stored.steps] == ["boss", "buh", "hr"]
-    assert [step.stage_id for step in stored.steps] == [STAGE_BOSS, STAGE_BUH, STAGE_HR]
+    # Шаги — свои шаги бланка (порядок бланка, не профиля), этапа у них нет.
+    assert [step.stage_title for step in stored.steps] == [
+        "Руководитель сотрудника",
+        "Бухгалтерия",
+        "Отдел кадров",
+    ]
+    assert [step.stage_id for step in stored.steps] == [None, None, None]
     assert stored.steps[0].owner_kind == "manager_ad"
     assert stored.steps[0].resolver == "ad_direct_manager"
     assert stored.steps[0].assignee == MANAGER_SAM
     assert stored.steps[1].owner_group == STEP_GROUP
     assert stored.steps[1].resolver == "by_group"
     assert stored.steps[1].stage_lines == ["проверить расчёт"]
-    assert stored.steps[2].stage_title == STAGE_HR_ROW["title"]
+    # Персональный шаг: согласующие и режим — из шага бланка (people/parallel).
+    assert stored.steps[2].owner_kind == "people"
+    assert stored.steps[2].resolver == "by_user"
+    assert stored.steps[2].assignees == [ROSTER_SAM]
+    assert stored.steps[2].assignee == ROSTER_SAM
+    assert stored.steps[2].approval_mode == "parallel"
     # Снимок шага в ответе — тот же, что в заявке.
-    assert [step["stage_code"] for step in body["steps"]] == ["boss", "buh", "hr"]
+    assert [step["stage_title"] for step in body["steps"]] == [
+        "Руководитель сотрудника",
+        "Бухгалтерия",
+        "Отдел кадров",
+    ]
+
+
+def test_create_auto_with_blank_snapshots_header_and_footer(
+    client, hr, settings_override, requests_store, routing_store, ad_reader
+):
+    """Шапка и подвал бланка — снимок на момент выдачи (печать идёт по нему).
+
+    Правка справочника после выдачи заявку не меняет: как blank_name/blank_version."""
+    created = _create(client, hr, blank_id=BLANK_ID)
+    assert created.status_code == 201, created.text
+    body = created.json()
+    assert body["blank_header_html"] == BLANK_HEADER
+    assert body["blank_footer_lines"] == BLANK_FOOTER
+    stored = requests_store.get(body["id"])
+    assert stored.blank_header_html == BLANK_HEADER
+    assert stored.blank_footer_lines == BLANK_FOOTER
+    # Правка справочника не меняет выданную заявку.
+    blank = next(item for item in routing_store.blanks if item["id"] == BLANK_ID)
+    blank["header_html"] = "<p>Другая шапка</p>"
+    blank["footer_lines"] = ["Другой подвал"]
+    again = requests_store.get(body["id"])
+    assert again.blank_header_html == BLANK_HEADER
+    assert again.blank_footer_lines == BLANK_FOOTER
+
+
+def test_create_auto_with_blank_without_header_keeps_empty_snapshot(
+    client, hr, settings_override, requests_store, routing_store, ad_reader
+):
+    """Бланк без шапки/подвала — снимок пустой (печать отдаст прежнее поведение)."""
+    created = _create(client, hr, blank_id=BLANK_LINE_ID)
+    assert created.status_code == 201, created.text
+    body = created.json()
+    assert body["blank_header_html"] is None
+    assert body["blank_footer_lines"] == []
 
 
 def test_create_auto_with_blank_and_manager_override(
@@ -791,6 +938,41 @@ def test_create_auto_with_unknown_or_inactive_blank_422(
     assert inactive.status_code == 422 and "отключён" in inactive.json()["detail"]
 
 
+def test_create_auto_with_blank_without_steps_422(
+    client, hr, settings_override, routing_store, ad_reader
+):
+    """Бланк без шагов выбрать нельзя: маршрут заявке нечем задать — 422, не 500."""
+    response = _create(client, hr, blank_id=BLANK_EMPTY_ID)
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert "без шагов" in detail
+    assert BLANK_EMPTY_ROW["name"] in detail and BLANK_NAME in detail
+
+
+def test_create_auto_without_blank_and_autopick_off_422_with_variants(
+    client, hr, settings_override, settings_store, requests_store, routing_store, ad_reader
+):
+    """Бланк не выбран, автоподстановка выключена — 422 с обоими вариантами.
+
+    Раньше был 500/тихий отказ: теперь ОК видит, что выбрать — бланк или ручной
+    маршрут (route_mode=custom с blocks/steps)."""
+    response = _create(client, hr)
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert "Выберите бланк" in detail
+    assert "маршрут вручную" in detail
+    assert BLANK_NAME in detail
+    assert not requests_store.list_all()
+    # Ручной маршрут без бланка — рабочий путь (контракт п.1).
+    manual = _create(
+        client,
+        hr,
+        route_mode="custom",
+        steps=[{"owner_group": STEP_GROUP, "resolver": "by_group"}],
+    )
+    assert manual.status_code == 201, manual.text
+
+
 def test_create_custom_without_blank_still_works(
     client, hr, settings_override, requests_store, routing_store, ad_reader
 ):
@@ -811,3 +993,168 @@ def test_create_custom_without_blank_still_works(
     assert stored.route_origin == "custom"
     assert stored.blank_id is None and stored.blank_name is None
     assert stored.steps[0].owner_group == STEP_GROUP
+
+
+# --- Снятие шага бланка по номеру шага (dismissed_step_orders) ---
+# У шага бланка нет кода этапа, поэтому снять его кодом (dismissed_stages)
+# нельзя — сотрудник ОК снимает шаг по его номеру в составе бланка
+# (решение человека 2026-10-08).
+
+
+def _blank_optional_steps(routing_store, blank_id: int, orders: list[int]) -> None:
+    """Пометить шаги бланка необязательными (в тестовом справочнике optional=False)."""
+    for step in routing_store.blank_steps:
+        if step["blank_id"] == blank_id and step["step_order"] in orders:
+            step["optional"] = True
+
+
+def test_preview_blank_step_optional_flag_and_order(
+    client, hr, settings_override, settings_store, routing_store, ad_reader
+):
+    """Предпросмотр отдаёт optional и номер шага бланка (для снятия по номеру).
+
+    optional=false у шага по умолчанию — его снять нельзя; optional=true —
+    можно, и предпросмотр показывает, какой это номер."""
+    _blank_optional_steps(routing_store, BLANK_ID, [2])
+    response = client.post(
+        "/requests/route/preview", json=_preview_body(blank_id=BLANK_ID), headers=hr
+    )
+    assert response.status_code == 200, response.text
+    stages = response.json()["stages"]
+    assert [stage["step_order"] for stage in stages] == [1, 2, 3]
+    assert [stage["optional"] for stage in stages] == [False, True, False]
+
+
+def test_preview_dismiss_optional_blank_step_by_order(
+    client, hr, settings_override, settings_store, routing_store, ad_reader, requests_store
+):
+    """Необязательный шаг бланка снимается по номеру — предпросмотр и создание.
+
+    Предпросмотр ничего не сохраняет (как и прежде), создание отдаёт маршрут
+    без снятого шага."""
+    _blank_optional_steps(routing_store, BLANK_ID, [2])
+    preview = client.post(
+        "/requests/route/preview",
+        json=_preview_body(blank_id=BLANK_ID, dismissed_step_orders=[2]),
+        headers=hr,
+    )
+    assert preview.status_code == 200, preview.text
+    body = preview.json()
+    assert [stage["title"] for stage in body["stages"]] == [
+        "Руководитель сотрудника",
+        "Отдел кадров",
+    ]
+    assert "DismissedStep=2" in body["reason"]
+    assert not requests_store.list_all()
+
+    created = _create(client, hr, blank_id=BLANK_ID, dismissed_step_orders=[2])
+    assert created.status_code == 201, created.text
+    assert [step["stage_title"] for step in created.json()["steps"]] == [
+        "Руководитель сотрудника",
+        "Отдел кадров",
+    ]
+
+
+def test_dismiss_blank_step_by_order_in_create_and_snapshot(
+    client, hr, settings_override, requests_store, routing_store, ad_reader
+):
+    """Снятие по номеру в создании заявки; optional остаётся в снимке шага.
+
+    Снимок нужен фронту и печати: правка справочника уже выданную заявку
+    не меняет (миграция 0015)."""
+    _blank_optional_steps(routing_store, BLANK_ID, [2])
+    created = _create(client, hr, blank_id=BLANK_ID, dismissed_step_orders=[2])
+    assert created.status_code == 201, created.text
+    body = created.json()
+    assert [step["stage_title"] for step in body["steps"]] == [
+        "Руководитель сотрудника",
+        "Отдел кадров",
+    ]
+    stored = requests_store.get(body["id"])
+    assert [step.stage_title for step in stored.steps] == [
+        "Руководитель сотрудника",
+        "Отдел кадров",
+    ]
+    # Снимок optional по шагам: снятого нет, остальные сохранили признак.
+    assert [step.optional for step in stored.steps] == [False, False]
+    assert [step["optional"] for step in body["steps"]] == [False, False]
+
+
+def test_blank_step_snapshot_keeps_optional_true(
+    client, hr, settings_override, requests_store, routing_store, ad_reader
+):
+    """Необязательный шаг, который остался в маршруте, хранит optional=True."""
+    _blank_optional_steps(routing_store, BLANK_ID, [3])
+    created = _create(client, hr, blank_id=BLANK_ID)
+    assert created.status_code == 201, created.text
+    stored = requests_store.get(created.json()["id"])
+    assert [step.optional for step in stored.steps] == [False, False, True]
+
+
+def test_dismiss_required_blank_step_422(
+    client, hr, settings_override, requests_store, routing_store, ad_reader
+):
+    """Обязательный шаг бланка снять нельзя — 422 с понятным текстом."""
+    response = client.post(
+        "/requests/route/preview",
+        json=_preview_body(blank_id=BLANK_ID, dismissed_step_orders=[1]),
+        headers=hr,
+    )
+    assert response.status_code == 422, response.text
+    assert "обязательный" in response.json()["detail"]
+
+    created = _create(client, hr, blank_id=BLANK_ID, dismissed_step_orders=[1])
+    assert created.status_code == 422, created.text
+    assert not requests_store.list_all()
+
+
+def test_dismiss_unknown_step_order_422(
+    client, hr, settings_override, requests_store, routing_store, ad_reader
+):
+    """Номера вне состава шагов бланка — 422 с перечнем доступных номеров."""
+    response = client.post(
+        "/requests/route/preview",
+        json=_preview_body(blank_id=BLANK_ID, dismissed_step_orders=[9]),
+        headers=hr,
+    )
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert "9" in detail and "1, 2, 3" in detail
+
+    created = _create(client, hr, blank_id=BLANK_ID, dismissed_step_orders=[9])
+    assert created.status_code == 422, created.text
+    assert not requests_store.list_all()
+
+
+def test_dismiss_all_blank_steps_422(
+    client, hr, settings_override, requests_store, routing_store, ad_reader
+):
+    """Снять все шаги нельзя: заявке нечем задавать маршрут — 422."""
+    _blank_optional_steps(routing_store, BLANK_ID, [1, 2, 3])
+    created = _create(client, hr, blank_id=BLANK_ID, dismissed_step_orders=[1, 2, 3])
+    assert created.status_code == 422, created.text
+    assert "все шаги" in created.json()["detail"]
+    assert not requests_store.list_all()
+
+
+def test_dismissed_stages_still_work_for_profile_steps(
+    client, hr, settings_override, settings_store, requests_store, routing_store, ad_reader
+):
+    """Снятие этапов профиля по кодам не сломано новым полем.
+
+    Бланк не выбран (blank_autopick=on — маршрут по службе): маршрут из этапов
+    справочника, у них есть коды, номера шагов бланка нет."""
+    settings_store.values["blank_autopick"] = json.dumps("on")
+    preview = client.post(
+        "/requests/route/preview",
+        json=_preview_body(dismissed_stages=["buh"]),
+        headers=hr,
+    )
+    assert preview.status_code == 200, preview.text
+    stages = preview.json()["stages"]
+    assert [stage["code"] for stage in stages] == ["boss"]
+    assert [stage["step_order"] for stage in stages] == [None]
+
+    created = _create(client, hr, dismissed_stages=["buh"])
+    assert created.status_code == 201, created.text
+    assert [step["stage_code"] for step in created.json()["steps"]] == ["boss"]

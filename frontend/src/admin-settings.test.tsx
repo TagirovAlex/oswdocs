@@ -3,7 +3,7 @@
 // модули settings-client и requests-client мокаются, сценарии — загрузка полного
 // объекта, сохранение, добавление/удаление предприятий и групп, рендер шаблонов,
 // справочник бланков с визуальным редактором текста этапа, успех/ошибка/403.
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AdminSettings } from "./admin-settings";
 import { ApiHttpError } from "./auth-client";
@@ -13,10 +13,10 @@ import {
   getBlankSteps,
   getBlanks,
   getDocTypes,
-  getRoutingCatalogs,
+  getStepGroups,
+  searchAd,
   setBlankSteps,
   updateBlank,
-  updateRoutingStage,
 } from "./requests-client";
 import {
   deleteBackup,
@@ -61,8 +61,8 @@ vi.mock("./requests-client", async (importOriginal) => {
     updateBlank: vi.fn(),
     getBlankSteps: vi.fn(),
     setBlankSteps: vi.fn(),
-    getRoutingCatalogs: vi.fn(),
-    updateRoutingStage: vi.fn(),
+    getStepGroups: vi.fn(),
+    searchAd: vi.fn(),
     getDocTypes: vi.fn(),
   };
 });
@@ -82,15 +82,7 @@ const settings: SettingsData = {
   require_comment: true,
   enterprises: [{ code: "OOO_ALFA", name: "ООО Альфа" }],
   allowed_ad_groups: ["SED_Vlastelcy", "SED_HR"],
-  position_to_category: { "Руководитель": "Руководители" },
   position_escalation: { "Руководитель": 48 },
-  templates: [
-    {
-      service: "Бухгалтерия",
-      category: "Увольнение",
-      steps: [{ owner_group: "SED_HR" }, { owner_group: "SED_Vlastelcy", require_comment: true }],
-    },
-  ],
   mail_templates: [{ code: "assigned", subject: "Заявка {{ request_id }}", body_html: "<html>{{ fio }}</html>" }],
   onec_bases: [],
   onec_enterprises_synced_at: "2026-09-30T14:00:00+00:00",
@@ -125,9 +117,7 @@ const contentOnly: SettingsData = {
   require_comment: true,
   enterprises: [{ code: "OOO_ALFA", name: "ООО Альфа" }],
   allowed_ad_groups: ["SED_HR"],
-  position_to_category: { "Руководитель": "Руководители" },
   position_escalation: {},
-  templates: [],
   mail_templates: [],
   onec_bases: [],
   onec_enterprises_synced_at: null,
@@ -139,7 +129,8 @@ const contentOnly: SettingsData = {
 };
 
 // Вымышленные бланки справочника (GET /api/settings/routing/blanks) и состав
-// шагов одного из них (GET .../blanks/{id}/steps).
+// СВОИХ шагов одного из них (GET .../blanks/{id}/steps): у шага нет этапа из
+// справочника, есть свой текст и свой исполнитель.
 const blanks = [
   {
     id: 10,
@@ -151,6 +142,8 @@ const blanks = [
     active: true,
     version: 3,
     step_count: 2,
+    header_html: "<p>Заявка на увольнение {fio}</p>",
+    footer_lines: ["Подпись: {manager}"],
   },
   {
     id: 11,
@@ -162,77 +155,51 @@ const blanks = [
     active: false,
     version: 1,
     step_count: 0,
+    header_html: null,
+    footer_lines: [],
   },
 ];
 
 const blankSteps: BlankStepRow[] = [
   {
     blank_id: 10,
-    stage_id: 1,
     step_order: 1,
-    optional_override: null,
-    require_comment_override: null,
-    approval_mode: "parallel",
-    stage_code: "rukovoditel",
     title: "Непосредственный руководитель",
     stage_lines: ["Ознакомить с приказом"],
-    owner_kind: "manager_ad",
+    executor_kind: "manager_ad",
+    assignees: [],
     owner_group: null,
+    approval_mode: "parallel",
     optional: false,
-    print_assignee: true,
     require_comment: false,
-    stage_active: true,
   },
   {
     blank_id: 10,
-    stage_id: 2,
     step_order: 2,
-    optional_override: true,
-    require_comment_override: true,
-    approval_mode: "sequential",
-    stage_code: "buhgalteriya",
     title: "Бухгалтерия",
     stage_lines: [],
-    owner_kind: "ad_group",
+    executor_kind: "ad_group",
+    assignees: [],
     owner_group: "SED_STEP_BUH",
+    approval_mode: "sequential",
     optional: true,
-    print_assignee: false,
-    require_comment: false,
-    stage_active: true,
+    require_comment: true,
   },
 ];
 
-// Справочник этапов для добавления в состав бланка (только активные).
-const catalogs = {
-  stages: [
-    {
-      id: 1,
-      code: "rukovoditel",
-      title: "Непосредственный руководитель",
-      owner_kind: "manager_ad",
-      owner_group: null,
-      optional: false,
-      active: true,
-    },
-    {
-      id: 2,
-      code: "buhgalteriya",
-      title: "Бухгалтерия",
-      owner_kind: "ad_group",
-      owner_group: "SED_STEP_BUH",
-      optional: true,
-      active: true,
-    },
-    {
-      id: 3,
-      code: "sluzhba_ok",
-      title: "Служба ОК",
-      owner_kind: "ad_group",
-      owner_group: "SED_STEP_OK",
-      optional: true,
-      active: true,
-    },
-  ],
+// Группы-владельцы шагов из settings (GET /api/step-groups) — значение owner_group.
+const stepGroups = [
+  { id: "SED_STEP_BUH", name: "Бухгалтерия (вымышленная группа)" },
+  { id: "SED_STEP_OK", name: "Отдел кадров (вымышленная группа)" },
+];
+
+// Кандидаты AD для подсказки согласующих (GET /api/ad/search).
+const adCandidate = {
+  sam: "petrov.pp",
+  display_name: "Петров Пётр Петрович",
+  department: "Бухгалтерия",
+  title: "Бухгалтер",
+  mail: "petrov.pp@example.test",
 };
 
 beforeEach(() => {
@@ -253,18 +220,19 @@ beforeEach(() => {
   vi.mocked(updateBlank).mockReset();
   vi.mocked(getBlankSteps).mockReset();
   vi.mocked(setBlankSteps).mockReset();
-  vi.mocked(getRoutingCatalogs).mockReset();
-  vi.mocked(updateRoutingStage).mockReset();
+  vi.mocked(getStepGroups).mockReset();
+  vi.mocked(searchAd).mockReset();
   vi.mocked(getDocTypes).mockReset();
   // Виды документов (doc_types) — пустой справочник по умолчанию.
   vi.mocked(getDocTypes).mockResolvedValue([
     { code: "uvol", name: "Увольнение", is_active: true, sort_order: 1 },
   ]);
-  // Справочники бланков по умолчанию: один бланк с двумя шагами, этапы и вид
-  // документа (тесты без бланков переопределяют getBlanks пустым списком).
+  // Справочники бланков по умолчанию: бланк с двумя своими шагами, группы шагов
+  // и вид документа (тесты без бланков переопределяют getBlanks пустым списком).
   vi.mocked(getBlanks).mockResolvedValue(blanks);
   vi.mocked(getBlankSteps).mockResolvedValue(blankSteps);
-  vi.mocked(getRoutingCatalogs).mockResolvedValue(catalogs);
+  vi.mocked(getStepGroups).mockResolvedValue(stepGroups);
+  vi.mocked(searchAd).mockResolvedValue([adCandidate]);
 });
 
 describe("AdminSettings", () => {
@@ -297,26 +265,58 @@ describe("AdminSettings", () => {
     expect(screen.getByLabelText("ID группы 1")).toHaveValue("SED_Vlastelcy");
     expect(screen.getByLabelText("Наименование группы 1")).toHaveValue("SED_Vlastelcy");
     expect(screen.getByLabelText("ID группы 2")).toHaveValue("SED_HR");
-    expect(screen.getByLabelText("Должность 1")).toHaveValue("Руководитель");
-    expect(screen.getByLabelText("Категория 1")).toHaveValue("Руководители");
   });
 
-  // Рендер шаблонов: служба, категория и шаги owner_group (вкладка «Шаблоны»).
-  it("рендерит шаблоны маршрутов и добавляет шаг", async () => {
+  // Легаси-вкладка «Шаблоны» (ключи templates/position_to_category) удалена:
+  // в навигации её нет ни админу, ни руководителю ОК.
+  it("вкладки «Шаблоны» нет в навигации", async () => {
     vi.mocked(getSettings).mockResolvedValue(settings);
+    vi.mocked(getSettingsContent).mockResolvedValue(contentOnly);
 
     render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Бланки" })).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Шаблоны" })).not.toBeInTheDocument();
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "Шаблоны" })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Шаблоны" }));
-    await waitFor(() => expect(screen.getByLabelText("Служба шаблона 1")).toBeInTheDocument());
-    expect(screen.getByLabelText("Служба шаблона 1")).toHaveValue("Бухгалтерия");
-    expect(screen.getByLabelText("Категория шаблона 1")).toHaveValue("Увольнение");
-    expect(screen.getByLabelText("Владелец шага 1.1")).toHaveValue("SED_HR");
-    expect(screen.getByLabelText("Владелец шага 1.2")).toHaveValue("SED_Vlastelcy");
+    cleanup();
+    render(<AdminSettings role="hr_admin" />);
+    await waitFor(() => expect(screen.getByLabelText("TTL отметок")).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Шаблоны" })).not.toBeInTheDocument();
+  });
 
-    fireEvent.click(screen.getByText("Добавить шаг"));
-    await waitFor(() => expect(screen.getByLabelText("Владелец шага 1.3")).toBeInTheDocument());
+  // Вкладка «Письма» (бывшие «Шаблоны»): редактор писем на месте, маршрутных
+  // шаблонов больше нет.
+  it("вкладка «Письма»: редактор писем без шаблонов маршрутов", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+    vi.mocked(saveSettings).mockImplementation(async (data: SettingsData) => data);
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Письма" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Письма" }));
+    await waitFor(() => expect(screen.getByText("Письма (mail_templates)")).toBeInTheDocument());
+    expect(screen.queryByText("Шаблоны маршрутов")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Служба шаблона 1")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Код письма 1")).toHaveValue("assigned");
+
+    fireEvent.click(screen.getByText("Добавить письмо"));
+    fireEvent.change(screen.getByLabelText("Код письма 2"), { target: { value: "reminder" } });
+    fireEvent.change(screen.getByLabelText("Тема письма 2"), { target: { value: "Напоминание" } });
+    fireEvent.change(screen.getByLabelText("HTML письма 2"), { target: { value: "<html>напоминание</html>" } });
+    fireEvent.click(screen.getByText("Сохранить"));
+
+    await waitFor(() =>
+      expect(saveSettings).toHaveBeenCalledWith(
+        expect.objectContaining({
+          mail_templates: [
+            { code: "assigned", subject: "Заявка {{ request_id }}", body_html: "<html>{{ fio }}</html>" },
+            { code: "reminder", subject: "Напоминание", body_html: "<html>напоминание</html>" },
+          ],
+        }),
+      ),
+    );
+    // Мёртвые ключи настроек в PUT не уходят.
+    const sent = vi.mocked(saveSettings).mock.calls[0][0] as unknown as Record<string, unknown>;
+    expect(sent).not.toHaveProperty("templates");
+    expect(sent).not.toHaveProperty("position_to_category");
   });
 
   // Добавление предприятия и сохранение: PUT уходит с новыми данными.
@@ -562,21 +562,22 @@ describe("AdminSettings", () => {
     expect(syncEnterprises).toHaveBeenCalledTimes(1);
   });
 
-  // Админ: на вкладке «Шаблоны» редактор маршрутов и писем; бланков бегунков
-  // (doc_templates) в UI больше нет — печать собирается из данных бланка.
-  it("админ правит шаблоны маршрутов и письма, бланков бегунков нет", async () => {
+  // Админ: на вкладке «Письма» только редактор писем; бланков бегунков
+  // (doc_templates) и шаблонов маршрутов в UI больше нет — печать собирается из
+  // данных бланка, маршрут задаёт бланк или сотрудник ОК вручную.
+  it("админ правит письма, бланков бегунков и шаблонов маршрутов нет", async () => {
     vi.mocked(getSettings).mockResolvedValue(settings);
     vi.mocked(saveSettings).mockImplementation(async (data) => data);
 
     render(<AdminSettings role="admin" />);
-    await waitFor(() => expect(screen.getByRole("button", { name: "Шаблоны" })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Шаблоны" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Письма" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Письма" }));
     await waitFor(() => expect(screen.getByText("Письма (mail_templates)")).toBeInTheDocument());
-    // Редактор бланков бегунков и наборов должностей удалён.
+    // Редактор бланков бегунков, наборов должностей и шаблонов маршрутов удалены.
     expect(screen.queryByText("Бланки бегунков (doc_templates)")).not.toBeInTheDocument();
     expect(screen.queryByText("Наборы должностей (для бланков)")).not.toBeInTheDocument();
-    // Существующие шаблон маршрута и письмо загружены из настроек.
-    expect(screen.getByLabelText("Служба шаблона 1")).toHaveValue("Бухгалтерия");
+    expect(screen.queryByText("Шаблоны маршрутов")).not.toBeInTheDocument();
+    // Существующее письмо загружено из настроек.
     expect(screen.getByLabelText("Код письма 1")).toHaveValue("assigned");
 
     fireEvent.click(screen.getByText("Добавить письмо"));
@@ -600,24 +601,22 @@ describe("AdminSettings", () => {
     const sent = vi.mocked(saveSettings).mock.calls[0][0] as unknown as Record<string, unknown>;
     expect(sent).not.toHaveProperty("doc_templates");
     expect(sent).not.toHaveProperty("position_sets");
+    expect(sent).not.toHaveProperty("templates");
+    expect(sent).not.toHaveProperty("position_to_category");
   });
 
-  // Руководитель ОК: редакторы шаблонов/писем на «Шаблонах», сохранение через content.
-  it("руководитель ОК редактирует шаблоны/письма и сохраняет через content", async () => {
+  // Руководитель ОК: редактор писем на «Письмах», сохранение через content.
+  it("руководитель ОК редактирует письма и сохраняет через content", async () => {
     vi.mocked(getSettingsContent).mockResolvedValue(contentOnly);
     vi.mocked(saveSettingsContent).mockImplementation(async (data) => data);
 
     render(<AdminSettings role="hr_admin" />);
-    await waitFor(() => expect(screen.getByRole("button", { name: "Шаблоны" })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Шаблоны" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Письма" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Письма" }));
     await waitFor(() => expect(screen.getByText("Письма (mail_templates)")).toBeInTheDocument());
     // Редактор бланков бегунков убран и у руководителя ОК.
     expect(screen.queryByText("Бланки бегунков (doc_templates)")).not.toBeInTheDocument();
-    // contentOnly: шаблонов/писем нет — редакторы пустые, но доступны.
-
-    fireEvent.click(screen.getByText("Добавить шаблон"));
-    fireEvent.change(screen.getByLabelText("Служба шаблона 1"), { target: { value: "Служба" } });
-    fireEvent.change(screen.getByLabelText("Категория шаблона 1"), { target: { value: "Увольнение" } });
+    // contentOnly: писем нет — редактор пустой, но доступен.
 
     fireEvent.click(screen.getByText("Добавить письмо"));
     fireEvent.change(screen.getByLabelText("Код письма 1"), { target: { value: "assigned" } });
@@ -629,11 +628,14 @@ describe("AdminSettings", () => {
     await waitFor(() =>
       expect(saveSettingsContent).toHaveBeenCalledWith(
         expect.objectContaining({
-          templates: [{ service: "Служба", category: "Увольнение", steps: [] }],
           mail_templates: [{ code: "assigned", subject: "Заявка", body_html: "<html>заявка</html>" }],
         }),
       ),
     );
+    // Легаси-ключи настроек ушли с бэкенда — в content их нет.
+    const sent = vi.mocked(saveSettingsContent).mock.calls[0][0] as unknown as Record<string, unknown>;
+    expect(sent).not.toHaveProperty("templates");
+    expect(sent).not.toHaveProperty("position_to_category");
     expect(saveSettings).not.toHaveBeenCalled();
   });
 
@@ -799,7 +801,7 @@ describe("AdminSettings", () => {
     vi.mocked(getSettingsContent).mockResolvedValue(contentOnly);
 
     render(<AdminSettings role="hr_admin" />);
-    await waitFor(() => expect(screen.getByRole("button", { name: "Шаблоны" })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Письма" })).toBeInTheDocument());
     expect(screen.queryByRole("button", { name: "Бланки" })).not.toBeInTheDocument();
     expect(getBlanks).not.toHaveBeenCalled();
   });
@@ -833,8 +835,76 @@ describe("AdminSettings", () => {
       description: "Пояснение для ОК",
       layout: "line",
       active: true,
+      // Новый бланк без шапки и подвала — пустые значения уходят как есть.
+      header_html: null,
+      footer_lines: [],
     });
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Бланк создан"));
+  });
+
+  // Шапка бланка: визуальный редактор + вставка плейсхолдера; подвал — список
+  // строк с добавлением строки и вставкой плейсхолдера в выбранную строку.
+  it("редакторы шапки и подвала: плейсхолдеры и строки уходят в карточку", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+    vi.mocked(updateBlank).mockResolvedValue({ id: 10 });
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Бланки" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Бланки" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Править бланк uvol_base" }));
+
+    // Шапка из справочника показана в визуальном редакторе.
+    expect(await screen.findByText("Заявка на увольнение {fio}")).toBeInTheDocument();
+    // Подвал: строка из справочника + добавление новой.
+    expect(screen.getByLabelText("Строка подвала 1")).toHaveValue("Подпись: {manager}");
+    fireEvent.click(screen.getByText("Добавить строку подвала"));
+    const line2 = await screen.findByLabelText("Строка подвала 2");
+    fireEvent.change(line2, { target: { value: "Дата" } });
+
+    // Плейсхолдер в выбранную строку подвала (после правки поля цель — строка 2).
+    fireEvent.click(screen.getByRole("button", { name: "Вставить {date} в подвал" }));
+    await waitFor(() => expect(screen.getByLabelText("Строка подвала 2")).toHaveValue("Дата{date}"));
+
+    // Плейсхолдер в шапку: уходит в визуальный редактор.
+    fireEvent.click(screen.getByRole("button", { name: "Вставить {fio} в шапку" }));
+    await waitFor(() => expect(screen.getByText(/Заявка на увольнение \{fio\}\{fio\}/)).toBeInTheDocument());
+
+    fireEvent.click(screen.getByText("Сохранить бланк"));
+    await waitFor(() =>
+      expect(updateBlank).toHaveBeenCalledWith(
+        10,
+        expect.objectContaining({
+          header_html: expect.stringContaining("Заявка на увольнение {fio}{fio}"),
+          footer_lines: ["Подпись: {manager}", "Дата{date}"],
+        }),
+      ),
+    );
+  });
+
+  // Пустой подвал: кнопки вставки плейсхолдера в подвал выключены и рядом есть
+  // объяснение; после добавления строки кнопки включаются.
+  it("пустой подвал: кнопки плейсхолдеров неактивны с объяснением", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Бланки" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Бланки" }));
+    // uvol_line — подвал пуст (footer_lines: []).
+    fireEvent.click(await screen.findByRole("button", { name: "Править бланк uvol_line" }));
+
+    expect(await screen.findByText("строк нет")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Вставить {fio} в подвал" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Вставить {date} в подвал" })).toBeDisabled();
+    // Понятное объяснение, почему вставлять некуда.
+    expect(screen.getByText("Добавьте строку, затем вставьте в неё плейсхолдер.")).toBeInTheDocument();
+    // В шапку вставка доступна всегда — там редактор есть.
+    expect(screen.getByRole("button", { name: "Вставить {fio} в шапку" })).not.toBeDisabled();
+
+    // Строка появилась — кнопки подвала активны, подсказка сменилась на номер строки.
+    fireEvent.click(screen.getByText("Добавить строку подвала"));
+    await screen.findByLabelText("Строка подвала 1");
+    expect(screen.getByRole("button", { name: "Вставить {fio} в подвал" })).not.toBeDisabled();
+    expect(screen.getByText("Плейсхолдер вставится в строку 1.")).toBeInTheDocument();
   });
 
   // Правка бланка: код неизменен (read-only), остальные поля уходят в updateBlank.
@@ -859,19 +929,25 @@ describe("AdminSettings", () => {
     fireEvent.click(screen.getByText("Сохранить бланк"));
 
     await waitFor(() =>
-      expect(updateBlank).toHaveBeenCalledWith(10, {
-        name: "Увольнение (базовый, правка)",
-        doc_type_code: "uvol",
-        description: "Пояснение для сотрудника ОК",
-        layout: "office",
-        active: false,
-      }),
+      expect(updateBlank).toHaveBeenCalledWith(
+        10,
+        expect.objectContaining({
+          name: "Увольнение (базовый, правка)",
+          doc_type_code: "uvol",
+          description: "Пояснение для сотрудника ОК",
+          layout: "office",
+          active: false,
+          // Шапка и подвал без правок уходят как из справочника.
+          header_html: "<p>Заявка на увольнение {fio}</p>",
+          footer_lines: ["Подпись: {manager}"],
+        }),
+      ),
     );
   });
 
-  // Состав бланка: этапы из справочника, порядок кнопками «вверх/вниз»,
-  // необязательный этап и обязательный комментарий, удаление шага.
-  it("состав бланка: добавление этапа, порядок, флаги и удаление", async () => {
+  // Состав бланка: СВОИ шаги (название, текст, вид исполнителя, согласующие,
+  // режим, необязательный, комментарий), порядок кнопками «вверх/вниз», удаление.
+  it("состав бланка: свои шаги, порядок, флаги и удаление", async () => {
     vi.mocked(getSettings).mockResolvedValue(settings);
     vi.mocked(setBlankSteps).mockResolvedValue({ blank_id: 10, count: 2 });
 
@@ -880,54 +956,46 @@ describe("AdminSettings", () => {
     fireEvent.click(screen.getByRole("button", { name: "Бланки" }));
     fireEvent.click(await screen.findByRole("button", { name: "Состав бланка uvol_base" }));
 
-    // Состав пришёл по GET .../blanks/{id}/steps: два шага по порядку.
+    // Состав пришёл по GET .../blanks/{id}/steps: два своих шага по порядку.
     await waitFor(() => expect(getBlankSteps).toHaveBeenCalledWith(10));
-    const table = await screen.findByRole("table", { name: "Состав бланка uvol_base" });
-    const rows = within(table).getAllByRole("row").slice(1);
-    expect(within(rows[0]).getByText("Непосредственный руководитель")).toBeInTheDocument();
-    expect(within(rows[1]).getByText("Бухгалтерия")).toBeInTheDocument();
+    expect(screen.getByLabelText("Название шага 1")).toHaveValue("Непосредственный руководитель");
+    expect(screen.getByLabelText("Название шага 2")).toHaveValue("Бухгалтерия");
     // Крайние шаги не двигаются: первый вверх, последний вниз — неактивны.
-    expect(within(rows[0]).getByRole("button", { name: "Поднять шаг 1" })).toBeDisabled();
-    expect(within(rows[1]).getByRole("button", { name: "Опустить шаг 2" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Поднять шаг 1" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Опустить шаг 2" })).toBeDisabled();
 
-    // Шаг 1 обязательный: переопределение «как в этапе», значение показано подсказкой.
-    // Режим шага — из справочника (миграция 0013): первый шаг параллельный.
-    expect(within(rows[0]).getByLabelText("Режим шага 1")).toHaveValue("parallel");
-    expect(within(rows[1]).getByLabelText("Режим шага 2")).toHaveValue("sequential");
-    expect(within(rows[0]).getByLabelText("Необязательность шага 1")).toHaveValue("");
-    expect(within(rows[0]).getByText("в этапе: обязательный")).toBeInTheDocument();
+    // Вид исполнителя и режим — из бланка (миграция 0013/0014).
+    expect(screen.getByLabelText("Вид исполнителя шага 1")).toHaveValue("manager_ad");
+    expect(screen.getByLabelText("Режим шага 1")).toHaveValue("parallel");
+    expect(screen.getByLabelText("Вид исполнителя шага 2")).toHaveValue("ad_group");
+    expect(screen.getByLabelText("Режим шага 2")).toHaveValue("sequential");
+    expect(screen.getByLabelText("Группа AD шага 2")).toHaveValue("SED_STEP_BUH");
     // Шаг 2 в бланке необязательный и с обязательным комментарием.
-    expect(within(rows[1]).getByLabelText("Необязательность шага 2")).toHaveValue("true");
-    expect(within(rows[1]).getByLabelText("Комментарий шага 2")).toHaveValue("true");
+    expect(screen.getByLabelText("Шаг 2 необязательный")).toBeChecked();
+    expect(screen.getByLabelText("Комментарий шага 2 обязателен")).toBeChecked();
 
-    // Меняем флаги первого шага и двигаем его вниз, затем удаляем второй шаг.
-    fireEvent.change(within(rows[0]).getByLabelText("Необязательность шага 1"), {
-      target: { value: "true" },
-    });
-    fireEvent.change(within(rows[0]).getByLabelText("Комментарий шага 1"), {
-      target: { value: "true" },
-    });
-    fireEvent.click(within(rows[0]).getByRole("button", { name: "Опустить шаг 1" }));
+    // Меняем первый шаг на согласующих: подсказка по поиску AD и добавление.
+    fireEvent.change(screen.getByLabelText("Вид исполнителя шага 1"), { target: { value: "people" } });
+    expect(screen.getByText(/Добавьте хотя бы одного согласующего/)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Логин согласующего шага 1"), { target: { value: "Петров" } });
+    fireEvent.click(screen.getByRole("button", { name: "Найти сотрудников" }));
+    await waitFor(() => expect(searchAd).toHaveBeenCalledWith("Петров"));
+    fireEvent.click(screen.getByRole("button", { name: "Добавить согласующего petrov.pp в шаг 1" }));
+
+    // Двигаем первый шаг вниз (он становится вторым) и удаляем второй шаг.
+    fireEvent.click(screen.getByRole("button", { name: "Опустить шаг 1" }));
     await waitFor(() =>
-      expect(
-        within(
-          within(screen.getByRole("table", { name: "Состав бланка uvol_base" })).getAllByRole("row")[2],
-        ).getByText("Непосредственный руководитель"),
-      ).toBeInTheDocument(),
+      expect(screen.getByLabelText("Название шага 2")).toHaveValue("Непосредственный руководитель"),
     );
-    // Удаляем второй шаг (после перестановки это руководитель).
     fireEvent.click(screen.getByRole("button", { name: "Удалить шаг 2" }));
     await waitFor(() => expect(screen.queryByRole("button", { name: "Удалить шаг 2" })).toBeNull());
 
-    // Этап, уже добавленный в состав, в селекте добавления не предлагается.
-    const add = screen.getByLabelText("Этап для добавления в бланк") as HTMLSelectElement;
-    expect(within(add).getByRole("option", { name: "Служба ОК" })).toBeInTheDocument();
-    expect(within(add).queryByRole("option", { name: "Бухгалтерия" })).not.toBeInTheDocument();
-
-    // Добавляем этап и сохраняем состав: порядок пересчитан с 1, флаги ушли.
-    fireEvent.change(add, { target: { value: "3" } });
-    fireEvent.click(screen.getByRole("button", { name: "Добавить этап" }));
-    await waitFor(() => expect(screen.getByRole("button", { name: "Удалить шаг 2" })).toBeInTheDocument());
+    // Добавляем свой шаг (без этапа из справочника) и сохраняем состав.
+    fireEvent.click(screen.getByRole("button", { name: "Добавить шаг" }));
+    await waitFor(() => expect(screen.getByLabelText("Название шага 2")).toHaveValue(""));
+    fireEvent.change(screen.getByLabelText("Название шага 2"), { target: { value: "Служба ОК" } });
+    fireEvent.change(screen.getByLabelText("Вид исполнителя шага 2"), { target: { value: "ad_group" } });
+    fireEvent.change(screen.getByLabelText("Группа AD шага 2"), { target: { value: "SED_STEP_OK" } });
     // Режим первого шага меняем с parallel на sequential («все ответственные»).
     fireEvent.change(screen.getByLabelText("Режим шага 1"), { target: { value: "sequential" } });
     fireEvent.click(screen.getByRole("button", { name: "Сохранить состав" }));
@@ -936,49 +1004,74 @@ describe("AdminSettings", () => {
       expect(setBlankSteps).toHaveBeenCalledWith(10, [
         // Порядок после перестановки: бухгалтерия первой (её флаги из бланка).
         {
-          stage_id: 2,
           step_order: 1,
-          optional_override: true,
-          require_comment_override: true,
+          title: "Бухгалтерия",
+          stage_lines: [],
+          executor_kind: "ad_group",
+          assignees: [],
+          owner_group: "SED_STEP_BUH",
           approval_mode: "sequential",
+          optional: true,
+          require_comment: true,
         },
-        // Добавленный этап — без переопределений и режима («как в этапе»).
+        // Новый шаг бланка — свой текст и своя группа AD.
         {
-          stage_id: 3,
           step_order: 2,
-          optional_override: null,
-          require_comment_override: null,
+          title: "Служба ОК",
+          stage_lines: [],
+          executor_kind: "ad_group",
+          assignees: [],
+          owner_group: "SED_STEP_OK",
           approval_mode: "sequential",
+          optional: false,
+          require_comment: false,
         },
       ]),
     );
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Состав бланка сохранён"));
   });
 
-  // Текст этапа и его пунктов — визуальный редактор: разметка уходит в те же
-  // поля справочника этапов (title/stage_lines), с предупреждением о печати.
-  it("текст этапа: визуальный редактор сохраняет HTML в справочник этапов", async () => {
+  // Некорректный шаг (people без согласующих) сервер бы отверг 422 — форма
+  // предупреждает заранее и состав не отправляет.
+  it("состав бланка: шаг без согласующих не отправляется", async () => {
     vi.mocked(getSettings).mockResolvedValue(settings);
-    vi.mocked(updateRoutingStage).mockResolvedValue({ id: 1, updated: "title,stage_lines" });
 
     render(<AdminSettings role="admin" />);
     await waitFor(() => expect(screen.getByRole("button", { name: "Бланки" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Бланки" }));
     fireEvent.click(await screen.findByRole("button", { name: "Состав бланка uvol_base" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Текст этапа 1" }));
 
-    // Название этапа и его пункт редактируются визуально; предупреждение о печати.
-    expect(await screen.findByText("Разметка попадёт в печатный документ.")).toBeInTheDocument();
+    // Первый шаг — manager_ad (данные не нужны), переключаем на согласующих.
+    const kind = await screen.findByLabelText("Вид исполнителя шага 1");
+    fireEvent.change(kind, { target: { value: "people" } });
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить состав" }));
+
     await waitFor(() =>
-      // Название и пункт этапа показаны в редакторах (в таблице они тоже есть).
-      expect(screen.getAllByText("Непосредственный руководитель").length).toBeGreaterThan(1),
+      expect(screen.getByRole("alert")).toHaveTextContent("добавьте хотя бы одного согласующего"),
     );
-    expect(screen.getByText("Ознакомить с приказом")).toBeInTheDocument();
-    const toolbars = screen.getAllByRole("toolbar");
-    expect(toolbars.length).toBeGreaterThanOrEqual(2);
+    expect(setBlankSteps).not.toHaveBeenCalled();
+  });
 
-    // Помечаем выделенное в названии этапа: полужирный.
-    const area = document.querySelector<HTMLElement>(".sed-blanktext .ProseMirror");
+  // Текст шага и его пунктов — визуальный редактор: разметка уходит в
+  // stage_lines шага бланка, с предупреждением о печати.
+  it("текст шага: визуальный редактор сохраняет HTML в stage_lines шага", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+    vi.mocked(setBlankSteps).mockResolvedValue({ blank_id: 10, count: 2 });
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Бланки" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Бланки" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Состав бланка uvol_base" }));
+
+    // Пункт первого шага редактируется визуально.
+    expect(await screen.findByText("Ознакомить с приказом")).toBeInTheDocument();
+    const toolbars = screen.getAllByRole("toolbar");
+    expect(toolbars.length).toBeGreaterThanOrEqual(1);
+
+    // Помечаем выделенное в пункте шага: полужирный (панель редактора этого пункта).
+    const editorBlock = (await screen.findByLabelText("Пункт шага 1.1")).closest(".sed-rte");
+    expect(editorBlock).not.toBeNull();
+    const area = editorBlock?.querySelector<HTMLElement>(".ProseMirror");
     expect(area).not.toBeNull();
     area?.setAttribute("tabindex", "-1");
     area?.focus();
@@ -988,26 +1081,30 @@ describe("AdminSettings", () => {
     window.getSelection()?.addRange(range);
     document.dispatchEvent(new Event("selectionchange"));
     await waitFor(() => expect(area?.textContent).not.toBe(""));
-    fireEvent.click(screen.getAllByRole("button", { name: "Полужирный" })[0]);
+    fireEvent.click(
+      within(editorBlock as HTMLElement).getByRole("button", { name: "Полужирный" }),
+    );
 
-    // Добавляем пункт и сохраняем текст этапа.
-    fireEvent.click(screen.getByRole("button", { name: "Добавить пункт" }));
-    fireEvent.click(screen.getByRole("button", { name: "Сохранить текст этапа" }));
+    // Добавляем пункт и сохраняем состав: разметка уходит в stage_lines.
+    fireEvent.click(screen.getByLabelText("Добавить пункт шага 1"));
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить состав" }));
 
-    await waitFor(() => expect(updateRoutingStage).toHaveBeenCalled());
-    const [stageId, patch] = vi.mocked(updateRoutingStage).mock.calls[0];
-    expect(stageId).toBe(1);
-    expect(patch.title).toContain("<strong>");
-    expect(patch.title).toContain("Непосредственный руководитель");
+    await waitFor(() => expect(setBlankSteps).toHaveBeenCalled());
+    const sentSteps = vi.mocked(setBlankSteps).mock.calls[0][1];
+    expect(sentSteps[0].title).toBe("Непосредственный руководитель");
+    expect(sentSteps[0].stage_lines[0]).toContain("<strong>");
+    expect(sentSteps[0].stage_lines[0]).toContain("Ознакомить с приказом");
     // Пункты: прежний остался, добавленный пустой не уходит.
-    expect(patch.stage_lines).toEqual(["Ознакомить с приказом"]);
-    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Текст этапа сохранён"));
+    expect(sentSteps[0].stage_lines).toHaveLength(1);
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Состав бланка сохранён"));
   });
 
   // Ошибка сервера при сохранении состава — понятным текстом, форма жива.
   it("ошибка сохранения состава показывается текстом", async () => {
     vi.mocked(getSettings).mockResolvedValue(settings);
-    vi.mocked(setBlankSteps).mockRejectedValue(new ApiHttpError(422, "Этап вне маршрутов: Служба ОК"));
+    vi.mocked(setBlankSteps).mockRejectedValue(
+      new ApiHttpError(422, "Шаг с executor_kind=people обязан содержать согласующих (assignees)"),
+    );
 
     render(<AdminSettings role="admin" />);
     await waitFor(() => expect(screen.getByRole("button", { name: "Бланки" })).toBeInTheDocument());
@@ -1016,7 +1113,9 @@ describe("AdminSettings", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Сохранить состав" }));
 
     await waitFor(() =>
-      expect(screen.getByRole("alert")).toHaveTextContent("Этап вне маршрутов: Служба ОК"),
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "Шаг с executor_kind=people обязан содержать согласующих (assignees)",
+      ),
     );
   });
 
@@ -1043,9 +1142,9 @@ describe("AdminSettings", () => {
     vi.mocked(getSettings).mockResolvedValue(settings);
 
     render(<AdminSettings role="admin" />);
-    await waitFor(() => expect(screen.getByRole("button", { name: "Шаблоны" })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Письма" })).toBeInTheDocument());
 
-    fireEvent.click(screen.getByRole("button", { name: "Шаблоны" }));
+    fireEvent.click(screen.getByRole("button", { name: "Письма" }));
     await waitFor(() => expect(screen.getByText("Письма (mail_templates)")).toBeInTheDocument());
     expect(screen.queryByText("Бланки бегунков (doc_templates)")).not.toBeInTheDocument();
     expect(screen.queryByText("Добавить бланк")).not.toBeInTheDocument();

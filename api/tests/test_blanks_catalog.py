@@ -1,11 +1,12 @@
-# Справочник бланков (миграция 0012: blanks/blank_steps): хранилище
+# Справочник бланков (миграции 0012/0014): хранилище
 # (DbRoutingStore.list_blanks/create_blank/update_blank/list_blank_steps/
 # set_blank_steps) и админ-эндпоинты GET/POST /settings/routing/blanks,
 # PUT /settings/routing/blanks/{id}[/steps], секция blanks в
-# GET /settings/routing/catalogs. Живой Postgres не нужен: сессия хранилища
-# подменяется моком (как в test_routing_store.py), эндпоинты — in-memory
-# заглушкой справочника (как в test_routing_preview.py). Все коды, названия
-# и логины — вымышленные.
+# GET /settings/routing/catalogs. Шаг бланка самостоятельный: свой текст
+# (title/stage_lines) и свой исполнитель (executor_kind + assignees/owner_group),
+# этапа у него нет. Живой Postgres не нужен: сессия хранилища подменяется моком
+# (как в test_routing_store.py), эндпоинты — in-memory заглушкой справочника
+# (как в test_routing_preview.py). Все коды, названия и логины — вымышленные.
 from __future__ import annotations
 
 import json
@@ -13,7 +14,6 @@ import os
 import sys
 
 import pytest
-from fastapi import HTTPException
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -21,14 +21,18 @@ from app.audit import audit_log  # noqa: E402
 from app.config import Settings, get_settings  # noqa: E402
 from app.main import app  # noqa: E402
 from app.routing_store import DbRoutingStore, get_routing_store  # noqa: E402
+from app.settings_routes import get_settings_store  # noqa: E402
 
 # --- Вымышленные данные справочника ---
 BLANK_ID = 30
 BLANK_CODE = "uvolnenie"
 BLANK_NAME = "Вымышленный бланк увольнения"
-STAGE_BUH = 21
-STAGE_BOSS = 22
-STAGE_HR = 23
+STEP_GROUP = "SED_STEP_BUH"
+STEP_GROUP_NAME = "Согласующие вымышленной службы"
+PERSON_1 = "soglasovatel.pervyy"
+PERSON_2 = "soglasovatel.vtoroy"
+BLANK_HEADER = "<p>Увольнение {fio}</p>"
+BLANK_FOOTER = ["Подпись {fio}", "Дата {date}"]
 
 BLANK_ROW = {
     "id": BLANK_ID,
@@ -41,23 +45,22 @@ BLANK_ROW = {
     "version": 1,
     "updated_at": None,
     "updated_by": None,
+    "header_html": BLANK_HEADER,
+    "footer_lines": list(BLANK_FOOTER),
     "step_count": 2,
 }
+# Строка шага бланка из БД (list_blank_steps): своих полей, без join с этапом.
 BLANK_STEP_ROW = {
     "blank_id": BLANK_ID,
-    "stage_id": STAGE_BUH,
     "step_order": 1,
-    "optional_override": None,
-    "require_comment_override": None,
-    "stage_code": "buh",
     "title": "Вымышленная бухгалтерия",
     "stage_lines": '["согласовать выплаты", "проверить расчёт"]',
-    "owner_kind": "ad_group",
-    "owner_group": "SED_STEP_BUH",
+    "executor_kind": "ad_group",
+    "assignees": '["%s", "%s"]' % (PERSON_1, PERSON_2),
+    "owner_group": STEP_GROUP,
     "optional": False,
-    "print_assignee": True,
-    "require_comment": False,
-    "stage_active": True,
+    "require_comment": True,
+    "approval_mode": "parallel",
 }
 
 
@@ -171,9 +174,12 @@ def test_list_blanks_returns_dicts_with_step_count():
 
 
 def test_blank_by_id_and_missing_blank():
-    """Бланк по id; отсутствующий — None (без 500)."""
-    session = FakeSession([BLANK_ROW])
-    assert _store(session).blank_by_id(BLANK_ID)["layout"] == "office"
+    """Бланк по id (шапка/подвал на месте, подвал — список); отсутствует — None."""
+    session = FakeSession([dict(BLANK_ROW, footer_lines=json.dumps(BLANK_FOOTER))])
+    blank = _store(session).blank_by_id(BLANK_ID)
+    assert blank["layout"] == "office"
+    assert blank["header_html"] == BLANK_HEADER
+    assert blank["footer_lines"] == BLANK_FOOTER
     assert "WHERE id = :blank_id" in _sqls(session)[0]
     assert session.calls[0][1] == {"blank_id": BLANK_ID}
 
@@ -192,6 +198,8 @@ def test_create_blank_returns_id_and_audits():
             "description": None,
             "layout": "line",
             "active": False,
+            "header_html": BLANK_HEADER,
+            "footer_lines": list(BLANK_FOOTER),
             "actor": "adm.petrov",
         }
     )
@@ -200,6 +208,8 @@ def test_create_blank_returns_id_and_audits():
     assert "INSERT INTO blanks" in sql
     assert params["code"] == BLANK_CODE and params["doc_type_code"] == "uvolnenie_doc"
     assert params["layout"] == "line" and params["active"] is False
+    assert params["header_html"] == BLANK_HEADER
+    assert json.loads(params["footer_lines"]) == BLANK_FOOTER
     assert params["actor"] == "adm.petrov"
     audit = _audit_call(session)
     assert audit["action"] == "blank.create" and audit["entity"] == "blank"
@@ -240,76 +250,89 @@ def test_update_blank_empty_payload_is_noop():
     assert session.calls == [] and session.commits == 0
 
 
-def test_list_blank_steps_joins_stage_and_parses_lines():
-    """Шаги бланка идут с join этапа; stage_lines из jsonb разбирается в список."""
+def test_list_blank_steps_own_fields_without_stage_join():
+    """Шаги бланка — собственные поля шага, join с этапом больше не нужен.
+
+    jsonb-колонки разбираются в списки, логины согласующих — без пустых и
+    повторов."""
     session = FakeSession([[BLANK_STEP_ROW]])
     items = _store(session).list_blank_steps(BLANK_ID)
-    assert items[0]["stage_id"] == STAGE_BUH
-    assert items[0]["title"] == "Вымышленная бухгалтерия"
-    assert items[0]["stage_lines"] == ["согласовать выплаты", "проверить расчёт"]
-    assert items[0]["optional_override"] is None
-    assert "JOIN approval_stages" in _sqls(session)[0]
+    item = items[0]
+    assert item["step_order"] == 1
+    assert item["title"] == "Вымышленная бухгалтерия"
+    assert item["stage_lines"] == ["согласовать выплаты", "проверить расчёт"]
+    assert item["executor_kind"] == "ad_group"
+    assert item["assignees"] == [PERSON_1, PERSON_2]
+    assert item["owner_group"] == STEP_GROUP
+    assert item["optional"] is False
+    assert item["require_comment"] is True
+    assert item["approval_mode"] == "parallel"
+    sql = _sqls(session)[0]
+    assert "FROM blank_steps" in sql
+    assert "JOIN approval_stages" not in sql
     assert session.calls[0][1] == {"blank_id": BLANK_ID}
 
 
 def test_set_blank_steps_replaces_composition_and_bumps_version():
     """Шаги бланка заменяются целиком, версия растёт: DELETE + INSERT + UPDATE."""
-    session = FakeSession([[FakeRow({"id": STAGE_BOSS}), FakeRow({"id": STAGE_BUH})]])
+    session = FakeSession([])
     _store(session).set_blank_steps(
         BLANK_ID,
         [
-            {"stage_id": STAGE_BUH, "step_order": 2, "optional_override": False},
-            {"stage_id": STAGE_BOSS, "step_order": 1, "require_comment_override": True},
+            {
+                "step_order": 2,
+                "title": "Отдел кадров",
+                "executor_kind": "people",
+                "assignees": [PERSON_2, " ", PERSON_1],
+                "stage_lines": ["оформить"],
+            },
+            {
+                "step_order": 1,
+                "title": "Бухгалтерия",
+                "executor_kind": "ad_group",
+                "owner_group": STEP_GROUP,
+                "require_comment": True,
+            },
         ],
         "adm.petrov",
     )
     assert _params_with(session, "DELETE FROM blank_steps") == [{"blank_id": BLANK_ID}]
     inserts = _params_with(session, "INSERT INTO blank_steps")
-    assert [(item["stage_id"], item["step_order"]) for item in inserts] == [
-        (STAGE_BOSS, 1),
-        (STAGE_BUH, 2),
-    ]
+    # Порядок вставки — по step_order; этап у шага нет (в INSERT его нет вовсе).
+    assert [item["step_order"] for item in inserts] == [1, 2]
+    assert "stage_id" not in _sqls(session)[1]
+    assert inserts[0]["title"] == "Бухгалтерия"
+    assert inserts[0]["owner_group"] == STEP_GROUP
+    assert inserts[0]["require_comment"] is True
+    assert inserts[0]["optional"] is False
+    assert inserts[1]["executor_kind"] == "people"
+    assert inserts[1]["assignees"] == '["%s", "%s"]' % (PERSON_2, PERSON_1)
     assert all(item["blank_id"] == BLANK_ID for item in inserts)
-    assert inserts[0]["require_comment_override"] is True
-    assert inserts[1]["optional_override"] is False
     bumps = _params_with(session, "UPDATE blanks SET version = version + 1")
     assert bumps == [{"blank_id": BLANK_ID, "actor": "adm.petrov"}]
     audit = _audit_call(session)
     assert audit["action"] == "blank.steps.update" and audit["entity"] == "blank"
     assert audit["entity_id"] == str(BLANK_ID) and audit["actor"] == "adm.petrov"
     details = json.loads(audit["details"])
-    assert details["steps"] == 2 and details["stage_ids"] == [STAGE_BUH, STAGE_BOSS]
+    assert details["steps"] == 2
+    # Логины согласующих — данные сотрудников, в аудит не пишемся.
+    assert "assignees" not in details and PERSON_1 not in audit["details"]
     assert session.commits == 1
-
-
-def test_set_blank_steps_unknown_stage_422():
-    """Неизвестный/отключённый этап — 422 до DELETE (состав и версия целы)."""
-    session = FakeSession([[FakeRow({"id": STAGE_BUH})]])
-    with pytest.raises(HTTPException) as err:
-        _store(session).set_blank_steps(
-            BLANK_ID,
-            [{"stage_id": STAGE_BUH, "step_order": 1}, {"stage_id": 99, "step_order": 2}],
-            "adm.petrov",
-        )
-    assert err.value.status_code == 422
-    assert "99" in str(err.value.detail)
-    joined = " ".join(_sqls(session))
-    assert "DELETE FROM blank_steps" not in joined
-    assert "UPDATE blanks SET version" not in joined
-    assert session.commits == 0
 
 
 def test_set_blank_steps_skips_broken_items_and_bumps_version():
     """Битые элементы пропускаются; пустой состав — замена на пустой + версия."""
-    session = FakeSession([[]])
+    session = FakeSession([])
     _store(session).set_blank_steps(
-        BLANK_ID, [None, {}, {"stage_id": None, "step_order": 1}], ""
+        BLANK_ID,
+        [None, {}, {"step_order": 1}, {"step_order": 2, "title": "  "}],
+        "",
     )
     assert _params_with(session, "INSERT INTO blank_steps") == []
     assert _params_with(session, "DELETE FROM blank_steps")
     assert _params_with(session, "UPDATE blanks SET version = version + 1")
     details = json.loads(_audit_call(session)["details"])
-    assert details["steps"] == 0 and details["stage_ids"] == []
+    assert details["steps"] == 0
     assert session.commits == 1
 
 
@@ -325,19 +348,15 @@ class FakeBlankStore:
             [
                 {
                     "blank_id": BLANK_ID,
-                    "stage_id": STAGE_BUH,
                     "step_order": 1,
-                    "optional_override": None,
-                    "require_comment_override": None,
                     "title": "Вымышленная бухгалтерия",
                     "stage_lines": ["согласовать выплаты"],
-                    "owner_kind": "ad_group",
-                    "owner_group": "SED_STEP_BUH",
+                    "executor_kind": "ad_group",
+                    "assignees": [],
+                    "owner_group": STEP_GROUP,
                     "optional": False,
-                    "print_assignee": True,
                     "require_comment": False,
-                    "stage_code": "buh",
-                    "stage_active": True,
+                    "approval_mode": "sequential",
                 }
             ]
             if steps is None
@@ -370,6 +389,17 @@ class FakeBlankStore:
     def list_blanks(self, active_only: bool = False) -> list[dict]:
         self._count("list_blanks")
         return [dict(item) for item in self.blanks]
+
+    def blank_by_id(self, blank_id: int) -> dict | None:
+        self._count("blank_by_id")
+        found = next((item for item in self.blanks if item["id"] == blank_id), None)
+        if found is None:
+            return None
+        row = dict(found)
+        row["step_count"] = len(
+            [item for item in self.steps if item["blank_id"] == blank_id]
+        )
+        return row
 
     def list_blank_steps(self, blank_id: int) -> list[dict]:
         self._count("list_blank_steps")
@@ -405,8 +435,6 @@ class FakeBlankStore:
         self.steps = [
             {
                 "blank_id": blank_id,
-                "optional_override": None,
-                "require_comment_override": None,
                 **item,
                 "approval_mode": (
                     "parallel"
@@ -416,6 +444,9 @@ class FakeBlankStore:
             }
             for item in items
         ]
+        for item in self.blanks:
+            if item["id"] == blank_id:
+                item["version"] = int(item.get("version") or 0) + 1
 
     def steps_for(self, blank_id: int) -> list[dict]:
         """Состав бланка для проверок теста (тот же срез, что list_blank_steps)."""
@@ -440,6 +471,36 @@ def blanks_store():
     app.dependency_overrides.pop(get_routing_store, None)
 
 
+class SeededSettingsStore:
+    """Настройки в памяти; значения — строками в сид-формате (JSONB)."""
+
+    def __init__(self, values: dict[str, str] | None = None) -> None:
+        self.values: dict[str, str] = dict(values or {})
+
+    def get(self, key: str) -> str | None:
+        return self.values.get(key)
+
+    def set(self, key: str, value: str) -> None:
+        self.values[key] = value
+
+    def get_many(self, keys) -> dict[str, str | None]:
+        return {key: self.values.get(key) for key in keys}
+
+    def set_many(self, values) -> None:
+        self.values.update(values)
+
+
+@pytest.fixture
+def groups_store():
+    """Справочник групп шагов: группа шага ad_group обязана быть в нём."""
+    store = SeededSettingsStore(
+        {"allowed_ad_groups": json.dumps([STEP_GROUP, "SED_STEP_OTHER"])}
+    )
+    app.dependency_overrides[get_settings_store] = lambda: store
+    yield store
+    app.dependency_overrides.pop(get_settings_store, None)
+
+
 @pytest.fixture(autouse=True)
 def clean_state():
     """Чистый журнал аудита на каждый тест."""
@@ -454,12 +515,31 @@ def _blank_body(**kw) -> dict:
     return body
 
 
+def _people_step(step_order: int, **kw) -> dict:
+    """Тело шага бланка с персональными согласующими (исполнитель people)."""
+    step = {
+        "step_order": step_order,
+        "title": "Отдел кадров",
+        "executor_kind": "people",
+        "assignees": [PERSON_1],
+        "stage_lines": ["оформить прекращение"],
+    }
+    step.update(kw)
+    return step
+
+
 # --- Эндпоинты бланков ---
 
 
-def test_admin_blanks_crud_cycle(client, admin_headers, settings_override, blanks_store):
-    """CRUD бланка: создание (201), правка (частичная), чтение состава шагов."""
-    created = client.post("/settings/routing/blanks", json=_blank_body(), headers=admin_headers)
+def test_admin_blanks_crud_cycle(
+    client, admin_headers, settings_override, blanks_store, groups_store
+):
+    """CRUD бланка: создание (201) с шапкой/подвалом, правка, чтение состава шагов."""
+    created = client.post(
+        "/settings/routing/blanks",
+        json=_blank_body(header_html=BLANK_HEADER, footer_lines=[" Подпись {fio} "]),
+        headers=admin_headers,
+    )
     assert created.status_code == 201, created.text
     blank_id = created.json()["id"]
 
@@ -476,11 +556,13 @@ def test_admin_blanks_crud_cycle(client, admin_headers, settings_override, blank
     assert updated.json()["updated"] == "description,layout"
     stored = next(item for item in blanks_store.blanks if item["id"] == blank_id)
     assert stored["layout"] == "line" and stored["description"] == "Вымышленное уточнение"
+    # Шапка/подвал — часть бланка: сохранились, края строк подвала обрезаны.
+    assert stored["header_html"] == BLANK_HEADER
+    assert stored["footer_lines"] == ["Подпись {fio}"]
 
     replaced = client.put(
         f"/settings/routing/blanks/{blank_id}/steps",
-        json={"steps": [{"stage_id": STAGE_BOSS, "step_order": 1,
-                         "optional_override": True}]},
+        json={"steps": [_people_step(1, optional=True)]},
         headers=admin_headers,
     )
     assert replaced.status_code == 200, replaced.text
@@ -489,17 +571,40 @@ def test_admin_blanks_crud_cycle(client, admin_headers, settings_override, blank
     steps = client.get(f"/settings/routing/blanks/{blank_id}/steps", headers=admin_headers)
     assert steps.status_code == 200, steps.text
     item = steps.json()[0]
-    assert item["stage_id"] == STAGE_BOSS and item["optional_override"] is True
+    assert item["executor_kind"] == "people"
+    assert item["assignees"] == [PERSON_1]
+    assert item["optional"] is True
 
 
-def test_blank_steps_read_joins_stage(client, admin_headers, settings_override, blanks_store):
-    """Состав бланка отдаётся с этапом: текст этапа и вид исполнителя на месте."""
+def test_update_blank_header_and_footer(
+    client, admin_headers, settings_override, blanks_store
+):
+    """Правка шапки/подвала бланка — частичное обновление, поля в белом списке."""
+    response = client.put(
+        f"/settings/routing/blanks/{BLANK_ID}",
+        json={"header_html": "<p>Другая шапка</p>", "footer_lines": ["Подвал"]},
+        headers=admin_headers,
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["updated"] == "footer_lines,header_html"
+    stored = next(item for item in blanks_store.blanks if item["id"] == BLANK_ID)
+    assert stored["header_html"] == "<p>Другая шапка</p>"
+    assert stored["footer_lines"] == ["Подвал"]
+
+
+def test_blank_steps_read_returns_own_step(
+    client, admin_headers, settings_override, blanks_store
+):
+    """Состав бланка отдаётся собственными полями шага (этапа у шага нет)."""
     response = client.get(f"/settings/routing/blanks/{BLANK_ID}/steps", headers=admin_headers)
     assert response.status_code == 200, response.text
     item = response.json()[0]
     assert item["title"] == "Вымышленная бухгалтерия"
     assert item["stage_lines"] == ["согласовать выплаты"]
-    assert item["owner_kind"] == "ad_group" and item["print_assignee"] is True
+    assert item["executor_kind"] == "ad_group"
+    assert item["owner_group"] == STEP_GROUP
+    assert item["approval_mode"] == "sequential"
+    assert "stage_id" not in item and "print_assignee" not in item
 
 
 def test_create_blank_duplicate_code_409(
@@ -514,32 +619,72 @@ def test_create_blank_duplicate_code_409(
     assert "create_blank" not in blanks_store.calls
 
 
-def test_replace_blank_steps_unknown_stage_422(
-    client, admin_headers, settings_override, blanks_store
+def test_replace_blank_steps_unknown_ad_group_422(
+    client, admin_headers, settings_override, blanks_store, groups_store
 ):
-    """Неизвестный этап в составе — 422 от хранилища (текст с перечнем этапов)."""
-
-    def _reject(blank_id, items, actor):
-        raise HTTPException(status_code=422, detail="Шаги бланка: этапы не найдены или отключены: 99")
-
-    blanks_store.set_blank_steps = _reject
+    """Группа шага вне справочника групп шагов — 422, состав не меняется."""
     response = client.put(
         f"/settings/routing/blanks/{BLANK_ID}/steps",
-        json={"steps": [{"stage_id": 99, "step_order": 1}]},
+        json={"steps": [{"step_order": 1, "title": "Вымышленная бухгалтерия",
+                         "executor_kind": "ad_group", "owner_group": "SED_STEP_NET"}]},
         headers=admin_headers,
     )
     assert response.status_code == 422, response.text
-    assert "99" in response.text
+    assert "SED_STEP_NET" in response.text
+    assert "set_blank_steps" not in blanks_store.calls
+
+
+def test_replace_blank_steps_people_without_assignees_422(
+    client, admin_headers, settings_override, blanks_store, groups_store
+):
+    """Шаг people без согласующих — 422 на границе, состав не меняется."""
+    response = client.put(
+        f"/settings/routing/blanks/{BLANK_ID}/steps",
+        json={"steps": [{"step_order": 1, "title": "Отдел кадров",
+                         "executor_kind": "people", "assignees": ["  "]}]},
+        headers=admin_headers,
+    )
+    assert response.status_code == 422, response.text
+    assert "assignees" in response.text
+    assert "set_blank_steps" not in blanks_store.calls
+
+
+def test_replace_blank_steps_ad_group_without_group_422(
+    client, admin_headers, settings_override, blanks_store, groups_store
+):
+    """Шаг ad_group без группы — 422 на границе, состав не меняется."""
+    response = client.put(
+        f"/settings/routing/blanks/{BLANK_ID}/steps",
+        json={"steps": [{"step_order": 1, "title": "Бухгалтерия",
+                         "executor_kind": "ad_group"}]},
+        headers=admin_headers,
+    )
+    assert response.status_code == 422, response.text
+    assert "owner_group" in response.text
+    assert "set_blank_steps" not in blanks_store.calls
+
+
+def test_replace_blank_steps_empty_title_422(
+    client, admin_headers, settings_override, blanks_store, groups_store
+):
+    """Пустое название шага — 422 на границе, состав не меняется."""
+    response = client.put(
+        f"/settings/routing/blanks/{BLANK_ID}/steps",
+        json={"steps": [_people_step(1, title="   ")]},
+        headers=admin_headers,
+    )
+    assert response.status_code == 422, response.text
+    assert "title" in response.text
+    assert "set_blank_steps" not in blanks_store.calls
 
 
 def test_replace_blank_steps_duplicate_order_422(
-    client, admin_headers, settings_override, blanks_store
+    client, admin_headers, settings_override, blanks_store, groups_store
 ):
     """Дубль порядка шага — 422 на границе (в БД PK (blank_id, step_order))."""
     response = client.put(
         f"/settings/routing/blanks/{BLANK_ID}/steps",
-        json={"steps": [{"stage_id": STAGE_BUH, "step_order": 1},
-                        {"stage_id": STAGE_BOSS, "step_order": 1}]},
+        json={"steps": [_people_step(1), _people_step(1, title="Второй")]},
         headers=admin_headers,
     )
     assert response.status_code == 422, response.text
@@ -560,7 +705,7 @@ def test_blanks_require_admin(client, hr_headers, settings_override, blanks_stor
     ).status_code == 403
     assert client.put(
         f"/settings/routing/blanks/{BLANK_ID}/steps",
-        json={"steps": [{"stage_id": STAGE_BUH, "step_order": 1}]},
+        json={"steps": [_people_step(1)]},
         headers=hr_headers,
     ).status_code == 403
     assert "create_blank" not in blanks_store.calls
@@ -593,12 +738,14 @@ def test_catalogs_contains_blanks_and_keeps_existing_keys(
 
 def test_set_blank_steps_keeps_approval_mode_and_defaults_sequential():
     """Режим шага пишется в blank_steps; без режима — sequential («все»)."""
-    session = FakeSession([[FakeRow({"id": STAGE_BOSS}), FakeRow({"id": STAGE_BUH})]])
+    session = FakeSession([])
     _store(session).set_blank_steps(
         BLANK_ID,
         [
-            {"stage_id": STAGE_BOSS, "step_order": 1, "approval_mode": "parallel"},
-            {"stage_id": STAGE_BUH, "step_order": 2, "approval_mode": "что-то"},
+            {"step_order": 1, "title": "Отдел кадров", "executor_kind": "people",
+             "assignees": [PERSON_1], "approval_mode": "parallel"},
+            {"step_order": 2, "title": "Бухгалтерия", "executor_kind": "ad_group",
+             "owner_group": STEP_GROUP, "approval_mode": "что-то"},
         ],
         "adm.petrov",
     )
@@ -609,35 +756,54 @@ def test_set_blank_steps_keeps_approval_mode_and_defaults_sequential():
 
 
 def test_blank_steps_422_on_unknown_approval_mode(
-    client, admin_headers, settings_override, blanks_store
+    client, admin_headers, settings_override, blanks_store, groups_store
 ):
     """Режим вне parallel/sequential — 422 на границе, состав не меняется."""
     created = client.post("/settings/routing/blanks", json=_blank_body(), headers=admin_headers)
     blank_id = created.json()["id"]
     status = client.put(
         f"/settings/routing/blanks/{blank_id}/steps",
-        json={"steps": [{"stage_id": STAGE_BOSS, "step_order": 1,
-                         "approval_mode": "как-нибудь"}]},
+        json={"steps": [_people_step(1, approval_mode="как-нибудь")]},
         headers=admin_headers,
     )
     assert status.status_code == 422, status.text
     assert blanks_store.steps_for(blank_id) == []
 
 
-def test_blank_steps_mode_round_trip(client, admin_headers, settings_override, blanks_store):
+def test_blank_steps_mode_round_trip(
+    client, admin_headers, settings_override, blanks_store, groups_store
+):
     """Режим шага сохраняется в составе бланка и возвращается при чтении."""
     created = client.post("/settings/routing/blanks", json=_blank_body(), headers=admin_headers)
     blank_id = created.json()["id"]
     replaced = client.put(
         f"/settings/routing/blanks/{blank_id}/steps",
         json={"steps": [
-            {"stage_id": STAGE_BOSS, "step_order": 1, "approval_mode": "parallel"},
-            {"stage_id": STAGE_BUH, "step_order": 2},
+            _people_step(1, approval_mode="parallel"),
+            {"step_order": 2, "title": "Бухгалтерия", "executor_kind": "ad_group",
+             "owner_group": STEP_GROUP},
         ]},
         headers=admin_headers,
     )
     assert replaced.status_code == 200, replaced.text
     rows = client.get(f"/settings/routing/blanks/{blank_id}/steps", headers=admin_headers)
     assert rows.status_code == 200, rows.text
-    modes = [(row["stage_id"], row.get("approval_mode")) for row in rows.json()]
-    assert modes == [(STAGE_BOSS, "parallel"), (STAGE_BUH, "sequential")]
+    modes = [(row["title"], row.get("approval_mode")) for row in rows.json()]
+    assert modes == [("Отдел кадров", "parallel"), ("Бухгалтерия", "sequential")]
+
+
+def test_replace_blank_steps_bumps_blank_version(
+    client, admin_headers, settings_override, blanks_store, groups_store
+):
+    """Замена состава увеличивает версию бланка (снимок blank_version заявки)."""
+    before = next(
+        item for item in blanks_store.blanks if item["id"] == BLANK_ID
+    )["version"]
+    response = client.put(
+        f"/settings/routing/blanks/{BLANK_ID}/steps",
+        json={"steps": [_people_step(1)]},
+        headers=admin_headers,
+    )
+    assert response.status_code == 200, response.text
+    after = next(item for item in blanks_store.blanks if item["id"] == BLANK_ID)
+    assert after["version"] == before + 1

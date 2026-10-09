@@ -53,13 +53,7 @@ SEED_VALUES = {
         ' {"code": "ENT_PRIMER_2", "name": "Предприятие Пример-2"}]'
     ),
     "allowed_ad_groups": '["SED_HR", "SED_ADMINS", "SED_STEP_EXEC"]',
-    "position_to_category": '{"Старший вымышленный кассир": "линейный"}',
     "position_escalation": "{}",
-    "templates": (
-        '[{"service": "Служба вымышленного учета", "category": "линейный",'
-        ' "steps": [{"owner_group": "SED_STEP_BUH"},'
-        ' {"owner_group": "SED_STEP_HR", "require_comment": true}]}]'
-    ),
     "mail_templates": (
         '[{"code": "assigned", "subject": "Заявка {{ request_id }}",'
         ' "body_html": "<html>Заявка {{ request_id }} назначена {{ fio }}</html>"}]'
@@ -97,18 +91,7 @@ CONTRACT_VALUES = {
         {"code": "ENT_PRIMER_2", "name": "Предприятие Пример-2"},
     ],
     "allowed_ad_groups": ["SED_HR", "SED_ADMINS", "SED_STEP_EXEC"],
-    "position_to_category": {"Старший вымышленный кассир": "линейный"},
     "position_escalation": {},
-    "templates": [
-        {
-            "service": "Служба вымышленного учета",
-            "category": "линейный",
-            "steps": [
-                {"owner_group": "SED_STEP_BUH"},
-                {"owner_group": "SED_STEP_HR", "require_comment": True},
-            ],
-        }
-    ],
     "mail_templates": [
         {
             "code": "assigned",
@@ -157,15 +140,7 @@ UPDATED_VALUES = {
         {"code": "ENT_PRIMER_9", "name": "Предприятие Пример-9"},
     ],
     "allowed_ad_groups": ["SED_HR", "SED_ADMINS"],
-    "position_to_category": {"Должность вымышленная": "руководитель"},
     "position_escalation": {"Должность вымышленная": 24},
-    "templates": [
-        {
-            "service": "Служба вымышленного учета",
-            "category": "руководитель",
-            "steps": [{"owner_group": "SED_STEP_HR"}],
-        }
-    ],
     "mail_templates": [
         {
             "code": "reminder",
@@ -375,13 +350,9 @@ def test_settings_put_admin_200_persists(client, admin_headers, mock_store):
     assert mock_store._data["smtp_password"] == '"relay-pass"'  # в БД — настоящее значение
     assert json.loads(mock_store._data["enterprises"]) == UPDATED_VALUES["enterprises"]
     assert json.loads(mock_store._data["allowed_ad_groups"]) == ["SED_HR", "SED_ADMINS"]
-    assert json.loads(mock_store._data["position_to_category"]) == {
-        "Должность вымышленная": "руководитель"
-    }
     assert json.loads(mock_store._data["position_escalation"]) == {
         "Должность вымышленная": 24
     }
-    assert json.loads(mock_store._data["templates"]) == UPDATED_VALUES["templates"]
     # Последующее чтение возвращает сохраненное (пароль — маской).
     got = client.get("/settings", headers=admin_headers)
     assert got.status_code == 200
@@ -431,7 +402,7 @@ def test_settings_put_partial_200(client, admin_headers, mock_store):
     assert mock_store._data["smtp_from"] == '"noreply@example.com"'
     assert mock_store._data["scan_retention_days"] == "365"
     assert mock_store._data["require_comment"] == "false"
-    assert json.loads(mock_store._data["templates"]) == CONTRACT_VALUES["templates"]
+    assert json.loads(mock_store._data["mail_templates"]) == CONTRACT_VALUES["mail_templates"]
 
 
 def test_settings_put_empty_200_no_changes(client, admin_headers, mock_store):
@@ -469,7 +440,7 @@ def test_settings_put_owner_403(client, owner_headers, mock_store):
 
 
 def test_settings_put_wrong_types_422(client, admin_headers, mock_store):
-    """Неверные типы (в т.ч. структура справочников/шаблонов) — 422."""
+    """Неверные типы (в т.ч. структура справочников) — 422."""
     bad_cases = [
         dict(CONTRACT_VALUES, approval_ttl_days="abc"),
         dict(CONTRACT_VALUES, require_paper_signature=123),
@@ -478,11 +449,7 @@ def test_settings_put_wrong_types_422(client, admin_headers, mock_store):
         dict(CONTRACT_VALUES, enterprises="ENT_PRIMER_1"),
         dict(CONTRACT_VALUES, enterprises=[{"code": "X"}]),
         dict(CONTRACT_VALUES, allowed_ad_groups=["SED_HR", 123]),
-        dict(CONTRACT_VALUES, position_to_category={"Должность": 123}),
         dict(CONTRACT_VALUES, position_escalation={"Должность": "много"}),
-        dict(CONTRACT_VALUES, templates="not-a-list"),
-        dict(CONTRACT_VALUES, templates=[{"service": "S", "category": "C"}]),
-        dict(CONTRACT_VALUES, templates=[{"service": "S", "category": "C", "steps": [{"resolver": "by_group"}]}]),
         dict(CONTRACT_VALUES, mail_templates="not-a-list"),
         dict(CONTRACT_VALUES, mail_templates=[{"code": "assigned"}]),
     ]
@@ -819,6 +786,40 @@ def test_settings_audit_not_written_on_403(client, hr_headers, mock_store):
 # --- doc_templates/position_sets вне контракта (бланки печатаются из данных) ---
 
 REMOVED_KEYS = ("doc_templates", "position_sets")
+
+# Легаси-ключи лекасства-вкладки «Шаблоны» маршрута (решение человека 2026-10-08):
+# маршрут задаёт бланк (его шаги) либо сотрудник ОК вручную.
+LEGACY_ROUTE_KEYS = ("templates", "position_to_category")
+
+
+def test_legacy_route_keys_not_in_settings_contract(client, admin_headers, mock_store):
+    """Ключей templates/position_to_category в контракте GET/PUT /settings нет.
+
+    Вкладка «Шаблоны» удалена целиком, строки настроек чистит миграция 0014."""
+    for key in LEGACY_ROUTE_KEYS:
+        assert key not in SETTINGS_KEYS
+        assert key not in CONTENT_KEYS
+        assert key not in CONTRACT_VALUES
+    body = client.get("/settings", headers=admin_headers).json()
+    for key in LEGACY_ROUTE_KEYS:
+        assert key not in body
+
+
+def test_legacy_route_keys_ignored_by_put(client, admin_headers, mock_store):
+    """Присылка легаси-ключей в PUT — не 422 и не запись: полей нет в модели."""
+    response = client.put(
+        "/settings",
+        json={
+            "templates": [{"service": "Служба вымышленного учета",
+                           "category": "линейный", "steps": []}],
+            "position_to_category": {"Должность вымышленная": "линейный"},
+        },
+        headers=admin_headers,
+    )
+    assert response.status_code == 200, response.text
+    for key in LEGACY_ROUTE_KEYS:
+        assert key not in response.json()
+        assert key not in mock_store._data
 
 
 def test_removed_doc_template_keys_not_in_settings_contract(client, admin_headers, mock_store):

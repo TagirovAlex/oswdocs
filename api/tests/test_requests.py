@@ -1,4 +1,4 @@
-# Тесты заявок и маршрутов (волна B2): шаблон/ручной, TTL, комментарии, чужие шаги.
+# Тесты заявок и маршрутов (волна B2): бланк/ручной, TTL, комментарии, чужие шаги.
 # Все ПДн вымышленные; группы подменяются оверрайдом get_settings.
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ from app.requests import (  # noqa: E402
     get_route_settings,
 )
 from app.requests import _Request, _Step  # noqa: E402
-from app.requests import RouteSettings, RouteStepTemplate, RouteTemplate  # noqa: E402
+from app.requests import RouteSettings  # noqa: E402
 from app.requests_store import get_requests_store  # noqa: E402
 from app.settings_routes import SettingsUnavailable, get_settings_store  # noqa: E402
 
@@ -89,21 +89,13 @@ def _headers_for(sam: str, groups: list[str]) -> dict:
 
 @pytest.fixture
 def route_override():
-    """Настройки маршрута с одним шаблоном (служба+линейный → 2 шага)."""
+    """Настройки маршрута без шаблонов службы (ключ templates снят).
+
+    Маршрут в этих тестах задаёт либо ручной конструктор (steps/blocks), либо
+    выбранный бланк — см. test_requests_blank_flow.py и test_requests_route_mode.py."""
     route = RouteSettings(
         approval_ttl_days=7,
-        position_to_category={FAKE_POSITION_LINE: "линейный"},
         position_escalation={},
-        templates=[
-            RouteTemplate(
-                service=FAKE_SERVICE,
-                category="линейный",
-                steps=[
-                    RouteStepTemplate(owner_group="SED_STEP_BUH"),
-                    RouteStepTemplate(owner_group="SED_STEP_HR"),
-                ],
-            )
-        ],
     )
     app.dependency_overrides[get_route_settings] = lambda: route
     yield route
@@ -158,7 +150,7 @@ def hr_admin() -> dict:
 
 @pytest.fixture
 def buh_owner() -> dict:
-    """Заголовки владельца первого шага шаблона."""
+    """Заголовки владельца первого шага маршрута."""
     return _headers_for("step.buhgalter", ["SED_STEP_BUH"])
 
 
@@ -170,7 +162,7 @@ def other_owner() -> dict:
 
 @pytest.fixture
 def hr_step_owner() -> dict:
-    """Заголовки владельца второго шага шаблона (группы SED_STEP_HR)."""
+    """Заголовки владельца второго шага маршрута (группы SED_STEP_HR)."""
     return _headers_for("step.kadrovik", ["SED_STEP_HR"])
 
 
@@ -235,7 +227,11 @@ def ad_reader():
 
 
 def _create(client, headers, **kw) -> dict:
-    """Создание заявки с вымышленными полями по умолчанию."""
+    """Создание заявки с вымышленными полями по умолчанию.
+
+    Маршрут по умолчанию — ручной (два групповых шага): шаблоны службы сняты,
+    маршрут либо выбирает бланк, либо задаёт конструктор. Тест, которому нужен
+    другой маршрут, передаёт steps/blocks/blank_id."""
     body = {
         "enterprise": FAKE_ENTERPRISE,
         "fio": "Вымышленный Сотрудник Полный",
@@ -244,22 +240,32 @@ def _create(client, headers, **kw) -> dict:
         "position": FAKE_POSITION_LINE,
         "subject": "Вымышленная тема",
         "content": "Вымышленное содержание",
+        "steps": [
+            {"owner_group": "SED_STEP_BUH"},
+            {"owner_group": "SED_STEP_HR"},
+        ],
     }
     body.update(kw)
     response = client.post("/requests", json=body, headers=headers)
     return response
 
 
-def test_no_template_falls_back_to_manual(client, hr, test_settings_override, route_override):
-    """Нет шаблона → 422 без steps, с ручным маршрутом — 201 custom."""
-    bad = _create(client, hr, position=FAKE_POSITION_OTHER)
+def test_without_blank_and_without_steps_422(
+    client, hr, requests_store, test_settings_override, route_override
+):
+    """Ни бланка, ни ручного маршрута — 422 и заявки нет; с steps — 201 custom.
+
+    Снятые шаблоны службы больше не подставляют маршрут молча: маршрут задаёт
+    либо бланк (его шаги), либо ручной конструктор blocks/steps. Без бланка в
+    режиме auto подбор по службе идёт только за настройкой blank_autopick
+    (выключена по умолчанию), а в этом файле справочники маршрута офлайн
+    (карточки сотрудника нет), поэтому API отвечает 422 с подсказкой переключиться
+    на «Вручную» и ничего не создаёт. С явными steps создаётся ручная заявка."""
+    bad = _create(client, hr, steps=None)
     assert bad.status_code == 422
-    ok = _create(
-        client,
-        hr,
-        position=FAKE_POSITION_OTHER,
-        steps=[{"owner_group": "SED_STEP_BUH"}],
-    )
+    assert "Вручную" in bad.json()["detail"]
+    assert requests_store.list_all() == []
+    ok = _create(client, hr, steps=[{"owner_group": "SED_STEP_BUH"}])
     assert ok.status_code == 201
     body = ok.json()
     assert body["route_origin"] == "custom"
@@ -360,16 +366,19 @@ def test_flat_step_sam_is_personal_executor(client, hr, test_settings_override, 
     assert step["assignee"] == BUH_SAM
 
 
-def test_template_picked_by_service_category(client, hr, test_settings_override, route_override):
-    """Шаблон по службе/категории (категория из position_to_category)."""
-    response = _create(client, hr)
+def test_manual_route_replaces_removed_service_template(
+    client, hr, test_settings_override, route_override
+):
+    """Маршрут задаёт ручной конструктор: шаги из steps по порядку, origin=custom.
+
+    Ключ настроек templates (служба+категория → шаги) снят, маршрут по шаблону
+    службы больше не подставляется; явная категория ОК остаётся в заявке."""
+    response = _create(client, hr, category="линейный")
     assert response.status_code == 201
     body = response.json()
-    assert body["route_origin"] == "template"
+    assert body["route_origin"] == "custom"
+    assert body["category"] == "линейный"
     assert [s["owner_group"] for s in body["steps"]] == ["SED_STEP_BUH", "SED_STEP_HR"]
-    # Явная категория от ОК важнее подсказки: чужой категории нет в шаблонах → нужен ручной.
-    miss = _create(client, hr, category="руководитель")
-    assert miss.status_code == 422
 
 
 def test_hr_admin_can_create(client, hr_admin, test_settings_override, route_override):
@@ -377,7 +386,7 @@ def test_hr_admin_can_create(client, hr_admin, test_settings_override, route_ove
     response = _create(client, hr_admin)
     assert response.status_code == 201
     body = response.json()
-    assert body["route_origin"] == "template"
+    assert body["route_origin"] == "custom"
     assert body["status"] == "Черновик"
 
 
@@ -594,7 +603,7 @@ def _step_of(body: dict, order: int) -> dict:
 
 
 def _create_and_submit(client, headers, **kw) -> str:
-    """Заявка по шаблону, поданная (статус «На согласовании»): возвращает id."""
+    """Заявка с заданным маршрутом, поданная (статус «На согласовании»): id."""
     rid = _create(client, headers, **kw).json()["id"]
     assert client.post(f"/requests/{rid}/submit", headers=headers).status_code == 200
     return rid

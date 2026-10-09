@@ -355,12 +355,16 @@ def ad_reader():
 
 @pytest.fixture
 def groups_store():
-    """Настройки с наименованием группы-владельца этапа (owner_name в предпросмотре)."""
+    """Настройки с наименованием группы-владельца этапа (owner_name в предпросмотре).
+
+    Заодно включён запасной подбор маршрута по службе (blank_autopick="on"):
+    модуль проверяет именно его, ведь бланк выбирает сотрудник ОК."""
     store = SeededSettingsStore(
         {
             "allowed_ad_groups": json.dumps(
                 [{"id": FAKE_STEP_GROUP, "name": FAKE_STEP_GROUP_NAME}], ensure_ascii=False
-            )
+            ),
+            "blank_autopick": json.dumps("on"),
         }
     )
     app.dependency_overrides[get_settings_store] = lambda: store
@@ -572,7 +576,7 @@ def _drop_owner_kind(stored) -> None:
 
 
 def test_roster_member_sees_request_after_store_reload(
-    client, hr, settings_override, route_override, requests_store, routing_store
+    client, hr, settings_override, route_override, requests_store, routing_store, groups_store
 ):
     """owner_kind восстановлен из справочника: участник реестра видит заявку.
 
@@ -606,7 +610,7 @@ def test_roster_member_sees_request_after_store_reload(
 
 
 def test_roster_member_decision_after_store_reload(
-    client, hr, settings_override, route_override, requests_store, routing_store
+    client, hr, settings_override, route_override, requests_store, routing_store, groups_store
 ):
     """Право по реестру работает и после перечитывания: отметка участника принята."""
     routing_store.profile_steps = _steps([STAGE_HR_ROW, STAGE_BUH_ROW])
