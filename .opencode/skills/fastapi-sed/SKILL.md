@@ -24,14 +24,19 @@ description: Use when editing FastAPI, SQLAlchemy, LDAP bind, 1C OData in SED. T
 - `employees.py` — `GET /employees?enterprise&q` (локальная таблица, `page`/`page_size`/`total`,
   уволенные отсекаются), `POST /employees/sync`, `POST /employees/hr-sync` (проход по регистру
   кадровых данных), `GET /employees/card`.
-- `routing.py`/`routing_store.py` — справочники маршрута (в т.ч. бланки `blanks`/`blank_steps`) и
-  чистый подбор профиля по службе / шагов бланка (`pick_blank_steps`).
+- `routing.py`/`routing_store.py` — справочники маршрута (бланки `blanks`/`blank_steps`, шаг бланка
+  самостоятельный — свой текст и свой исполнитель, этап не нужен) и чистый подбор профиля по службе /
+  шагов бланка (`pick_blank_steps`).
 - `requests.py` — `GET /requests/route/blanks` (селект бланка для ОК), `POST /requests/route/preview`
   (бланк/профиль, этапы, `notice`, `link_state`) и `POST /requests/route/link-employee`
-  (подтверждение связи при импорте); создание заявки принимает `blank_id`, в заявку пишется снимок
-  бланка, автоподстановка по службе — за настройкой `blank_autopick`.
+  (подтверждение связи при импорте); создание заявки принимает `blank_id`, снятие шага бланка — по
+  номеру (`dismissed_step_orders`), в заявку пишется снимок бланка (в т.ч. `blank_header_html`/
+  `blank_footer_lines`), автоподстановка по службе — за настройкой `blank_autopick`; бланк не
+  выбран при `blank_autopick=off` — одинаковый 422 в предпросмотре и создании с перечнем вариантов.
 - Границы вне роутеров создаём через `dependency_overrides`-совместимые фабрики — прямой
   вызов `get_*_store(get_settings())` в хелпере уводит офлайн-прогоны в боевую БД.
+- `documents.py`/`docs.py` — печать бланка из данных заявки и снимка (шапка/подвал/текст шага) с
+  плейсхолдерами (`{fio}`…`{manager}`), значения экранируются, неизвестные остаются текстом.
 - `requests.py, steps.py` — заявки, `route_origin=template|custom`, отметку ставит любой из `owner_group`.
 - `onec_client.py` — клиент per-base (см. скил `onec-multibase`), таймаут 5с.
 - `ad_reader.py` — см. скил `ad-reader`.

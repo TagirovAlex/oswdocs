@@ -5,7 +5,7 @@
 ## Обзор
 - `api/` — FastAPI (Python 3.12), `app/` — код, `tests/` — pytest, `requirements.txt`.
 - `frontend/` — React SPA (Vite): `src/` — код, `public/` — статика, `dist/` — сборка.
-- `db/alembic/versions/` — миграции БД (0001..0013).
+- `db/alembic/versions/` — миграции БД (0001..0016).
 - `proxy/` — nginx. `deploy/` — компоуз/деплой. `samples/` — DESIGN.md + макет.
 - `script_local/`, `script_remote/` — инструментарий разработчика (gitignored).
 - `PLAN.md` — план/статус; `TEMPLATES.md` — бланки/этапы и печать; `task/` — исторические спеки (gitignored).
@@ -18,8 +18,10 @@
 - `requests.py` — заявки: создание, шаги, отметки (approve/reject/return), PATCH, rollback, история,
   комментарии; выбор бланка сотрудником ОК (`blank_id` в `POST /requests`, список для селекта
   `GET /requests/route/blanks`, автоподстановка по службе за `blank_autopick` — `_blank_autopick_enabled`),
-  снимок бланка в заявке (`blank_id/blank_name/blank_version/blank_layout`), несколько
-  ответственных шага (`assignees`/`approvals`/`approval_mode`), предпросмотр
+  снимок бланка в заявке (`blank_id/blank_name/blank_version/blank_layout/blank_header_html/
+  blank_footer_lines`), несколько ответственных шага (`assignees`/`approvals`/`approval_mode`),
+  снятие шага бланка по номеру (`dismissed_step_orders`, рядом с `dismissed_stages` по кодам этапов),
+  предпросмотр
   `POST /requests/route/preview` (бланк/профиль/этапы/исполнители/`notice`/`link_state`/`link_candidate`),
   подтверждение связи при импорте `POST /requests/route/link-employee` (`_link_state`,
   `_ad_candidates`, `_missing_ad_card_detail`).
@@ -54,23 +56,32 @@
   (службы AD; `blank_kind` — прежний признак вида бланка, в печати не участвует), `route_profiles`,
   `approval_stages` (`owner_kind`:
   `ad_group`/`stage_roster`/`manager_ad`), `stage_assignees`, `route_profile_steps`; справочник
-  бланков (миграция 0012): `blanks`, `blank_steps` (`list_blanks`/`blank_by_id`/`create_blank`/
-  `update_blank`/`list_blank_steps`/`set_blank_steps` — замена состава одной транзакцией с ростом
-  `version`); чистая логика `pick_profile`/`pick_blank_steps`/`apply_dismissals_and_additions` +
-  хранилище и карточки пользователей (`user_card`, `manager_sam_by_dn`).
+  бланков (миграции 0012/0014): `blanks` (+`header_html`/`footer_lines`), `blank_steps` —
+  самостоятельные шаги (`title`/`stage_lines`/`executor_kind`/`assignees`/`owner_group`/`optional`/
+  `require_comment`/`approval_mode`; `stage_id` — nullable-наследие) (`list_blanks`/`blank_by_id`/
+  `create_blank`/`update_blank`/`list_blank_steps`/`set_blank_steps` — замена состава одной
+  транзакцией с ростом `version`); чистая логика `pick_profile`/`pick_blank_steps`/
+  `apply_dismissals_and_additions` + хранилище и карточки пользователей (`user_card`,
+  `manager_sam_by_dn`).
 - `settings_routes.py` — настройки (GET/PUT /settings, /settings/content), doc_types CRUD, step-groups,
   бланки (CRUD справочника и состава шагов):
   `GET/POST /settings/routing/blanks`, `PUT /settings/routing/blanks/{id}`,
   `GET/PUT /settings/routing/blanks/{id}/steps` (все — только admin); ключ `blank_autopick`
-  в `INFRA_KEYS`. Ключи `doc_templates`/`position_sets` и ручки файлов-бланков удалены вместе
-  с файлами-шаблонами .docx.
+  в `INFRA_KEYS`. Ключи `templates`/`position_to_category` (миграция 0014) и мёртвые
+  `doc_templates`/`position_sets` (миграция 0016) удалены из БД, ручки файлов-бланков удалены
+  вместе с файлами-шаблонами .docx; вкладка «Шаблоны» из админки снята (редактор писем — на
+  вкладке «Письма»).
 - `documents.py` — печать бланка (вариант 1, `pdf_b64` без записи версий в БД, временные файлы
-  удаляются); макет — из снимка `blank_layout` (`resolve_blank_layout`), `_fill_step_fio` подставляет
-  ФИО ВСЕХ ответственных шага из зеркала `users` по логинам (`assignees`); групповой шаг
-  (снимок ответственных пуст) печатается по `owner_group` — как в исходных бланках.
+  удаляются); макет — из снимка `blank_layout` (`resolve_blank_layout`), шапка/подвал/текст шага —
+  из снимка `blank_header_html`/`blank_footer_lines`, `_fill_step_fio` подставляет ФИО ВСЕХ
+  ответственных шага из зеркала `users` по логинам (`assignees`); групповой шаг (снимок
+  ответственных пуст) печатается по `owner_group`; `_fill_hr_placeholders` — `{date}`/
+  `{dismissal_date}`/`{manager}` из локальных зеркал (кадровые данные по ключу заявки, AD users).
 - `docs.py` — сборка бланка из данных: `build_blank_document` (python-docx) по макету из снимка
   (`LAYOUT_PRESETS` office|line, `build_bypass_context` — снимок бланка, шаги с `assignees`/`assignee_names`
-  и `stage_lines`), QR и конвертация в PDF (`generate_bypass`, LibreOffice); переменные — см. `TEMPLATES.md`.
+  и `stage_lines`), плейсхолдеры печати (`blank_placeholders`/`render_blank_text`, значения
+  экранируются, неизвестные остаются текстом), QR и конвертация в PDF (`generate_bypass`, LibreOffice);
+  переменные — см. `TEMPLATES.md`.
 - `archive.py` — бэкапы (ручной, расписание, настройки, список, скачать/удалить).
 - `audit.py` — журнал аудита (память + INSERT в БД).
 - `mailer.py` — письма (шаблоны, SMTP/файловая очередь); адресаты шага — все ответственные из
@@ -93,11 +104,14 @@
   при `link_state=need_link`, переход в «Вручную» при блокировке маршрута).
 - `request-card.tsx` — карточка заявки (шаги, отметки, история, комментарии, вложения, печать, админ СЭД);
   у шага видны все ответственные и прогресс отметок по режиму шага.
-- `admin-settings.tsx` — настройки (вкладки: процесс/инфра/регламенты/доступ/виды документов/архивация)
-  и вкладка «Бланки» (только admin): карточка бланка + состав шагов с выбором режима шага
-  (`parallel`/`sequential`) и переопределений флагов этапа.
-- `rich-text.tsx` — визуальный редактор текста этапа на TipTap (`@tiptap/react` +
-  `@tiptap/starter-kit`); HTML уходит в `title`/`stage_lines` этапа и доходит до печати.
+- `admin-settings.tsx` — настройки (вкладки: процесс/справочники/письма — контент; инфра/регламенты/
+  доступ/архивация/бланки — только admin; легаси-вкладка «Шаблоны» удалена) и вкладка «Бланки»
+  (только admin): карточка бланка (шапка `header_html`, подвал `footer_lines`) + собственные шаги
+  бланка — название/текст, вид исполнителя (`executor_kind`), согласующие/группа AD/руководитель,
+  режим шага (`parallel`/`sequential`), флаги `optional`/`require_comment`.
+- `rich-text.tsx` — визуальный редактор текста шага и шапки бланка на TipTap
+  (`@tiptap/react` + `@tiptap/starter-kit`); HTML уходит в `title`/`stage_lines` шага и
+  `blank_header_html` и доходит до печати.
 - `directory.tsx` — справочник сотрудников (поиск, пагинация, автосопоставление).
 - `link-match.tsx` — раздел «Сопоставление 1С↔AD» (admin): ручной запуск прохода, счётчики
   расхождений, фильтры, пагинация (первая/последняя + по пять с каждой стороны), массовое
@@ -110,13 +124,15 @@
 - ВСЕ стили — один файл `frontend/src/theme.css` (токены, сетки, кнопки, таблицы, dropdown, панели).
 - Иконки меню/темы — инлайн-SVG в `frontend/src/layout.tsx` (каталог `ico/` удалён, в сборку не входит); логотипы — `logo-oswdocs*.svg` + `frontend/public/`.
 - Файлов-шаблонов `.docx` больше нет: оформление печати — два встроенных пресета `office`/`line`
-  в `docs.LAYOUT_PRESETS`, выбирает `blank_layout` из снимка заявки. Шапка, таблица этапов и QR
+  в `docs.LAYOUT_PRESETS`, выбирает `blank_layout` из снимка заявки. Шапка, таблица шагов и QR
   собираются из данных (`build_blank_document`); в `FILES_DIR` остаются только временные
   docx/pdf/qr, которые удаляются сразу после ответа печати.
-- Маршрут задаёт справочник: бланк (`blanks`/`blank_steps`, миграции 0012/0013) — основной путь,
+- Маршрут задаёт справочник: бланк (`blanks`/`blank_steps`, миграции 0012/0013/0014) — основной
+  путь, шаг бланка самостоятельный (свой текст, свой исполнитель, этап справочника не нужен);
   `route_profiles`/`approval_stages`/`route_profile_steps` (миграция 0008) — запасной подбор по
-  службе за `blank_autopick` и ручной конструктор. Старые `templates/template_steps/template_filters`
-  из 0001 — пустые таблицы, в подборе не участвуют.
+  службе за `blank_autopick` (там снятие/добавление этапов по кодам) и ручной конструктор. Старые
+  `templates/template_steps/template_filters` из 0001 — пустые таблицы, в подборе не участвуют;
+  мёртвый код маршрута по шаблонам удалён.
 - Писем — `mail_templates` (код/тема/тело). Описание бланков, режима шага и печати — `TEMPLATES.md`.
 
 ## БД (db/alembic/versions/)
@@ -131,10 +147,16 @@
   blank_id/blank_name/blank_version/blank_layout; сид: каждый doc_types → бланк с тем же кодом,
   настройка blank_autopick='off'),
   0013 несколько ответственных и режим шага (blank_steps.approval_mode;
-  request_steps.assignees/approval_mode/approvals — jsonb).
+  request_steps.assignees/approval_mode/approvals — jsonb),
+  0014 самостоятельный шаг бланка (blank_steps.stage_id → NULLABLE + title/stage_lines/executor_kind/
+  assignees/owner_group/optional/require_comment; blanks.header_html/footer_lines; снимок
+  dismissal_requests.blank_header_html/blank_footer_lines; очистка blank_steps/blanks;
+  удаление ключей templates/position_to_category),
+  0015 request_steps.optional NOT NULL DEFAULT TRUE (снимок «шаг можно снять»),
+  0016 удаление мёртвых ключей настроек doc_templates/position_sets.
 
 ## Сценарии ключевых функций
 - Создание: create-form → POST /requests → шаги; отметки: request-card → POST .../steps/{order}/decide; печать: POST /print (pdf_b64) → iframe; история: GET /history (audit_log); сотрудники: GET /employees (локальная таблица); бэкапы: /api/archive*; настройки: /api/settings.
-- Маршрут по бланку: create-form → GET /requests/route/blanks (селект бланка ОК) → POST /requests/route/preview (link_state=need_link? → «Подтвердить связь с AD» → POST /requests/route/link-employee → предпросмотр заново) → POST /requests (blank_id; снимок бланка и шагов в заявке). Запасной путь — подбор профиля по службе AD за `blank_autopick`, ручной конструктор — `route_mode=custom`.
+- Маршрут по бланку: create-form → GET /requests/route/blanks (селект бланка ОК) → POST /requests/route/preview (link_state=need_link? → «Подтвердить связь с AD» → POST /requests/route/link-employee → предпросмотр заново; снятие шага бланка — `dismissed_step_orders`) → POST /requests (blank_id; снимок бланка и шагов в заявке). Запасной путь — подбор профиля по службе AD за `blank_autopick`, ручной конструктор — `route_mode=custom`. Бланк не выбран при `blank_autopick=off` — одинаковый 422 в предпросмотре и создании с перечнем вариантов.
 - Сопоставление 1С↔AD: link-match → POST /link_1c_ad/sync (проход) → GET /link_1c_ad/discrepancies → POST /link_1c_ad/discrepancies/confirm (только строки с одним кандидатом AD; строка справочника помечается связанной сразу). Регламент: worker по `schedule_ad_links_sync`/`schedule_hr_dismissals_sync`.
 - Кадровые данные: ежедневный проход регистра (worker) → `POST /employees/hr-sync` для запуска по требованию → `employees.dismissal_date` → поиск сотрудников скрывает уволенных, сопоставление их пропускает.
