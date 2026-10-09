@@ -467,11 +467,16 @@ export const FOLDER_STATUSES: Record<FolderId, string[] | null> = {
   mine: null,
 };
 
-// Деталь ошибки из тела FastAPI (detail), иначе null.
+// Деталь ошибки из тела FastAPI (detail), иначе null. У 422 detail — список
+// ошибок валидации: берём текст первой (без служебного префикса «Value error»).
 async function readDetail(res: Response): Promise<string | null> {
   try {
     const data = await res.json();
     if (typeof data?.detail === "string" && data.detail !== "") return data.detail;
+    if (Array.isArray(data?.detail) && data.detail.length > 0) {
+      const msg = typeof data.detail[0]?.msg === "string" ? data.detail[0].msg : null;
+      if (msg) return msg.replace(/^Value error,\s*/, "");
+    }
   } catch {
     // тело не JSON — общий текст ниже
   }
@@ -808,6 +813,15 @@ export async function updateBlank(blankId: number, patch: BlankPatch): Promise<{
     method: "PUT",
     body: JSON.stringify(patch),
   });
+}
+
+// DELETE /api/settings/routing/blanks/{id}: удалить бланк. Шаги бланка сносятся
+// каскадом, у выданных заявок blank_id становится NULL (печать — по снимку).
+export async function deleteBlank(blankId: number): Promise<{ id: number; deleted: boolean }> {
+  return requestJson<{ id: number; deleted: boolean }>(
+    `/api/settings/routing/blanks/${blankId}`,
+    { method: "DELETE" },
+  );
 }
 
 // GET /api/settings/routing/blanks/{id}/steps: состав шагов бланка с текстом этапов.

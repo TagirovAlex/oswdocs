@@ -86,6 +86,7 @@ class FakeResult:
 
     def __init__(self, rows=None) -> None:
         self._rows = rows
+        self.rowcount = 0
 
     def _as_rows(self) -> list:
         if self._rows is None:
@@ -123,8 +124,12 @@ class FakeSession:
     def execute(self, statement, params=None):
         self.calls.append((str(statement), dict(params or {})))
         if not self._results:
-            return FakeResult(None)
-        return FakeResult(self._results.pop(0))
+            result = FakeResult(None)
+            result.rowcount = 0
+            return result
+        result = FakeResult(self._results.pop(0))
+        result.rowcount = 1
+        return result
 
     def commit(self) -> None:
         self.commits += 1
@@ -324,6 +329,26 @@ def test_set_blank_steps_skips_broken_items_and_bumps_version():
     assert session.commits == 1
 
 
+def test_delete_blank_deletes_and_audits():
+    """Удаление бланка: DELETE по id + аудит blank.delete; нет строки — False.
+
+    Каскад шагов и снятие привязки заявок делает БД (FK ON DELETE CASCADE /
+    SET NULL), поэтому здесь только один DELETE по бланку."""
+    session = FakeSession([FakeRow({"id": BLANK_ID})])
+    assert _store(session).delete_blank(BLANK_ID, "adm.petrov") is True
+    assert _params_with(session, "DELETE FROM blanks") == [{"id": BLANK_ID}]
+    assert "DELETE FROM blank_steps" not in _sqls(session)
+    audit = _audit_call(session)
+    assert audit["action"] == "blank.delete" and audit["entity"] == "blank"
+    assert audit["entity_id"] == str(BLANK_ID) and audit["actor"] == "adm.petrov"
+    assert session.commits == 1
+
+    session = FakeSession([])
+    assert _store(session).delete_blank(999, "adm.petrov") is False
+    assert _params_with(session, "INSERT INTO audit_log") == []
+    assert session.commits == 1
+
+
 # ================= Эндпоинты: in-memory заглушка справочника =================
 
 
@@ -437,8 +462,17 @@ class FakeBlankStore:
                 item["version"] = int(item.get("version") or 0) + 1
 
     def steps_for(self, blank_id: int) -> list[dict]:
-        """Состав бланка для проверок теста (тот же срез, что list_blank_steps)."""
+        """Состав бланка для проверок теста (тот же срез, что list_blank_steps."""
         return [dict(item) for item in self.steps if item["blank_id"] == blank_id]
+
+    def delete_blank(self, blank_id: int, actor: str) -> bool:
+        self._count("delete_blank")
+        before = len(self.blanks)
+        # Каскад шагов делает БД, в заглушке — симулируем тем же срезом.
+
+        self.blanks = [item for item in self.blanks if item["id"] != blank_id]
+        self.steps = [item for item in self.steps if item["blank_id"] != blank_id]
+        return len(self.blanks) < before
 
 
 @pytest.fixture
@@ -696,7 +730,33 @@ def test_blanks_require_admin(client, hr_headers, settings_override, blanks_stor
         json={"steps": [_people_step(1)]},
         headers=hr_headers,
     ).status_code == 403
+    assert client.delete(
+        f"/settings/routing/blanks/{BLANK_ID}", headers=hr_headers
+    ).status_code == 403
     assert "create_blank" not in blanks_store.calls
+
+
+def test_delete_blank_endpoint(
+    client, admin_headers, settings_override, blanks_store
+):
+    """Удаление бланка: 200, строка и её шаги уходят (каскад в БД;, аудит."""
+    response = client.delete(
+        f"/settings/routing/blanks/{BLANK_ID}", headers=admin_headers
+    )
+    assert response.status_code == 200, response.text
+    assert response.json() == {"id": BLANK_ID, "deleted": True}
+    assert blanks_store.blank_by_id(BLANK_ID) is None
+    assert blanks_store.list_blank_steps(BLANK_ID) == []
+    assert "delete_blank" in blanks_store.calls
+
+
+def test_delete_blank_missing_404(
+    client, admin_headers, settings_override, blanks_store
+):
+    """Удаление отсутствующего бланка — 404 (не найдена)."""
+    response = client.delete("/settings/routing/blanks/999", headers=admin_headers)
+    assert response.status_code == 404, response.text
+    assert "не найден" in response.text
 
 
 def test_blank_code_validation(

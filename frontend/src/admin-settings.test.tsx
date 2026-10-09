@@ -11,6 +11,7 @@ import type { BlankStepRow, StepCatalogRow } from "./requests-client";
 import {
   createBlank,
   createStepCatalog,
+  deleteBlank,
   deleteStepCatalog,
   getBlankSteps,
   getBlanks,
@@ -63,6 +64,7 @@ vi.mock("./requests-client", async (importOriginal) => {
     getBlanks: vi.fn(),
     createBlank: vi.fn(),
     updateBlank: vi.fn(),
+    deleteBlank: vi.fn(),
     getBlankSteps: vi.fn(),
     setBlankSteps: vi.fn(),
     getStepGroups: vi.fn(),
@@ -259,6 +261,7 @@ beforeEach(() => {
   vi.mocked(getBlanks).mockReset();
   vi.mocked(createBlank).mockReset();
   vi.mocked(updateBlank).mockReset();
+  vi.mocked(deleteBlank).mockReset();
   vi.mocked(getBlankSteps).mockReset();
   vi.mocked(setBlankSteps).mockReset();
   vi.mocked(getStepGroups).mockReset();
@@ -885,6 +888,10 @@ describe("AdminSettings", () => {
       footer_lines: [],
     });
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Бланк создан"));
+    // Созданный бланк сразу открывается на правку: код становится read-only,
+    // состав шагов подгружается (GET .../steps; в карточке правки).
+    expect(screen.getByLabelText("Код бланка")).toHaveAttribute("readonly");
+    await waitFor(() => expect(getBlankSteps).toHaveBeenCalledWith(12));
   });
 
   // Шапка бланка: визуальный редактор + вставка плейсхолдера; подвал — список
@@ -998,7 +1005,7 @@ describe("AdminSettings", () => {
     render(<AdminSettings role="admin" />);
     await waitFor(() => expect(screen.getByRole("button", { name: "Бланки" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Бланки" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Состав бланка uvol_base" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Править бланк uvol_base" }));
 
     // Состав пришёл по GET .../blanks/{id}/steps: два своих шага по порядку.
     await waitFor(() => expect(getBlankSteps).toHaveBeenCalledWith(10));
@@ -1083,7 +1090,7 @@ describe("AdminSettings", () => {
     render(<AdminSettings role="admin" />);
     await waitFor(() => expect(screen.getByRole("button", { name: "Бланки" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Бланки" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Состав бланка uvol_base" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Править бланк uvol_base" }));
 
     // Первый шаг — manager_ad (данные не нужны), переключаем на согласующих.
     const kind = await screen.findByLabelText("Вид исполнителя шага 1");
@@ -1105,7 +1112,7 @@ describe("AdminSettings", () => {
     render(<AdminSettings role="admin" />);
     await waitFor(() => expect(screen.getByRole("button", { name: "Бланки" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Бланки" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Состав бланка uvol_base" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Править бланк uvol_base" }));
 
     // Пункт первого шага редактируется визуально.
     expect(await screen.findByText("Ознакомить с приказом")).toBeInTheDocument();
@@ -1153,7 +1160,7 @@ describe("AdminSettings", () => {
     render(<AdminSettings role="admin" />);
     await waitFor(() => expect(screen.getByRole("button", { name: "Бланки" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Бланки" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Состав бланка uvol_base" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Править бланк uvol_base" }));
     fireEvent.click(await screen.findByRole("button", { name: "Сохранить состав" }));
 
     await waitFor(() =>
@@ -1164,6 +1171,115 @@ describe("AdminSettings", () => {
   });
 
   // Недоступность справочника бланков (503) — понятный текст, админка жива.
+  // Удаление бланка: подтверждение с последствиями, DELETE и перечитывание
+  // списка; если бланк правился, карточка правки сбрасывается.
+
+  it("удаление бланка: confirm и deleteBlank, список перечитывается", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+    vi.mocked(deleteBlank).mockResolvedValue({ id: 10, deleted: true });
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Бланки" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Бланки" } ));
+
+    // Открыли бланк на правку — удаляем его же: карточка сбрасывается в «новый».
+    fireEvent.click(await screen.findByRole("button", { name: "Править бланк uvol_base" } ));
+    await waitFor(() => expect(getBlankSteps).toHaveBeenCalledWith(10));
+
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    fireEvent.click(screen.getByRole("button", { name: "Удалить бланк uvol_base" } ));
+    await waitFor(() => expect(deleteBlank).toHaveBeenCalledWith(10));
+    // Подтверждение объясняет последствия: шаги удалятся каскадом, заявки
+    // останутся без привязки (печать — по снимку заявки.
+
+
+    expect(confirm).toHaveBeenCalledWith(
+      expect.stringContaining("Шаги бланка удалятся"),
+    );
+    confirm.mockRestore();
+    // Список перечитан, карточка правки сброшена(код снова редактируется).
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Бланк удалён"));
+    expect(screen.getByLabelText("Код бланка")).not.toHaveAttribute("readonly");
+    expect(getBlanks).toHaveBeenCalledTimes(2);
+  });
+
+  // При правке бланка состав шагов виден сразу в карточке: отдельных кнопок
+  // «Состав»/«Закрыть состав» и карточки «Состав бланка: …» больше нет.
+
+  it("при правке бланка состав шагов виден сразу, без отдельной карточки состава", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Бланки" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Бланки" } ));
+
+    fireEvent.click(await screen.findByRole("button", { name: "Править бланк uvol_base" } ));
+    // Состав подгружается сразу(GET .../steps) и шаги видны в карточке правки.
+
+
+    await waitFor(() => expect(getBlankSteps).toHaveBeenCalledWith(10));
+    expect(await screen.findByLabelText("Название шага 1")).toHaveValue("Непосредственный руководитель");
+    // Отдельной кнопки «Состав» и «Закрыть состав» нет.
+
+
+
+    expect(screen.queryByRole("button", { name: "Состав бланка uvol_base" } )).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Закрыть состав" } )).not.toBeInTheDocument();
+  });
+
+  // Код бланка проверяется до отправки: неверный формат не уходит на сервер,
+
+
+  // а причина показывается понятным русским текстом.
+
+
+
+  it("некорректный код бланка не отправляется, причина понятна", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Бланки" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Бланки" } ));
+
+
+    await waitFor(() => expect(screen.getByLabelText("Код бланка")).toBeInTheDocument());
+    fireEvent.change(screen.getByLabelText("Код бланка"), { target: { value: "Плохой Код" } });
+    fireEvent.change(screen.getByLabelText("Название бланка"), { target: { value: "Бланк" } });
+    fireEvent.click(screen.getByText("Создать бланк"));
+
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "Код — только строчные латинские буквы",
+      ),
+    );
+    expect(createBlank).not.toHaveBeenCalled();
+  });
+
+  // Код шага справочника — тот же формат, что у бланка: проверка до отправки.
+
+
+
+  it("некорректный код шага справочника не отправляется", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Шаги" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Шаги" } ));
+
+
+    await waitFor(() => expect(screen.getByLabelText("Код шага справочника")).toBeInTheDocument());
+    fireEvent.change(screen.getByLabelText("Код шага справочника"), { target: { value: "Soglas_Ok" } });
+    fireEvent.change(screen.getByLabelText("Название шага справочника"), { target: { value: "Согласование" } });
+    fireEvent.click(screen.getByText("Создать шаг"));
+
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "Код — только строчные латинские буквы",
+      ),
+    );
+    expect(createStepCatalog).not.toHaveBeenCalled();
+  });
+
   it("недоступность справочника бланков показывает текст", async () => {
     vi.mocked(getSettings).mockResolvedValue(settings);
     vi.mocked(getBlanks).mockRejectedValue(new ApiHttpError(503, "Хранилище справочников недоступно"));
@@ -1263,7 +1379,7 @@ describe("AdminSettings", () => {
     render(<AdminSettings role="admin" />);
     await waitFor(() => expect(screen.getByRole("button", { name: "Бланки" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Бланки" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Состав бланка uvol_base" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Править бланк uvol_base" }));
     await waitFor(() => expect(getBlankSteps).toHaveBeenCalledWith(10));
 
     // Кнопка раскрывает список активных шагов справочника.

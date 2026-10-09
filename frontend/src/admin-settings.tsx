@@ -7,6 +7,7 @@ import { useEffect, useState } from "react";
 import {
   createBlank,
   createStepCatalog,
+  deleteBlank,
   deleteStepCatalog,
   getBlankSteps,
   getBlanks,
@@ -666,6 +667,13 @@ const BLANK_PLACEHOLDERS: readonly string[] = [
   "{manager}",
 ];
 
+// Код бланка/шага — snake_case (тот же формат, что на бэкенде): строчная
+// латиница, цифры и «_», начинается с буквы. Проверяется до отправки, чтобы
+// вместо «Неверные данные запроса» показать понятную причину 422.
+const CODE_FORMAT = /^[a-z][a-z0-9_]*$/;
+const CODE_FORMAT_HINT =
+  "Код — только строчные латинские буквы, цифры и «_», начинается с буквы";
+
 // Кнопки вставки плейсхолдера (набор один и тот же для шапки и подвала).
 function PlaceholderButtons(props: {
   onInsert: (token: string) => void;
@@ -716,8 +724,6 @@ function BlanksEditor() {
   const [saved, setSaved] = useState<string>("");
   const [busy, setBusy] = useState<boolean>(false);
   const [form, setForm] = useState<BlankForm>(EMPTY_BLANK_FORM);
-  // id выбранного бланка (null — состав не открыт).
-  const [selectedId, setSelectedId] = useState<number | null>(null);
   const [steps, setSteps] = useState<BlankStepRow[]>([]);
   // Запрос подсказки согласующих (GET /api/ad/search) и найденные кандидаты:
   // логины хранятся как есть, ФИО показываем, если AD его отдал.
@@ -770,11 +776,51 @@ function BlanksEditor() {
       .catch((e: unknown) => setError(e instanceof Error ? e.message : "Ошибка загрузки состава бланка"));
   }
 
-  function selectBlank(blankId: number): void {
-    setSelectedId(blankId);
+  // Открыть бланк на правку: карточка + состав шагов (виден сразу под карточкой).
+  function startEdit(blank: BlankRow): void {
+    setForm({
+      id: blank.id,
+      code: blank.code,
+      name: blank.name,
+      doc_type_code: blank.doc_type_code ?? "",
+      description: blank.description ?? "",
+      active: blank.active,
+      header_html: blank.header_html ?? "",
+      footer_lines: [...(blank.footer_lines ?? [])],
+    });
+    setFooterTarget(0);
     setError("");
     setSaved("");
-    loadSteps(blankId);
+    loadSteps(blank.id);
+  }
+
+  // Удаление бланка с подтверждением: шаги сносятся каскадом, у выданных заявок
+  // привязка к бланку снимается (печать идёт по снимку заявки — заявки не теряются).
+  async function handleDeleteBlank(blank: BlankRow): Promise<void> {
+    if (
+      !window.confirm(
+        `Удалить бланк «${blank.name}»? Шаги бланка удалятся, у выданных заявок привязка к бланку снимется (печать — по снимку заявки).`,
+      )
+    ) {
+      return;
+    }
+    setError("");
+    setSaved("");
+    setBusy(true);
+    try {
+      await deleteBlank(blank.id);
+      if (form.id === blank.id) {
+        setForm(EMPTY_BLANK_FORM);
+        setSteps([]);
+        setCatalogOpen(false);
+      }
+      setSaved("Бланк удалён");
+      loadBlanks();
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Ошибка удаления бланка");
+    } finally {
+      setBusy(false);
+    }
   }
 
   // Создание/правка карточки бланка. Код неизменен после создания — при правке
@@ -786,9 +832,16 @@ function BlanksEditor() {
       setError("Укажите название бланка");
       return;
     }
-    if (form.id === null && form.code.trim() === "") {
-      setError("Укажите код бланка");
-      return;
+    if (form.id === null) {
+      const code = form.code.trim();
+      if (code === "") {
+        setError("Укажите код бланка");
+        return;
+      }
+      if (!CODE_FORMAT.test(code)) {
+        setError(`Код бланка: ${CODE_FORMAT_HINT}`);
+        return;
+      }
     }
     setError("");
     setSaved("");
@@ -803,9 +856,11 @@ function BlanksEditor() {
     };
     try {
       if (form.id === null) {
-        await createBlank({ code: form.code.trim(), ...payload });
+        const created = await createBlank({ code: form.code.trim(), ...payload });
+        // Созданный бланк сразу открывается на правку: карточка + состав шагов.
+        setForm({ ...form, id: created.id });
+        loadSteps(created.id);
         setSaved("Бланк создан");
-        setForm(EMPTY_BLANK_FORM);
       } else {
         await updateBlank(form.id, payload);
         setSaved("Бланк сохранён");
@@ -844,7 +899,7 @@ function BlanksEditor() {
     setSteps((prev) => [
       ...prev,
       {
-        blank_id: selectedId ?? 0,
+        blank_id: form.id ?? 0,
         step_order: prev.length + 1,
         title: "",
         stage_lines: [],
@@ -867,7 +922,7 @@ function BlanksEditor() {
     setSteps((prev) => [
       ...prev,
       {
-        blank_id: selectedId ?? 0,
+        blank_id: form.id ?? 0,
         step_order: prev.length + 1,
         title: source.title,
         stage_lines: [...source.stage_lines],
@@ -955,7 +1010,7 @@ function BlanksEditor() {
 
   // Сохранение состава: полная замена одной транзакцией (порядок — с 1).
   async function handleSaveSteps(): Promise<void> {
-    if (selectedId === null) return;
+    if (form.id === null) return;
     const problem = stepsProblem();
     if (problem !== "") {
       setError(problem);
@@ -966,7 +1021,7 @@ function BlanksEditor() {
     setBusy(true);
     try {
       await setBlankSteps(
-        selectedId,
+        form.id,
         steps.map((s, i) => ({
           step_order: i + 1,
           title: s.title.trim(),
@@ -981,7 +1036,7 @@ function BlanksEditor() {
         })),
       );
       setSaved("Состав бланка сохранён");
-      loadSteps(selectedId);
+      loadSteps(form.id);
       loadBlanks();
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Ошибка сохранения состава бланка");
@@ -989,8 +1044,6 @@ function BlanksEditor() {
       setBusy(false);
     }
   }
-
-  const selectedBlank = blanks.find((b) => b.id === selectedId) ?? null;
 
   return (
     <fieldset>
@@ -1019,7 +1072,7 @@ function BlanksEditor() {
           </thead>
           <tbody>
             {blanks.map((blank) => (
-              <tr key={blank.id} className={blank.id === selectedId ? "sed-table__row--active" : undefined}>
+              <tr key={blank.id} className={blank.id === form.id ? "sed-table__row--active" : undefined}>
                 <td>{blank.code}</td>
                 <td>
                   {blank.name}
@@ -1034,30 +1087,19 @@ function BlanksEditor() {
                     <button
                       type="button"
                       className="sed-btn sed-btn--ghost"
-                      aria-label={`Состав бланка ${blank.code}`}
-                      onClick={() => selectBlank(blank.id)}
+                      aria-label={`Править бланк ${blank.code}`}
+                      onClick={() => startEdit(blank)}
                     >
-                      Состав
+                      Править
                     </button>
                     <button
                       type="button"
                       className="sed-btn sed-btn--ghost"
-                      aria-label={`Править бланк ${blank.code}`}
-                      onClick={() => {
-                        setForm({
-                          id: blank.id,
-                          code: blank.code,
-                          name: blank.name,
-                          doc_type_code: blank.doc_type_code ?? "",
-                          description: blank.description ?? "",
-                          active: blank.active,
-                          header_html: blank.header_html ?? "",
-                          footer_lines: [...(blank.footer_lines ?? [])],
-                        });
-                        setFooterTarget(0);
-                      }}
+                      aria-label={`Удалить бланк ${blank.code}`}
+                      onClick={() => void handleDeleteBlank(blank)}
+                      disabled={busy}
                     >
-                      Править
+                      Удалить
                     </button>
                   </div>
                 </td>
@@ -1076,7 +1118,11 @@ function BlanksEditor() {
             <button
               type="button"
               className="sed-btn sed-btn--ghost"
-              onClick={() => setForm(EMPTY_BLANK_FORM)}
+              onClick={() => {
+                setForm(EMPTY_BLANK_FORM);
+                setSteps([]);
+                setCatalogOpen(false);
+              }}
             >
               Отменить правку
             </button>
@@ -1092,6 +1138,9 @@ function BlanksEditor() {
               title={form.id !== null ? "Код бланка после создания не меняется" : undefined}
               onChange={(e) => setForm({ ...form, code: e.target.value })}
             />
+            <div className="sed-note">
+              {form.id !== null ? "Код после создания не меняется." : `${CODE_FORMAT_HINT}.`}
+            </div>
           </label>
           <label className="sed-field">
             Название
@@ -1215,28 +1264,12 @@ function BlanksEditor() {
           />
         </fieldset>
 
-        <div className="sed-toolbar sed-mt-8">
-          <button type="button" className="sed-btn" onClick={handleSaveForm} disabled={busy}>
-            {form.id === null ? "Создать бланк" : "Сохранить бланк"}
-          </button>
-        </div>
-      </div>
-
-      {/* Состав СВОИХ шагов выбранного бланка. */}
-      {selectedBlank && (
-        <div className="sed-editor-card">
-          <div className="sed-blockcard__head">
-            <span className="sed-blockcard__title">Состав бланка: {selectedBlank.name}</span>
-            <span className="sed-blockcard__spacer" />
-            <button
-              type="button"
-              className="sed-btn sed-btn--ghost"
-              onClick={() => setSelectedId(null)}
-            >
-              Закрыть состав
-            </button>
-          </div>
-          {steps.length === 0 && <div className="sed-note">Шагов нет</div>}
+        {/* Состав СВОИХ шагов бланка — инлайн в карточке правки (сразу под
+            полями бланка): редактируется здесь, отдельных диалогов нет. */}
+        {form.id !== null && (
+          <div className="sed-mt-8">
+            <div className="sed-sub">Состав бланка (шаги):</div>
+            {steps.length === 0 && <div className="sed-note">Шагов нет</div>}
           {steps.map((step, i) => (
             <div key={i} className="sed-editor-card" aria-label={`Шаг ${i + 1}`}>
               <div className="sed-blockcard__head">
@@ -1522,8 +1555,14 @@ function BlanksEditor() {
               </ul>
             </div>
           )}
+          </div>
+        )}
+        <div className="sed-toolbar sed-mt-8">
+          <button type="button" className="sed-btn" onClick={handleSaveForm} disabled={busy}>
+            {form.id === null ? "Создать бланк" : "Сохранить бланк"}
+          </button>
         </div>
-      )}
+      </div>
       {error && <div role="alert">{error}</div>}
       {saved && <div role="status">{saved}</div>}
     </fieldset>
@@ -1605,9 +1644,16 @@ function StepsCatalogEditor() {
       setError("Укажите название шага");
       return;
     }
-    if (form.id === null && form.code.trim() === "") {
-      setError("Укажите код шага");
-      return;
+    if (form.id === null) {
+      const code = form.code.trim();
+      if (code === "") {
+        setError("Укажите код шага");
+        return;
+      }
+      if (!CODE_FORMAT.test(code)) {
+        setError(`Код шага: ${CODE_FORMAT_HINT}`);
+        return;
+      }
     }
     if (form.executor_kind === "people" && form.assignees.length === 0) {
       setError("Добавьте хотя бы одного согласующего");
@@ -1808,6 +1854,9 @@ function StepsCatalogEditor() {
               title={editing ? "Код шага после создания не меняется" : undefined}
               onChange={(e) => setForm({ ...form, code: e.target.value })}
             />
+            <div className="sed-note">
+              {editing ? "Код после создания не меняется." : `${CODE_FORMAT_HINT}.`}
+            </div>
           </label>
           <label className="sed-field">
             Название

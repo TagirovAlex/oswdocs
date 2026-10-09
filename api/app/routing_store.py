@@ -315,6 +315,10 @@ class DbRoutingStore:
         """
     )
     _DELETE_BLANK_STEPS = text("DELETE FROM blank_steps WHERE blank_id = :blank_id")
+    # Удаление бланка: шаги сносятся каскадом (FK blank_steps ON DELETE CASCADE),
+    # а dismissal_requests.blank_id у выданных заявок становится NULL (FK
+    # ON DELETE SET NULL) — печать идёт по снимку, справочник им не нужен.
+    _DELETE_BLANK = text("DELETE FROM blanks WHERE id = :id")
     _INSERT_BLANK_STEP = text(
         """
         INSERT INTO blank_steps (blank_id, step_order, title, stage_lines,
@@ -801,6 +805,25 @@ class DbRoutingStore:
                 "бланк изменён", {"fields": sorted(fields)},
             )
             session.commit()
+
+    def delete_blank(self, blank_id: int, actor: str) -> bool:
+        """Удалить бланк; True — строка была, False — не найдена.
+
+        Шаги бланка сносятся каскадом (FK blank_steps ON DELETE CASCADE); у
+        выданных заявок blank_id становится NULL (FK ON DELETE SET NULL) —
+        печать идёт по снимку бланка, справочник им больше не нужен. Аудит —
+        blank.delete."""
+        actor = str(actor or "")
+        with self._session() as session:
+            result = session.execute(self._DELETE_BLANK, {"id": blank_id})
+            deleted = bool(result.rowcount)
+            if deleted:
+                self._audit(
+                    session, actor, "blank.delete", "blank", blank_id,
+                    "бланк удалён",
+                )
+            session.commit()
+        return deleted
 
     def list_blank_steps(self, blank_id: int) -> list[dict]:
         """Собственные шаги бланка по step_order (без join с этапом): выдаче

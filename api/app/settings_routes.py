@@ -11,11 +11,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import Mapping, Sequence
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import bindparam, create_engine, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import sessionmaker
@@ -1215,6 +1216,19 @@ def delete_doc_type(
 _ROUTE_CODE_PATTERN = r"^[a-z][a-z0-9_]*$"
 
 
+def _clean_code(value: str) -> str:
+    """Код бланка/шага: snake_case — только строчная латиница, цифры и «_»,
+    начинается с буквы (тот же формат, что у этапов/профилей). Пробелы по краям
+    срезаются; неверный формат — ValueError с понятным русским текстом (422),
+    а не техническим сообщением pydantic про pattern."""
+    code = str(value or "").strip()
+    if not re.fullmatch(_ROUTE_CODE_PATTERN, code):
+        raise ValueError(
+            "Код — только строчные латинские буквы, цифры и «_», начинается с буквы"
+        )
+    return code
+
+
 class StageCatalogIn(BaseModel):
     """Новый этап маршрута (approval_stages).
 
@@ -1392,7 +1406,7 @@ class BlankCatalogIn(BaseModel):
     footer_lines — подвал (список строк). Макет печати снят (миграция 0018):
     печать единая, пресетов office|line нет."""
 
-    code: str = Field(pattern=_ROUTE_CODE_PATTERN, description="Код бланка (snake_case, уникален)")
+    code: str = Field(description="Код бланка (snake_case, уникален)")
     name: str = Field(min_length=1, description="Наименование бланка")
     doc_type_code: str | None = Field(
         default=None, description="Вид документа (doc_types.code) — классификация"
@@ -1405,6 +1419,11 @@ class BlankCatalogIn(BaseModel):
     footer_lines: list[str] = Field(
         default_factory=list, description="Подвал бланка (строки печати)"
     )
+
+    @field_validator("code")
+    @classmethod
+    def _check_code(cls, value: str) -> str:
+        return _clean_code(value)
 
     @model_validator(mode="after")
     def _check_blank(self) -> "BlankCatalogIn":
@@ -1543,7 +1562,7 @@ class StepCatalogIn(BaseModel):
     (executor_kind + assignees/owner_group), optional/require_comment/approval_mode.
     code уникален и неизменен; active=false — шаг недоступен для набора."""
 
-    code: str = Field(pattern=_ROUTE_CODE_PATTERN, description="Код шага (snake_case, уникален)")
+    code: str = Field(description="Код шага (snake_case, уникален)")
     title: str = Field(min_length=1, description="Название шага-заготовки")
     stage_lines: list[str] = Field(
         default_factory=list, description="Текст шага (строки; HTML TipTap допускается)"
@@ -1567,6 +1586,11 @@ class StepCatalogIn(BaseModel):
         default=False, description="Комментарий обязателен даже при согласии"
     )
     active: bool = Field(default=True, description="Активен шаг (active=false — недоступен для набора)")
+
+    @field_validator("code")
+    @classmethod
+    def _check_code(cls, value: str) -> str:
+        return _clean_code(value)
 
     @model_validator(mode="after")
     def _check_step(self) -> "StepCatalogIn":
@@ -1955,6 +1979,29 @@ def update_routing_blank(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
     return {"id": blank_id, "updated": ",".join(sorted(updates))}
+
+
+@router.delete("/settings/routing/blanks/{blank_id}")
+def delete_routing_blank(
+    blank_id: int,
+    user: CurrentUser = Depends(get_current_user),
+    store: DbRoutingStore = Depends(get_routing_store),
+) -> dict:
+    """Удалить бланк (только admin); не найден — 404.
+
+    Шаги бланка сносятся каскадом, у выданных заявок blank_id становится NULL —
+    печать идёт по снимку бланка, поэтому удаление безопасно. Аудит — в
+    routing_store (blank.delete)."""
+    _require_admin(user)
+    try:
+        deleted = store.delete_blank(blank_id, user.sam)
+    except RoutingUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Бланк не найден")
+    return {"id": blank_id, "deleted": True}
 
 
 @router.get("/settings/routing/blanks/{blank_id}/steps")
