@@ -253,7 +253,6 @@ export interface RoutePreviewBlank {
   id: number;
   code: string;
   name: string;
-  layout: string | null;
   version: number | null;
   step_count: number;
 }
@@ -677,7 +676,6 @@ export interface RouteBlank {
   code: string;
   name: string;
   description: string | null;
-  layout: string | null;
   step_count: number;
   autopick: boolean;
 }
@@ -696,7 +694,6 @@ export interface BlankRow {
   name: string;
   doc_type_code: string | null;
   description: string | null;
-  layout: string;
   active: boolean;
   version: number;
   updated_at?: string | null;
@@ -708,14 +705,12 @@ export interface BlankRow {
   footer_lines?: string[];
 }
 
-// Тело POST /api/settings/routing/blanks (BlankCatalogIn). layout — встроенный
-// пресет печати (office|line), файлов-шаблонов нет.
+// Тело POST /api/settings/routing/blanks (BlankCatalogIn).
 export interface BlankInput {
   code: string;
   name: string;
   doc_type_code?: string | null;
   description?: string | null;
-  layout?: "office" | "line";
   active?: boolean;
   header_html?: string | null;
   footer_lines?: string[];
@@ -724,6 +719,39 @@ export interface BlankInput {
 // Тело PUT /api/settings/routing/blanks/{id} (BlankCatalogUpdateIn): код бланка
 // неизменен, поэтому его нет среди полей.
 export type BlankPatch = Omit<BlankInput, "code">;
+
+// Строка справочника шагов (GET /api/settings/routing/step-catalog): все шаги,
+// включая inactive. Используется как заготовка для шага бланка («Взять из
+// справочника») и правится в своей вкладке админки.
+export interface StepCatalogRow {
+  id: number;
+  code: string;
+  title: string;
+  stage_lines: string[];
+  executor_kind: BlankStepExecutorKind;
+  assignees: string[];
+  owner_group: string | null;
+  approval_mode?: StepApprovalMode | null;
+  optional: boolean;
+  require_comment: boolean;
+  active: boolean;
+  updated_by?: string | null;
+  updated_at?: string | null;
+}
+
+// Тело POST /api/settings/routing/step-catalog (StepCatalogIn).
+export interface StepCatalogIn {
+  code: string;
+  title: string;
+  stage_lines: string[];
+  executor_kind: BlankStepExecutorKind;
+  assignees: string[];
+  owner_group: string | null;
+  approval_mode?: StepApprovalMode | null;
+  optional: boolean;
+  require_comment: boolean;
+  active: boolean;
+}
 
 // Вид исполнителя шага бланка (BlankStepIn.executor_kind): people — согласующие
 // из assignees (логины AD), ad_group — группа AD из owner_group, manager_ad —
@@ -796,6 +824,41 @@ export async function setBlankSteps(
   return requestJson<{ blank_id: number; count: number }>(
     `/api/settings/routing/blanks/${blankId}/steps`,
     { method: "PUT", body: JSON.stringify({ steps }) },
+  );
+}
+
+// GET /api/settings/routing/step-catalog: справочник шагов (все, включая
+// inactive) — заготовки для состава бланка (только админ, иначе 403).
+export async function getStepCatalog(): Promise<StepCatalogRow[]> {
+  return requestJson<StepCatalogRow[]>("/api/settings/routing/step-catalog");
+}
+
+// POST /api/settings/routing/step-catalog: создать шаг справочника
+// (409 на дубль кода).
+export async function createStepCatalog(payload: StepCatalogIn): Promise<{ id: number; code: string }> {
+  return requestJson<{ id: number; code: string }>("/api/settings/routing/step-catalog", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+// PUT /api/settings/routing/step-catalog/{id}: частичная правка шага. updated —
+// сводка изменённых полей (как у этапов справочника, updateRoutingStage).
+export async function updateStepCatalog(
+  stepId: number,
+  patch: Partial<StepCatalogIn>,
+): Promise<{ id: number; updated: string }> {
+  return requestJson<{ id: number; updated: string }>(
+    `/api/settings/routing/step-catalog/${stepId}`,
+    { method: "PUT", body: JSON.stringify(patch) },
+  );
+}
+
+// DELETE /api/settings/routing/step-catalog/{id}: удалить шаг справочника.
+export async function deleteStepCatalog(stepId: number): Promise<{ id: number; deleted: boolean }> {
+  return requestJson<{ id: number; deleted: boolean }>(
+    `/api/settings/routing/step-catalog/${stepId}`,
+    { method: "DELETE" },
   );
 }
 

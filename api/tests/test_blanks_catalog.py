@@ -40,7 +40,6 @@ BLANK_ROW = {
     "name": BLANK_NAME,
     "doc_type_code": "uvolnenie_doc",
     "description": "Вымышленное описание бланка",
-    "layout": "office",
     "active": True,
     "version": 1,
     "updated_at": None,
@@ -177,7 +176,6 @@ def test_blank_by_id_and_missing_blank():
     """Бланк по id (шапка/подвал на месте, подвал — список); отсутствует — None."""
     session = FakeSession([dict(BLANK_ROW, footer_lines=json.dumps(BLANK_FOOTER))])
     blank = _store(session).blank_by_id(BLANK_ID)
-    assert blank["layout"] == "office"
     assert blank["header_html"] == BLANK_HEADER
     assert blank["footer_lines"] == BLANK_FOOTER
     assert "WHERE id = :blank_id" in _sqls(session)[0]
@@ -196,7 +194,6 @@ def test_create_blank_returns_id_and_audits():
             "name": BLANK_NAME,
             "doc_type_code": "uvolnenie_doc",
             "description": None,
-            "layout": "line",
             "active": False,
             "header_html": BLANK_HEADER,
             "footer_lines": list(BLANK_FOOTER),
@@ -207,7 +204,7 @@ def test_create_blank_returns_id_and_audits():
     sql, params = session.calls[0]
     assert "INSERT INTO blanks" in sql
     assert params["code"] == BLANK_CODE and params["doc_type_code"] == "uvolnenie_doc"
-    assert params["layout"] == "line" and params["active"] is False
+    assert params["active"] is False
     assert params["header_html"] == BLANK_HEADER
     assert json.loads(params["footer_lines"]) == BLANK_FOOTER
     assert params["actor"] == "adm.petrov"
@@ -216,15 +213,6 @@ def test_create_blank_returns_id_and_audits():
     assert audit["entity_id"] == "31" and audit["actor"] == "adm.petrov"
     assert "adm.petrov" not in audit["details"]
     assert session.commits == 1
-
-
-def test_create_blank_layout_default_in_sql():
-    """Пустой макет — пресет office из SQL (COALESCE), не из кода роутера."""
-    session = FakeSession([FakeRow({"id": 31})])
-    _store(session).create_blank({"code": BLANK_CODE, "name": BLANK_NAME, "actor": ""})
-    sql, params = session.calls[0]
-    assert "COALESCE(:layout, 'office')" in sql
-    assert params["layout"] is None
 
 
 def test_update_blank_whitelist_and_audit():
@@ -549,13 +537,13 @@ def test_admin_blanks_crud_cycle(
 
     updated = client.put(
         f"/settings/routing/blanks/{blank_id}",
-        json={"layout": "line", "description": "Вымышленное уточнение"},
+        json={"description": "Вымышленное уточнение"},
         headers=admin_headers,
     )
     assert updated.status_code == 200, updated.text
-    assert updated.json()["updated"] == "description,layout"
+    assert updated.json()["updated"] == "description"
     stored = next(item for item in blanks_store.blanks if item["id"] == blank_id)
-    assert stored["layout"] == "line" and stored["description"] == "Вымышленное уточнение"
+    assert stored["description"] == "Вымышленное уточнение"
     # Шапка/подвал — часть бланка: сохранились, края строк подвала обрезаны.
     assert stored["header_html"] == BLANK_HEADER
     assert stored["footer_lines"] == ["Подпись {fio}"]
@@ -711,15 +699,12 @@ def test_blanks_require_admin(client, hr_headers, settings_override, blanks_stor
     assert "create_blank" not in blanks_store.calls
 
 
-def test_blank_code_and_layout_validation(
+def test_blank_code_validation(
     client, admin_headers, settings_override, blanks_store
 ):
-    """Код бланка — snake_case, макет — из встроенных пресетов (office|line)."""
+    """Код бланка — snake_case (макет печати снят, пресетов больше нет)."""
     assert client.post(
         "/settings/routing/blanks", json=_blank_body(code="Плохой Код"), headers=admin_headers
-    ).status_code == 422
-    assert client.post(
-        "/settings/routing/blanks", json=_blank_body(layout="docx"), headers=admin_headers
     ).status_code == 422
     assert "create_blank" not in blanks_store.calls
 

@@ -145,7 +145,6 @@ BLANK_ROW = {
     "name": "Бланк вымышленный параллельный",
     "doc_type_code": "uvol_par",
     "description": "Один шаг-реестр в режиме «кто-то один»",
-    "layout": "office",
     "active": True,
     "version": 2,
 }
@@ -755,13 +754,16 @@ def _blank_text(blob: bytes) -> str:
         return archive.read("word/document.xml").decode("utf-8")
 
 
-def _responsible_cell(blob: bytes) -> str:
-    """Колонка «Ответственный» таблицы шагов готового бланка (docx нужен на стенде)."""
+def _responsible_line(blob: bytes) -> str:
+    """Строка «Ответственный: …» готового бланка (docx нужен на стенде)."""
     pytest.importorskip("docx")
     from docx import Document
 
-    table = Document(io.BytesIO(blob)).tables[-1]
-    return "\n".join(row.cells[2].text for row in table.rows[1:])
+    prefix = "Ответственный: "
+    for paragraph in Document(io.BytesIO(blob)).paragraphs:
+        if paragraph.text.startswith(prefix):
+            return paragraph.text[len(prefix):]
+    return ""
 
 
 def _print_context(requests_store, routing_store, rid: str) -> dict:
@@ -823,19 +825,19 @@ def test_print_lists_all_step_assignees(
 ):
     """Бланк печатает всех ответственных шага-реестра (ФИО из AD по логинам).
 
-    В колонке «Ответственный» — по строке на ответственного, в порядке снимка."""
+    В строке «Ответственный» — все ответственные через запятую, в порядке снимка."""
     rid = _ready_request(client, BLANK_SEQ_ID, _hr())
     context = _print_context(requests_store, routing_store, rid)
     blob = build_blank_document(dict(context, qr_url=""))
     for _sam, fio in ROSTER:
         assert fio in _blank_text(blob), fio
-    assert _responsible_cell(blob).splitlines() == [fio for _sam, fio in ROSTER]
+    assert _responsible_line(blob) == ", ".join(fio for _sam, fio in ROSTER)
 
 
-def test_print_single_assignee_cell_has_one_name(
+def test_print_single_assignee_has_one_name(
     client, requests_store, routing_store, settings_override, route_override, ad_reader
 ):
-    """Один ответственный — одна строка в колонке (без дублей и пустых строк)."""
+    """Один ответственный — одно имя в строке (без дублей и пустых)."""
     rid = _ready_request(client, BLANK_SEQ_ID, _hr())
     context = _print_context(requests_store, routing_store, rid)
     context["steps"][0].update(
@@ -845,7 +847,7 @@ def test_print_single_assignee_cell_has_one_name(
         fio=ROSTER[0][1],
     )
     blob = build_blank_document(dict(context, qr_url=""))
-    assert _responsible_cell(blob).splitlines() == [ROSTER[0][1]]
+    assert _responsible_line(blob) == ROSTER[0][1]
 
 
 def test_print_group_step_shows_group_name(
@@ -858,7 +860,7 @@ def test_print_group_step_shows_group_name(
         assignees=[], assignee="", assignee_names=[], fio="", owner=STEP_GROUP
     )
     blob = build_blank_document(dict(context, qr_url=""))
-    assert _responsible_cell(blob).splitlines() == [STEP_GROUP]
+    assert _responsible_line(blob) == STEP_GROUP
 
 
 def test_print_context_reads_user_card_once_per_login(
@@ -997,7 +999,6 @@ def _snapshot_request() -> _Request:
         blank_id=BLANK_SEQ_ID,
         blank_name=BLANK_SEQ_ROW["name"],
         blank_version=BLANK_SEQ_ROW["version"],
-        blank_layout="office",
         steps=[_snapshot_step()],
     )
 

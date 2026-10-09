@@ -1,9 +1,9 @@
 # Тесты печати бланка ИЗ ДАННЫХ (волна «Справочник бланков»):
-# генератор docs.build_blank_document (python-docx, два пресета макета из снимка
-# blank_layout), санирование текстов этапа (HTML из визуального редактора),
-# QR на заявку, ответственные (ФИО персональных исполнителей / группы AD),
-# generate_bypass без файлов-шаблонов и ручка печати (макет в blank_kind,
-# пустые шаги — 422). Все ПДн вымышленные.
+# генератор docs.build_blank_document (python-docx, единая вёрстка без макета),
+# санирование текстов этапа (HTML из визуального редактора), QR на заявку,
+# ответственные (ФИО персональных исполнителей / группы AD), режим шага
+# (последовательно/параллельно), generate_bypass без файлов-шаблонов и ручка
+# печати (пустые шаги — 422). Все ПДн вымышленные.
 
 from __future__ import annotations
 
@@ -23,14 +23,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from app import docs as docs_module  # noqa: E402
 from app.config import Settings, get_settings  # noqa: E402
 from app.docs import (  # noqa: E402
-    DEFAULT_BLANK_LAYOUT,
-    LAYOUT_PRESETS,
     BypassResult,
     blank_placeholders,
     build_blank_document,
     generate_bypass,
     render_blank_text,
-    resolve_blank_layout,
 )
 from app.main import app  # noqa: E402
 from app.requests import _Request, _Step, _utcnow, get_memory_requests_store  # noqa: E402
@@ -107,7 +104,6 @@ def _context(**overrides) -> dict:
         "enterprise": FAKE_ENTERPRISE_NAME,
         "blank_name": FAKE_BLANK,
         "blank_version": 2,
-        "blank_layout": "office",
         "qr_url": QR_URL,
         "subject": FAKE_SUBJECT,
         "content": FAKE_CONTENT,
@@ -123,6 +119,7 @@ def _context(**overrides) -> dict:
                 "fio": FAKE_ASSIGNEE_FIO,
                 "status": "Согласовано",
                 "done_at": "05.10.2026 12:00",
+                "approval_mode": "sequential",
             },
             {
                 "order": 2,
@@ -132,6 +129,7 @@ def _context(**overrides) -> dict:
                 "fio": "",
                 "status": STEP_PENDING,
                 "done_at": "",
+                "approval_mode": None,
             },
         ],
     }
@@ -156,21 +154,14 @@ def _opened(blob: bytes):
     return Document(io.BytesIO(blob))
 
 
-def _steps_rows(blob: bytes) -> list[list[str]]:
-    """Строки таблицы шагов (последняя таблица документа)."""
-    table = _opened(blob).tables[-1]
-    return [[cell.text for cell in row.cells] for row in table.rows]
+def _paragraph_texts(blob: bytes) -> list[str]:
+    """Тексты абзацев тела документа по порядку (таблиц в единой вёрстке нет)."""
+    return [paragraph.text for paragraph in _opened(blob).paragraphs]
 
 
 def _body_paragraphs(blob: bytes) -> list:
-    """Абзацы тела документа по порядку (таблицы в них не входят)."""
+    """Абзацы тела документа по порядку."""
     return _opened(blob).paragraphs
-
-
-def _body_blocks(blob: bytes) -> list[str]:
-    """Типы блоков тела документа по порядку: p — абзац, tbl — таблица."""
-    body = _opened(blob).element.body
-    return [child.tag.split("}")[-1] for child in body]
 
 
 def _request(**overrides) -> _Request:
@@ -188,7 +179,6 @@ def _request(**overrides) -> _Request:
         blank_id=7,
         blank_name=FAKE_BLANK,
         blank_version=2,
-        blank_layout="line",
         steps=[
             _Step(
                 order=1,
@@ -270,42 +260,11 @@ def _fake_result(pdf_path: str) -> BypassResult:
 
 
 # ---------------------------------------------------------------------------
-# Выбор макета: единственная точка resolve_blank_layout + два пресета
+# Генератор: шапка, шаги блоками строк, подвал
 # ---------------------------------------------------------------------------
 
-def test_resolve_blank_layout_office_by_default():
-    """Пустой/неизвестный снимок макета — office (дефолт миграции 0012)."""
-    assert DEFAULT_BLANK_LAYOUT == "office"
-    assert resolve_blank_layout(None) == "office"
-    assert resolve_blank_layout("") == "office"
-    assert resolve_blank_layout("  ") == "office"
-    assert resolve_blank_layout("неизвестный макет") == "office"
-    assert resolve_blank_layout("линейный") == "office"
-
-
-def test_resolve_blank_layout_line_ignores_case_and_spaces():
-    """line из снимка — макет line; регистр и пробелы не важны."""
-    assert resolve_blank_layout("line") == "line"
-    assert resolve_blank_layout(" LINE ") == "line"
-    assert resolve_blank_layout("Line") == "line"
-
-
-def test_layout_presets_cover_contract_layouts():
-    """Пресеты ровно office/line, дефолт среди них, доли колонок дают 100%."""
-    assert set(LAYOUT_PRESETS) == {"office", "line"}
-    assert DEFAULT_BLANK_LAYOUT in LAYOUT_PRESETS
-    for name, preset in LAYOUT_PRESETS.items():
-        shares = preset["step_widths"]
-        assert len(shares) == 4, name
-        assert abs(sum(shares) - 1.0) < 0.001, name
-
-
-# ---------------------------------------------------------------------------
-# Генератор: шапка, таблица шагов, подвал
-# ---------------------------------------------------------------------------
-
-def test_build_blank_document_is_docx_with_header_table_and_footer():
-    """DOCX из данных: название бланка, поля сотрудника, таблица шагов, подвал."""
+def test_build_blank_document_is_docx_with_header_steps_and_footer():
+    """DOCX из данных: название бланка, поля сотрудника, шаги блоками, подвал."""
     blob = build_blank_document(_context())
     assert blob[:2] == b"PK"
     text = _docx_text(blob)
@@ -318,36 +277,41 @@ def test_build_blank_document_is_docx_with_header_table_and_footer():
         FAKE_ENTERPRISE_NAME,  # предприятие
     ):
         assert expected in text, expected
-    rows = _steps_rows(blob)
-    assert rows[0] == ["№", "Этап", "Ответственный", "Отметка/дата"]
-    assert rows[1][0] == "1"
-    assert FAKE_STAGE in rows[1][1]      # название этапа
-    assert "Проверить расчёты" in rows[1][1]  # его пункты
-    assert rows[1][2] == FAKE_ASSIGNEE_FIO  # ФИО персонального исполнителя
-    assert "Согласовано" in rows[1][3] and "05.10.2026 12:00" in rows[1][3]
-    assert rows[2][2] == "SED_STEP_HR"   # группа AD — печатаем как есть
+    texts = _paragraph_texts(blob)
+    # Каждый шаг — отдельным блоком строк: заголовок с режимом, пункты,
+    # ответственный и отметка.
+    assert "1. Бухгалтерия вымышленная (последовательно)" in texts
+    assert "Проверить расчёты" in texts
+    assert f"Ответственный: {FAKE_ASSIGNEE_FIO}" in texts
+    assert "Отметка/дата: Согласовано, 05.10.2026 12:00" in texts
+    # Группа AD печатается как есть.
+    assert "Ответственный: SED_STEP_HR" in texts
     footer = _opened(blob).sections[0].footer.paragraphs[0].text
     assert "REQ-0001" in footer and FAKE_BLANK in footer and "v2" in footer
+    # Таблиц в единой вёрстке нет.
+    assert _opened(blob).tables == []
+
+
+def test_build_blank_document_step_mode_parallel_and_sequential_labels():
+    """Режим шага печатается пометкой: parallel — «параллельно», иначе — «последовательно»."""
+    context = _context()
+    context["steps"][1]["approval_mode"] = "parallel"
+    texts = _paragraph_texts(build_blank_document(context))
+    assert "1. Бухгалтерия вымышленная (последовательно)" in texts
+    assert "2. Отдел кадров вымышленный (параллельно)" in texts
+    # Без режима в снимке (старая заявка) — «последовательно».
+    plain = _context()
+    plain["steps"] = [dict(plain["steps"][0], approval_mode=None)]
+    plain_texts = _paragraph_texts(build_blank_document(plain))
+    assert "1. Бухгалтерия вымышленная (последовательно)" in plain_texts
 
 
 def test_build_blank_document_step_mark_without_date_has_paper_line():
     """Шаг без даты: статус и место под росчерк (печать от руки)."""
-    rows = _steps_rows(build_blank_document(_context()))
-    marks = rows[2][3].splitlines()
-    assert marks[0] == STEP_PENDING
-    assert set(marks[1]) == {"_"}
-
-
-def test_build_blank_document_layout_comes_from_snapshot():
-    """Макет берётся из снимка blank_layout, а не из службы/настроек."""
-    office = _opened(build_blank_document(_context(blank_layout="office")))
-    line = _opened(build_blank_document(_context(blank_layout="line")))
-    # Линейный пресет компактнее офисного (поля страницы и кегль меньше).
-    assert line.sections[0].left_margin < office.sections[0].left_margin
-    assert line.styles["Normal"].font.size < office.styles["Normal"].font.size
-    # Без макета в снимке — office (дефолт), а не иной пресет.
-    default = _opened(build_blank_document(_context(blank_layout="")))
-    assert default.sections[0].left_margin == office.sections[0].left_margin
+    texts = _paragraph_texts(build_blank_document(_context()))
+    marks = [text for text in texts if text.startswith("Отметка/дата:")]
+    assert marks[0] == "Отметка/дата: Согласовано, 05.10.2026 12:00"
+    assert marks[1] == f"Отметка/дата: {STEP_PENDING}, " + "_" * 10
 
 
 def test_build_blank_document_qr_image_and_caption():
@@ -404,20 +368,20 @@ def test_build_blank_document_keeps_only_allowed_tags():
     ]
     blob = build_blank_document(context)
     text = _docx_text(blob)
-    stage_text = _steps_rows(blob)[1][1]
+    texts = _paragraph_texts(blob)
     # Текст печатается, форматирование разрешённых тегов — работает.
-    assert "Проверить расчёты и долги" in stage_text
-    assert "Подпись" in stage_text
-    assert "Проверить  табель" in stage_text
+    assert any("Проверить расчёты и долги" in value for value in texts)
+    assert any("Подпись" in value for value in texts)
+    assert any("Проверить  табель" in value for value in texts)
     # Содержимое служебных тегов и атрибуты прочих — на бланок не попадают.
     assert "alert" not in text
     assert "onerror" not in text
     assert "<img" not in text
     # Голые спецсимволы остаются текстом (Word экранирует их сам).
-    assert "Сумма 5 < 7 и 8 > 3" in stage_text
-    stage_paragraphs = _opened(blob).tables[-1].rows[1].cells[1].paragraphs
-    bolded = [run.text for paragraph in stage_paragraphs for run in paragraph.runs if run.bold]
-    italiced = [run.text for paragraph in stage_paragraphs for run in paragraph.runs if run.italic]
+    assert any("Сумма 5 < 7 и 8 > 3" in value for value in texts)
+    paragraphs = _body_paragraphs(blob)
+    bolded = [run.text for paragraph in paragraphs for run in paragraph.runs if run.bold]
+    italiced = [run.text for paragraph in paragraphs for run in paragraph.runs if run.italic]
     assert "расчёты" in bolded
     assert "долги" in italiced
 
@@ -436,11 +400,8 @@ def test_build_blank_document_breaks_line_on_allowed_tag():
             "done_at": "",
         }
     ]
-    assert _steps_rows(build_blank_document(context))[1][1].splitlines() == [
-        "Этап",
-        "Первый пункт",
-        "второй пункт",
-    ]
+    texts = _paragraph_texts(build_blank_document(context))
+    assert any(value.splitlines() == ["Первый пункт", "второй пункт"] for value in texts)
 
 
 # ---------------------------------------------------------------------------
@@ -448,7 +409,7 @@ def test_build_blank_document_breaks_line_on_allowed_tag():
 # ---------------------------------------------------------------------------
 
 def test_build_blank_document_header_html_comes_from_snapshot():
-    """Шапка в снимке печатается как шапка бланка; сетку полей она заменяет."""
+    """Шапка в снимке печатается как шапка бланка; список полей она заменяет."""
     blob = build_blank_document(_context(blank_header_html=FAKE_HEADER))
     paragraphs = [paragraph.text for paragraph in _body_paragraphs(blob)]
     # Заголовок бланка печатается как было, пользовательская шапка — под ним.
@@ -456,9 +417,9 @@ def test_build_blank_document_header_html_comes_from_snapshot():
     assert paragraphs[1] == "Акт вымышленного увольнения № " + FAKE_TAB_NUM
     assert paragraphs[2] == f"Сотрудник: {FAKE_FIO}, {FAKE_POSITION}"
     assert f"Бланк {FAKE_BLANK}, количество шагов: 2, руководитель {FAKE_MANAGER_FIO}" in paragraphs
-    # Шапка заменяет сетку полей: подписей полей на бланке нет, таблица шагов одна.
+    # Шапка заменяет список полей: подписей полей на бланке нет.
     assert "Табельный номер" not in _docx_text(blob)
-    assert len(_opened(blob).tables) == 1
+    assert _opened(blob).tables == []
 
 
 def test_build_blank_document_header_html_keeps_allowed_formatting():
@@ -529,9 +490,12 @@ def test_build_blank_document_header_placeholder_value_stays_plain_text():
         f"Содержание: прощайте {markup}",
         f"Тема: тема {markup}",
     ]
-    # Начертание осталось только у разметки самой шапки, значение его не дало.
+    # Начертание осталось только у разметки самой шапки и жирных заголовков
+    # шагов; значение плейсхолдера начертания не дало.
     bold = [run.text for paragraph in paragraphs for run in paragraph.runs if run.bold]
-    assert bold == [FAKE_BLANK, "Акт вымышленного увольнения"]
+    assert FAKE_BLANK in bold
+    assert "Акт вымышленного увольнения" in bold
+    assert not any("жирно" in run for run in bold)
 
 
 def test_build_blank_document_placeholder_markup_does_not_break_print():
@@ -539,7 +503,7 @@ def test_build_blank_document_placeholder_markup_does_not_break_print():
 
     Шапка (HTML) — значение экранируется, подвал — обычная подстановка в текст;
     в обоих случаях документ собирается, значение печатается символами, а шапка,
-    таблица шагов и подвал на месте."""
+    шаги и подвал на месте."""
     markup = "</p><b>жирно</b> <script>alert(1)</script>"
     context = _context(
         subject=markup,
@@ -556,39 +520,34 @@ def test_build_blank_document_placeholder_markup_does_not_break_print():
     # Подвал печатается целиком, неизвестный плейсхолдер остаётся текстом.
     assert paragraphs[-2:] == [f"Подпись {markup}", "Подпись {не_существует}"]
     # Содержащее значение из {content} печатается в тексте шага, документ цел.
-    assert len(_opened(blob).tables) == 1
+    assert _opened(blob).tables == []
     assert _docx_names(blob)[0] == "[Content_Types].xml"
 
 
-def test_build_blank_document_without_header_html_keeps_field_grid():
-    """Шапки в снимке нет — прежнее поведение: офисный пресет печатает сетку полей."""
-    grid = _opened(build_blank_document(_context())).tables[0]
-    assert [row.cells[0].text.strip() for row in grid.rows] == [
-        "ФИО:", "Должность:", "Служба:", "Табельный номер:", "Предприятие:",
-    ]
-    assert grid.cell(0, 1).text == FAKE_FIO
-    # Линейный пресет — те же поля списком.
-    line = _body_paragraphs(build_blank_document(_context(blank_layout="line")))
-    assert f"Табельный номер: {FAKE_TAB_NUM}" in [
-        paragraph.text for paragraph in line
-    ]
+def test_build_blank_document_without_header_html_keeps_field_list():
+    """Шапки в снимке нет — поля сотрудника печатаются списком с жирной подписью."""
+    texts = _paragraph_texts(build_blank_document(_context()))
+    for expected in (
+        f"ФИО: {FAKE_FIO}",
+        f"Должность: {FAKE_POSITION}",
+        f"Служба: {FAKE_SERVICE}",
+        f"Табельный номер: {FAKE_TAB_NUM}",
+        f"Предприятие: {FAKE_ENTERPRISE_NAME}",
+    ):
+        assert expected in texts, expected
 
 
-def test_build_blank_document_footer_lines_come_after_steps_table():
-    """Строки подвала печатаются после таблицы шагов, по порядку и по центру."""
+def test_build_blank_document_footer_lines_come_after_steps():
+    """Строки подвала печатаются после шагов, по порядку и по центру."""
     from docx.enum.text import WD_ALIGN_PARAGRAPH
 
     blob = build_blank_document(
         _context(blank_footer_lines=list(FAKE_FOOTER), date=None, fio=FAKE_FIO)
     )
-    # Последние блоки тела — абзацы подвала, таблица шагов перед ними.
-    blocks = _body_blocks(blob)
-    assert blocks[-1] == "sectPr"
-    assert blocks[-3:-1] == ["p", "p"]
-    assert "tbl" in blocks[:-3]
     paragraphs = _body_paragraphs(blob)
-    assert paragraphs[-2].text == FAKE_FOOTER[0]
-    assert paragraphs[-1].text == f"Дата: , ФИО: {FAKE_FIO}"
+    texts = [paragraph.text for paragraph in paragraphs]
+    assert texts[-2] == FAKE_FOOTER[0]
+    assert texts[-1] == f"Дата: , ФИО: {FAKE_FIO}"
     assert all(p.alignment == WD_ALIGN_PARAGRAPH.CENTER for p in paragraphs[-2:])
 
 
@@ -596,7 +555,8 @@ def test_build_blank_document_without_footer_lines_prints_nothing():
     """Подвала в снимке нет (или он пустой/из пробелов) — ничего не печатаем."""
     for lines in (None, [], [" ", ""]):
         blob = build_blank_document(_context(blank_footer_lines=lines))
-        assert _body_blocks(blob)[-2:] == ["tbl", "sectPr"]
+        assert "Подпись" not in _docx_text(blob)
+        assert _opened(blob).tables == []
 
 
 def test_build_blank_document_substitutes_all_placeholders():
@@ -698,13 +658,15 @@ def test_build_blank_document_step_text_substitutes_placeholders():
             "done_at": "",
         }
     ]
-    assert _steps_rows(build_blank_document(context))[1][1].splitlines() == [
-        f"Согласование {FAKE_FIO}",
+    texts = _paragraph_texts(build_blank_document(context))
+    assert f"1. Согласование {FAKE_FIO} (последовательно)" in texts
+    for expected in (
         f"Должность {FAKE_POSITION}",
         f"Табельный {FAKE_TAB_NUM}",
         f"Предприятие {FAKE_ENTERPRISE_NAME}",
         "{не_существует}",
-    ]
+    ):
+        assert any(expected in value for value in texts), expected
 
 
 def test_build_blank_document_step_placeholder_value_stays_plain_text():
@@ -729,29 +691,25 @@ def test_build_blank_document_step_placeholder_value_stays_plain_text():
         }
     ]
     blob = build_blank_document(context)
-    cell = _opened(blob).tables[-1].rows[1].cells[1]
-    # Абзацев в ячейке ровно по одному на название и на пункт этапа.
-    assert len(cell.paragraphs) == 3
-    # Значение напечатано символами текста, неизвестный плейсхолдер остался текстом.
-    assert [paragraph.text for paragraph in cell.paragraphs] == [
-        f"Этап согласование — прощайте {markup}",
-        f"Пункт тема {markup}",
-        "Пункт {не_существует}",
-    ]
+    paragraphs = _body_paragraphs(blob)
+    texts = [paragraph.text for paragraph in paragraphs]
+    # Заголовок шага — один абзац: значение печатается символами, неизвестный
+    # плейсхолдер остаётся текстом.
+    assert f"1. Этап согласование — прощайте {markup} (последовательно)" in texts
+    assert any(value == f"Пункт тема {markup}" for value in texts)
+    assert "Пункт {не_существует}" in texts
     # Начертание — только у разметки самого шага (название этапа печатается
     # жирным), значение плейсхолдера начертания не дало.
-    bold = [run.text for paragraph in cell.paragraphs for run in paragraph.runs if run.bold]
-    assert bold == ["Этап ", "согласование"]
-    # Документ собран целиком (значение печать не сломало): таблица шагов на месте.
+    bold = [run.text for paragraph in paragraphs for run in paragraph.runs if run.bold]
+    assert "согласование" in bold
+    # Документ собран целиком (значение печать не сломало).
     assert _docx_names(blob)[0] == "[Content_Types].xml"
-    table = _opened(blob).tables[-1]
-    assert table.rows[0].cells[0].text == "№"
+    assert _opened(blob).tables == []
 
 
 # ---------------------------------------------------------------------------
 # Генератор: DOCX из данных -> PDF (LibreOffice), без файлов-шаблонов
 # ---------------------------------------------------------------------------
-
 
 def test_generate_bypass_signature_has_no_template_arguments():
     """Пути через файлы-шаблоны в печати нет: ни body, ни .docx-файла."""
@@ -774,7 +732,7 @@ def test_generate_bypass_builds_from_context_and_qr_url(tmp_path, monkeypatch):
         base_url=BASE_URL, files_dir=str(tmp_path),
     )
     assert captured["qr_url"] == QR_URL
-    assert captured["blank_layout"] == "office"
+    assert captured["steps"][0]["approval_mode"] == "sequential"
     assert result.generated is False  # нет soffice — PDF не создан
 
 
@@ -795,13 +753,11 @@ def test_generate_bypass_offline_missing_library_reason(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Ручка печати: макет из снимка в blank_kind, doc_templates не читается
+# Ручка печати: снимок бланка, doc_templates не читается
 # ---------------------------------------------------------------------------
 
-def test_print_uses_blank_snapshot_and_reports_layout(
-    client, requests_store, monkeypatch, tmp_path
-):
-    """Печать собирается из снимка бланка заявки; blank_kind = макет бланка."""
+def test_print_uses_blank_snapshot(client, requests_store, monkeypatch, tmp_path):
+    """Печать собирается из снимка бланка заявки; макета в ответе больше нет."""
     requests_store.create(_request())
     captured = {}
     pdf = tmp_path / "bypass.pdf"
@@ -815,29 +771,16 @@ def test_print_uses_blank_snapshot_and_reports_layout(
     response = client.post("/requests/REQ-0001/print", headers=_hr_headers())
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["generated"] is True and body["blank_kind"] == "line"
+    assert body["generated"] is True and "blank_kind" not in body
     assert "template_body" not in captured and "template_file" not in captured
     context = captured["context"]
     assert context["blank_name"] == FAKE_BLANK
-    assert context["blank_layout"] == "line"
+    assert "blank_layout" not in context
     assert context["tab_num"] == FAKE_TAB_NUM
     assert context["enterprise"] == FAKE_ENTERPRISE_NAME  # названием из справочника
     assert context["steps"][0]["title"] == FAKE_STAGE
     assert context["steps"][0]["stage_lines"] == ["Проверить расчёты"]
-
-
-def test_print_blank_kind_defaults_to_office(
-    client, requests_store, monkeypatch, tmp_path
-):
-    """Без макета в снимке (старая заявка) печатаем офисный бланк."""
-    requests_store.create(_request(blank_layout=None, blank_name=None, blank_version=None))
-    pdf = tmp_path / "bypass.pdf"
-    pdf.write_bytes(b"%PDF-1.4 fake")
-    monkeypatch.setattr(
-        "app.documents.generate_bypass", lambda **kwargs: _fake_result(str(pdf))
-    )
-    body = client.post("/requests/REQ-0001/print", headers=_hr_headers()).json()
-    assert body["blank_kind"] == "office"
+    assert context["steps"][0]["approval_mode"] is None
 
 
 def test_print_ignores_doc_templates_setting(client, requests_store, monkeypatch, tmp_path):

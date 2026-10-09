@@ -6,15 +6,26 @@
 import { useEffect, useState } from "react";
 import {
   createBlank,
+  createStepCatalog,
+  deleteStepCatalog,
   getBlankSteps,
   getBlanks,
   getDocTypes,
+  getStepCatalog,
   getStepGroups,
   searchAd,
   setBlankSteps,
   updateBlank,
+  updateStepCatalog,
 } from "./requests-client";
-import type { AdCandidate, BlankRow, BlankStepRow, DocType, StepGroup } from "./requests-client";
+import type {
+  AdCandidate,
+  BlankRow,
+  BlankStepRow,
+  DocType,
+  StepCatalogRow,
+  StepGroup,
+} from "./requests-client";
 import {
   createDocType,
   deleteBackup,
@@ -53,14 +64,15 @@ interface AdminSettingsProps {
 }
 
 // Вкладки админки: контент (Процесс/Справочники/Письма) + Инфра, Регламенты,
-// Доступ и роли, Архивация и Бланки — только админ. Легаси-вкладка «Шаблоны»
-// (ключи templates/position_to_category) удалена вместе с ключами настроек.
+// Доступ и роли, Архивация, Бланки и Шаги — только админ. Легаси-вкладка
+// «Шаблоны» (ключи templates/position_to_category) удалена вместе с ключами.
 const CONTENT_TABS = ["Процесс", "Справочники", "Письма"] as const;
 const ALL_TABS = [
   "Процесс",
   "Справочники",
   "Письма",
   "Бланки",
+  "Шаги",
   "Инфра",
   "Регламенты",
   "Доступ и роли",
@@ -609,8 +621,8 @@ function DocTypesEditor() {
 }
 
 // Карточка бланка в админке: код (только при создании — потом неизменен),
-// название, вид документа, описание, макет печати, шапка (header_html),
-// подвал (footer_lines) и активность.
+// название, вид документа, описание, шапка (header_html), подвал (footer_lines)
+// и активность.
 interface BlankForm {
   // null — новый бланк; число — правка существующего.
   id: number | null;
@@ -618,7 +630,6 @@ interface BlankForm {
   name: string;
   doc_type_code: string;
   description: string;
-  layout: "office" | "line";
   active: boolean;
   // Шапка бланка — HTML визуального редактора (печать санирует его бэкенд).
   header_html: string;
@@ -626,15 +637,13 @@ interface BlankForm {
   footer_lines: string[];
 }
 
-// Пустая карточка нового бланка; макет по умолчанию office — как в контракте
-// API (BlankCatalogIn.layout), наборы должностей/имена — только из справочников.
+// Пустая карточка нового бланка; наборы должностей/имена — только из справочников.
 const EMPTY_BLANK_FORM: BlankForm = {
   id: null,
   code: "",
   name: "",
   doc_type_code: "",
   description: "",
-  layout: "office",
   active: true,
   header_html: "",
   footer_lines: [],
@@ -685,10 +694,11 @@ function PlaceholderButtons(props: {
 }
 
 // Вкладка «Бланки» (только админ): справочник бланков — карточка (код, название,
-// вид документа, описание, макет печати, шапка, подвал, активность) и состав
-// СВОИХ шагов (название, текст, вид исполнителя, согласующие/группа AD, режим,
-// необязательный, обязательный комментарий). Этап из справочника у шага нет.
-// Файлов-шаблонов .docx нет: печать собирается из данных бланка.
+// вид документа, описание, шапка, подвал, активность) и состав СВОИХ шагов
+// (название, текст, вид исполнителя, согласующие/группа AD, режим, необязательный,
+// обязательный комментарий). Этап из справочника у шага нет. Шаг можно скопировать
+// из справочника шагов («Взять из справочника») — он становится независимой
+// заготовкой в составе. Файлов-шаблонов .docx нет: печать из данных бланка.
 function BlanksEditor() {
   const [blanks, setBlanks] = useState<BlankRow[]>([]);
   // Группы-владельцы шагов из settings (GET /api/step-groups) — селект группы AD
@@ -696,6 +706,11 @@ function BlanksEditor() {
   const [groups, setGroups] = useState<StepGroup[]>([]);
   // Виды документов (doc_types) — значение doc_type_code бланка.
   const [docTypes, setDocTypes] = useState<DocType[]>([]);
+  // Справочник шагов (GET /api/settings/routing/step-catalog) — источник
+  // «Взять из справочника» в составе бланка (копируются активные шаги).
+  const [stepCatalog, setStepCatalog] = useState<StepCatalogRow[]>([]);
+  // Список шагов справочника для раскрытия при «Взять из справочника».
+  const [catalogOpen, setCatalogOpen] = useState<boolean>(false);
   const [loadError, setLoadError] = useState<string>("");
   const [error, setError] = useState<string>("");
   const [saved, setSaved] = useState<string>("");
@@ -729,14 +744,18 @@ function BlanksEditor() {
 
   useEffect(() => {
     loadBlanks();
-    // Группы шагов и виды документов — для выбора группы AD и вида документа.
-    // Справочники общие; недоступность не ломает список бланков.
+    // Группы шагов, виды документов и справочник шагов — для выбора группы AD,
+    // вида документа и «Взять из справочника». Справочники общие; недоступность
+    // не ломает список бланков.
     getStepGroups()
       .then((items) => setGroups(items))
       .catch(() => setGroups([]));
     getDocTypes(false)
       .then((items) => setDocTypes(items))
       .catch(() => setDocTypes([]));
+    getStepCatalog()
+      .then((items) => setStepCatalog(items))
+      .catch(() => setStepCatalog([]));
   }, []);
 
   // Состав выбранного бланка — по его id (состав пустым не бывает: шаги нет — []).
@@ -778,7 +797,6 @@ function BlanksEditor() {
       name,
       doc_type_code: form.doc_type_code === "" ? null : form.doc_type_code,
       description: form.description === "" ? null : form.description,
-      layout: form.layout,
       active: form.active,
       header_html: form.header_html === "" ? null : form.header_html,
       footer_lines: form.footer_lines,
@@ -838,6 +856,30 @@ function BlanksEditor() {
         require_comment: false,
       },
     ]);
+  }
+
+  // Копирование активного шага справочника в конец состава бланка: заготовка
+  // (title, текст, исполнитель, режим, флаги) — шаг остаётся независимой копией,
+  // правится в составе как обычный шаг бланка.
+  function copyFromCatalog(catalogId: number): void {
+    const source = stepCatalog.find((c) => c.id === catalogId);
+    if (!source) return;
+    setSteps((prev) => [
+      ...prev,
+      {
+        blank_id: selectedId ?? 0,
+        step_order: prev.length + 1,
+        title: source.title,
+        stage_lines: [...source.stage_lines],
+        executor_kind: source.executor_kind,
+        assignees: [...source.assignees],
+        owner_group: source.owner_group,
+        approval_mode: source.approval_mode ?? "sequential",
+        optional: source.optional,
+        require_comment: source.require_comment,
+      },
+    ]);
+    setCatalogOpen(false);
   }
 
   // Порядок шага: кнопки «вверх/вниз» (доступнее перетаскивания). step_order
@@ -969,7 +1011,6 @@ function BlanksEditor() {
               <th scope="col">Код</th>
               <th scope="col">Название</th>
               <th scope="col">Вид документа</th>
-              <th scope="col">Макет</th>
               <th scope="col">Шагов</th>
               <th scope="col">Версия</th>
               <th scope="col">Активен</th>
@@ -985,7 +1026,6 @@ function BlanksEditor() {
                   {blank.description && <div className="sed-sub">{blank.description}</div>}
                 </td>
                 <td>{blank.doc_type_code ?? "—"}</td>
-                <td>{blank.layout}</td>
                 <td>{blank.step_count ?? 0}</td>
                 <td>{blank.version}</td>
                 <td>{blank.active ? "да" : "нет"}</td>
@@ -1010,7 +1050,6 @@ function BlanksEditor() {
                           name: blank.name,
                           doc_type_code: blank.doc_type_code ?? "",
                           description: blank.description ?? "",
-                          layout: blank.layout === "line" ? "line" : "office",
                           active: blank.active,
                           header_html: blank.header_html ?? "",
                           footer_lines: [...(blank.footer_lines ?? [])],
@@ -1077,17 +1116,6 @@ function BlanksEditor() {
                   {dt.name}
                 </option>
               ))}
-            </select>
-          </label>
-          <label className="sed-field">
-            Макет печати
-            <select
-              aria-label="Макет печати бланка"
-              value={form.layout}
-              onChange={(e) => setForm({ ...form, layout: e.target.value as "office" | "line" })}
-            >
-              <option value="office">office — с шапкой и таблицей шагов</option>
-              <option value="line">line — построчный</option>
             </select>
           </label>
           <label className="sed-field">
@@ -1456,12 +1484,538 @@ function BlanksEditor() {
             >
               Добавить шаг
             </button>
+            {/* «Взять из справочника»: раскрывает список активных шагов шаблона;
+                выбор копирует шаг заготовкой в конец состава (независимая копия). */}
+            <button
+              type="button"
+              className="sed-btn sed-btn--ghost"
+              aria-label="Взять из справочника"
+              onClick={() => setCatalogOpen((open) => !open)}
+            >
+              Взять из справочника
+            </button>
             <button type="button" className="sed-btn" onClick={handleSaveSteps} disabled={busy}>
               Сохранить состав
             </button>
           </div>
+          {catalogOpen && (
+            <div className="sed-mt-8">
+              <div className="sed-sub">Шаги справочника (копия в состав):</div>
+              {stepCatalog.filter((c) => c.active).length === 0 && (
+                <div className="sed-note">Активных шагов в справочнике нет</div>
+              )}
+              <ul className="sed-list">
+                {stepCatalog
+                  .filter((c) => c.active)
+                  .map((c) => (
+                    <li key={c.id}>
+                      <button
+                        type="button"
+                        className="sed-btn sed-btn--ghost"
+                        aria-label={`Взять из справочника ${c.title}`}
+                        onClick={() => copyFromCatalog(c.id)}
+                      >
+                        {c.title} ({c.code})
+                      </button>
+                    </li>
+                  ))}
+              </ul>
+            </div>
+          )}
         </div>
       )}
+      {error && <div role="alert">{error}</div>}
+      {saved && <div role="status">{saved}</div>}
+    </fieldset>
+  );
+}
+
+// Карточка шага справочника (вкладка «Шаги»): код (неизменен после создания),
+// название, вид исполнителя, согласующие/группа AD, режим, флаги, текст.
+interface StepCatalogForm {
+  // null — новый шаг; число — правка существующего.
+  id: number | null;
+  code: string;
+  title: string;
+  stage_lines: string[];
+  executor_kind: BlankStepRow["executor_kind"];
+  assignees: string[];
+  owner_group: string;
+  approval_mode: "sequential" | "parallel";
+  optional: boolean;
+  require_comment: boolean;
+  active: boolean;
+}
+
+// Пустая карточка нового шага справочника; значения — только из справочников.
+const EMPTY_CATALOG_FORM: StepCatalogForm = {
+  id: null,
+  code: "",
+  title: "",
+  stage_lines: [],
+  executor_kind: "people",
+  assignees: [],
+  owner_group: "",
+  approval_mode: "sequential",
+  optional: false,
+  require_comment: false,
+  active: true,
+};
+
+// Вкладка «Шаги» (только админ): справочник шагов (step_catalog) — заготовки для
+// состава бланков («Взять из справочника»). Карточка как у шага бланка; код
+// неизменен после создания. Согласующие и группы AD — только из справочников.
+function StepsCatalogEditor() {
+  const [steps, setSteps] = useState<StepCatalogRow[]>([]);
+  const [groups, setGroups] = useState<StepGroup[]>([]);
+  const [loadError, setLoadError] = useState<string>("");
+  const [error, setError] = useState<string>("");
+  const [saved, setSaved] = useState<string>("");
+  const [busy, setBusy] = useState<boolean>(false);
+  const [form, setForm] = useState<StepCatalogForm>(EMPTY_CATALOG_FORM);
+  const [adQuery, setAdQuery] = useState<string>("");
+  const [adHits, setAdHits] = useState<AdCandidate[]>([]);
+  const [adError, setAdError] = useState<string>("");
+
+  // Список шагов после любой правки (активность/код/версии из ответа сервера).
+  function loadCatalog(): void {
+    getStepCatalog()
+      .then((items) => {
+        setSteps(items);
+        setLoadError("");
+      })
+      .catch((e: unknown) =>
+        setLoadError(e instanceof Error ? e.message : "Ошибка загрузки справочника шагов"),
+      );
+  }
+
+  useEffect(() => {
+    loadCatalog();
+    // Группы-владельцы шагов — селект группы AD (общий справочник).
+    getStepGroups()
+      .then((items) => setGroups(items))
+      .catch(() => setGroups([]));
+  }, []);
+
+  // Создание/правка карточки шага. Код неизменен после создания — при правке он
+  // показывается read-only, поэтому в PUT не уходит (частичное обновление).
+  async function handleSaveForm(): Promise<void> {
+    const title = form.title.trim();
+    if (title === "") {
+      setError("Укажите название шага");
+      return;
+    }
+    if (form.id === null && form.code.trim() === "") {
+      setError("Укажите код шага");
+      return;
+    }
+    if (form.executor_kind === "people" && form.assignees.length === 0) {
+      setError("Добавьте хотя бы одного согласующего");
+      return;
+    }
+    if (form.executor_kind === "ad_group" && form.owner_group.trim() === "") {
+      setError("Выберите группу AD");
+      return;
+    }
+    setError("");
+    setSaved("");
+    setBusy(true);
+    const payload = {
+      title,
+      // Пустые пункты текста в запрос не уходят (бэкенд их и не хранит).
+      stage_lines: form.stage_lines.filter((line) => richTextToPlain(line) !== ""),
+      executor_kind: form.executor_kind,
+      assignees: form.assignees,
+      owner_group: form.executor_kind === "ad_group" ? form.owner_group : null,
+      approval_mode: form.approval_mode,
+      optional: form.optional,
+      require_comment: form.require_comment,
+      active: form.active,
+    };
+    try {
+      if (form.id === null) {
+        await createStepCatalog({ code: form.code.trim(), ...payload });
+        setSaved("Шаг справочника создан");
+        setForm(EMPTY_CATALOG_FORM);
+      } else {
+        await updateStepCatalog(form.id, payload);
+        setSaved("Шаг справочника сохранён");
+      }
+      loadCatalog();
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Ошибка сохранения шага справочника");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Удаление шага справочника с подтверждением.
+  async function handleDelete(step: StepCatalogRow): Promise<void> {
+    if (!window.confirm(`Удалить шаг «${step.title}» из справочника?`)) return;
+    setError("");
+    setSaved("");
+    setBusy(true);
+    try {
+      await deleteStepCatalog(step.id);
+      setSaved("Шаг справочника удалён");
+      loadCatalog();
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Ошибка удаления шага справочника");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Подсказки согласующих по ФИО (GET /api/ad/search, только чтение AD).
+  function searchAssignees(): void {
+    const q = adQuery.trim();
+    if (q === "") {
+      setAdHits([]);
+      setAdError("");
+      return;
+    }
+    searchAd(q)
+      .then((items) => {
+        setAdHits(items);
+        setAdError("");
+      })
+      .catch((e: unknown) => setAdError(e instanceof Error ? e.message : "Ошибка поиска сотрудников в AD"));
+  }
+
+  function addAssignee(sam: string): void {
+    const login = sam.trim();
+    if (login === "") return;
+    if (form.assignees.includes(login)) return;
+    setForm({ ...form, assignees: [...form.assignees, login] });
+  }
+
+  function removeAssignee(sam: string): void {
+    setForm({ ...form, assignees: form.assignees.filter((a) => a !== sam) });
+  }
+
+  function patchLine(index: number, html: string): void {
+    setForm({
+      ...form,
+      stage_lines: form.stage_lines.map((l, k) => (k === index ? html : l)),
+    });
+  }
+
+  const editing = form.id !== null;
+
+  return (
+    <fieldset>
+      <legend>Шаги (справочник для бланков)</legend>
+      <div className="sed-note">
+        Шаг справочника — заготовка для состава бланка: во вкладке «Бланки» шаг
+        копируется кнопкой «Взять из справочника» и правится уже в составе. Сам
+        справочник бланков не меняет.
+      </div>
+      {loadError && <div role="alert">Шаги: {loadError}</div>}
+      {!loadError && steps.length === 0 && <div className="sed-note">Шагов нет</div>}
+      {steps.length > 0 && (
+        <table className="sed-table" aria-label="Справочник шагов">
+          <thead>
+            <tr>
+              <th scope="col">Код</th>
+              <th scope="col">Название</th>
+              <th scope="col">Вид исполнителя</th>
+              <th scope="col">Режим</th>
+              <th scope="col">Активен</th>
+              <th scope="col">Действия</th>
+            </tr>
+          </thead>
+          <tbody>
+            {steps.map((step) => (
+              <tr key={step.id} className={step.id === form.id ? "sed-table__row--active" : undefined}>
+                <td>{step.code}</td>
+                <td>{step.title}</td>
+                <td>
+                  {step.executor_kind === "people"
+                    ? "согласующие"
+                    : step.executor_kind === "ad_group"
+                      ? "группа AD"
+                      : "руководитель сотрудника"}
+                </td>
+                <td>
+                  {step.approval_mode === "parallel" ? "любой ответственный" : "все ответственные"}
+                </td>
+                <td>{step.active ? "да" : "нет"}</td>
+                <td>
+                  <div className="sed-toolbar sed-mt-0">
+                    <button
+                      type="button"
+                      className="sed-btn sed-btn--ghost"
+                      aria-label={`Править шаг ${step.code}`}
+                      onClick={() =>
+                        setForm({
+                          id: step.id,
+                          code: step.code,
+                          title: step.title,
+                          stage_lines: [...step.stage_lines],
+                          executor_kind: step.executor_kind,
+                          assignees: [...step.assignees],
+                          owner_group: step.owner_group ?? "",
+                          approval_mode: step.approval_mode ?? "sequential",
+                          optional: step.optional,
+                          require_comment: step.require_comment,
+                          active: step.active,
+                        })
+                      }
+                    >
+                      Править
+                    </button>
+                    <button
+                      type="button"
+                      className="sed-btn sed-btn--ghost"
+                      aria-label={`Удалить шаг ${step.code}`}
+                      onClick={() => void handleDelete(step)}
+                      disabled={busy}
+                    >
+                      Удалить
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      {/* Карточка шага: создание или правка выбранного. */}
+      <div className="sed-editor-card">
+        <div className="sed-blockcard__head">
+          <span className="sed-blockcard__title">
+            {form.id === null ? "Новый шаг справочника" : `Правка шага: ${form.code}`}
+          </span>
+          <span className="sed-blockcard__spacer" />
+          {editing && (
+            <button
+              type="button"
+              className="sed-btn sed-btn--ghost"
+              onClick={() => setForm(EMPTY_CATALOG_FORM)}
+            >
+              Отменить правку
+            </button>
+          )}
+        </div>
+        <div className="sed-editor-row">
+          <label className="sed-field">
+            Код
+            <input
+              aria-label="Код шага справочника"
+              value={form.code}
+              readOnly={editing}
+              title={editing ? "Код шага после создания не меняется" : undefined}
+              onChange={(e) => setForm({ ...form, code: e.target.value })}
+            />
+          </label>
+          <label className="sed-field">
+            Название
+            <input
+              aria-label="Название шага справочника"
+              value={form.title}
+              onChange={(e) => setForm({ ...form, title: e.target.value })}
+            />
+          </label>
+        </div>
+        <div className="sed-editor-row">
+          <label className="sed-field">
+            Вид исполнителя
+            <select
+              aria-label="Вид исполнителя шага справочника"
+              value={form.executor_kind}
+              onChange={(e) =>
+                setForm({ ...form, executor_kind: e.target.value as StepCatalogForm["executor_kind"] })
+              }
+            >
+              <option value="people">согласующие</option>
+              <option value="ad_group">группа AD</option>
+              <option value="manager_ad">руководитель сотрудника</option>
+            </select>
+          </label>
+          <label className="sed-field">
+            Режим
+            <select
+              aria-label="Режим шага справочника"
+              value={form.approval_mode}
+              onChange={(e) =>
+                setForm({ ...form, approval_mode: e.target.value as "sequential" | "parallel" })
+              }
+            >
+              <option value="sequential">все ответственные</option>
+              <option value="parallel">любой ответственный</option>
+            </select>
+          </label>
+          <label className="sed-field">
+            <input
+              type="checkbox"
+              aria-label="Шаг справочника активен"
+              checked={form.active}
+              onChange={(e) => setForm({ ...form, active: e.target.checked })}
+            />
+            Активен
+          </label>
+        </div>
+
+        {/* Исполнитель по списку согласующих: логины AD, ФИО подсказывает поиск. */}
+        {form.executor_kind === "people" && (
+          <div className="sed-mt-8">
+            <div className="sed-sub">Согласующие (логины AD):</div>
+            {form.assignees.length === 0 && (
+              <div className="sed-note">
+                Добавьте хотя бы одного согласующего — без согласующих шаг не сохранится.
+              </div>
+            )}
+            {form.assignees.map((sam) => {
+              const hit = adHits.find((c) => c.sam === sam);
+              return (
+                <div key={sam} className="sed-editor-row sed-editor-row--center">
+                  <span>
+                    {sam}
+                    {hit && hit.display_name ? ` — ${hit.display_name}` : ""}
+                  </span>
+                  <button
+                    type="button"
+                    className="sed-btn sed-btn--ghost"
+                    aria-label={`Удалить согласующего ${sam} из шага справочника`}
+                    onClick={() => removeAssignee(sam)}
+                  >
+                    Удалить согласующего
+                  </button>
+                </div>
+              );
+            })}
+            <div className="sed-editor-row sed-editor-row--center sed-mt-8">
+              <input
+                aria-label="Логин согласующего шага справочника"
+                value={adQuery}
+                onChange={(e) => setAdQuery(e.target.value)}
+              />
+              <button type="button" className="sed-btn sed-btn--ghost" onClick={searchAssignees}>
+                Найти сотрудников
+              </button>
+              <button
+                type="button"
+                className="sed-btn sed-btn--ghost"
+                aria-label="Добавить согласующего в шаг справочника"
+                onClick={() => addAssignee(adQuery)}
+              >
+                Добавить по логину
+              </button>
+            </div>
+            {adError && <div role="alert">{adError}</div>}
+            {adHits.length > 0 && (
+              <ul className="sed-list">
+                {adHits.map((cand) => (
+                  <li key={cand.sam}>
+                    <button
+                      type="button"
+                      className="sed-btn sed-btn--ghost"
+                      aria-label={`Добавить согласующего ${cand.sam} в шаг справочника`}
+                      onClick={() => addAssignee(cand.sam)}
+                    >
+                      {cand.display_name || cand.sam} ({cand.sam})
+                      {cand.title ? ` — ${cand.title}` : ""}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+
+        {/* Исполнитель — группа AD из справочника групп шагов. */}
+        {form.executor_kind === "ad_group" && (
+          <label className="sed-field sed-mt-8">
+            Группа AD
+            <select
+              aria-label="Группа AD шага справочника"
+              value={form.owner_group}
+              onChange={(e) => setForm({ ...form, owner_group: e.target.value })}
+            >
+              <option value="">— выберите группу —</option>
+              {groups.map((group) => (
+                <option key={group.id} value={group.id}>
+                  {group.name}
+                </option>
+              ))}
+            </select>
+            {form.owner_group === "" && (
+              <div className="sed-note">Выберите группу AD — без неё шаг не сохранится.</div>
+            )}
+          </label>
+        )}
+
+        {/* Исполнитель — руководитель сотрудника в AD: данных в шаге нет, бэкенд
+            находит его при выдаче заявки. */}
+        {form.executor_kind === "manager_ad" && (
+          <div className="sed-note">
+            Исполнитель — руководитель сотрудника из AD (находит сервер при выдаче
+            заявки; если руководителя нет, заявка не создастся).
+          </div>
+        )}
+
+        <div className="sed-editor-row">
+          <label className="sed-field">
+            <input
+              type="checkbox"
+              aria-label="Шаг справочника необязательный"
+              checked={form.optional}
+              onChange={(e) => setForm({ ...form, optional: e.target.checked })}
+            />
+            Необязательный
+          </label>
+          <label className="sed-field">
+            <input
+              type="checkbox"
+              aria-label="Комментарий шага справочника обязателен"
+              checked={form.require_comment}
+              onChange={(e) => setForm({ ...form, require_comment: e.target.checked })}
+            />
+            Комментарий обязателен
+          </label>
+        </div>
+
+        {/* Текст шага и его пунктов — визуальный редактор (HTML уходит в
+            stage_lines; разметка попадёт в печать бланка). */}
+        <div className="sed-blanktext">
+          {form.stage_lines.map((line, li) => (
+            <div key={li} className="sed-blanktext__line">
+              <RichTextEditor
+                label={`Пункт шага справочника ${li + 1}`}
+                value={line}
+                onChange={(html) => patchLine(li, html)}
+              />
+              <button
+                type="button"
+                className="sed-btn sed-btn--ghost"
+                aria-label={`Удалить пункт шага справочника ${li + 1}`}
+                onClick={() =>
+                  setForm({ ...form, stage_lines: form.stage_lines.filter((_, k) => k !== li) })
+                }
+              >
+                Удалить пункт
+              </button>
+            </div>
+          ))}
+          <div className="sed-toolbar sed-mt-8">
+            <button
+              type="button"
+              className="sed-btn sed-btn--ghost"
+              aria-label="Добавить пункт шага справочника"
+              onClick={() => setForm({ ...form, stage_lines: [...form.stage_lines, "<p></p>"] })}
+            >
+              Добавить пункт
+            </button>
+          </div>
+        </div>
+
+        <div className="sed-toolbar sed-mt-8">
+          <button type="button" className="sed-btn" onClick={handleSaveForm} disabled={busy}>
+            {form.id === null ? "Создать шаг" : "Сохранить шаг"}
+          </button>
+        </div>
+      </div>
       {error && <div role="alert">{error}</div>}
       {saved && <div role="status">{saved}</div>}
     </fieldset>
@@ -1975,6 +2529,9 @@ export function AdminSettings(props: AdminSettingsProps) {
           не общим PUT /settings, поэтому своей кнопки «Сохранить» здесь нет. */}
       {activeTab === "Бланки" && isAdmin && <BlanksEditor />}
 
+      {/* Справочник шагов для бланков — только админ (как «Бланки»). */}
+      {activeTab === "Шаги" && isAdmin && <StepsCatalogEditor />}
+
       {activeTab === "Инфра" && isAdmin && (
         <fieldset>
           <legend>Инфра (сессия, сканы, SMTP)</legend>
@@ -2368,8 +2925,8 @@ export function AdminSettings(props: AdminSettingsProps) {
       {activeTab === "Архивация" && isAdmin && <ArchiveTab />}
 
       {/* Общий «Сохранить» — не для вкладок с собственным сохранением:
-          «Архивация» (PUT /api/archive) и «Бланки» (свои CRUD-запросы). */}
-      {activeTab !== "Архивация" && activeTab !== "Бланки" && (
+          «Архивация» (PUT /api/archive), «Бланки» и «Шаги» (свои CRUD-запросы). */}
+      {activeTab !== "Архивация" && activeTab !== "Бланки" && activeTab !== "Шаги" && (
         <div className="sed-toolbar sed-mt-12">
           <button type="button" className="sed-btn" onClick={handleSave} disabled={busy}>
             {busy ? "Сохранение…" : "Сохранить"}

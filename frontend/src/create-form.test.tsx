@@ -110,7 +110,6 @@ const routeBlanks: RouteBlank[] = [
     code: "uvol_base",
     name: "Увольнение (базовый)",
     description: "Пояснение для сотрудника ОК",
-    layout: "office",
     step_count: 2,
     autopick: false,
   },
@@ -119,7 +118,6 @@ const routeBlanks: RouteBlank[] = [
     code: "uvol_line",
     name: "Увольнение (линейный)",
     description: null,
-    layout: "line",
     step_count: 1,
     autopick: false,
   },
@@ -1818,7 +1816,6 @@ describe("CreateForm: выбор бланка", () => {
               id: 10,
               code: "uvol_base",
               name: "Увольнение (базовый)",
-              layout: "office",
               version: 3,
               step_count: 2,
             }

@@ -272,7 +272,7 @@ def test_print_returns_pdf_and_does_not_store_versions(
 
 
 def test_print_uses_blank_snapshot_from_request(client, hr, monkeypatch):
-    """Печать идёт по снимку бланка заявки (макет blank_layout), не по шаблону."""
+    """Печать идёт по снимку бланка заявки, не по шаблону."""
     rid = _create(client, hr, category="линейный",
                   steps=[{"owner_group": "SED_STEP_BUH"}])["id"]
     captured = {}

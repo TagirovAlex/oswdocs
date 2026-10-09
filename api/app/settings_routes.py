@@ -1388,9 +1388,9 @@ class BlankCatalogIn(BaseModel):
     """Новый бланк (blanks, миграции 0012/0014): шапка, подвал и свои шаги.
 
     doc_type_code — вид документа (doc_types.code) как классификация, на печать
-    не влияет; оформление печати задаёт layout (встроенные пресеты office|line),
-    файлов-шаблонов нет. header_html — шапка (HTML TipTap, санируется при печати),
-    footer_lines — подвал (список строк)."""
+    не влияет. header_html — шапка (HTML TipTap, санируется при печати),
+    footer_lines — подвал (список строк). Макет печати снят (миграция 0018):
+    печать единая, пресетов office|line нет."""
 
     code: str = Field(pattern=_ROUTE_CODE_PATTERN, description="Код бланка (snake_case, уникален)")
     name: str = Field(min_length=1, description="Наименование бланка")
@@ -1399,9 +1399,6 @@ class BlankCatalogIn(BaseModel):
     )
     description: str | None = Field(
         default=None, description="Пояснение для сотрудника ОК (селект бланка)"
-    )
-    layout: Literal["office", "line"] = Field(
-        default="office", description="Макет печати бланка"
     )
     active: bool = Field(default=True, description="Активен бланк (active=false — вне формы заявки)")
     header_html: str | None = Field(default=None, description="Шапка бланка (HTML TipTap)")
@@ -1431,9 +1428,6 @@ class BlankCatalogUpdateIn(BaseModel):
     )
     description: str | None = Field(
         default=None, description="Пояснение для сотрудника ОК (селект бланка)"
-    )
-    layout: Literal["office", "line"] | None = Field(
-        default=None, description="Макет печати бланка"
     )
     active: bool | None = Field(default=None, description="Активен бланк")
     header_html: str | None = Field(default=None, description="Шапка бланка (HTML TipTap)")
@@ -1537,6 +1531,110 @@ class BlankStepsIn(BaseModel):
                 "Порядок шагов бланка должен быть уникален: повторяются %s"
                 % ", ".join(str(order) for order in duplicates)
             )
+        return self
+
+
+class StepCatalogIn(BaseModel):
+    """Новый шаг справочника (step_catalog, миграция 0018): заготовка, из которой
+    бланк набирается копией в blank_steps.
+
+    Поля повторяют самостоятельный шаг бланка (BlankStepIn), без step_order
+    (порядок задаёт бланк при наборе): текст (title/stage_lines), исполнитель
+    (executor_kind + assignees/owner_group), optional/require_comment/approval_mode.
+    code уникален и неизменен; active=false — шаг недоступен для набора."""
+
+    code: str = Field(pattern=_ROUTE_CODE_PATTERN, description="Код шага (snake_case, уникален)")
+    title: str = Field(min_length=1, description="Название шага-заготовки")
+    stage_lines: list[str] = Field(
+        default_factory=list, description="Текст шага (строки; HTML TipTap допускается)"
+    )
+    executor_kind: Literal["people", "ad_group", "manager_ad"] = Field(
+        default="people", description="Вид исполнителя шага"
+    )
+    assignees: list[str] = Field(
+        default_factory=list, description="Логины согласующих (для executor_kind=people)"
+    )
+    owner_group: str | None = Field(
+        default=None, description="Группа AD (для executor_kind=ad_group)"
+    )
+    approval_mode: Literal["sequential", "parallel"] | None = Field(
+        default=None,
+        description="Режим шага: parallel — закрывает любой из ответственных, "
+        "sequential — все ответственные (null — sequential)",
+    )
+    optional: bool = Field(default=False, description="Шаг необязательный для маршрута")
+    require_comment: bool = Field(
+        default=False, description="Комментарий обязателен даже при согласии"
+    )
+    active: bool = Field(default=True, description="Активен шаг (active=false — недоступен для набора)")
+
+    @model_validator(mode="after")
+    def _check_step(self) -> "StepCatalogIn":
+        """Нормализация и проверка пары executor_kind/исполнитель (422).
+
+        people без согласующих и ad_group без группы — ошибка данных, а не
+        хранилища: шаг без исполнителя согласовать было бы некому. Группа AD
+        сверяется со справочником групп шагов в эндпоинте."""
+        self.title = self.title.strip()
+        self.stage_lines = _clean_lines(self.stage_lines)
+        self.assignees = _clean_logins(self.assignees)
+        self.owner_group = (self.owner_group or "").strip() or None
+        if not self.title:
+            raise ValueError("Название шага справочника не может быть пустым")
+        if self.executor_kind == "people" and not self.assignees:
+            raise ValueError(
+                "Шаг с executor_kind=people обязан содержать согласующих (assignees)"
+            )
+        if self.executor_kind == "ad_group" and not self.owner_group:
+            raise ValueError(
+                "Шаг с executor_kind=ad_group обязан содержать группу AD (owner_group)"
+            )
+        return self
+
+
+class StepCatalogUpdateIn(BaseModel):
+    """Правка шага справочника (частичное обновление; код шага неизменен, как
+    у бланка/профиля)."""
+
+    title: str | None = Field(default=None, min_length=1, description="Название шага-заготовки")
+    stage_lines: list[str] | None = Field(default=None, description="Текст шага (строки)")
+    executor_kind: Literal["people", "ad_group", "manager_ad"] | None = Field(
+        default=None, description="Вид исполнителя шага"
+    )
+    assignees: list[str] | None = Field(
+        default=None, description="Логины согласующих (для executor_kind=people)"
+    )
+    owner_group: str | None = Field(
+        default=None, description="Группа AD (для executor_kind=ad_group)"
+    )
+    approval_mode: Literal["sequential", "parallel"] | None = Field(
+        default=None, description="Режим шага"
+    )
+    optional: bool | None = Field(default=None, description="Шаг необязательный")
+    require_comment: bool | None = Field(
+        default=None, description="Комментарий обязателен даже при согласии"
+    )
+    active: bool | None = Field(default=None, description="Активен шаг")
+
+    @model_validator(mode="after")
+    def _check_step(self) -> "StepCatalogUpdateIn":
+        """Пустые названия и несогласованная пара executor_kind/исполнитель — 422."""
+        if self.title is not None:
+            self.title = self.title.strip()
+            if not self.title:
+                raise ValueError("Название шага справочника не может быть пустым")
+        if self.executor_kind == "people" and not (self.assignees or []):
+            raise ValueError(
+                "Шаг с executor_kind=people обязан содержать согласующих (assignees)"
+            )
+        if self.executor_kind == "ad_group" and not (self.owner_group or "").strip():
+            raise ValueError(
+                "Шаг с executor_kind=ad_group обязан содержать группу AD (owner_group)"
+            )
+        if self.owner_group is not None:
+            self.owner_group = self.owner_group.strip() or None
+        if self.stage_lines is not None:
+            self.stage_lines = _clean_lines(self.stage_lines)
         return self
 
 
@@ -1826,7 +1924,6 @@ def create_routing_blank(
                 "name": payload.name,
                 "doc_type_code": payload.doc_type_code,
                 "description": payload.description,
-                "layout": payload.layout,
                 "active": payload.active,
                 "header_html": payload.header_html,
                 "footer_lines": payload.footer_lines,
@@ -1920,4 +2017,115 @@ def replace_blank_steps(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
     return {"blank_id": blank_id, "count": len(items)}
+
+
+# --- Шаги справочника (step_catalog, миграция 0018) --- админ-эндпоинты,
+# доступ только admin (как бланки/этапы). Переиспользуемые заготовки: бланк
+# набирается копией шага в blank_steps. Создание/правка — с аудитом в
+# routing_store (entity=step_catalog); здесь проверки границы (409 на дубль
+# кода, 422 на неизвестную группу AD) и чтение с audit_log.
+
+@router.get("/settings/routing/step-catalog")
+def list_routing_step_catalog(
+    user: CurrentUser = Depends(get_current_user),
+    store: DbRoutingStore = Depends(get_routing_store),
+) -> list[dict]:
+    """Шаги справочника (только admin, иначе 403): все, включая отключённые
+    (active=false) — админка их правит. Хранилище недоступно — 503."""
+    _require_admin(user)
+    try:
+        return store.list_catalog_steps()
+    except RoutingUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+
+
+@router.post("/settings/routing/step-catalog", status_code=status.HTTP_201_CREATED)
+def create_routing_step_catalog(
+    payload: StepCatalogIn,
+    user: CurrentUser = Depends(get_current_user),
+    store: DbRoutingStore = Depends(get_routing_store),
+    settings_store: DbSettingsStore = Depends(get_settings_store),
+) -> dict:
+    """Создать шаг справочника (только admin): код уникален (409, сверка со всем
+    справочником), группа-владелец должна быть в справочнике групп шагов (422).
+    Аудит — в routing_store (step_catalog.create)."""
+    _require_admin(user)
+    try:
+        _reject_known_code(store.list_catalog_steps(), payload.code, "Шаг справочника")
+        _require_known_step_group(settings_store, payload.owner_group)
+        step_id = store.create_catalog_step(
+            {
+                "code": payload.code,
+                "title": payload.title,
+                "stage_lines": payload.stage_lines,
+                "executor_kind": payload.executor_kind,
+                "assignees": payload.assignees,
+                "owner_group": payload.owner_group,
+                "approval_mode": payload.approval_mode,
+                "optional": payload.optional,
+                "require_comment": payload.require_comment,
+                "active": payload.active,
+                "actor": user.sam,
+            }
+        )
+    except RoutingUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    except SettingsUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    return {"id": step_id, "code": payload.code}
+
+
+@router.put("/settings/routing/step-catalog/{step_id}")
+def update_routing_step_catalog(
+    step_id: int,
+    payload: StepCatalogUpdateIn,
+    user: CurrentUser = Depends(get_current_user),
+    store: DbRoutingStore = Depends(get_routing_store),
+    settings_store: DbSettingsStore = Depends(get_settings_store),
+) -> dict:
+    """Изменить шаг справочника (только admin): частичное обновление полей (код
+    неизменен), аудит — в routing_store (step_catalog.update)."""
+    _require_admin(user)
+    updates = payload.model_dump(mode="json", exclude_unset=True)
+    try:
+        _require_known_step_group(settings_store, updates.get("owner_group"))
+        store.update_catalog_step(step_id, {**updates, "actor": user.sam})
+    except RoutingUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    except SettingsUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    return {"id": step_id, "updated": ",".join(sorted(updates))}
+
+
+@router.delete("/settings/routing/step-catalog/{step_id}")
+def delete_routing_step_catalog(
+    step_id: int,
+    user: CurrentUser = Depends(get_current_user),
+    store: DbRoutingStore = Depends(get_routing_store),
+) -> dict:
+    """Удалить шаг справочника (только admin); не найдено — 404. Копии шага в
+    бланках не ссылаются на справочник, поэтому удаление безопасно. Аудит — в
+    routing_store (step_catalog.delete)."""
+    _require_admin(user)
+    try:
+        deleted = store.delete_catalog_step(step_id, user.sam)
+    except RoutingUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    if not deleted:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Шаг справочника не найден"
+        )
+    return {"id": step_id, "deleted": True}
 

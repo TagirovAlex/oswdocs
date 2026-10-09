@@ -35,17 +35,31 @@ class RoutingUnavailable(Exception):
 # здесь (payload целиком в SQL не подставляется).
 _SERVICE_FIELDS = ("dept_name", "status", "blank_kind", "route_profile_id")
 _PROFILE_FIELDS = ("code", "name", "service_id", "active")
-# Бланки (миграции 0012/0014): код уникален, макет — пресет печати office|line,
-# header_html/footer_lines — шапка и подвал бланка (текст печати).
+# Бланки (миграции 0012/0014): код уникален, header_html/footer_lines — шапка
+# и подвал бланка (текст печати). Макет печати снят (миграция 0018): печать
+# единая, пресетов office|line нет.
 _BLANK_FIELDS = (
     "code",
     "name",
     "doc_type_code",
     "description",
-    "layout",
     "active",
     "header_html",
     "footer_lines",
+)
+# Шаги справочника (step_catalog, миграция 0018): те же поля, что у
+# самостоятельного шага бланка; code при правке не меняется, поэтому в белый
+# список UPDATE он не входит.
+_CATALOG_STEP_FIELDS = (
+    "title",
+    "stage_lines",
+    "executor_kind",
+    "assignees",
+    "owner_group",
+    "approval_mode",
+    "optional",
+    "require_comment",
+    "active",
 )
 _STAGE_FIELDS = (
     "code",
@@ -59,7 +73,7 @@ _STAGE_FIELDS = (
     "active",
 )
 # Колонки jsonb: в UPDATE требуют явного CAST (:stage_lines).
-_JSONB_FIELDS = ("stage_lines", "footer_lines")
+_JSONB_FIELDS = ("stage_lines", "footer_lines", "assignees")
 
 
 def _int_or_none(value: object) -> int | None:
@@ -256,10 +270,10 @@ class DbRoutingStore:
 
     # Бланки (миграция 0012, поля шапки/подвала — 0014): step_count — счётчик из
     # подзапроса, а не join с blank_steps (одна выборка справочника, а не запрос
-    # на каждый бланк).
+    # на каждый бланк). Макет печати снят (миграция 0018).
     _LIST_BLANKS = text(
         """
-        SELECT b.id, b.code, b.name, b.doc_type_code, b.description, b.layout,
+        SELECT b.id, b.code, b.name, b.doc_type_code, b.description,
                b.active, b.version, b.updated_at, b.updated_by,
                b.header_html, b.footer_lines,
                (SELECT count(*) FROM blank_steps bs WHERE bs.blank_id = b.id) AS step_count
@@ -271,7 +285,7 @@ class DbRoutingStore:
     # Бланк по id: step_count нужен выдаче заявки — пустой бланк выбрать нельзя.
     _BLANK_BY_ID = text(
         """
-        SELECT id, code, name, doc_type_code, description, layout, active, version,
+        SELECT id, code, name, doc_type_code, description, active, version,
                updated_at, updated_by, header_html, footer_lines,
                (SELECT count(*) FROM blank_steps bs WHERE bs.blank_id = blanks.id)
                  AS step_count
@@ -281,10 +295,10 @@ class DbRoutingStore:
     )
     _INSERT_BLANK = text(
         """
-        INSERT INTO blanks (code, name, doc_type_code, description, layout, active,
+        INSERT INTO blanks (code, name, doc_type_code, description, active,
                             header_html, footer_lines, updated_at, updated_by)
         VALUES (:code, :name, :doc_type_code, :description,
-                COALESCE(:layout, 'office'), COALESCE(:active, TRUE), :header_html,
+                COALESCE(:active, TRUE), :header_html,
                 CAST(:footer_lines AS jsonb), now(), :actor)
         RETURNING id
         """
@@ -317,6 +331,31 @@ class DbRoutingStore:
         "UPDATE blanks SET version = version + 1, updated_at = now(), updated_by = :actor "
         "WHERE id = :blank_id"
     )
+
+    # Шаги справочника (step_catalog, миграция 0018): переиспользуемые
+    # заготовки, из которых бланк набирается копией в blank_steps.
+    _LIST_CATALOG_STEPS = text(
+        """
+        SELECT id, code, title, stage_lines, executor_kind, assignees, owner_group,
+               approval_mode, optional, require_comment, active, updated_by, updated_at
+        FROM step_catalog
+        WHERE (CAST(:active_only AS BOOLEAN) = FALSE OR active = TRUE)
+        ORDER BY code, id
+        """
+    )
+    _INSERT_CATALOG_STEP = text(
+        """
+        INSERT INTO step_catalog (code, title, stage_lines, executor_kind, assignees,
+                                  owner_group, approval_mode, optional, require_comment,
+                                  active, updated_at, updated_by)
+        VALUES (:code, :title, CAST(:stage_lines AS jsonb), :executor_kind,
+                CAST(:assignees AS jsonb), :owner_group, :approval_mode,
+                COALESCE(:optional, FALSE), COALESCE(:require_comment, FALSE),
+                COALESCE(:active, TRUE), now(), :actor)
+        RETURNING id
+        """
+    )
+    _DELETE_CATALOG_STEP = text("DELETE FROM step_catalog WHERE id = :id")
 
     _LIST_STAGE_ASSIGNEES = text(
         """
@@ -733,7 +772,6 @@ class DbRoutingStore:
                     "name": params["name"],
                     "doc_type_code": params["doc_type_code"],
                     "description": params["description"],
-                    "layout": params["layout"],
                     "active": params["active"],
                     "header_html": params["header_html"],
                     "footer_lines": params["footer_lines"],
@@ -834,6 +872,95 @@ class DbRoutingStore:
                 "шаги бланка обновлены", {"steps": len(wanted)},
             )
             session.commit()
+
+    # --- Шаги справочника (step_catalog, миграция 0018) ---
+    # Переиспользуемые заготовки: бланк набирается копией шага в blank_steps.
+    # Поля — те же, что у самостоятельного шага бланка; code неизменен.
+
+    def list_catalog_steps(self, active_only: bool = False) -> list[dict]:
+        """Шаги справочника (по умолчанию — все, включая отключённые);
+        stage_lines и assignees всегда списками."""
+        with self._session() as session:
+            rows = session.execute(
+                self._LIST_CATALOG_STEPS, {"active_only": active_only}
+            ).all()
+        items = _rows_to_dicts(rows)
+        for item in items:
+            item["stage_lines"] = _stage_lines(item.get("stage_lines"))
+            item["assignees"] = _logins(item.get("assignees"))
+        return items
+
+    def create_catalog_step(self, data: dict) -> int:
+        """Создать шаг справочника с аудитом (step_catalog.create). Возвращает id.
+
+        Вид исполнителя и режим нормализуются (как у set_blank_steps): всё
+        незнакомое и пустое — people/sequential (безопасные дефолты). Дубль code —
+        409 на границе (роутер сверяется со списком), здесь нарушение UNIQUE
+        приходит обёрнутым в RoutingUnavailable (503)."""
+        actor = str(data.get("actor") or "")
+        params = self._payload(data, _CATALOG_STEP_FIELDS)
+        with self._session() as session:
+            row = session.execute(
+                self._INSERT_CATALOG_STEP,
+                {
+                    "code": str(data.get("code") or ""),
+                    "title": str(params.get("title") or ""),
+                    "stage_lines": params.get("stage_lines"),
+                    "executor_kind": _executor_kind_or_default(params.get("executor_kind")),
+                    "assignees": params.get("assignees"),
+                    "owner_group": params.get("owner_group"),
+                    "approval_mode": _approval_mode_or_default(params.get("approval_mode")),
+                    "optional": bool(params.get("optional")),
+                    "require_comment": bool(params.get("require_comment")),
+                    "active": bool(params.get("active")),
+                    "actor": actor,
+                },
+            ).first()
+            step_id = int(row[0]) if row is not None else 0
+            self._audit(
+                session, actor, "step_catalog.create", "step_catalog", step_id,
+                "шаг справочника создан", {"fields": sorted(_CATALOG_STEP_FIELDS)},
+            )
+            session.commit()
+        return step_id
+
+    def update_catalog_step(self, step_id: int, data: dict) -> None:
+        """Правка шага справочника: в SET только поля из белого списка (код
+        неизменен), вид исполнителя и режим нормализуются; аудит
+        (step_catalog.update)."""
+        fields = tuple(col for col in _CATALOG_STEP_FIELDS if col in data)
+        if not fields:
+            return
+        actor = str(data.get("actor") or "")
+        params = self._payload(data, fields)
+        if "executor_kind" in params:
+            params["executor_kind"] = _executor_kind_or_default(params["executor_kind"])
+        if "approval_mode" in params:
+            params["approval_mode"] = _approval_mode_or_default(params["approval_mode"])
+        params.update({"id": step_id, "actor": actor})
+        with self._session() as session:
+            session.execute(self._update_sql("step_catalog", fields), params)
+            self._audit(
+                session, actor, "step_catalog.update", "step_catalog", step_id,
+                "шаг справочника изменён", {"fields": sorted(fields)},
+            )
+            session.commit()
+
+    def delete_catalog_step(self, step_id: int, actor: str) -> bool:
+        """Удалить шаг справочника; True — строка была, False — не найдена.
+        Удаление — только незанятых шагов (ссылок из бланков нет: копия
+        кладётся в blank_steps, поэтому удаление безопасно)."""
+        actor = str(actor or "")
+        with self._session() as session:
+            result = session.execute(self._DELETE_CATALOG_STEP, {"id": step_id})
+            deleted = bool(result.rowcount)
+            if deleted:
+                self._audit(
+                    session, actor, "step_catalog.delete", "step_catalog", step_id,
+                    "шаг справочника удалён",
+                )
+            session.commit()
+        return deleted
 
     # --- Состав этапа (owner_kind = stage_roster) ---
 

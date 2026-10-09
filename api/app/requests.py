@@ -399,9 +399,6 @@ class RequestOut(BaseModel):
     blank_version: int | None = Field(
         default=None, description="Версия состава шагов бланка на момент выдачи (снимок)"
     )
-    blank_layout: str | None = Field(
-        default=None, description="Макет печати бланка на момент выдачи (office/line)"
-    )
     blank_header_html: str | None = Field(
         default=None, description="Шапка бланка на момент выдачи (HTML, снимок)"
     )
@@ -480,14 +477,13 @@ class _Request(BaseModel):
     service_name: str | None = None
     is_manager: bool = False
     # Снимок выбранного бланка (миграции 0012/0014): ссылка на справочник плюс
-    # копия названия/версии/макета и текстов печати (шапка/подвал) — правка
+    # копия названия/версии и текстов печати (шапка/подвал) — правка
     # справочника не меняет уже выданную заявку (её шаги хранят снимок текстов
     # шага в request_steps). Заполняется в режиме auto; в custom бланк не
     # обязателен.
     blank_id: int | None = None
     blank_name: str | None = None
     blank_version: int | None = None
-    blank_layout: str | None = None
     blank_header_html: str | None = None
     blank_footer_lines: list[str] = Field(default_factory=list)
 
@@ -1544,7 +1540,6 @@ def _auto_route(
         "blank_id": _int_or_none((blank or {}).get("id")),
         "blank_name": str((blank or {}).get("name") or "") or None,
         "blank_version": _int_or_none((blank or {}).get("version")),
-        "blank_layout": str((blank or {}).get("layout") or "") or None,
         "blank_header_html": str((blank or {}).get("header_html") or "") or None,
         "blank_footer_lines": [
             str(line).strip()
@@ -2135,7 +2130,6 @@ def _public_view(
         blank_id=request.blank_id,
         blank_name=request.blank_name,
         blank_version=request.blank_version,
-        blank_layout=request.blank_layout,
         blank_header_html=request.blank_header_html,
         blank_footer_lines=list(request.blank_footer_lines or []),
         escalation_hours=request.escalation_hours,
@@ -2514,7 +2508,6 @@ class RoutePreviewBlankOut(BaseModel):
     id: int
     code: str
     name: str
-    layout: str | None = Field(default=None, description="Макет печати бланка (office/line)")
     version: int | None = None
     step_count: int = 0
 
@@ -2871,7 +2864,6 @@ def _route_preview(body: RoutePreviewIn, ad_reader: object | None) -> RoutePrevi
                 id=int(blank.get("id") or 0),
                 code=str(blank.get("code") or ""),
                 name=str(blank.get("name") or ""),
-                layout=str(blank.get("layout") or "") or None,
                 version=_int_or_none(blank.get("version")),
                 step_count=len(blank_rows),
             )
@@ -2892,7 +2884,6 @@ class RouteBlankOut(BaseModel):
     code: str
     name: str
     description: str | None = None
-    layout: str | None = Field(default=None, description="Макет печати бланка (office/line)")
     step_count: int = 0
     autopick: bool = Field(
         default=False,
@@ -2956,7 +2947,6 @@ def list_route_blanks(
             code=str(item.get("code") or ""),
             name=str(item.get("name") or ""),
             description=str(item.get("description") or "") or None,
-            layout=str(item.get("layout") or "") or None,
             step_count=_int_or_none(item.get("step_count")) or 0,
             autopick=autopick,
         )
@@ -2976,7 +2966,7 @@ def create_request(
     """Создание заявки от ОК: маршрут из бланка (auto), иначе ручной конструктор.
 
     В режиме auto выбранный ОК бланк (blank_id) задаёт шаги маршрута, а его
-    снимок (blank_id/blank_name/blank_version/blank_layout + шапка/подвал) пишется
+    снимок (blank_id/blank_name/blank_version + шапка/подвал) пишется
     в заявку. Бланк не выбран и автоподстановка по службе выключена — 422 с
     вариантами (см. _auto_route); в custom маршрут задаёт конструктор, бланк
     указывать не обязательно."""
@@ -3065,7 +3055,6 @@ def create_request(
             blank_id=auto["blank_id"] if auto else None,
             blank_name=auto["blank_name"] if auto else None,
             blank_version=auto["blank_version"] if auto else None,
-            blank_layout=auto["blank_layout"] if auto else None,
             blank_header_html=auto["blank_header_html"] if auto else None,
             blank_footer_lines=list(auto["blank_footer_lines"] if auto else []),
         )

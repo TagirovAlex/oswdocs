@@ -2,8 +2,8 @@
 # 0001) + эндпоинты печати и выдачи PDF. Файлы генерирует docs.generate_bypass
 # (модульная функция — тесты подменяют её, на стенде — python-docx + LibreOffice
 # + qrcode). Оформление бланка собирается из данных заявки и снимка бланка
-# (docs.build_blank_document, макет blank_layout); файлы-шаблоны .docx и ключ
-# настроек doc_templates удалены — печати нечего читать.
+# (docs.build_blank_document, единая вёрстка без макета); файлы-шаблоны .docx и
+# ключ настроек doc_templates удалены — печати нечего читать.
 # Печать — только ОК/админы; чтение мета/PDF — ОК/админы и владелец своего шага.
 # ПДн владельцу не светят: отдаются только пути/версии/QR, PDF не парсится.
 
@@ -28,7 +28,6 @@ from .employee_sync import get_employee_sync_store
 from .docs import (
     build_bypass_context,
     generate_bypass,
-    resolve_blank_layout,
 )
 from .requests import (
     _get_request_or_404,
@@ -425,11 +424,10 @@ def print_bypass(
     """Печать бланка (ОК/админ): печатная форма ТЕКУЩЕГО состояния заявки.
 
     Документ собирается из данных заявки и снимка бланка
-    (docs.build_blank_document: макет blank_layout office|line, шапка, таблица
-    шагов с ВСЕМИ ответственными каждого шага, QR на заявку). Файлы-шаблоны
-    .docx и ключ настроек doc_templates удалены; вид бланка службы AD
-    (blank_kind) в выборе оформления больше не участвует. Пустые шаги — 422,
-    а не пустой документ.
+    (docs.build_blank_document: единая вёрстка без макета, шапка, шаги блоками
+    строк с ВСЕМИ ответственными каждого шага, QR на заявку). Файлы-шаблоны
+    .docx и ключ настроек doc_templates удалены; вида бланка службы AD в выборе
+    оформления нет. Пустые шаги — 422, а не пустой документ.
 
     Вариант 1 (решение пользователя): версии не накапливаются и документы в БД
     НЕ пишутся. PDF отдаётся base64 в ответе, временные файлы (docx/pdf/qr)
@@ -442,14 +440,12 @@ def print_bypass(
     except RequestsUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     context = build_bypass_context(request)
-    # Макет бланка — из снимка заявки (office по умолчанию), не по службе AD.
-    blank_kind = resolve_blank_layout(context.get("blank_layout"))
     if not context.get("steps"):
         raise HTTPException(
             status_code=422,
             detail="В заявке нет шагов маршрута: бланк печатать нечего",
         )
-    # ФИО ответственных этапов подставляем из зеркала AD (в колонку «Ответственный»).
+    # ФИО ответственных этапов подставляем из зеркала AD (в строку «Ответственный»).
     _fill_step_fio(context, _routing_store_or_none())
     # Кадровые плейсхолдеры ({date}/{dismissal_date}/{manager}) — из локальных
     # зеркал, только чтение; зеркало недоступно — пусто, печать не падает.
@@ -493,9 +489,6 @@ def print_bypass(
         "generated": True,
         "reason": None,
         "pdf_b64": base64.b64encode(pdf_bytes).decode("ascii"),
-        # Макет напечатанного бланка (office/line) — из снимка заявки; для UI
-        # и разбора «почему тот бланок».
-        "blank_kind": blank_kind,
     }
 
 

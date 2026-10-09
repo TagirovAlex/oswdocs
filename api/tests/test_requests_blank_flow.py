@@ -1,7 +1,7 @@
 # Выбор бланка сотрудником ОК при создании заявки (миграция 0012): список
 # бланков для селекта (GET /requests/route/blanks), предпросмотр по выбранному
 # бланку вместо профиля службы, запасная автоподстановка по службе за настройкой
-# blank_autopick и снимок бланка (blank_id/name/version/layout) в заявке.
+# blank_autopick и снимок бланка (blank_id/name/version) в заявке.
 # Справочники, настройки, AD и локальный справочник подменены in-memory
 # заглушками через подмену зависимостей (как в test_routing_preview.py).
 # Все службы, группы, бланки, логины и ФИО — вымышленные.
@@ -144,7 +144,6 @@ BLANK_ROW = {
     "name": BLANK_NAME,
     "doc_type_code": BLANK_CODE,
     "description": "Вымышленный бланк с тремя шагами",
-    "layout": "office",
     "active": True,
     "version": BLANK_VERSION,
     "updated_at": None,
@@ -157,7 +156,6 @@ BLANK_LINE_ROW = dict(
     id=BLANK_LINE_ID,
     code=BLANK_LINE_CODE,
     name="Увольнение вымышленного линейного",
-    layout="line",
     version=1,
     header_html=None,
     footer_lines=[],
@@ -592,7 +590,7 @@ def test_route_blanks_lists_active_with_steps_and_autopick_off(
 ):
     """Доступны только активные бланки С ШАГАМИ; autopick выключен, пока ключа нет.
 
-    Поля строки — то, что нужно форме: код, название, описание, макет, число
+    Поля строки — то, что нужно форме: код, название, описание, число
     шагов. Отключённый и пустой бланки в выборку не попадают: ни отключённый
     выбрать нельзя, ни пустой (маршрут заявке нечем задать)."""
     response = client.get("/requests/route/blanks", headers=hr)
@@ -602,7 +600,6 @@ def test_route_blanks_lists_active_with_steps_and_autopick_off(
     assert [item["code"] for item in body] == [BLANK_CODE, BLANK_LINE_CODE]
     assert body[0]["name"] == BLANK_NAME
     assert body[0]["description"] == BLANK_ROW["description"]
-    assert body[0]["layout"] == "office" and body[1]["layout"] == "line"
     assert body[0]["step_count"] == BLANK_STEP_COUNT
     assert body[1]["step_count"] == 1
     assert [item["autopick"] for item in body] == [False, False]
@@ -641,7 +638,6 @@ def test_preview_with_blank_uses_blank_steps_and_owners(
         "id": BLANK_ID,
         "code": BLANK_CODE,
         "name": BLANK_NAME,
-        "layout": "office",
         "version": BLANK_VERSION,
         "step_count": BLANK_STEP_COUNT,
     }
@@ -825,7 +821,7 @@ def test_create_auto_with_blank_writes_snapshot(
     client, hr, settings_override, requests_store, routing_store, ad_reader
 ):
     """auto + blank_id: свои шаги бланка в заявке и снимок blank_* (name/version/
-    layout/шапка/подвал).
+    шапка/подвал).
 
     Права/резолвы прежние: группа-владелец, руководитель из AD, персональные
     согласующие шага."""
@@ -836,13 +832,11 @@ def test_create_auto_with_blank_writes_snapshot(
     assert body["blank_id"] == BLANK_ID
     assert body["blank_name"] == BLANK_NAME
     assert body["blank_version"] == BLANK_VERSION
-    assert body["blank_layout"] == "office"
 
     stored = requests_store.get(body["id"])
     assert stored.blank_id == BLANK_ID
     assert stored.blank_name == BLANK_NAME
     assert stored.blank_version == BLANK_VERSION
-    assert stored.blank_layout == "office"
     # Шаги — свои шаги бланка (порядок бланка, не профиля), этапа у них нет.
     assert [step.stage_title for step in stored.steps] == [
         "Руководитель сотрудника",

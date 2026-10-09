@@ -4,10 +4,11 @@
 # QR — заглушка (PNG с URL заявки в tEXt-блоке, матрица — на стенде
 # библиотекой qrcode).
 # Печать бланков (волна «Справочник бланков»): документ собирается ИЗ ДАННЫХ
-# заявки — build_blank_document на python-docx, макет из снимка blank_layout
-# (office|line). Файлы-шаблоны .docx источником оформления больше не являются
-# (ключ настроек doc_templates и ручки файлов-шаблонов удалены — печать собирает
-# бланок из данных).
+# заявки — build_blank_document на python-docx, единая вёрстка (A4, поля
+# ~20/15/18/15 мм, Times New Roman 11); шаги печатаются блоками строк.
+
+# Файлы-шаблоны .docx источником оформления больше не являются (ключ настроек
+# doc_templates и ручки файлов-шаблонов удалены— печать собирает бланок из данных).
 # ПДн (остаток отпуска и др.) в бланки не включаются — см. sanitize_context.
 # Зависимости стенда (python-docx/qrcode/Pillow/LibreOffice) — раскомментирует
 # стенд, offline только stdlib.
@@ -286,13 +287,14 @@ def _step_logins(step: object) -> List[str]:
 
 def build_bypass_context(request: object) -> Dict[str, object]:
     """Контекст бланка: поля 1С заявки без ПДн (mail/отпуск — не включаем)
-    + снимок бланка (название/версия/макет) + шаги маршрута (владельцы шагов —
+    + снимок бланка (название/версия) + шаги маршрута (владельцы шагов —
     участники процесса, не ПДн).
 
     По каждому шагу отдаём снимок этапа из справочников (title/stage_lines),
     снимок ответственных (assignees — все логины, один ответственный — список
-    из одного) и отметку (done_at): бланк печатается по маршруту, собранному из
-    этапов, и в колонке «Ответственный» печатаются ВСЕ ответственные шага.
+    из одного), отметку (done_at) и режим шага (approval_mode): бланк печатается
+    по маршруту, собранному из этапов, и в блоке шага «Ответственный»
+    печатаются ВСЕ ответственные шага.
     assignee_names здесь пустой намеренно: ФИО по логинам подставляет
     documents.py из зеркала AD (docs.py про хранилище заявок не знает — импорт
     был бы циклическим, его не делаем); fio — ФИО первого ответственного
@@ -327,6 +329,9 @@ def build_bypass_context(request: object) -> Dict[str, object]:
                 "assignee_names": [],
                 "stage_lines": stage_lines or [owner],
                 "done_at": _step_done_text(getattr(step, "done_at", None)),
+                # Режим шага (снимок): sequential — «все ответственные», parallel —
+                # «любой ответственный». Печатается пометкой в блоке шага.
+                "approval_mode": getattr(step, "approval_mode", None),
             }
         )
     return {
@@ -339,15 +344,14 @@ def build_bypass_context(request: object) -> Dict[str, object]:
         "tab_num": getattr(request, "tab_num", None) or "",
         "doc_type_code": getattr(request, "doc_type_code", None) or "",
         # Тема и содержание заявки — печатаются только если бланк их подставил
-        # ({subject}/{content}); в таблицу шагов и письма само по себе не идут.
+        # ({subject}/{content}); в шаги и письма само по себе не идут.
         "subject": getattr(request, "subject", None) or "",
         "content": getattr(request, "content", None) or "",
         # Снимок выбранного бланка: правка справочника не меняет выданную
-        # заявку, поэтому печатаем ровно тот макет, который зафиксирован.
+        # заявку, поэтому печатаем ровно то, что зафиксировано на момент выдачи.
         "blank_id": getattr(request, "blank_id", None),
         "blank_name": getattr(request, "blank_name", None) or "",
         "blank_version": getattr(request, "blank_version", None),
-        "blank_layout": getattr(request, "blank_layout", None) or "",
         # Шапка/подвал бланка — тоже снимок (миграция 0014): печатаем то, что
         # было в бланке на момент выдачи заявки.
         "blank_header_html": getattr(request, "blank_header_html", None) or "",
@@ -361,44 +365,25 @@ def build_bypass_context(request: object) -> Dict[str, object]:
 
 
 # ---------------------------------------------------------------------------
-# Бланк из данных (волна «Справочник бланков»): DOCX собирается python-docx,
-# макет — из снимка заявки (blank_layout), два встроенных пресета. Файлы-шаблоны
-# .docx печать не читает. Зависимости стенда (python-docx/qrcode/Pillow)
-# импортируются лениво: офлайн их нет — generate_bypass вернет generated=False
-# с причиной (не 500).
+# Бланк из данных (волна «Справочник бланков»): DOCX собирается python-docx
+# единой вёрсткой (A4, поля ~20/15/18/15 мм, Times New Roman 11): шаги
+# маршрута печатаются блоками строк, макета/пресетов оформления больше нет.
+# Файлы-шаблоны .docx печать не читает. Зависимости стенда (python-docx/
+# qrcode/Pillow) импортируются лениво: офлайн их нет — generate_bypass вернет
+# generated=False с причиной (не 500).
 # ---------------------------------------------------------------------------
 
 # Шрифт печатной формы бланка (константа вёрстки, не настройка).
 BLANK_FONT_NAME = "Times New Roman"
 
-# Два встроенных пресета оформления; выбирает blank_layout из снимка заявки.
-# Числа — константы вёрстки печатной формы: поля страницы (В/П/Н/Л, мм), кегль
-# обычного текста и заголовка, сторона QR (мм), сетка полей шапки, заливка
-# шапки таблицы, доли ширины колонок таблицы шагов.
-LAYOUT_PRESETS: Dict[str, dict] = {
-    "office": {
-        "margins_mm": (20, 15, 18, 15),
-        "font_pt": 11,
-        "title_pt": 14,
-        "qr_mm": 30,
-        "grid_info": True,
-        "shade_header": True,
-        "step_widths": (0.07, 0.55, 0.26, 0.12),
-    },
-    "line": {
-        "margins_mm": (12, 10, 12, 10),
-        "font_pt": 9,
-        "title_pt": 11,
-        "qr_mm": 20,
-        "grid_info": False,
-        "shade_header": False,
-        "step_widths": (0.06, 0.56, 0.26, 0.12),
-    },
-}
-
-# Макет по умолчанию, если в снимке пусто или значение не из списка пресетов
-# (дефолт совпадает с default='office' миграции 0012).
-DEFAULT_BLANK_LAYOUT = "office"
+# Константы вёрстки печатной формы: поля страницы (В/П/Н/Л, мм), кегль
+# обычного текста и заголовка, сторона QR (мм) и подпись под ним. Единая
+# вёрстка — макета/пресетов оформления больше нет.
+BLANK_MARGINS_MM = (20, 15, 18, 15)
+BLANK_FONT_PT = 11
+BLANK_TITLE_PT = 14
+BLANK_QR_MM = 30
+BLANK_QR_CAPTION_PT = 8
 
 # Подписи полей шапки бланка: (подпись, ключ контекста).
 _HEADER_FIELDS = (
@@ -408,9 +393,6 @@ _HEADER_FIELDS = (
     ("Табельный номер", "tab_num"),
     ("Предприятие", "enterprise"),
 )
-
-# Колонки таблицы шагов.
-_STEP_HEADERS = ("№", "Этап", "Ответственный", "Отметка/дата")
 
 # Теги текста этапа, разрешённые к печати (визуальный редактор отдаёт HTML):
 # начертание и перенос строки. Остальные теги — обычный текст без разметки,
@@ -426,13 +408,6 @@ _HIDDEN_TAGS = frozenset(
     }
 )
 _HTML_TAG_RE = re.compile(r"<\s*(/?)\s*([a-zA-Z][a-zA-Z0-9]*)[^>]*>")
-
-
-def resolve_blank_layout(value: object) -> str:
-    """Макет бланка по значению снимка: office|line; всё прочее (пусто, мусор) —
-    office. Единая точка выбора макета для печати и ответа API (blank_kind)."""
-    name = str(value or "").strip().lower()
-    return name if name in LAYOUT_PRESETS else DEFAULT_BLANK_LAYOUT
 
 
 def _blank_title(context: Dict[str, object]) -> str:
@@ -512,41 +487,21 @@ def render_blank_text(
     )
 
 
-def _printable_width_mm(document: object) -> float:
-    """Ширина наборной полосы страницы, мм (поля из пресета)."""
-    from docx.shared import Emu
-
-    section = document.sections[0]
-    # Разность длин Emu — обычный int, в миллиметры возвращает сам Emu.
-    return Emu(section.page_width - section.left_margin - section.right_margin).mm
-
-
-def _docx_document(preset: dict):
-    """Пустой документ A4 под макет: поля страницы и базовый шрифт."""
+def _docx_document():
+    """Пустой документ A4 единой вёрстки: поля страницы и базовый шрифт."""
     from docx import Document
     from docx.shared import Mm, Pt
 
     document = Document()
     section = document.sections[0]
     section.page_width, section.page_height = Mm(210), Mm(297)
-    top, right, bottom, left = preset["margins_mm"]
+    top, right, bottom, left = BLANK_MARGINS_MM
     section.top_margin, section.right_margin = Mm(top), Mm(right)
     section.bottom_margin, section.left_margin = Mm(bottom), Mm(left)
     style = document.styles["Normal"]
     style.font.name = BLANK_FONT_NAME
-    style.font.size = Pt(preset["font_pt"])
+    style.font.size = Pt(BLANK_FONT_PT)
     return document
-
-
-def _shade_cell(cell: object, color: str = "D9D9D9") -> None:
-    """Заливка ячейки (шапка таблицы офисного пресета)."""
-    from docx.oxml import OxmlElement
-    from docx.oxml.ns import qn
-
-    shading = OxmlElement("w:shd")
-    shading.set(qn("w:val"), "clear")
-    shading.set(qn("w:fill"), color)
-    cell._tc.get_or_add_tcPr().append(shading)
 
 
 def _add_runs(
@@ -627,7 +582,7 @@ def _add_stage_text(paragraph: object, text: str, *, bold: bool = False) -> None
 
 
 def _add_blank_header_html(document: object, context: Dict[str, object]) -> None:
-    """Шапка бланка из снимка заявки (HTML редактора) вместо сетки полей.
+    """Шапка бланка из снимка заявки (HTML редактора) вместо списка полей.
 
     Абзац на каждый закрытый <p>, начертания те же, что у текста этапа:
     санитайзер _add_stage_text вырезает содержимое служебных тегов (script,
@@ -644,12 +599,15 @@ def _add_blank_header_html(document: object, context: Dict[str, object]) -> None
             _add_stage_text(document.add_paragraph(), chunk)
 
 
-def _add_blank_header(document: object, context: Dict[str, object], preset: dict) -> None:
+def _add_blank_header(document: object, context: Dict[str, object]) -> None:
     """Шапка бланка: название, поля сотрудника, QR на заявку (qr_url контекста).
 
-    Шапка настраивается в бланке: если в снимке заявки есть blank_header_html,
-    печатается он вместо сетки полей; шапки нет — прежнее поведение пресета
-    (office — сетка, line — список полей)."""
+    Название — по центру жирным; если в снимке заявки есть blank_header_html,
+    печатается он вместо полей сотрудника (санитаризация _add_stage_text +
+    плейсхолдеры с escape); шапки нет — поля сотрудника списком с жирной подписью.
+
+    QR — справа с подписью URL (qr_url контекста, кладёт generate_bypass).
+    """
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.shared import Mm, Pt
 
@@ -657,30 +615,14 @@ def _add_blank_header(document: object, context: Dict[str, object], preset: dict
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
     heading = title.add_run(_blank_title(context))
     heading.bold = True
-    heading.font.size = Pt(preset["title_pt"])
+    heading.font.size = Pt(BLANK_TITLE_PT)
     if str(context.get("blank_header_html") or "").strip():
         _add_blank_header_html(document, context)
     else:
-        values = [
-            (label, str(context.get(key) or "").strip()) for label, key in _HEADER_FIELDS
-        ]
-        if preset["grid_info"]:
-            # Офисный пресет: поля шапки сеткой (таблица без границ).
-            grid = document.add_table(rows=len(values), cols=2)
-            label_mm = 35.0
-            width_mm = _printable_width_mm(document)
-            for row, (label, value) in zip(grid.rows, values):
-                row.cells[0].width = Mm(label_mm)
-                row.cells[1].width = Mm(max(10.0, width_mm - label_mm))
-                cell = row.cells[0].paragraphs[0]
-                cell.add_run(label + ": ").bold = True
-                row.cells[1].paragraphs[0].add_run(value)
-        else:
-            # Линейный пресет: поля шапки списком, компактнее.
-            for label, value in values:
-                paragraph = document.add_paragraph()
-                paragraph.add_run(label + ": ").bold = True
-                paragraph.add_run(value)
+        for label, key in _HEADER_FIELDS:
+            paragraph = document.add_paragraph()
+            paragraph.add_run(label + ": ").bold = True
+            paragraph.add_run(str(context.get(key) or "").strip())
     qr_url = str(context.get("qr_url") or "").strip()
     if not qr_url:
         return
@@ -688,21 +630,20 @@ def _add_blank_header(document: object, context: Dict[str, object], preset: dict
     picture.alignment = WD_ALIGN_PARAGRAPH.RIGHT
     picture.add_run().add_picture(
         io.BytesIO(_render_qr_png(qr_url)),
-        width=Mm(preset["qr_mm"]),
-        height=Mm(preset["qr_mm"]),
+        width=Mm(BLANK_QR_MM),
+        height=Mm(BLANK_QR_MM),
     )
     caption = document.add_paragraph()
     caption.alignment = WD_ALIGN_PARAGRAPH.RIGHT
     note = caption.add_run(qr_url)
-    note.font.size = Pt(max(6, preset["font_pt"] - 3))
+    note.font.size = Pt(BLANK_QR_CAPTION_PT)
 
 
 def _step_responsible(step: Dict[str, object]) -> List[str]:
-    """Ответственные шага на бланке — список строк.
+    """Ответственные шага на бланке — список имён (в строку «Ответственный: …»).
 
     ФИО всех персональных исполнителей снимка (assignee_names — их подставляет
-    documents._fill_step_fio по логинам), по одному в строке: колонка узкая,
-    а отметку/подпись каждый ставит напротив своей фамилии. Прежнее одиночное
+    documents._fill_step_fio по логинам), через запятую. Прежнее одиночное
     fio — как есть. Пустой снимок (групповой этап) — группа AD печатается как
     есть, на бумаге её пишут от руки."""
     names = [
@@ -714,7 +655,12 @@ def _step_responsible(step: Dict[str, object]) -> List[str]:
     return [single or str(step.get("owner") or "").strip()]
 
 
-def _step_marks(step: Dict[str, object]) -> list[str]:
+def _step_mode_text(mode: object) -> str:
+    """Режим шага текстом для печати: parallel — «параллельно», иначе «последовательно»."""
+    return "параллельно" if str(mode or "").strip().casefold() == "parallel" else "последовательно"
+
+
+def _step_marks(step: Dict[str, object]) -> List[str]:
     """Отметка/дата шага: статус и дата выполнения; без даты — место под росчерк."""
     done_at = str(step.get("done_at") or "").strip()
     return [
@@ -724,42 +670,29 @@ def _step_marks(step: Dict[str, object]) -> list[str]:
     ]
 
 
-def _add_steps_table(
-    document: object, context: Dict[str, object], preset: dict
-) -> None:
-    """Таблица шагов: № | этап с его пунктами | ответственные | отметка/дата.
+def _add_steps(document: object, context: Dict[str, object]) -> None:
+    """Шаги маршрута: каждый отдельным блоком строк (не таблицей).
 
-    В колонке «Ответственный» печатаются ВСЕ ответственные шага (реестровый этап
-    с несколькими исполнителями), по одному в строке. Плейсхолдеры подставляются
-    и в названии этапа, и в его пунктах — значения ЭКРАНИРУЮТСЯ (как в шапке):
+    Блок шага: «№. Название (последовательно/параллельно)» жирным, пункты текста
+    (stage_lines), «Ответственный: …» (все ответственные снимка) и
+    «Отметка/дата: …» (статус + дата либо место для росчерка). Плейсхолдеры
+    подставляются в названии и пунктах с ЭКРАНИРОВАНИЕМ значений (как в шапке):
     текст шага разбирается как разметка бланка, свободный текст заявки из
     {content}/{subject} не должен становиться его тегами."""
-    from docx.shared import Mm
-
-    steps = [step for step in (context.get("steps") or []) if isinstance(step, dict)]
-    table = document.add_table(rows=1, cols=len(_STEP_HEADERS))
-    if preset["shade_header"]:
-        table.style = "Table Grid"
-    table.autofit = False
-    width_mm = _printable_width_mm(document)
-    widths = [Mm(width_mm * share) for share in preset["step_widths"]]
-    for index, column in enumerate(table.columns):
-        column.width = widths[index]
-    for index, cell in enumerate(table.rows[0].cells):
-        cell.width = widths[index]
-        cell.paragraphs[0].add_run(_STEP_HEADERS[index]).bold = True
-        if preset["shade_header"]:
-            _shade_cell(cell)
-    for position, step in enumerate(steps, start=1):
-        row = table.add_row()
-        for index, cell in enumerate(row.cells):
-            cell.width = widths[index]
-        row.cells[0].paragraphs[0].add_run(str(step.get("order") or position))
-        stage = row.cells[1].paragraphs[0]
+    for position, step in enumerate(
+        (item for item in (context.get("steps") or []) if isinstance(item, dict)),
+        start=1,
+    ):
+        heading = document.add_paragraph()
         _add_stage_text(
-            stage,
-            render_blank_text(
-                str(step.get("title") or "").strip(), context, escape=True
+            heading,
+            "%d. %s (%s)"
+            % (
+                position,
+                render_blank_text(
+                    str(step.get("title") or "").strip(), context, escape=True
+                ),
+                _step_mode_text(step.get("approval_mode")),
             ),
             bold=True,
         )
@@ -767,22 +700,17 @@ def _add_steps_table(
             text = str(line).strip()
             if text:
                 _add_stage_text(
-                    row.cells[1].add_paragraph(),
+                    document.add_paragraph(),
                     render_blank_text(text, context, escape=True),
                 )
-        responsible_cell = row.cells[2]
-        for index, name in enumerate(_step_responsible(step)):
-            paragraph = (
-                responsible_cell.paragraphs[0] if index == 0
-                else responsible_cell.add_paragraph()
-            )
-            paragraph.add_run(name)
-        mark_cell = row.cells[3]
-        for index, line in enumerate(_step_marks(step)):
-            paragraph = (
-                mark_cell.paragraphs[0] if index == 0 else mark_cell.add_paragraph()
-            )
-            paragraph.add_run(line)
+        responsible = document.add_paragraph()
+        responsible.add_run("Ответственный: ").bold = True
+        responsible.add_run(", ".join(_step_responsible(step)))
+        marks = document.add_paragraph()
+        marks.add_run("Отметка/дата: ").bold = True
+        marks.add_run(", ".join(_step_marks(step)))
+        # Пустая строка после блока каждого шага (отделяет шаги друг от друга).
+        document.add_paragraph()
 
 
 def _add_blank_footer_lines(document: object, context: Dict[str, object]) -> None:
@@ -801,9 +729,7 @@ def _add_blank_footer_lines(document: object, context: Dict[str, object]) -> Non
         _add_runs(paragraph, render_blank_text(text, context))
 
 
-def _add_blank_footer(
-    document: object, context: Dict[str, object], preset: dict
-) -> None:
+def _add_blank_footer(document: object, context: Dict[str, object]) -> None:
     """Подвал бланка: номер заявки, название бланка и его версия (снимок)."""
     from docx.enum.text import WD_ALIGN_PARAGRAPH
 
@@ -820,26 +746,25 @@ def _add_blank_footer(
 def build_blank_document(context: Dict[str, object]) -> bytes:
     """Бланк заявки как DOCX: собирается из данных (python-docx), не из файла.
 
-    Макет — из снимка blank_layout (office|line, дефолт office, см.
-    resolve_blank_layout), шапка берёт blank_name и поля сотрудника (либо
-    blank_header_html снимка, если она есть), шаги печатаются таблицей с
-    ответственными — ВСЕМИ по снимку (ФИО подставил documents.py по логинам
-    assignee_names, по строке на ответственного), группы AD — как есть, после
-    таблицы шагов идут строки подвала blank_footer_lines снимка, QR — на qr_url
-    из контекста (его кладёт generate_bypass: URL заявки). Плейсхолдеры вида
-    {fio}/{date}/{steps} подставляются в шапке, подвале и тексте шага; неизвестные
-    остаются текстом. ПДн-поля вычищает sanitize_context.
+    Единая вёрстка (макета/пресетов нет): шапка берёт blank_name и поля
+    сотрудника (либо blank_header_html снимка, если она есть), шаги печатаются
+    отдельными блоками строк с ответственными — ВСЕМИ по снимку (ФИО подставил
+    documents.py по логинам assignee_names), группами AD — как есть, и пометкой
+    режима шага (последовательно/параллельно); после шагов идут строки подвала
+    blank_footer_lines снимка, QR — на qr_url из контекста (его кладёт
+    generate_bypass: URL заявки). Плейсхолдеры вида {fio}/{date}/{steps}
+    подставляются в шапке, подвале и тексте шага; неизвестные остаются текстом.
+    ПДн-поля вычищает sanitize_context.
     Заявку без шагов не печатает пустым документом — печать отвечает 422
     (documents.print_bypass). Ожидает python-docx/qrcode/Pillow (стенд);
     офлайн ImportError разбирает generate_bypass (generated=False).
     """
     safe = sanitize_context(dict(context))
-    preset = LAYOUT_PRESETS[resolve_blank_layout(safe.get("blank_layout"))]
-    document = _docx_document(preset)
-    _add_blank_header(document, safe, preset)
-    _add_steps_table(document, safe, preset)
+    document = _docx_document()
+    _add_blank_header(document, safe)
+    _add_steps(document, safe)
     _add_blank_footer_lines(document, safe)
-    _add_blank_footer(document, safe, preset)
+    _add_blank_footer(document, safe)
     buf = io.BytesIO()
     document.save(buf)
     return buf.getvalue()
@@ -944,8 +869,8 @@ def generate_bypass(
     """Собрать бланк заявки: DOCX (python-docx) -> PDF (LibreOffice) + QR.
 
     Оформление целиком из данных: build_blank_document по контексту (снимок
-    blank_layout, шапка, таблица шагов со всеми ответственными); файлы-шаблоны
-    .docx и ключ настроек doc_templates удалены. qr_url кладёт сам
+    бланка: шапка, шаги блоками строк со всеми ответственными и режимом шага);
+    файлы-шаблоны .docx и ключ настроек doc_templates удалены. qr_url кладёт сам
     generate_bypass — payload QR и подпись под картинкой это URL заявки;
     sanitize_context применяется ДО сборки (qr_url/steps под фильтр ПДн
     не подпадают).

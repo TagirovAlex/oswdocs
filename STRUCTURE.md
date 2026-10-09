@@ -17,9 +17,9 @@
 - `config.py` — настройки/env (Settings), `get_settings`.
 - `requests.py` — заявки: создание, шаги, отметки (approve/reject/return), PATCH, rollback, история,
   комментарии; выбор бланка сотрудником ОК (`blank_id` в `POST /requests`, список для селекта
-  `GET /requests/route/blanks`, автоподстановка по службе за `blank_autopick` — `_blank_autopick_enabled`),
-  снимок бланка в заявке (`blank_id/blank_name/blank_version/blank_layout/blank_header_html/
-  blank_footer_lines`), несколько ответственных шага (`assignees`/`approvals`/`approval_mode`),
+   `GET /requests/route/blanks`, автоподстановка по службе за `blank_autopick` — `_blank_autopick_enabled`),
+   снимок бланка в заявке (`blank_id/blank_name/blank_version/blank_header_html/
+   blank_footer_lines`), несколько ответственных шага (`assignees`/`approvals`/`approval_mode`),
   снятие шага бланка по номеру (`dismissed_step_orders`, рядом с `dismissed_stages` по кодам этапов),
   предпросмотр
   `POST /requests/route/preview` (бланк/профиль/этапы/исполнители/`notice`/`link_state`/`link_candidate`),
@@ -60,28 +60,31 @@
   самостоятельные шаги (`title`/`stage_lines`/`executor_kind`/`assignees`/`owner_group`/`optional`/
   `require_comment`/`approval_mode`) (`list_blanks`/`blank_by_id`/
   `create_blank`/`update_blank`/`list_blank_steps`/`set_blank_steps` — замена состава одной
-  транзакцией с ростом `version`); чистая логика `pick_profile`/`pick_blank_steps`/
+  транзакцией с ростом `version`); справочник шагов `step_catalog` (миграция 0018, переиспользуемые
+  заготовки — `list_catalog_steps`/`create_catalog_step`/`update_catalog_step`/`delete_catalog_step`
+  с аудитом); чистая логика `pick_profile`/`pick_blank_steps`/
   `apply_dismissals_and_additions` + хранилище и карточки пользователей (`user_card`,
   `manager_sam_by_dn`).
 - `settings_routes.py` — настройки (GET/PUT /settings, /settings/content), doc_types CRUD, step-groups,
   бланки (CRUD справочника и состава шагов):
   `GET/POST /settings/routing/blanks`, `PUT /settings/routing/blanks/{id}`,
-  `GET/PUT /settings/routing/blanks/{id}/steps` (все — только admin); ключ `blank_autopick`
+  `GET/PUT /settings/routing/blanks/{id}/steps` и шаги справочника
+  `GET/POST/PUT/DELETE /settings/routing/step-catalog` (все — только admin); ключ `blank_autopick`
   в `INFRA_KEYS`. Ключи `templates`/`position_to_category` (миграция 0014) и мёртвые
   `doc_templates`/`position_sets` (миграция 0016) удалены из БД, ручки файлов-бланков удалены
   вместе с файлами-шаблонами .docx; вкладка «Шаблоны» из админки снята (редактор писем — на
   вкладке «Письма»).
 - `documents.py` — печать бланка (вариант 1, `pdf_b64` без записи версий в БД, временные файлы
-  удаляются); макет — из снимка `blank_layout` (`resolve_blank_layout`), шапка/подвал/текст шага —
+  удаляются); макета/пресетов нет (поле `blank_layout` снято миграцией 0018), шапка/подвал/текст шага —
   из снимка `blank_header_html`/`blank_footer_lines`, `_fill_step_fio` подставляет ФИО ВСЕХ
   ответственных шага из зеркала `users` по логинам (`assignees`); групповой шаг (снимок
   ответственных пуст) печатается по `owner_group`; `_fill_hr_placeholders` — `{date}`/
   `{dismissal_date}`/`{manager}` из локальных зеркал (кадровые данные по ключу заявки, AD users).
-- `docs.py` — сборка бланка из данных: `build_blank_document` (python-docx) по макету из снимка
-  (`LAYOUT_PRESETS` office|line, `build_bypass_context` — снимок бланка, шаги с `assignees`/`assignee_names`
-  и `stage_lines`), плейсхолдеры печати (`blank_placeholders`/`render_blank_text`, значения
-  экранируются, неизвестные остаются текстом), QR и конвертация в PDF (`generate_bypass`, LibreOffice);
-  переменные — см. `TEMPLATES.md`.
+- `docs.py` — сборка бланка из данных: `build_blank_document` (python-docx) единой вёрсткой
+  (шапка, шаги блоками строк с режимом, подвал; `build_bypass_context` — снимок бланка, шаги с
+  `assignees`/`assignee_names`/`approval_mode` и `stage_lines`), плейсхолдеры печати
+  (`blank_placeholders`/`render_blank_text`, значения экранируются, неизвестные остаются текстом),
+  QR и конвертация в PDF (`generate_bypass`, LibreOffice); переменные — см. `TEMPLATES.md`.
 - `archive.py` — бэкапы (ручной, расписание, настройки, список, скачать/удалить).
 - `audit.py` — журнал аудита (память + INSERT в БД).
 - `mailer.py` — письма (шаблоны, SMTP/файловая очередь); адресаты шага — все ответственные из
@@ -105,10 +108,12 @@
 - `request-card.tsx` — карточка заявки (шаги, отметки, история, комментарии, вложения, печать, админ СЭД);
   у шага видны все ответственные и прогресс отметок по режиму шага.
 - `admin-settings.tsx` — настройки (вкладки: процесс/справочники/письма — контент; инфра/регламенты/
-  доступ/архивация/бланки — только admin; легаси-вкладка «Шаблоны» удалена) и вкладка «Бланки»
+  доступ/архивация/бланки/шаги — только admin; легаси-вкладка «Шаблоны» удалена) и вкладка «Бланки»
   (только admin): карточка бланка (шапка `header_html`, подвал `footer_lines`) + собственные шаги
   бланка — название/текст, вид исполнителя (`executor_kind`), согласующие/группа AD/руководитель,
-  режим шага (`parallel`/`sequential`), флаги `optional`/`require_comment`.
+  режим шага (`parallel`/`sequential`), флаги `optional`/`require_comment`; «Взять из справочника»
+  копирует шаг из `step_catalog` в состав бланка. Вкладка «Шаги» (только admin) — редактор
+  справочника шагов (`step_catalog`): код/название/текст/исполнитель/режим/флаги/активность.
 - `rich-text.tsx` — визуальный редактор текста шага и шапки бланка на TipTap
   (`@tiptap/react` + `@tiptap/starter-kit`); HTML уходит в `title`/`stage_lines` шага и
   `blank_header_html` и доходит до печати.
@@ -123,10 +128,9 @@
 ## Стили, бланки и печать (где что лежит)
 - ВСЕ стили — один файл `frontend/src/theme.css` (токены, сетки, кнопки, таблицы, dropdown, панели).
 - Иконки меню/темы — инлайн-SVG в `frontend/src/layout.tsx` (каталог `ico/` удалён, в сборку не входит); логотипы — `logo-oswdocs*.svg` + `frontend/public/`.
-- Файлов-шаблонов `.docx` больше нет: оформление печати — два встроенных пресета `office`/`line`
-  в `docs.LAYOUT_PRESETS`, выбирает `blank_layout` из снимка заявки. Шапка, таблица шагов и QR
-  собираются из данных (`build_blank_document`); в `FILES_DIR` остаются только временные
-  docx/pdf/qr, которые удаляются сразу после ответа печати.
+- Файлов-шаблонов `.docx` больше нет и пресетов печати тоже: оформление — единая вёрстка
+  `build_blank_document` (шапка, шаги блоками строк, подвал, QR собираются из данных). В `FILES_DIR`
+  остаются только временные docx/pdf/qr, которые удаляются сразу после ответа печати.
 - Маршрут задаёт справочник: бланк (`blanks`/`blank_steps`, миграции 0012/0013/0014) — основной
   путь, шаг бланка самостоятельный (свой текст, свой исполнитель, этап справочника не нужен);
   `route_profiles`/`approval_stages`/`route_profile_steps` (миграция 0008) — запасной подбор по
@@ -155,7 +159,9 @@
   0015 request_steps.optional NOT NULL DEFAULT TRUE (снимок «шаг можно снять»),
   0016 удаление мёртвых ключей настроек doc_templates/position_sets,
   0017 удаление мёртвых колонок шага бланка (blank_steps.stage_id/optional_override/
-  require_comment_override — вместе с FK на approval_stages и UNIQUE (blank_id, stage_id)).
+  require_comment_override — вместе с FK на approval_stages и UNIQUE (blank_id, stage_id)),
+  0018 справочник шагов step_catalog (переиспользуемые заготовки для бланков) и снятие
+  «макета печати» (DROP blanks.layout, DROP dismissal_requests.blank_layout — печать единая).
 
 ## Сценарии ключевых функций
 - Создание: create-form → POST /requests → шаги; отметки: request-card → POST .../steps/{order}/decide; печать: POST /print (pdf_b64) → iframe; история: GET /history (audit_log); сотрудники: GET /employees (локальная таблица); бэкапы: /api/archive*; настройки: /api/settings.
