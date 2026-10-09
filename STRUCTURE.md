@@ -5,7 +5,7 @@
 ## Обзор
 - `api/` — FastAPI (Python 3.12), `app/` — код, `tests/` — pytest, `requirements.txt`.
 - `frontend/` — React SPA (Vite): `src/` — код, `public/` — статика, `dist/` — сборка.
-- `db/alembic/versions/` — миграции БД (0001..0016).
+- `db/alembic/versions/` — миграции БД (0001..0017).
 - `proxy/` — nginx. `deploy/` — компоуз/деплой. `samples/` — DESIGN.md + макет.
 - `script_local/`, `script_remote/` — инструментарий разработчика (gitignored).
 - `PLAN.md` — план/статус; `TEMPLATES.md` — бланки/этапы и печать; `task/` — исторические спеки (gitignored).
@@ -58,7 +58,7 @@
   `ad_group`/`stage_roster`/`manager_ad`), `stage_assignees`, `route_profile_steps`; справочник
   бланков (миграции 0012/0014): `blanks` (+`header_html`/`footer_lines`), `blank_steps` —
   самостоятельные шаги (`title`/`stage_lines`/`executor_kind`/`assignees`/`owner_group`/`optional`/
-  `require_comment`/`approval_mode`; `stage_id` — nullable-наследие) (`list_blanks`/`blank_by_id`/
+  `require_comment`/`approval_mode`) (`list_blanks`/`blank_by_id`/
   `create_blank`/`update_blank`/`list_blank_steps`/`set_blank_steps` — замена состава одной
   транзакцией с ростом `version`); чистая логика `pick_profile`/`pick_blank_steps`/
   `apply_dismissals_and_additions` + хранилище и карточки пользователей (`user_card`,
@@ -153,7 +153,9 @@
   dismissal_requests.blank_header_html/blank_footer_lines; очистка blank_steps/blanks;
   удаление ключей templates/position_to_category),
   0015 request_steps.optional NOT NULL DEFAULT TRUE (снимок «шаг можно снять»),
-  0016 удаление мёртвых ключей настроек doc_templates/position_sets.
+  0016 удаление мёртвых ключей настроек doc_templates/position_sets,
+  0017 удаление мёртвых колонок шага бланка (blank_steps.stage_id/optional_override/
+  require_comment_override — вместе с FK на approval_stages и UNIQUE (blank_id, stage_id)).
 
 ## Сценарии ключевых функций
 - Создание: create-form → POST /requests → шаги; отметки: request-card → POST .../steps/{order}/decide; печать: POST /print (pdf_b64) → iframe; история: GET /history (audit_log); сотрудники: GET /employees (локальная таблица); бэкапы: /api/archive*; настройки: /api/settings.

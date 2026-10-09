@@ -290,7 +290,7 @@ class DbRoutingStore:
         """
     )
     # Шаги бланка — самостоятельные шаги (миграция 0014): свой текст и свой
-    # исполнитель, join с этапом больше не нужен (stage_id — наследие, NULL).
+    # исполнитель, join с этапом не нужен (миграция 0017 сняла stage_id).
     _LIST_BLANK_STEPS = text(
         """
         SELECT blank_id, step_order, title, stage_lines, executor_kind,

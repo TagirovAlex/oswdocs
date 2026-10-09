@@ -14,21 +14,27 @@ Postgres 17 (`postgres:17-trixie`), миграции — Alembic (вверх/в�
   маршрута, 0009 кадровые данные сотрудника, 0010 link_discrepancies, 0011 detail,
   0012 справочник бланков (blanks/blank_steps + снимок в dismissal_requests), 0013 несколько
   ответственных и режим шага (jsonb `assignees`/`approvals`, `approval_mode`), 0014 самостоятельный
-  шаг бланка (`blank_steps.stage_id` → NULLABLE + `title`/`stage_lines`/`executor_kind`/`assignees`/
+  шаг бланка (`title`/`stage_lines`/`executor_kind`/`assignees`/
   `owner_group`/`optional`/`require_comment`; `blanks.header_html`/`footer_lines`; снимок
   `dismissal_requests.blank_header_html`/`blank_footer_lines`; очистка `blank_steps`/`blanks`;
   удаление ключей `templates`/`position_to_category`), 0015 `request_steps.optional NOT NULL
-  DEFAULT TRUE`, 0016 удаление мёртвых ключей `doc_templates`/`position_sets`.
+  DEFAULT TRUE`, 0016 удаление мёртвых ключей `doc_templates`/`position_sets`,
+  0017 удаление мёртвых колонок шага бланка (`blank_steps.stage_id`/`optional_override`/
+  `require_comment_override`; FK на `approval_stages` и `UNIQUE (blank_id, stage_id)` сняты
+  вместе с колонками).
 - Откат миграции 0016 ничего не восстанавливает (значения и нерабочие), 0014 при downgrade не
-  возвращает прежнее содержимое бланков — состав собирает человек заново.
+  возвращает прежнее содержимое бланков — состав собирает человек заново; откат 0017 возвращает
+  `stage_id` NOT NULL и потому удаляет все текущие шаги бланка (у них `NULL stage_id`) —
+  содержимое бланков собирается заново.
 - `audit_log` — append-only (только INSERT, без UPDATE/DELETE; запретить на уровне прав/триггера).
 - Ключ сотрудника составной: `enterprise+base_code+tab_num`.
 - `employees` несёт кадровые данные: `ref_key` (сопоставление с регистром), `dismissal_date`
   (поиск и сопоставление пропускают уволенных), `hr_synced_at`; `link_discrepancies` — выдача
   разбора автосопоставления с `reason` и `resolved_at`; справочник бланков `blanks`/`blank_steps`
-  (шаг самостоятельный: порядок + свой текст + свой исполнитель + режим + `optional`; `stage_id`
-  и `optional_override`/`require_comment_override` — наследие прежней модели, не используются;
-  `version` растёт при замене состава).
+  (шаг самостоятельный: порядок + свой текст + свой исполнитель + режим + `optional`; мёртвые
+  колонки прежней модели `stage_id`/`optional_override`/`require_comment_override` сняты миграцией
+  0017 вместе с FK на `approval_stages` и `UNIQUE (blank_id, stage_id)`; `version` растёт при
+  замене состава).
 - Поиск людей — индексы `pg_trgm` на ФИО/`sam`, чувствительность к `ё` учесть в нормализации на стороне API.
 - Файлы (сканы, DOCX/PDF) в БД не хранить — только мета + путь в volume.
 - Сиды `settings` по умолчанию: группы, `sed_ou`, `approval_ttl_days`, `position_escalation`,

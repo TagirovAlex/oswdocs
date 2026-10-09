@@ -1,10 +1,10 @@
 ﻿# Бланки, этапы и письма СЭД: как устроено и что уходит в печать
 
-Обновлено: 2026-10-08. Источник истины — код (`api/app/requests.py`, `api/app/routing.py`,
+Обновлено: 2026-10-09. Источник истины — код (`api/app/requests.py`, `api/app/routing.py`,
 `api/app/routing_store.py`, `api/app/settings_routes.py`, `api/app/documents.py`, `api/app/docs.py`,
 `api/app/mailer.py`) и миграции `db/alembic/versions/0012_blank_directory.py`,
 `0013_multi_assignee_steps.py`, `0014_blank_steps_own.py`, `0015_step_optional.py`,
-`0016_drop_dead_setting_keys.py`.
+`0016_drop_dead_setting_keys.py`, `0017_blank_steps_drop_dead_columns.py`.
 
 Ключевая мысль модели: **оформление бланка — не файл, а данные**. Файлы-шаблоны `.docx`
 (`office.docx`/`line.docx` и производные) удалены из проекта, настройки `doc_templates`/
@@ -50,12 +50,14 @@
 
 Аудит: `blank.create`, `blank.update`, `blank.steps.update`.
 
-## 2. Шаг бланка (`blank_steps`, миграции 0012/0013/0014)
+## 2. Шаг бланка (`blank_steps`, миграции 0012/0013/0014/0017)
 
 Шаг бланка самостоятельный: **этап справочника ему не нужен**, свой текст и своих согласующих
-задаёт сотрудник ОК. `stage_id` в БД остался как nullable-наследие прежней модели (новая запись
-пишет `NULL`), как и `optional_override`/`require_comment_override` — они не используются. Порядок
-уникален внутри бланка (в БД это PK `(blank_id, step_order)`, дубль порядка — 422 на границе).
+задаёт сотрудник ОК. Порядок уникален внутри бланка (в БД это PK `(blank_id, step_order)`,
+дубль порядка — 422 на границе). Мёртвые колонки прежней модели `stage_id`,
+`optional_override`, `require_comment_override` **удалены из таблицы миграцией 0017** (вместе с FK
+на `approval_stages` и `UNIQUE (blank_id, stage_id)`) — в схеме их нет, API их не принимает и не
+отдаёт. Сняты 0017; прежние значения при откате не восстанавливаются.
 
 | Поле шага бланка | Значение |
 |---|---|
