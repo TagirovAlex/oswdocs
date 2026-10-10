@@ -1594,6 +1594,25 @@ def test_cancel_endpoint_sets_revoked_not_done(
         ).status_code == 409
 
 
+def test_cancel_endpoint_openapi_has_both_methods_without_duplicate_ids(
+    client, test_settings_override, route_override
+):
+    """Контракт отзыва виден в схеме OpenAPI и не содержит дублей operation_id.
+
+    Регистрация отзыва на два метода (POST — как остальные действия, PATCH — как
+    в QA-проверке) при api_route(methods=[...]) давала бы одинаковый operation_id
+    у обоих и сыпала Duplicate Operation ID при каждой сборке схемы."""
+    import warnings
+
+    paths = client.get("/openapi.json").json()["paths"]
+    methods = sorted(m.upper() for m in paths["/requests/{request_id}/cancel"])
+    assert methods == ["PATCH", "POST"]
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        app.openapi()
+    assert [str(w.message) for w in caught if "Duplicate Operation ID" in str(w.message)] == []
+
+
 def test_cancel_forbidden_for_non_hr(client, hr, buh_owner, test_settings_override, route_override):
     """Отзыв — только разрешённой группе (403), статус заявки не меняется."""
     rid = _create_and_submit(client, hr)

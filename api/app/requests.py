@@ -3409,13 +3409,12 @@ def withdraw_request(
 
 
 # Отзыв заявки принимается и POST (как остальные действия над заявкой), и PATCH —
-# QA-проверка зовёт `curl -X PATCH /requests/{id}/cancel`. Тело то же, поэтому
-# один обработчик на оба метода.
-@router.api_route(
-    "/requests/{request_id}/cancel",
-    methods=["POST", "PATCH"],
-    response_model=RequestOut,
-)
+# QA-проверка зовёт `curl -X PATCH /requests/{id}/cancel`. Два декоратора вместо
+# api_route(methods=[...]): у api_route оба метода получают один operation_id, и
+# сборка схемы OpenAPI сыпет Duplicate Operation ID. Тело и аудит те же, поэтому
+# отзыв через любой из методов не может дать разные статусы.
+@router.post("/requests/{request_id}/cancel", response_model=RequestOut)
+@router.patch("/requests/{request_id}/cancel", response_model=RequestOut)
 def cancel_request(
     request_id: str,
     user: CurrentUser = Depends(get_current_user),
