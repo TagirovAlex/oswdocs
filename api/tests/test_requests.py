@@ -1373,6 +1373,72 @@ def test_parallel_block_notifies_each_step_once(
     assert _sent(mail_queue) == expected
 
 
+def test_return_reason_survives_in_comment_thread(
+    client, hr, buh_owner, hr_step_owner, test_settings_override, route_override
+):
+    """Причина возврата остаётся у заявки, когда шаг переоткрывают по новому кругу.
+
+    Комментарий шага стирается при переоткрытии (шаг снова в работе), а в
+    audit_log текста нет — без ленты комментариев причина возврата исчезала бы
+    из заявки навсегда."""
+    rid = _create_and_submit(
+        client,
+        hr,
+        blocks=[
+            {"mode": "sequential", "steps": [{"owner_group": GROUP_BUH}]},
+            {"mode": "sequential", "steps": [{"owner_group": GROUP_HR}]},
+        ],
+    )
+    _approve(client, rid, 1, buh_owner)
+    reason = "Вымышленная причина возврата: нет документов"
+    assert client.post(
+        f"/requests/{rid}/steps/1001/decision",
+        json={"decision": "return", "comment": reason},
+        headers=hr_step_owner,
+    ).status_code == 200
+
+    # Предыдущий блок согласован заново — возвращённый шаг снова в работе.
+    _approve(client, rid, 1, buh_owner)
+    step = _step_of(client.get(f"/requests/{rid}", headers=hr).json(), 1001)
+    assert step["status"] == "ожидает"
+    assert step["comment"] is None
+
+    comments = client.get(f"/requests/{rid}/comments", headers=hr).json()
+    assert len(comments) == 1
+    assert comments[0]["body"] == reason
+    assert comments[0]["author"] == HR_STEP_SAM
+    assert comments[0]["kind"] == "step"
+    assert comments[0]["step_id"] == "1001"
+
+
+def test_reject_reason_saved_to_comment_thread(
+    client, hr, buh_owner, test_settings_override, route_override
+):
+    """Причина отказа тоже попадает в ленту заявки: заявка ушла на доработку, и
+    инициатор должен видеть, чем именно отказали."""
+    rid = _create_and_submit(client, hr)
+    reason = "Вымышленная причина отказа"
+    assert client.post(
+        f"/requests/{rid}/steps/1/decision",
+        json={"decision": "reject", "comment": reason},
+        headers=buh_owner,
+    ).status_code == 200
+    comments = client.get(f"/requests/{rid}/comments", headers=hr).json()
+    assert [(c["body"], c["kind"], c["step_id"]) for c in comments] == [
+        (reason, "step", "1")
+    ]
+
+
+def test_approve_comment_not_duplicated_into_comment_thread(
+    client, hr, buh_owner, test_settings_override, route_override
+):
+    """Согласование в ленту не пишется: там причины отказа и возврата, а не
+    обычные отметки (иначе каждое согласие создавало бы запись)."""
+    rid = _create_and_submit(client, hr)
+    _approve(client, rid, 1, buh_owner)
+    assert client.get(f"/requests/{rid}/comments", headers=hr).json() == []
+
+
 def test_return_reopens_previous_block_and_notifies(
     client, hr, buh_owner, hr_step_owner, mail_queue, mail_settings_store,
     mail_ad_reader, test_settings_override, route_override
