@@ -427,6 +427,8 @@ export interface RequestComment {
   id: string;
   request_id: string;
   author: string;
+  // ФИО автора из AD; при недоступном AD приходит логин (см. author).
+  author_name?: string;
   body: string;
   at: string;
   // Вид комментария: request | step | rollback (контракт API).
@@ -436,14 +438,24 @@ export interface RequestComment {
 }
 
 // Запись истории заявки (GET /api/requests/{id}/history; audit_log).
+// Подготовлена бэкендом под карточку: ФИО автора и комментарий решения. Сырой
+// details (order=1, origin=custom, was/became) бэкенд не отдаёт; машинный код
+// action остаётся — карточка разбирает его через HISTORY_ACTIONS.
 export interface RequestHistoryItem {
   at: string;
-  actor: string;
+  // Логин автора события — только привилегированным (как done_by/assignee),
+  // у остальных null. В UI не выводится: показывается actor_name.
+  actor?: string | null;
+  // ФИО автора из AD; при недоступном AD равно логину.
+  actor_name: string;
+  // Машинный код события: карточка разбирает его на человеческий текст через
+  // HISTORY_ACTIONS (см. request-card.tsx).
   action: string;
-  entity?: string | null;
-  entity_id?: string | null;
-  // JSONB «было/стало» либо id/названия затронутых шагов (без раскрытия схемы).
-  details?: Record<string, unknown> | null;
+  // Комментарий решения (причина отказа/возврата, причина правки маршрута);
+  // у событий без комментария — пустая строка.
+  comment: string;
+  // Номер шага заявки, если событие относится к шагу.
+  step?: string;
 }
 
 // Фильтры над таблицей заявок.

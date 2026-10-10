@@ -71,6 +71,47 @@ function historyWhen(at: string): string {
   return isNaN(d.getTime()) ? at : d.toLocaleString("ru-RU");
 }
 
+// События истории, обычному сотруднику ничего не говорящие: пропуск уведомления
+// (внутренняя диагностика доставки письма) и чтение вложения/документа. Их в
+// таблице не показываем — иначе журнал утонул бы в собственном шуме.
+const HISTORY_HIDDEN_ACTIONS = new Set([
+  "notify.skip",
+  "attachment.read",
+  "document.read",
+]);
+
+// Код события → человеческий текст. Номер шага дописывается отдельно, чтобы
+// «Согласование» в заявке на пять шагов не было двусмысленным.
+const HISTORY_ACTIONS: Record<string, string> = {
+  "request.create": "Заявка создана",
+  "request.submit": "Отправлена на согласование",
+  "request.withdraw": "Заявка отозвана",
+  "request.to_execution": "Передана к исполнению",
+  "request.finish": "Заявка завершена",
+  "request.delete": "Заявка удалена",
+  "request.update": "Изменена карточка",
+  "request.rollback": "Откат маршрута",
+  "steps.patch": "Изменён маршрут",
+  "step.approve": "Согласование",
+  "step.approve_partial": "Согласование (шаг ждёт остальных)",
+  "step.reject": "Отказ",
+  "step.return": "Возврат",
+  "step.reissue": "Повтор шага",
+  "step.expired": "Истёк срок по шагу",
+  "document.print": "Печать бланка",
+  "document.download": "Скачивание бланка",
+  "attachment.upload": "Загрузка вложения",
+  "attachment.download": "Скачивание вложения",
+  "attachment.delete": "Удаление вложения",
+};
+
+// Текст действия для строки таблицы: название + номер шага, если событие о шаге.
+function historyActionLabel(item: RequestHistoryItem): string {
+  const base = HISTORY_ACTIONS[item.action] ?? "Действие по заявке";
+  const order = Number(item.step ?? "");
+  return order > 0 ? `${base} · шаг ${stepLabel(order)}` : base;
+}
+
 // Статусы, из которых заявку ещё можно отозвать (POST /requests/{id}/withdraw):
 // закрытые (Завершено/Отклонено/Отозвано) бэкенд отдаёт 409 — их тут нет.
 const WITHDRAW_STATUSES = [
@@ -258,6 +299,8 @@ export function RequestCard(props: RequestCardProps) {
   // История изменений (GET /api/requests/{id}/history) и комментарии заявки.
   const [history, setHistory] = useState<RequestHistoryItem[]>([]);
   const [historyError, setHistoryError] = useState<string>("");
+  // Записи истории без служебного шума (порядок бэкенда — по времени).
+  const visibleHistory = history.filter((item) => !HISTORY_HIDDEN_ACTIONS.has(item.action));
   const [comments, setComments] = useState<RequestComment[]>([]);
   const [commentsError, setCommentsError] = useState<string>("");
   const [newComment, setNewComment] = useState<string>("");
@@ -368,8 +411,8 @@ export function RequestCard(props: RequestCardProps) {
     };
   }, [requestId]);
 
-  // История заявки (GET /api/requests/{id}/history; видна участникам). Своя
-  // загрузка: ошибка — примечанием, карточку не ломает (alert не используем).
+  // История заявки (GET /api/requests/{id}/history; таблица на листе «История»).
+  // Своя загрузка: ошибка — сообщением, карточку не ломает.
   useEffect(() => {
     let alive = true;
     setHistoryError("");
@@ -1659,37 +1702,59 @@ export function RequestCard(props: RequestCardProps) {
       )}
       {card && !deleted && cardTab === "history" && (
         <>
-          {/* История заявки: кто / когда / действие / детали (audit_log). */}
-          <section aria-label="История">
-            <h4>История</h4>
-            {historyError && <div className="sed-note">История недоступна: {historyError}</div>}
-            {history.length === 0 && !historyError && (
+          {/* История заявки таблицей: ФИО · действие · комментарий · дата и время.
+              Служебных кодов (action) и сырых details здесь нет — бэкенд отдаёт
+              ФИО и комментарий решения, а код разбирается в человеческий текст. */}
+          <section aria-label="История" className="sed-review">
+            <b>История заявки</b>
+            {historyError && <div role="alert">История недоступна: {historyError}</div>}
+            {!historyError && visibleHistory.length === 0 && (
               <div className="sed-note">Записей истории нет</div>
             )}
-            {history.length > 0 && (
-              <ul>
-                {history.map((item, i) => (
-                  <li key={i}>
-                    <strong>{item.actor}</strong> · {historyWhen(item.at)} · {item.action}
-                    {item.details && <div className="sed-sub">{JSON.stringify(item.details)}</div>}
-                  </li>
-                ))}
-              </ul>
+            {visibleHistory.length > 0 && (
+              <table className="sed-table sed-table--history" aria-label="Таблица истории заявки">
+                <colgroup>
+                  <col className="sed-history__col-who" />
+                  <col className="sed-history__col-what" />
+                  <col className="sed-history__col-comment" />
+                  <col className="sed-history__col-when" />
+                </colgroup>
+                <thead>
+                  <tr>
+                    <th>Кто</th>
+                    <th>Действие</th>
+                    <th>Комментарий</th>
+                    <th>Дата и время</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {visibleHistory.map((item) => (
+                    <tr key={`${item.at}|${item.action}|${item.actor_name ?? ""}`}>
+                      <td>{item.actor_name || item.actor || "—"}</td>
+                      <td>{historyActionLabel(item)}</td>
+                      <td>{item.comment || "—"}</td>
+                      <td className="sed-history__when">{historyWhen(item.at)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             )}
           </section>
 
           {/* Комментарии к заявке: список + поле добавления. */}
-          <section aria-label="Комментарии">
-            <h4>Комментарии</h4>
-            {commentsError && <div className="sed-note">Комментарии недоступны: {commentsError}</div>}
+          <section aria-label="Комментарии" className="sed-review">
+            <b>Комментарии к заявке</b>
+            {commentsError && <div role="alert">Комментарии недоступны: {commentsError}</div>}
             {comments.length === 0 && !commentsError && (
               <div className="sed-note">Комментариев нет</div>
             )}
             {comments.length > 0 && (
-              <ul>
+              <ul className="sed-list">
                 {comments.map((c) => (
                   <li key={c.id}>
-                    <strong>{c.author}</strong> · {c.at.slice(0, 16).replace("T", " ")}: {c.body}
+                    <strong>{c.author_name || c.author}</strong>
+                    {c.step_id ? ` · шаг ${stepLabel(Number(c.step_id))}` : ""} ·{" "}
+                    {historyWhen(c.at)}: {c.body}
                   </li>
                 ))}
               </ul>

@@ -14,6 +14,8 @@ import {
   finishRequest,
   getAdGroupMembers,
   getAttachments,
+  getComments,
+  getHistory,
   getRequest,
   getStepGroups,
   printRequest,
@@ -45,6 +47,8 @@ vi.mock("./requests-client", async (importOriginal) => {
     getAdGroupMembers: vi.fn(),
     addComment: vi.fn(),
     replaceRequestSteps: vi.fn(),
+    getHistory: vi.fn(),
+    getComments: vi.fn(),
   };
 });
 
@@ -144,6 +148,12 @@ beforeEach(() => {
   vi.mocked(getStepGroups).mockResolvedValue([]);
   vi.mocked(addComment).mockReset();
   vi.mocked(replaceRequestSteps).mockReset();
+  // История и комментарии по умолчанию пустые: без мока уходил бы реальный
+  // fetch, падал, и вкладка «История» показывала «недоступна».
+  vi.mocked(getHistory).mockReset();
+  vi.mocked(getHistory).mockResolvedValue([]);
+  vi.mocked(getComments).mockReset();
+  vi.mocked(getComments).mockResolvedValue([]);
   vi.mocked(getAdGroupMembers).mockReset();
   // Состав по умолчанию недоступен: в сотруднике — название/код группы.
   vi.mocked(getAdGroupMembers).mockRejectedValue(new ApiHttpError(503, "AD недоступен"));
@@ -748,6 +758,130 @@ describe("RequestCard", () => {
     expect(
       screen.queryByRole("button", { name: "Скорректировать маршрут" }),
     ).not.toBeInTheDocument();
+  });
+
+  // Вкладка «История» — таблицей: ФИО, действие, комментарий, дата и время.
+  // Служебных кодов (action) и сырых details в ней быть не должно.
+  it("история выведена таблицей с ФИО, действием, комментарием и датой", async () => {
+    vi.mocked(getRequest).mockResolvedValue(
+      requestWith("Громов Игорь Олегович", "На согласовании"),
+    );
+    vi.mocked(getHistory).mockResolvedValue([
+      {
+        at: "2026-10-05T10:00:00+00:00",
+        actor: "petrov.pp",
+        actor_name: "Петров Пётр Петрович",
+        action: "step.return",
+        comment: "Вымышленная причина возврата",
+        step: "1001",
+      },
+      {
+        at: "2026-10-05T09:00:00+00:00",
+        actor: "sidorova.as",
+        actor_name: "Сидорова Анна Сергеевна",
+        action: "request.create",
+        comment: "",
+      },
+    ]);
+
+    renderCard();
+    await waitFor(() => expect(screen.getByRole("button", { name: "История" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "История" }));
+    const table = await screen.findByLabelText("Таблица истории заявки");
+    const headers = within(table).getAllByRole("columnheader").map((th) => th.textContent);
+    expect(headers).toEqual(["Кто", "Действие", "Комментарий", "Дата и время"]);
+    // Полное ФИО, человеческий текст действия с номером шага и комментарий.
+    expect(within(table).getByText("Петров Пётр Петрович")).toBeInTheDocument();
+    expect(within(table).getByText("Возврат · шаг 2.1")).toBeInTheDocument();
+    expect(within(table).getByText("Вымышленная причина возврата")).toBeInTheDocument();
+    expect(within(table).getByText("Заявка создана")).toBeInTheDocument();
+    // Пустой комментарий — прочерк, а не пустая ячейка.
+    expect(within(table).getAllByText("—")).toHaveLength(1);
+    // Ни логина, ни машинных кодов, ни JSON в таблице нет.
+    expect(table.textContent).not.toContain("petrov.pp");
+    expect(table.textContent).not.toContain("step.return");
+    expect(table.textContent).not.toContain("request.create");
+    expect(table.textContent).not.toContain("{");
+  });
+
+  // Служебные события (пропуск письма, чтение вложения) в таблице не показываются.
+  it("история не показывает служебные события", async () => {
+    vi.mocked(getRequest).mockResolvedValue(
+      requestWith("Громов Игорь Олегович", "На согласовании"),
+    );
+    vi.mocked(getHistory).mockResolvedValue([
+      {
+        at: "2026-10-05T10:00:00+00:00",
+        actor: "system",
+        actor_name: "system",
+        action: "notify.skip",
+        comment: "",
+      },
+      {
+        at: "2026-10-05T10:01:00+00:00",
+        actor: "petrov.pp",
+        actor_name: "Петров Пётр Петрович",
+        action: "attachment.read",
+        comment: "",
+      },
+      {
+        at: "2026-10-05T10:02:00+00:00",
+        actor: "petrov.pp",
+        actor_name: "Петров Пётр Петрович",
+        action: "step.approve",
+        comment: "",
+        step: "1",
+      },
+    ]);
+
+    renderCard();
+    await waitFor(() => expect(screen.getByRole("button", { name: "История" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "История" }));
+    const table = await screen.findByLabelText("Таблица истории заявки");
+    expect(within(table).getAllByRole("row")).toHaveLength(2); // заголовок + одно событие
+    expect(table.textContent).toContain("Согласование · шаг 1");
+    expect(table.textContent).not.toContain("notify.skip");
+    expect(table.textContent).not.toContain("attachment.read");
+  });
+
+  // Пустая история — понятная заглушка, без пустой таблицы.
+  it("пустая история показывает заглушку, а не пустую таблицу", async () => {
+    vi.mocked(getRequest).mockResolvedValue(
+      requestWith("Громов Игорь Олегович", "На согласовании"),
+    );
+    vi.mocked(getHistory).mockResolvedValue([]);
+
+    renderCard();
+    await waitFor(() => expect(screen.getByRole("button", { name: "История" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "История" }));
+    expect(await screen.findByText("Записей истории нет")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Таблица истории заявки")).not.toBeInTheDocument();
+  });
+
+  // Комментарии заявки показывают ФИО автора, а не логин: бэкенд отдаёт
+  // author_name (fail-soft на логин), карточка берёт именно его.
+  it("комментарии показывают ФИО автора, а не логин", async () => {
+    vi.mocked(getRequest).mockResolvedValue(
+      requestWith("Громов Игорь Олегович", "На согласовании"),
+    );
+    vi.mocked(getComments).mockResolvedValue([
+      {
+        id: "c-1",
+        request_id: "REQ-0001",
+        author: "petrov.pp",
+        author_name: "Петров Пётр Петрович",
+        body: "Вымышленный комментарий",
+        at: "2026-10-05T10:00:00+00:00",
+        kind: "request",
+      },
+    ]);
+
+    renderCard();
+    await waitFor(() => expect(screen.getByRole("button", { name: "История" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "История" }));
+    const list = await screen.findByLabelText("Комментарии");
+    expect(within(list).getByText(/Петров Пётр Петрович/)).toBeInTheDocument();
+    expect(list.textContent).not.toContain("petrov.pp");
   });
 
   // Правка маршрута заявки (issue_report п.4): редактор открывается, шаг

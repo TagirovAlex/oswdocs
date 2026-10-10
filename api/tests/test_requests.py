@@ -176,8 +176,12 @@ class FakeAdReader:
         self._entries = entries
         self._raise = raise_exc
         self._titles = titles or {}
+        # Счётчик обращений к AD: резолв ФИО обязан быть один на уникального
+        # человека, а не на каждое событие истории.
+        self.calls: list[str] = []
 
     def get_user(self, sam: str):
+        self.calls.append(sam)
         if self._raise:
             raise AdUnavailable("AD недоступен (тест)")
         if sam not in self._entries:
@@ -1437,6 +1441,170 @@ def test_approve_comment_not_duplicated_into_comment_thread(
     rid = _create_and_submit(client, hr)
     _approve(client, rid, 1, buh_owner)
     assert client.get(f"/requests/{rid}/comments", headers=hr).json() == []
+
+
+def test_history_returns_fio_comment_and_step_without_raw_details(
+    client, hr, buh_owner, hr_step_owner, test_settings_override, route_override
+):
+    """История отдаётся под карточку: ФИО автора, комментарий решения и номер
+    шага; технические коды и сырой details наружу не выходят.
+
+    Код действия остаётся (машинный признак для UI), но сырой JSON-мусор,
+    который раньше показывался в карточке, из ответа убран."""
+    rid = _create_and_submit(
+        client,
+        hr,
+        blocks=[
+            {"mode": "sequential", "steps": [{"owner_group": GROUP_BUH}]},
+            {"mode": "sequential", "steps": [{"owner_group": GROUP_HR}]},
+        ],
+    )
+    _approve(client, rid, 1, buh_owner)
+    reason = "Вымышленная причина возврата"
+    client.post(
+        f"/requests/{rid}/steps/1001/decision",
+        json={"decision": "return", "comment": reason},
+        headers=hr_step_owner,
+    )
+
+    history = client.get(f"/requests/{rid}/history", headers=hr).json()
+    assert history, "история не пуста"
+    assert all(set(item) == {"at", "actor", "actor_name", "action", "comment", "step"}
+               for item in history)
+    ret = next(item for item in history if item["action"] == "step.return")
+    assert ret["comment"] == reason
+    assert ret["step"] == "1001"
+    assert ret["actor"] == HR_STEP_SAM
+    # Комментарий обычного согласия в колонку комментария не попадает.
+    approve = next(item for item in history if item["action"] == "step.approve")
+    assert approve["comment"] == ""
+    assert approve["step"] == "1"
+    # Служебный текст события («origin=custom», «order=1») комментарием не стал.
+    created = next(item for item in history if item["action"] == "request.create")
+    assert created["comment"] == ""
+
+
+def test_history_actor_name_resolved_once_per_author(
+    client, hr, buh_owner, hr_step_owner, ad_reader, test_settings_override, route_override
+):
+    """ФИО автора резолвится из AD один раз на человека.
+
+    История со многими событиями одного автора не должна дёргать AD на каждое
+    событие. Заодно проверяем, что ФИО действительно пришло из AD, а не осталось
+    логином (assert на непустое поле проходил бы и при ad_reader=None)."""
+    rid = _create_and_submit(client, hr)
+    _approve(client, rid, 1, buh_owner)
+    _approve(client, rid, 2, hr_step_owner)
+
+    history = client.get(f"/requests/{rid}/history", headers=hr).json()
+    # Системные события (notify.skip) в ленте тоже есть, но actor=system — не
+    # человек, AD по нему не спрашивается.
+    people = [item for item in history if item["actor"] != "system"]
+    unique_actors = {item["actor"] for item in people}
+    assert unique_actors == {hr["X-Mock-Sam"], BUH_SAM, HR_STEP_SAM}
+    assert len(ad_reader.calls) == len(unique_actors), (
+        "AD опрошен %d раз на %d человеков" % (len(ad_reader.calls), len(unique_actors))
+    )
+    buh_items = [item for item in people if item["actor"] == BUH_SAM]
+    assert buh_items, "событий согласующего нет"
+    for item in buh_items:
+        assert item["actor_name"] == FAKE_OWNER_FIO
+
+
+def test_history_without_ad_reader_falls_back_to_login(
+    client, hr, buh_owner, test_settings_override, route_override
+):
+    """Без AD (ридер не отдан — офлайн) история не падает: ФИО падает на логин.
+
+    В офлайн-прогонах get_ad_reader отдаёт None, и 500 здесь уронил бы карточку."""
+    rid = _create_and_submit(client, hr)
+    _approve(client, rid, 1, buh_owner)
+    response = client.get(f"/requests/{rid}/history", headers=hr)
+    assert response.status_code == 200
+    item = next(i for i in response.json() if i["actor"] == BUH_SAM)
+    assert item["actor_name"] == BUH_SAM
+
+
+def test_history_masks_actor_login_for_non_privileged(
+    client, hr, buh_owner, test_settings_override, route_override
+):
+    """Логин актора участнику не отдаётся (как done_by/assignee), ФИО — да.
+
+    Иначе обычный сотрудник видел бы логины сотрудников ОК и администратора СЭД."""
+    rid = _create_and_submit(client, hr)
+    _approve(client, rid, 1, buh_owner)
+    # Владельцу шага (роль owner) логины скрыты.
+    for_viewer = client.get(f"/requests/{rid}/history", headers=buh_owner).json()
+    assert all(item["actor"] is None for item in for_viewer)
+    assert any(item["actor_name"] for item in for_viewer)
+    # Привилегированному (ОК) логины остаются: сверка по audit_log нужна.
+    for_hr = client.get(f"/requests/{rid}/history", headers=hr).json()
+    assert any(item["actor"] == BUH_SAM for item in for_hr)
+
+
+def test_history_forbidden_for_non_participant(
+    client, hr, other_owner, test_settings_override, route_override
+):
+    """Чужой пользователь историю не видит — 403 (эндпоинт теперь отдаёт ФИО)."""
+    rid = _create_and_submit(client, hr)
+    assert client.get(f"/requests/{rid}/history", headers=other_owner).status_code == 403
+
+
+def test_comments_carry_author_fio(
+    client, hr, buh_owner, ad_reader, test_settings_override, route_override
+):
+    """В комментариях ФИО автора отдельным полем."""
+    rid = _create_and_submit(client, hr)
+    added = client.post(
+        f"/requests/{rid}/comments",
+        json={"body": "Вымышленный комментарий"},
+        headers=buh_owner,
+    ).json()
+    assert added[0]["author_name"] == FAKE_OWNER_FIO
+    assert added[0]["author"] == BUH_SAM
+    listed = client.get(f"/requests/{rid}/comments", headers=hr).json()
+    assert listed[0]["author_name"] == FAKE_OWNER_FIO
+
+
+def test_comments_without_ad_reader_fall_back_to_login(
+    client, hr, buh_owner, test_settings_override, route_override
+):
+    """Без AD ФИО автора комментария падает на логин, ответ не 500."""
+    rid = _create_and_submit(client, hr)
+    added = client.post(
+        f"/requests/{rid}/comments",
+        json={"body": "Вымышленный комментарий"},
+        headers=buh_owner,
+    )
+    assert added.status_code == 200
+    assert added.json()[0]["author_name"] == BUH_SAM
+
+
+def test_history_detail_value_reads_both_store_shapes():
+    """Разбор details одинаков для обоих хранилищ.
+
+    In-memory кладёт текст события в поле detail, Postgres — в details["detail"]
+    (JSONB). Продакшн-путь обязан быть покрыт, иначе смена хранилища тихо
+    сломала бы извлечение комментария и номера шага."""
+    from app.requests import _history_detail_value
+
+    packed = json.dumps({"order": 1001, "comment": "Вымышленная причина"}, ensure_ascii=False)
+    memory = {"detail": packed, "details": None}
+    postgres = {"detail": None, "details": {"detail": packed}}
+    for event in (memory, postgres):
+        assert _history_detail_value(event, "comment") == "Вымышленная причина"
+        assert _history_detail_value(event, "order") == "1001"
+    # Обычный служебный текст события комментарием не становится, но номер
+    # шага из него берётся (иначе «Согласование» без шага двусмысленно).
+    for detail in ("order=1", "order=1 progress=1/2"):
+        event = {"detail": detail, "details": None}
+        assert _history_detail_value(event, "comment") == ""
+        assert _history_detail_value(event, "order") == "1"
+    # Мусор и отсутствие полей — пустая строка, без исключений.
+    for event in ({}, {"detail": None, "details": None}, {"details": {"detail": 5}},
+                  {"details": "не словарь"}, {"detail": "{битый json"}):
+        assert _history_detail_value(event, "comment") == ""
+        assert _history_detail_value(event, "order") == ""
 
 
 def test_return_reopens_previous_block_and_notifies(

@@ -567,6 +567,46 @@ a {
   border: 1px solid var(--sed-border);
 }
 
+/* Таблица истории заявки: те же 880px, что у таблицы рассмотрения. Ширина
+   окна-попа здесь контентная (.sed-window без width:100% в колоночном flex),
+   поэтому без общего min-width переключение вкладок «Лист рассмотрения» ↔
+   «История» заметно сужало/раздвигало белое поле. */
+.sed-table--history {
+  min-width: 880px;
+  table-layout: fixed;
+  border: 1px solid var(--sed-border);
+}
+
+.sed-table--history th,
+.sed-table--history td {
+  border: 1px solid var(--sed-border);
+  vertical-align: top;
+}
+
+/* Ширины колонок истории — через colgroup (как у таблицы рассмотрения): в
+   строках 2+ нет ячеек с rowSpan, поэтому nth-child сместил бы колонки. */
+.sed-history__col-who {
+  width: 180px;
+}
+
+.sed-history__col-what {
+  width: 200px;
+}
+
+.sed-history__col-comment {
+  width: auto;
+}
+
+.sed-history__col-when {
+  width: 140px;
+}
+
+/* Дата и время не переносываются: перенос «10.10.2026» на «10.10» + «2026,
+   12:03:11» читается как два разных значения. */
+.sed-history__when {
+  white-space: nowrap;
+}
+
 /* Список участников группового шага: всех без сворачивания, компактно. */
 .sed-memberlist {
   margin: 0;

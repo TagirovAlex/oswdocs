@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
@@ -255,11 +256,16 @@ class CommentIn(BaseModel):
 
 
 class CommentOut(BaseModel):
-    """Комментарий заявки (author — sam-логин, ПДн-обрезка не требуется)."""
+    """Комментарий заявки (author — sam-логин, author_name — ФИО из AD).
+
+    ФИО резолвится fail-soft: при недоступном AD author_name = author. ПДн-обрезка
+    по ролям не требуется — автор комментария и так участник заявки.
+    """
 
     id: int
     request_id: str
     author: str | None = None
+    author_name: str = ""
     body: str
     at: str
     kind: str
@@ -277,6 +283,27 @@ class StepsReplaceIn(BaseModel):
     manager: str | None = Field(
         default=None, description="Замена руководителя для шагов ad_direct_manager"
     )
+
+
+class HistoryOut(BaseModel):
+    """Запись истории заявки под карточку (GET /requests/{id}/history).
+
+    Карточка показывает ФИО, действие и комментарий, поэтому служебные поля
+    (сырой details с order=1/origin=custom/was-became, entity/entity_id) из
+    ответа убраны. actor остаётся машинным признаком и отдаётся только
+    привилегированным; actor_name падает на логин, когда AD недоступен."""
+
+    at: str = Field(description="Момент события (ISO, UTC)")
+    actor: str | None = Field(
+        default=None,
+        description="Логин автора события; только привилегированным (как done_by/assignee)",
+    )
+    actor_name: str = Field(description="ФИО автора; при недоступном AD — логин")
+    action: str = Field(
+        description="Машинный код события: карточка разбирает его на человеческий текст"
+    )
+    comment: str = Field(default="", description="Комментарий решения, если он был")
+    step: str = Field(default="", description="Номер шага заявки, если событие о шаге")
 
 
 class StepApprovalOut(BaseModel):
@@ -2196,6 +2223,48 @@ def _audit(
     )
 
 
+def _history_detail_value(event: dict, key: str) -> str:
+    """Строковое значение из details события (пусто, если ключа нет).
+
+    Текст события хранилища отдают по-разному: in-memory кладёт его в поле
+    detail, Postgres — в details["detail"] (JSONB), причём для структурированных
+    сведений это JSON-строка. Здесь берутся оба места и строка распаковывается.
+
+    Комментарий и номер шага нужны в истории заявки: причина возврата/отказа и
+    номер шага больше нигде у события не сохраняются."""
+    texts: list[object] = [event.get("detail")]
+    details = event.get("details")
+    if isinstance(details, dict):
+        texts.append(details.get("detail"))
+    for raw in texts:
+        if not isinstance(raw, str) or raw.strip() == "":
+            continue
+        try:
+            parsed = json.loads(raw)
+        except ValueError:
+            # Обычный текст события («order=1», «origin=custom») — служебный
+            # поясняющий текст, а не комментарий пользователя: в колонке
+            # комментария он не показывается (увидел бы его обычный сотрудник).
+            # Номер шага из него, наоборот, нужен — «Согласование» без номера
+            # шага в заявке на пять шагов ничего не значит.
+            match = re.search(r"\border=(\d+)\b", raw) if key == "order" else None
+            if match:
+                return match.group(1)
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        for name in (("comment", "reason") if key == "comment" else ("order",)):
+            value = parsed.get(name)
+            if isinstance(value, bool) or value is None:
+                continue
+            # Номер шага кладётся в details числом, а не строкой.
+            if isinstance(value, (int, float)):
+                return str(int(value))
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
+
+
 def _is_step_viewer(step: _Step, user: CurrentUser, roster: _RosterResolver | None = None) -> bool:
     """Видит ли пользователь шаг заявки (только чтение карточки/списка).
 
@@ -3590,7 +3659,12 @@ def decide_step(
             step.done_by = user.sam
             step.done_at = now
             step.comment = (body.comment or "").strip() or None
-            _audit(user.sam, "step.reject", request.id, f"order={order}")
+            _audit(
+                user.sam,
+                "step.reject",
+                request.id,
+                details={"order": order, "comment": step.comment or ""},
+            )
             # Отказ — заявка инициатору на доработку (REWORK), маршрут не
             # переоткрывается автоматически: инициатор смотрит причину, пишет
             # комментарии и правит шаги (PATCH /requests/{id}/steps) либо просто
@@ -3602,7 +3676,12 @@ def decide_step(
             step.done_by = user.sam
             step.done_at = now
             step.comment = (body.comment or "").strip() or None
-            _audit(user.sam, "step.return", request.id, f"order={order}")
+            _audit(
+                user.sam,
+                "step.return",
+                request.id,
+                details={"order": order, "comment": step.comment or ""},
+            )
             # Возврат — на предыдущий блок: его шаги снова в работе с новым TTL
             # (route.approval_ttl_days), заявка остаётся на согласовании. Нет
             # предыдущего блока — заявка на доработку, уведомляется автор.
@@ -3778,11 +3857,33 @@ def replace_steps(
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
-    _audit(user.sam, "steps.patch", request.id, (body.reason or "")[:200])
+    _audit(
+        user.sam,
+        "steps.patch",
+        request.id,
+        details={"reason": (body.reason or "").strip()[:200]},
+    )
     return _public_view(request, user)
 
 
 # --- Комментарии (таблица request_comments, решения пользователя 2026-10-02) ---
+
+
+def _comments_out(comments: list[dict], ad_reader: object | None) -> list[CommentOut]:
+    """Комментарии с ФИО авторов (fail-soft: без AD остаётся логин).
+
+    ФИО резолвится один раз на уникального автора — в обсуждении один человек
+    пишет много, а AD запрашивать на каждый комментарий нельзя."""
+    names: dict[str, str] = {}
+
+    def resolve(sam: str | None) -> str:
+        if not sam:
+            return ""
+        if sam not in names:
+            names[sam] = _owner_display_name(ad_reader, sam) or sam
+        return names[sam]
+
+    return [CommentOut(**{**c, "author_name": resolve(c.get("author"))}) for c in comments]
 
 
 @router.get("/requests/{request_id}/comments", response_model=list[CommentOut])
@@ -3791,6 +3892,7 @@ def list_comments(
     user: CurrentUser = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
     store: RequestsStore = Depends(get_requests_store),
+    ad_reader: object | None = Depends(get_ad_reader),
 ) -> list[CommentOut]:
     """Комментарии заявки — участникам (ОК/админы, инициатор, владельцы шагов)."""
     settings.ensure_read_only()
@@ -3803,7 +3905,7 @@ def list_comments(
         ) from exc
     if not _is_participant(request, user):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Нет доступа к заявке")
-    return [CommentOut(**c) for c in comments]
+    return _comments_out(comments, ad_reader)
 
 
 @router.post("/requests/{request_id}/comments", response_model=list[CommentOut])
@@ -3813,6 +3915,7 @@ def add_comment(
     user: CurrentUser = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
     store: RequestsStore = Depends(get_requests_store),
+    ad_reader: object | None = Depends(get_ad_reader),
 ) -> list[CommentOut]:
     """Добавить комментарий (автор/участники/ОК), вернуть полный список."""
     settings.ensure_read_only()
@@ -3830,20 +3933,31 @@ def add_comment(
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
-    return [CommentOut(**c) for c in comments]
+    return _comments_out(comments, ad_reader)
 
 
 # --- История изменений (append-only audit_log) ---
 
 
-@router.get("/requests/{request_id}/history")
+@router.get("/requests/{request_id}/history", response_model=list[HistoryOut])
 def get_history(
     request_id: str,
     user: CurrentUser = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
     store: RequestsStore = Depends(get_requests_store),
-) -> list[dict]:
-    """История заявки участникам: события request/document/attachment по id, по at."""
+    ad_reader: object | None = Depends(get_ad_reader),
+) -> list[HistoryOut]:
+    """История заявки участникам: события request/document/attachment по id, по at.
+
+    Запись приходит подготовленной под карточку: ФИО автора (из AD, fail-soft —
+    при недоступном AD остаётся логин) и комментарий решения, разобранный из
+    details. Сырой details (order=1, origin=custom, was/became) наружу не
+    отдаётся; машинный код action остаётся — по нему UI строит человеческий
+    текст действия.
+
+    Логин actor отдаётся только привилегированным (как done_by/assignee в
+    _public_view): ФИО согласующих участникам и так видно, а логины сотрудников
+    ОК и администратора СЭД — лишняя выдача."""
     settings.ensure_read_only()
     try:
         request = _get_request_or_404(store, request_id)
@@ -3859,7 +3973,27 @@ def get_history(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
     events.sort(key=lambda e: e["at"])
-    return events
+    # ФИО резолвим по одному на уникального автора: история заявки короткая, но
+    # один и тот же человек в ней повторяется, а AD запрашивать на каждое событие
+    # нельзя. Системные события (actor=system) мимо AD.
+    privileged = _is_hr(user)
+    names: dict[str, str] = {}
+    for event in events:
+        actor = str(event.get("actor") or "")
+        if not actor or actor in names or actor == "system":
+            continue
+        names[actor] = _owner_display_name(ad_reader, actor) or actor
+    return [
+        HistoryOut(
+            at=event["at"],
+            actor=str(event.get("actor") or "") if privileged else None,
+            actor_name=names.get(str(event.get("actor") or ""), str(event.get("actor") or "")),
+            action=str(event.get("action") or ""),
+            comment=_history_detail_value(event, "comment"),
+            step=_history_detail_value(event, "order"),
+        )
+        for event in events
+    ]
 
 
 # --- Правка карточки и откат маршрута (только администратор СЭД) ---
