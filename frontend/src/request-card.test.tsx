@@ -7,6 +7,7 @@ import { ApiHttpError, me } from "./auth-client";
 import type { AuthUser } from "./auth-client";
 import { RequestCard } from "./request-card";
 import {
+  addComment,
   decideStep,
   deleteAttachment,
   deleteRequest,
@@ -16,6 +17,7 @@ import {
   getRequest,
   getStepGroups,
   printRequest,
+  replaceRequestSteps,
   submitRequest,
   toExecution,
   uploadAttachment,
@@ -41,6 +43,8 @@ vi.mock("./requests-client", async (importOriginal) => {
     printRequest: vi.fn(),
     getStepGroups: vi.fn(),
     getAdGroupMembers: vi.fn(),
+    addComment: vi.fn(),
+    replaceRequestSteps: vi.fn(),
   };
 });
 
@@ -138,6 +142,8 @@ beforeEach(() => {
   vi.mocked(getStepGroups).mockReset();
   // Справочник групп по умолчанию пуст: в должности — код группы.
   vi.mocked(getStepGroups).mockResolvedValue([]);
+  vi.mocked(addComment).mockReset();
+  vi.mocked(replaceRequestSteps).mockReset();
   vi.mocked(getAdGroupMembers).mockReset();
   // Состав по умолчанию недоступен: в сотруднике — название/код группы.
   vi.mocked(getAdGroupMembers).mockRejectedValue(new ApiHttpError(503, "AD недоступен"));
@@ -611,6 +617,383 @@ describe("RequestCard", () => {
     await waitFor(() => expect(close).toHaveBeenCalled());
     expect(window.localStorage.getItem("sed:requests-changed")).not.toBeNull();
     clearOpener();
+  });
+
+  // Отказ без комментария на ходу: форма решения скрывается по can_act
+  // обновлённой карточки, но комментарий к заявке на листе рассмотрения
+  // остаётся (issue_report п.2) — дописать заявке можно, не листая «Историю».
+  it("после отказа комментарий к заявке остаётся доступен на листе рассмотрения", async () => {
+    // Обновлённая карточка после отказа: шаг закрыт, заявка на доработке.
+    const refused = requestWith(null, "На доработке", "REQ-0001", [
+      {
+        order: 1,
+        owner_group: "petrov.pp",
+        resolver: "by_user",
+        assignee: "petrov.pp",
+        can_act: false,
+        status: "отклонен",
+        expires_at: "2026-10-05T10:00:00+00:00",
+      },
+    ]);
+    vi.mocked(getRequest)
+      .mockResolvedValueOnce(requestForAction(null))
+      .mockResolvedValue(refused);
+    vi.mocked(decideStep).mockResolvedValue(refused);
+    vi.mocked(addComment).mockResolvedValue({
+      id: "c-1",
+      request_id: "REQ-0001",
+      author: "petrov.pp",
+      body: "Дописка после отказа",
+      at: "2026-10-05T11:00:00+00:00",
+      kind: "request",
+    });
+
+    renderCard("REQ-0001", "owner");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Отказать" })).toBeInTheDocument());
+    fireEvent.change(screen.getByLabelText("Комментарий к решению"), {
+      target: { value: "Вымышленная причина отказа" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Отказать" }));
+    await waitFor(() =>
+      expect(vi.mocked(decideStep)).toHaveBeenCalledWith(
+        "REQ-0001",
+        1,
+        "reject",
+        "Вымышленная причина отказа",
+      ),
+    );
+    // Форма решения исчезла (can_act больше не true), комментарий к заявке — нет.
+    expect(screen.queryByRole("button", { name: "Отказать" })).not.toBeInTheDocument();
+    const field = screen.getByLabelText("Текст комментария");
+    fireEvent.change(field, { target: { value: "Дописка после отказа" } });
+    fireEvent.click(screen.getByRole("button", { name: "Добавить комментарий" }));
+    await waitFor(() =>
+      expect(vi.mocked(addComment)).toHaveBeenCalledWith("REQ-0001", "Дописка после отказа"),
+    );
+  });
+
+  // Шаг с require_comment: комментарий обязателен и при согласии (issue_report п.3).
+  it("шаг с require_comment требует комментарий и при согласовании", async () => {
+    vi.mocked(getRequest).mockResolvedValue(
+      requestWith(null, "На согласовании", "REQ-0001", [
+        {
+          order: 1,
+          owner_group: "petrov.pp",
+          resolver: "by_user",
+          assignee: "petrov.pp",
+          can_act: true,
+          status: "ожидает",
+          require_comment: true,
+          expires_at: "2026-10-05T10:00:00+00:00",
+        },
+      ]),
+    );
+
+    renderCard("REQ-0001", "owner");
+    const field = await waitFor(() => screen.getByLabelText("Комментарий к решению"));
+    expect(field).toBeRequired();
+    fireEvent.click(screen.getByRole("button", { name: "Согласовать" }));
+    expect(screen.getByText("Шаг требует комментарий и при согласовании")).toBeInTheDocument();
+    expect(vi.mocked(decideStep)).not.toHaveBeenCalled();
+  });
+
+  // Отклонённая заявка: инициатору «Повторить» и «Перенаправить»
+  // (issue_report п.7). Статус заявки «Отклонено» не используется — признак
+  // отказа шаг со статусом «отклонен».
+  it("отклонённая заявка даёт инициатору «Повторить» и «Перенаправить»", async () => {
+    vi.mocked(getRequest).mockResolvedValue(
+      requestWith("Громов Игорь Олегович", "На доработке", "REQ-0001", [
+        {
+          order: 1,
+          owner_group: "SED_STEP_BUH",
+          resolver: "by_group",
+          can_act: false,
+          status: "согласован",
+          expires_at: "2026-10-05T10:00:00+00:00",
+        },
+        {
+          order: 1001,
+          owner_group: "SED_STEP_HR",
+          resolver: "by_group",
+          can_act: false,
+          status: "отклонен",
+          comment: "Вымышленная причина отказа",
+          expires_at: "2026-10-05T10:00:00+00:00",
+        },
+      ]),
+    );
+    vi.mocked(submitRequest).mockResolvedValue(
+      requestWith("Громов Игорь Олегович", "На согласовании", "REQ-0001"),
+    );
+
+    renderCard();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Повторить" })).toBeInTheDocument(),
+    );
+    // Отказ виден в карточке, согласованный шаг не потерян.
+    expect(screen.getByText("Вымышленная причина отказа")).toBeInTheDocument();
+    // «Перенаправить» открывает редактор маршрута.
+    expect(screen.getByRole("button", { name: "Перенаправить" })).toBeInTheDocument();
+    // После отправки заявка ушла на согласование: блок доработки исчез, а в
+    // общем тулбаре появилась «Отправить на согласование» для следующего круга.
+    vi.mocked(getRequest).mockResolvedValue(
+      requestWith("Громов Игорь Олегович", "На согласовании", "REQ-0001"),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Повторить" }));
+    await waitFor(() => expect(vi.mocked(submitRequest)).toHaveBeenCalledWith("REQ-0001"));
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Повторить" })).not.toBeInTheDocument(),
+    );
+    expect(screen.queryByRole("button", { name: "Перенаправить" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Скорректировать маршрут" }),
+    ).not.toBeInTheDocument();
+  });
+
+  // Правка маршрута заявки (issue_report п.4): редактор открывается, шаг
+  // добавляется и порядок блоков уходит в PATCH /requests/{id}/steps. В теле
+  // только ОЖИДАЮЩИЕ шаги: закрытые («согласован»/«отклонен») бэкенд сохраняет
+  // сам, иначе они бы задвоились.
+  it("скорректировать маршрут: добавленный шаг уходит в PATCH /steps", async () => {
+    vi.mocked(getStepGroups).mockResolvedValue([
+      { id: "SED_STEP_BUH", name: "Бухгалтерия" },
+      { id: "SED_STEP_HR", name: "Кадры" },
+    ]);
+    vi.mocked(getRequest).mockResolvedValue(
+      requestWith("Громов Игорь Олегович", "На доработке", "REQ-0001", [
+        {
+          order: 1,
+          owner_group: "SED_STEP_BUH",
+          resolver: "by_group",
+          can_act: false,
+          status: "согласован",
+          expires_at: "2026-10-05T10:00:00+00:00",
+        },
+        {
+          order: 1001,
+          owner_group: "SED_STEP_OK",
+          resolver: "by_group",
+          can_act: false,
+          status: "отклонен",
+          expires_at: "2026-10-05T10:00:00+00:00",
+        },
+        {
+          order: 1002,
+          owner_group: "SED_STEP_BUH",
+          resolver: "by_group",
+          can_act: false,
+          status: "ожидает",
+          require_comment: true,
+          expires_at: "2026-10-05T10:00:00+00:00",
+        },
+      ]),
+    );
+    vi.mocked(replaceRequestSteps).mockResolvedValue(
+      requestWith("Громов Игорь Олегович", "Черновик", "REQ-0001"),
+    );
+
+    renderCard();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Скорректировать маршрут" })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Скорректировать маршрут" }));
+    // Открытый редактор подставил текущий ожидающий шаг (первый блок).
+    expect(within(screen.getByLabelText("Правка маршрута")).getByLabelText("Группа блока 1, шаг 1"))
+      .toHaveValue("SED_STEP_BUH");
+
+    // Добавляем шаг-группу из справочника и сохраняем.
+    const addSelect = within(screen.getByLabelText("Правка маршрута")).getByLabelText(
+      "Группа для блока 1",
+    );
+    fireEvent.change(addSelect, { target: { value: "SED_STEP_HR" } });
+    fireEvent.change(screen.getByLabelText("Причина правки маршрута"), {
+      target: { value: "Вымышленная причина правки" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить маршрут" }));
+    await waitFor(() =>
+      expect(vi.mocked(replaceRequestSteps)).toHaveBeenCalledWith(
+        "REQ-0001",
+        [
+          {
+            mode: "sequential",
+            steps: [
+              // require_comment шага переносится: правка маршрута не должна
+              // молча отменять требование комментария, заданное бланком.
+              { owner_group: "SED_STEP_BUH", resolver: "by_group", require_comment: true },
+              { owner_group: "SED_STEP_HR", resolver: "by_group", require_comment: false },
+            ],
+          },
+        ],
+        "Вымышленная причина правки",
+      ),
+    );
+  });
+
+  // Шаг с несколькими ответственными в StepSpec не помещается: правка такого
+  // маршрута блокируется понятным сообщением, а не молча отнимает согласующих.
+  it("скорректировать маршрут: шаг с несколькими ответственными блокирует правку", async () => {
+    vi.mocked(getStepGroups).mockResolvedValue([{ id: "SED_STEP_BUH", name: "Бухгалтерия" }]);
+    vi.mocked(getRequest).mockResolvedValue(
+      requestWith("Громов Игорь Олегович", "На доработке", "REQ-0001", [
+        {
+          order: 1,
+          owner_group: "petrov.pp",
+          resolver: "by_user",
+          assignee: "petrov.pp",
+          assignees: ["petrov.pp", "sidorova.as"],
+          can_act: false,
+          status: "ожидает",
+          expires_at: "2026-10-05T10:00:00+00:00",
+        },
+      ]),
+    );
+
+    renderCard();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Скорректировать маршрут" })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Скорректировать маршрут" }));
+    // Неизменяемый шаг показан списком ответственных, кнопок правки у него нет.
+    expect(screen.getByText(/Ответственные: petrov\.pp, sidorova\.as/)).toBeInTheDocument();
+    expect(screen.queryByLabelText("Удалить шаг 1.1")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить маршрут" }));
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Правка недоступна: petrov.pp, sidorova.as",
+    );
+    expect(vi.mocked(replaceRequestSteps)).not.toHaveBeenCalled();
+  });
+
+  // Удаление блока с неизменяемым шагом спрашивает подтверждение: PATCH
+  // пересобирает маршрут целиком, и молча снесённый шаг унёс бы согласующих.
+  it("скорректировать маршрут: удаление блока с несколькими ответственными спрашивает подтверждение", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    vi.mocked(getRequest).mockResolvedValue(
+      requestWith("Громов Игорь Олегович", "На доработке", "REQ-0001", [
+        {
+          order: 1,
+          owner_group: "petrov.pp",
+          resolver: "by_user",
+          assignee: "petrov.pp",
+          assignees: ["petrov.pp", "sidorova.as"],
+          can_act: false,
+          status: "ожидает",
+          expires_at: "2026-10-05T10:00:00+00:00",
+        },
+      ]),
+    );
+
+    renderCard();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Скорректировать маршрут" })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Скорректировать маршрут" }));
+    fireEvent.click(screen.getByRole("button", { name: "Удалить блок 1" }));
+    expect(confirmSpy).toHaveBeenCalled();
+    // Отказ — блок на месте, PATCH не отправляется.
+    expect(screen.getByText(/Ответственные: petrov\.pp, sidorova\.as/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить маршрут" }));
+    expect(vi.mocked(replaceRequestSteps)).not.toHaveBeenCalled();
+    confirmSpy.mockRestore();
+  });
+
+  // Группа шага вне справочника (этап-реестр, удалённая группа) не выражается
+// через owner_group: такой шаг не переписывается молча, а блокирует правку —
+  // иначе в PATCH ушёл бы мёртвый код и шаг не отметил бы никто.
+  it("скорректировать маршрут: группа вне справочника блокирует правку", async () => {
+    vi.mocked(getStepGroups).mockResolvedValue([{ id: "SED_STEP_HR", name: "Кадры" }]);
+    vi.mocked(getRequest).mockResolvedValue(
+      requestWith("Громов Игорь Олегович", "Черновик", "REQ-0001", [
+        {
+          order: 1,
+          owner_group: "hr",
+          resolver: "by_group",
+          can_act: false,
+          status: "ожидает",
+          expires_at: "2026-10-05T10:00:00+00:00",
+        },
+      ]),
+    );
+
+    renderCard();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Скорректировать маршрут" })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Скорректировать маршрут" }));
+    expect(screen.getByText(/Ответственные: hr \(группы нет в справочнике\)/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить маршрут" }));
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Правка недоступна: hr (группы нет в справочнике)",
+    );
+    expect(vi.mocked(replaceRequestSteps)).not.toHaveBeenCalled();
+  });
+
+  // С пустым исполнителем шаг не должен молча выпасть из маршрута.
+  it("скорректировать маршрут: шаг без исполнителя блокирует сохранение", async () => {
+    vi.mocked(getRequest).mockResolvedValue(
+      requestWith("Громов Игорь Олегович", "Черновик", "REQ-0001", [
+        {
+          order: 1,
+          owner_group: "petrov.pp",
+          resolver: "by_user",
+          assignee: "petrov.pp",
+          can_act: false,
+          status: "ожидает",
+          expires_at: "2026-10-05T10:00:00+00:00",
+        },
+      ]),
+    );
+
+    renderCard();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Скорректировать маршрут" })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Скорректировать маршрут" }));
+    fireEvent.change(screen.getByLabelText("Логин исполнителя 1.1"), { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить маршрут" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("шаг без исполнителя");
+    expect(vi.mocked(replaceRequestSteps)).not.toHaveBeenCalled();
+  });
+
+  // Владельцу шага и администратору СЭД новые действия не показываются: правку
+  // маршрута и отправку заявки делает роль, которой API открывает _require_hr.
+  it("владельцу и администратору СЭД не показываются правка маршрута и действия по доработке", async () => {
+    const refused = requestWith(null, "На доработке", "REQ-0001", [
+      {
+        order: 1,
+        owner_group: "petrov.pp",
+        resolver: "by_user",
+        assignee: "petrov.pp",
+        can_act: false,
+        status: "отклонен",
+        expires_at: "2026-10-05T10:00:00+00:00",
+      },
+    ]);
+    vi.mocked(getRequest).mockResolvedValue(refused);
+
+    for (const role of ["owner", "sed_admin"] as Role[]) {
+      const view = renderCard("REQ-0001", role);
+      await waitFor(() => expect(view.getByLabelText("Шаги заявки")).toBeInTheDocument());
+      expect(view.queryByRole("button", { name: "Скорректировать маршрут" })).not.toBeInTheDocument();
+      expect(view.queryByRole("button", { name: "Перенаправить" })).not.toBeInTheDocument();
+      expect(view.queryByRole("button", { name: "Повторить" })).not.toBeInTheDocument();
+      view.unmount();
+    }
+  });
+
+  // Пустой маршрут в редакторе — понятная ошибка, запрос не уходит.
+  it("скорректировать маршрут: пустой маршрут не отправляется", async () => {
+    vi.mocked(getRequest).mockResolvedValue(
+      requestWith("Громов Игорь Олегович", "Черновик", "REQ-0001", []),
+    );
+
+    renderCard();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Скорректировать маршрут" })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Скорректировать маршрут" }));
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить маршрут" }));
+    expect(screen.getByText("Маршрут пуст: добавьте блок с исполнителем")).toBeInTheDocument();
+    expect(vi.mocked(replaceRequestSteps)).not.toHaveBeenCalled();
   });
 
   // Завершение в окне-попе: окно закрывается.

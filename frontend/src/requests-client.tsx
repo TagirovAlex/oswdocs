@@ -161,8 +161,8 @@ export interface CreateRequestBody {
   // Маршрут блоками: последовательный/параллельный (приоритетнее steps).
   blocks?: Array<{
     mode: "sequential" | "parallel";
-    // Шаг блока: персональный исполнитель (sam) либо группа (owner_group).
-    steps: Array<{ sam?: string; owner_group?: string; resolver?: string }>;
+    // Шаги блока: персональный исполнитель (sam) либо группа (owner_group).
+    steps: RouteStepSpec[];
   }>;
   // Тема и содержание заявки (обязательные поля формы).
   subject: string;
@@ -593,6 +593,30 @@ export async function rollbackRequest(id: string, toStepId: number): Promise<Req
   return requestJson<RequestOut>(`/api/requests/${encodeURIComponent(id)}/rollback`, {
     method: "POST",
     body: JSON.stringify({ to_step_id: toStepId }),
+  });
+}
+
+// Тело PATCH /api/requests/{id}/steps (правка маршрута заявки на ходу).
+// Шаг описан общим типом RouteStepSpec: персональный исполнитель (sam) либо
+// группа (owner_group) с резолвером; тот же шаг уходит при создании заявки.
+export type RouteStepSpec = {
+  sam?: string;
+  owner_group?: string;
+  resolver?: string;
+  require_comment?: boolean;
+};
+
+// PATCH /api/requests/{id}/steps: заменить маршрут заявки (ОК/админ).
+// Уже закрытые шаги бэкенд сохраняет сам — уходят только ожидающие шаги
+// нового маршрута. 409 — заявка закрыта, 422 — маршрут пуст.
+export async function replaceRequestSteps(
+  id: string,
+  blocks: Array<{ mode: "sequential" | "parallel"; steps: RouteStepSpec[] }>,
+  reason?: string,
+): Promise<RequestOut> {
+  return requestJson<RequestOut>(`/api/requests/${encodeURIComponent(id)}/steps`, {
+    method: "PATCH",
+    body: JSON.stringify({ blocks, reason: reason || undefined }),
   });
 }
 

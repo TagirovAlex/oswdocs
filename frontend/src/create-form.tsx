@@ -1128,6 +1128,8 @@ function changeRouteMode(mode: RouteMode): void {
       setCreated(`Заявка ${id} создана`);
       resetForm();
       // В окне-попе — после создания закрыть окно (список обновится по фокусу).
+      // Через onClose не идём: он смотрит «несохранённые данные», а форма уже
+      // сброшена, и подтверждение выскакивало бы после каждой отправки.
       if (closeOnCreate) window.close();
     } catch (e: unknown) {
       setCreateError(e instanceof Error ? e.message : "Ошибка создания заявки");

@@ -498,7 +498,7 @@ def test_patch_empty_blocks_422(client, hr, test_settings_override, route_overri
 
 
 def test_reject_without_comment_422(client, hr, buh_owner, test_settings_override, route_override):
-    """Отказ без комментария → 422, с комментарием → На доработке (возврат по маршруту)."""
+    """Отказ без комментария → 422, с комментарием → заявка инициатору на доработку."""
     created = _create(client, hr).json()
     rid = created["id"]
     assert client.post(f"/requests/{rid}/submit", headers=hr).status_code == 200
@@ -514,7 +514,8 @@ def test_reject_without_comment_422(client, hr, buh_owner, test_settings_overrid
         headers=buh_owner,
     )
     assert with_comment.status_code == 200
-    # Отказ по первому блоку: возвращать некуда → заявка на доработку.
+    # Отказ всегда уводит заявку инициатору на доработку: маршрут сам не
+    # переоткрывается, решает инициатор (комментарии + правка шагов).
     assert with_comment.json()["status"] == "На доработке"
 
 
@@ -1201,6 +1202,7 @@ GROUP_BUH = "SED_STEP_BUH"
 GROUP_HR = "SED_STEP_HR"
 GROUP_DIRECTOR = "SED_STEP_DIRECTOR"
 GROUP_ARCHIVE = "SED_STEP_ARCHIVE"
+GROUP_OTHER = "SED_STEP_OTHER"
 HR_STEP_SAM = "step.kadrovik"
 DIRECTOR_SAM = "step.direktor"
 
@@ -1562,3 +1564,297 @@ def test_finish_notifies_author_closed(
         (_mail_of(BUH_SAM), EVENT_ASSIGNED),
         (_mail_of(hr["X-Mock-Sam"]), EVENT_CLOSED),
     ]
+
+
+# --- Отзыв заявки: /withdraw и его синоним /cancel (issue_report п.1) ---
+
+
+def test_cancel_endpoint_sets_revoked_not_done(
+    client, hr, buh_owner, test_settings_override, route_override
+):
+    """Отзыв заявки → «Отозвано» (не «Завершено»): /withdraw и /cancel.
+
+    Пункт 1 отчёта об ошибках: отозванная заявка не должна попадать в статус
+    завершения. Статус «Завершено» — строка контракта, он же «done» в коде БД,
+    поэтому проверяем именно его (счётчик папки «Завершённые» его и считает)."""
+    # Методы: POST (как остальные действия) и PATCH (так зовёт QA-проверка
+    # `curl -X PATCH /requests/{id}/cancel` из отчёта об ошибках).
+    for method in ("post", "patch"):
+        rid = _create_and_submit(client, hr)
+        response = getattr(client, method)(f"/requests/{rid}/cancel", headers=hr)
+        assert response.status_code == 200, response.text
+        assert response.json()["status"] == "Отозвано"
+        # Повторный отзыв закрытой заявки — 409, статус не меняется.
+        again = getattr(client, method)(f"/requests/{rid}/cancel", headers=hr)
+        assert again.status_code == 409
+        assert client.get(f"/requests/{rid}", headers=hr).json()["status"] == "Отозвано"
+        # Отозванная заявка закрыта: маршрут не правится.
+        assert client.patch(
+            f"/requests/{rid}/steps", json={"steps": [{"owner_group": GROUP_BUH}]}, headers=hr
+        ).status_code == 409
+
+
+def test_cancel_forbidden_for_non_hr(client, hr, buh_owner, test_settings_override, route_override):
+    """Отзыв — только разрешённой группе (403), статус заявки не меняется."""
+    rid = _create_and_submit(client, hr)
+    denied = client.post(f"/requests/{rid}/cancel", headers=buh_owner)
+    assert denied.status_code == 403
+    assert client.get(f"/requests/{rid}", headers=hr).json()["status"] == "На согласовании"
+
+
+def test_withdrawn_request_counted_in_done_folder(
+    client, hr, test_settings_override, route_override
+):
+    """Отозванная заявка попадает в папку «Завершённые», а не теряется из списка."""
+    rid = _create_and_submit(client, hr)
+    assert client.post(f"/requests/{rid}/cancel", headers=hr).status_code == 200
+    folders = {f["id"]: f["count"] for f in client.get("/folders", headers=hr).json()}
+    assert folders["done"] == 1
+    assert folders["agreement"] == 0
+    assert [r["id"] for r in client.get("/requests", headers=hr).json()] == [rid]
+
+
+# --- Отказ по шагу: заявка инициатору на доработку (issue_report п.6/п.7) ---
+
+
+def test_reject_goes_to_rework_and_keeps_request(
+    client, hr, buh_owner, hr_step_owner, requests_store,
+    test_settings_override, route_override
+):
+    """Отказ по шагу второго блока: заявка на доработку, запись сохранена.
+
+    Маршрут сам не переоткрывается — решает инициатор. Согласие первого блока
+    при этом сохраняется (шаг остаётся «согласован»), а в папке «На доработке»
+    заявка засчитана, то есть из списка не исчезает."""
+    rid = _create_and_submit(
+        client,
+        hr,
+        blocks=[
+            {"mode": "sequential", "steps": [{"owner_group": GROUP_BUH}]},
+            {"mode": "sequential", "steps": [{"owner_group": GROUP_HR}]},
+        ],
+    )
+    _approve(client, rid, 1, buh_owner)
+    rejected = client.post(
+        f"/requests/{rid}/steps/1001/decision",
+        json={"decision": "reject", "comment": "Вымышленная причина отказа"},
+        headers=hr_step_owner,
+    )
+    assert rejected.status_code == 200, rejected.text
+    body = rejected.json()
+    assert body["status"] == "На доработке"
+    # Отклонённый шаг помечен «отклонен» и хранит причину; первый блок закрыт.
+    assert _step_of(body, 1001)["status"] == "отклонен"
+    assert _step_of(body, 1001)["comment"] == "Вымышленная причина отказа"
+    assert _step_of(body, 1)["status"] == "согласован"
+    # Запись на месте и учтена в папке «На доработке».
+    assert requests_store.get(rid).status == "На доработке"
+    folders = {f["id"]: f["count"] for f in client.get("/folders", headers=hr).json()}
+    assert folders["revision"] == 1
+    assert folders["agreement"] == 0
+    assert [r["id"] for r in client.get("/requests", headers=hr).json()] == [rid]
+
+
+def test_submit_after_rework_returns_to_who_rejected(
+    client, hr, buh_owner, hr_step_owner, requests_store, mail_queue, mail_settings_store,
+    mail_ad_reader, test_settings_override, route_override
+):
+    """Подача из «На доработке» возвращает заявку тому, кто её вернул.
+
+    Отклонённый шаг снова «ожидает» с новым сроком, его владелец уведомлён,
+    согласованные шаги не трогаются."""
+    rid = _create_and_submit(
+        client,
+        hr,
+        blocks=[
+            {"mode": "sequential", "steps": [{"owner_group": GROUP_BUH}]},
+            {"mode": "sequential", "steps": [{"owner_group": GROUP_HR}]},
+        ],
+    )
+    _approve(client, rid, 1, buh_owner)
+    assert client.post(
+        f"/requests/{rid}/steps/1001/decision",
+        json={"decision": "reject", "comment": "Вымышленная причина отказа"},
+        headers=hr_step_owner,
+    ).status_code == 200
+    sent_before = len(_sent(mail_queue))
+
+    submitted = client.post(f"/requests/{rid}/submit", headers=hr)
+    assert submitted.status_code == 200, submitted.text
+    body = submitted.json()
+    assert body["status"] == IN_APPROVAL
+    reopened = _step_of(body, 1001)
+    assert reopened["status"] == "ожидает"
+    assert reopened["done_by"] is None
+    # Причина отказа остаётся в карточке — это суть доработки.
+    assert reopened["comment"] == "Вымышленная причина отказа"
+    assert _step_of(body, 1)["status"] == "согласован"
+    # Отметка ответственного (reject) тоже сохранена: иначе согласовавшийся заново
+    # не смог бы оставить пометку, а прежняя отметка исчезла бы из истории.
+    stored_step = requests_store.get(rid).steps[1]
+    assert [item["decision"] for item in stored_step.approvals] == ["reject"]
+    assert datetime.fromisoformat(reopened["expires_at"]) > _utcnow() + timedelta(
+        days=route_override.approval_ttl_days - 1
+    )
+    # Возврат ушёл тому, кто вернул, — не автору и не первому блоку.
+    assert _sent(mail_queue)[sent_before:] == [(_mail_of(HR_STEP_SAM), EVENT_ASSIGNED)]
+
+
+def test_submit_after_rework_reopens_expired_step(
+    client, hr, buh_owner, requests_store, mail_queue, mail_settings_store,
+    mail_ad_reader, test_settings_override, route_override
+):
+    """Просроченный шаг после доработки снова ожидает, а не остаётся «просрочен».
+
+    Иначе заявка ушла бы в «На согласовании» вообще без доступного шага
+    (can_act у просроченного шага всегда false) и висела до ручного reissue."""
+    rid = _create_and_submit(client, hr)
+    requests_store.get(rid).steps[0].expires_at = _utcnow() - timedelta(days=1)
+    expired = client.post(
+        f"/requests/{rid}/steps/1/decision",
+        json={"decision": "approve"},
+        headers=buh_owner,
+    )
+    assert expired.status_code == 410
+    # Истечение срока кладёт заявку на доработку (тело 410 — это detail, не карточка).
+    assert requests_store.get(rid).status == "На доработке"
+
+    submitted = client.post(f"/requests/{rid}/submit", headers=hr)
+    assert submitted.status_code == 200, submitted.text
+    body = submitted.json()
+    assert body["status"] == IN_APPROVAL
+    step = _step_of(body, 1)
+    assert step["status"] == "ожидает"
+    # can_act считается для текущего пользователя: смотрим карточку глазами
+    # владельца шага, у ОК он всегда False.
+    owner_view = client.get(f"/requests/{rid}", headers=buh_owner).json()
+    assert _step_of(owner_view, 1)["can_act"] is True
+    assert datetime.fromisoformat(step["expires_at"]) > _utcnow()
+
+
+def test_patch_steps_keeps_stage_snapshot_for_same_executor(
+    client, hr, requests_store, test_settings_override, route_override
+):
+    """Правка маршрута не обнуляет текст шага для печати.
+
+    Печать идёт по снимку выданной заявки, а пересборка маршрута создаёт шаги
+    заново; снимок этапа переносится на шаг с тем же исполнитетелем и НЕ
+    переносится, если исполнителя сменили (чужой текст хуже никакого)."""
+    rid = _create_and_submit(
+        client, hr, steps=[{"owner_group": GROUP_BUH}, {"owner_group": GROUP_HR}]
+    )
+    before = requests_store.get(rid).steps[0]
+    before.stage_title = "Вымышленный этап"
+    before.stage_lines = ["Вымышленный текст этапа"]
+
+    same = client.patch(
+        f"/requests/{rid}/steps",
+        json={"steps": [{"owner_group": GROUP_BUH}, {"owner_group": GROUP_HR}]},
+        headers=hr,
+    )
+    assert same.status_code == 200, same.text
+    after_same = requests_store.get(rid).steps[0]
+    assert after_same.stage_title == "Вымышленный этап"
+    assert after_same.stage_lines == ["Вымышленный текст этапа"]
+
+    changed = client.patch(
+        f"/requests/{rid}/steps",
+        json={"steps": [{"owner_group": GROUP_BUH}, {"owner_group": GROUP_OTHER}]},
+        headers=hr,
+    )
+    assert changed.status_code == 200, changed.text
+    steps = sorted(requests_store.get(rid).steps, key=lambda s: s.order)
+    # Исполнителя первого шага сменили — его снимок не переносится.
+    assert steps[1].owner_group == GROUP_OTHER
+    assert steps[1].stage_lines == []
+
+
+def test_submit_after_rework_resets_expired_step_approvals(
+    client, hr, buh_owner, requests_store, test_settings_override, route_override
+):
+    """Отметки истёкшего круга не переносятся на новый срок шага.
+
+    Частично согласованный шаг просрочился: после подачи он снова ожидает, но
+    согласия прежнего круга не осталось — иначе прежний согласовавший получил бы
+    409 «Вы уже согласовали этот шаг», а шаг закрылся бы по старой отметке."""
+    rid = _create_and_submit(
+        client, hr, blocks=[{"mode": "sequential", "steps": [{"sam": BUH_SAM}]}]
+    )
+    requests_store.get(rid).steps[0].expires_at = _utcnow() - timedelta(days=1)
+    assert client.post(
+        f"/requests/{rid}/steps/1/decision",
+        json={"decision": "approve"},
+        headers=buh_owner,
+    ).status_code == 410
+    assert requests_store.get(rid).status == "На доработке"
+    # Отметка прежнего круга кладётся прямо в хранилище: собирать такой шаг через
+    # API нельзя (параллельный блок закрывает шаг первым же согласованием, а
+    # последовательный имеет одного ответственного), а проверяем тут именно
+    # переоткрытие шага по `submit`.
+    expired_step = requests_store.get(rid).steps[0]
+    expired_step.approvals = [
+        {
+            "sam": BUH_SAM,
+            "at": _utcnow().isoformat(),
+            "decision": "approve",
+            "comment": "Вымышленное согласие прежнего круга",
+        }
+    ]
+    expired_step.comment = "Вымышленное согласие прежнего круга"
+
+    submitted = client.post(f"/requests/{rid}/submit", headers=hr)
+    assert submitted.status_code == 200, submitted.text
+    stored_step = requests_store.get(rid).steps[0]
+    assert stored_step.status == "ожидает"
+    assert stored_step.approvals == []
+    assert stored_step.comment is None
+    # Прежний согласовавший может согласовать заново (без 409).
+    again = client.post(
+        f"/requests/{rid}/steps/1/decision",
+        json={"decision": "approve"},
+        headers=buh_owner,
+    )
+    assert again.status_code == 200, again.text
+    assert again.json()["status"] == "Согласовано"
+
+
+def test_submit_after_rework_uses_new_route_after_patch(
+    client, hr, buh_owner, hr_step_owner, test_settings_override, route_override
+):
+    """Маршрут, изменённый на доработке, ведёт по новым шагам, а не к отклонившему.
+
+    Правка маршрута (PATCH /requests/{id}/steps) переводит заявку в Черновик, где
+    ветка переоткрытия отклонённых шагов не выполняется: заявка уходит первому
+    согласующему нового маршрута."""
+    rid = _create_and_submit(
+        client,
+        hr,
+        blocks=[
+            {"mode": "sequential", "steps": [{"owner_group": GROUP_BUH}]},
+            {"mode": "sequential", "steps": [{"owner_group": GROUP_HR}]},
+        ],
+    )
+    _approve(client, rid, 1, buh_owner)
+    assert client.post(
+        f"/requests/{rid}/steps/1001/decision",
+        json={"decision": "reject", "comment": "Вымышленная причина отказа"},
+        headers=hr_step_owner,
+    ).status_code == 200
+    patched = client.patch(
+        f"/requests/{rid}/steps",
+        json={"blocks": [{"mode": "sequential", "steps": [{"owner_group": GROUP_HR}]}]},
+        headers=hr,
+    )
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["status"] == "Черновик"
+
+    submitted = client.post(f"/requests/{rid}/submit", headers=hr)
+    assert submitted.status_code == 200, submitted.text
+    body = submitted.json()
+    assert body["status"] == IN_APPROVAL
+    # Отклонённый шаг остался отклонённым — по нему заявка не идёт.
+    assert _step_of(body, 1001)["status"] == "отклонен"
+    # Текущим стал первый шаг нового маршрута: его владелец снова может отметить.
+    assert _step_of(body, 2001)["status"] == "ожидает"
+    owner_view = client.get(f"/requests/{rid}", headers=hr_step_owner).json()
+    assert _step_of(owner_view, 2001)["can_act"] is True

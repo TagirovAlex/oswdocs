@@ -22,6 +22,7 @@ import {
   getStepGroups,
   notifyRequestsChanged,
   printRequest,
+  replaceRequestSteps,
   rollbackRequest,
   stepLabel,
   submitRequest,
@@ -38,7 +39,9 @@ import type {
   RequestHistoryItem,
   RequestOut,
   RequestStep,
+  RouteStepSpec,
   StepDecision,
+  StepGroup,
 } from "./requests-client";
 import type { Role } from "./api-mock";
 import { attachmentUrl, employeeUrl, openPopup } from "./windows";
@@ -78,6 +81,150 @@ const WITHDRAW_STATUSES = [
   "К исполнению",
 ];
 
+// Статусы, в которых маршрут ещё можно править (PATCH /requests/{id}/steps).
+// Только Черновик и «На доработке»: на «На согласовании» правка сняла бы
+// текущий ожидающий шаг из-под исполнителя, который с ним работает, а на
+// «Согласовано»/«К исполнению» добавленные шаги уже никто не пройдёт.
+const ROUTE_EDIT_STATUSES = ["Черновик", "На доработке"];
+
+// Шаг черновика маршрута в редакторе. kind:
+//   group — группа AD (owner_group), user — персональный исполнитель (sam),
+//   fixed — несколько ответственных: StepSpec умеет одного, такой шаг править
+//   нельзя (см. routeBlocksPayload).
+interface RouteStepDraft {
+  key: string;
+  kind: "group" | "user" | "fixed";
+  value: string;
+  // Резолвер шага (RESOLVERS в api/app/requests.py) — переносится в PATCH как
+  // есть: без него шаг «руководитель сотрудника» стал бы групповым без
+  // ответственных, и отметить его было бы некому (can_act вечно false).
+  resolver: string;
+  // Флаг require_comment шага: без переноса правка маршрута молча отменяла бы
+  // требование комментария, заданное бланком/этапом.
+  requireComment: boolean;
+  // Представление неизменяемого шага (логины его ответственных).
+  label: string;
+}
+
+// Блок черновика маршрута: последовательный либо параллельный.
+interface RouteBlockDraft {
+  key: string;
+  mode: "sequential" | "parallel";
+  steps: RouteStepDraft[];
+}
+
+// Роль, которой API разрешает оперировать заявкой (_require_hr в
+// api/app/requests.py): hr/hr_admin/admin. У владельца шага и у администратора
+// СЭД (_require_hr их не пропускает) такие кнопки давали бы 403, поэтому гейт
+// по роли, а не «не владелец».
+function canOperateRequest(role: Role | string): boolean {
+  return role === "hr" || role === "hr_admin" || role === "admin";
+}
+
+// Шаги, по которым заявка ушла инициатору на доработку (отказ/возврат). Их
+// наличие — признак, что заявка ждёт решения инициатора: статус заявки
+// «Отклонено» в системе не используется (отказ переводит её в «На доработке»).
+function REWORKED_STEPS(steps: RequestStep[]): RequestStep[] {
+  return steps.filter((s) => s.status === "отклонен" || s.status === "возвращен");
+}
+
+// Порядковый номер ключа черновика (React-ключи строк маршрута).
+let routeDraftSeq = 0;
+
+function nextRouteKey(): string {
+  routeDraftSeq += 1;
+  return `rd-${routeDraftSeq}`;
+}
+
+// Черновик маршрута из ожидающих шагов заявки. Закрытые шаги («согласован»,
+// «отклонён», «возвращён», «просрочен») в правку не входят: бэкенд сохраняет их
+// сам и пересобирает маршрут только из ожидающих — иначе согласованные шаги
+// задваились бы. Блок и режим восстановлены из кода order (block*1000 + 100
+// для параллельного, см. _block_info в api/app/requests.py).
+//
+// knownGroups — коды групп из справочника (GET /api/step-groups). Шаг-группа с
+// кодом вне справочника (этап-реестр, удалённая группа) не выражается через
+// owner_group: такой шаг помечается fixed и правку блокирует, иначе в PATCH
+// ушёл бы мёртвый код и шаг не отметил бы никто.
+function routeDraftFromSteps(steps: RequestStep[], knownGroups: string[]): RouteBlockDraft[] {
+  const blocks: RouteBlockDraft[] = [];
+  const byKey = new Map<number, RouteBlockDraft>();
+  for (const step of steps) {
+    if (step.status !== "ожидает") continue;
+    const blockIndex = Math.floor(step.order / 1000);
+    const mode = Math.floor((step.order % 1000) / 100) === 1 ? "parallel" : "sequential";
+    let block = byKey.get(blockIndex);
+    if (!block) {
+      block = { key: nextRouteKey(), mode, steps: [] };
+      byKey.set(blockIndex, block);
+      blocks.push(block);
+    }
+    block.mode = mode;
+    const assignees = step.assignees ?? [];
+    const login = step.assignee ?? assignees[0] ?? "";
+    const groupStep = step.resolver !== "by_user" && login === "";
+    // Больше одного ответственного (шаг бланка people, миграция 0013) в StepSpec
+    // не помещается, и группа вне справочника не выражается как owner_group —
+    // оба случая шаг неизменяемый: иначе правка молча отняла бы у маршрута
+    // согласующих либо оставила бы шаг без исполнителя.
+    const kind: RouteStepDraft["kind"] =
+      assignees.length > 1 || (groupStep && !knownGroups.includes(step.owner_group))
+        ? "fixed"
+        : groupStep
+          ? "group"
+          : "user";
+    block.steps.push({
+      key: nextRouteKey(),
+      kind,
+      value: kind === "group" ? step.owner_group : login || step.owner_group,
+      resolver: step.resolver || "by_group",
+      requireComment: step.require_comment === true,
+      label:
+        assignees.length === 0 && kind === "fixed"
+          ? `${step.owner_group} (группы нет в справочнике)`
+          : assignees.length > 0
+            ? assignees.join(", ")
+            : step.owner_group,
+    });
+  }
+  return blocks;
+}
+
+// Тело PATCH /steps из черновика. Второе значение — список шагов, которые
+// отправить нельзя: правка блокируется понятным сообщением, молча выкидывать
+// согласующих или ронять шаг с забытым исполнителем нельзя.
+function routeBlocksPayload(blocks: RouteBlockDraft[]): {
+  blocks: Array<{ mode: "sequential" | "parallel"; steps: RouteStepSpec[] }>;
+  blocked: string[];
+} {
+  const blocked: string[] = [];
+  const payload = blocks.map((block) => ({
+    mode: block.mode,
+    steps: block.steps.flatMap((step) => {
+      if (step.kind === "fixed") {
+        blocked.push(step.label);
+        return [];
+      }
+      // Пустой логин/группа — шаг выпал бы из маршрута молча, а ответственным
+      // за шагом после этого не остался бы никто.
+      if (step.value.trim() === "") {
+        blocked.push("шаг без исполнителя");
+        return [];
+      }
+      return [
+        step.kind === "user"
+          ? { sam: step.value.trim(), require_comment: step.requireComment }
+          : {
+              owner_group: step.value.trim(),
+              resolver: step.resolver,
+              require_comment: step.requireComment,
+            },
+      ];
+    }),
+  }));
+  return { blocks: payload.filter((block) => block.steps.length > 0), blocked };
+}
+
 // Карточка заявки со всеми блоками (W5b + документы + вложения).
 export function RequestCard(props: RequestCardProps) {
   const { requestId, role } = props;
@@ -89,9 +236,10 @@ export function RequestCard(props: RequestCardProps) {
   const [printPdf, setPrintPdf] = useState<string | null>(null);
   const [decisionComment, setDecisionComment] = useState<string>("");
   const [decisionError, setDecisionError] = useState<string>("");
-  // Форма решения скрыта на время запроса: после отказа закрывается сразу,
-  // не дожидаясь ответа бэкенда.
-  const [actStepHidden, setActStepHidden] = useState<boolean>(false);
+  // Запрос отметки в полёте: на это время кнопки решения выключены, форма
+  // остаётся на месте — иначе после отказа поле комментария исчезало бы вместе
+  // с ней и дописать комментарий к заявке было негде.
+  const [deciding, setDeciding] = useState<boolean>(false);
   const [cardActionStatus, setCardActionStatus] = useState<string>("");
   const [cardActionError, setCardActionError] = useState<string>("");
   const [deleteBusy, setDeleteBusy] = useState<boolean>(false);
@@ -120,6 +268,8 @@ export function RequestCard(props: RequestCardProps) {
   // Наименования групп (GET /api/step-groups: id → name) для колонки
   // «Должность / Группа» у групповых шагов; без наименования — код как раньше.
   const [groupNames, setGroupNames] = useState<Record<string, string>>({});
+  // Список групп-владельцев для выбора в редакторе маршрута.
+  const [stepGroups, setStepGroups] = useState<StepGroup[]>([]);
   // Состав групп AD (GET /api/ad/groups/{group}/members) для колонки
   // «Исполнитель» у групповых шагов; показываем всех без сворачивания.
   const [groupMembers, setGroupMembers] = useState<Record<string, AdGroupMember[]>>({});
@@ -135,6 +285,16 @@ export function RequestCard(props: RequestCardProps) {
   const [rollbackStep, setRollbackStep] = useState<string>("");
   const [sedStatus, setSedStatus] = useState<string>("");
   const [sedError, setSedError] = useState<string>("");
+  // Правка маршрута заявки (PATCH /requests/{id}/steps): редактор ожидающих
+  // шагов. Открывается кнопкой «Скорректировать маршрут» и подставляет текущий
+  // маршрут, чтобы сохранение не выкинуло шаги молча.
+  const [routeOpen, setRouteOpen] = useState<boolean>(false);
+  const [routeBlocks, setRouteBlocks] = useState<RouteBlockDraft[]>([]);
+  const [routeReason, setRouteReason] = useState<string>("");
+  // Логины AD, набранные для добавления шага-исполнителя (по блоку, черновик).
+  const [routeLogins, setRouteLogins] = useState<Record<string, string>>({});
+  const [routeBusy, setRouteBusy] = useState<boolean>(false);
+  const [routeError, setRouteError] = useState<string>("");
 
   // Загрузка карточки (GET /api/requests/{id}).
   useEffect(() => {
@@ -262,8 +422,9 @@ export function RequestCard(props: RequestCardProps) {
     };
   }, [isSedAdmin]);
 
-  // Наименования групп-владельцев (settings step-groups): id → читабельное
-  // название; недоступность — fallback на код группы в таблице.
+  // Справочник групп-владельцев (settings step-groups): список для выбора группы
+  // в редакторе маршрута и id → читабельное название для таблицы шагов;
+  // недоступность — fallback на код группы в таблице.
   useEffect(() => {
     let alive = true;
     getStepGroups()
@@ -274,6 +435,7 @@ export function RequestCard(props: RequestCardProps) {
           if (g.name) names[g.id] = g.name;
         });
         setGroupNames(names);
+        setStepGroups(items);
       })
       .catch(() => undefined);
     return () => {
@@ -396,9 +558,7 @@ export function RequestCard(props: RequestCardProps) {
 
   // Шаг, который может отметить ТЕКУЩИЙ пользователь: ожидает И can_act
   // (единственный источник истины от бэкенда, без эвристики по роли).
-  const actStep = actStepHidden
-    ? null
-    : (card?.steps.find((s) => s.status === "ожидает" && s.can_act === true) ?? null);
+  const actStep = card?.steps.find((s) => s.status === "ожидает" && s.can_act === true) ?? null;
 
   // Ключ карточки сотрудника (enterprise|base_code|tab_num): employee_key от
   // бэкенда (собран по локальному справочнику, только привилегированным),
@@ -619,20 +779,27 @@ export function RequestCard(props: RequestCardProps) {
   }
 
   async function handleDecision(order: number, decision: StepDecision): Promise<void> {
+    if (deciding) return;
     const text = decisionComment.trim();
-    if (decision !== "approve" && !text) {
-      setDecisionError("При отказе/возврате комментарий обязателен");
+    // Комментарий обязателен при отказе/возврате всегда, при согласии — когда
+    // шаг помечен require_comment (та же проверка на сервере, _check_comment).
+    const step = card?.steps.find((s) => s.order === order);
+    const commentRequired = decision !== "approve" || step?.require_comment === true;
+    if (commentRequired && !text) {
+      setDecisionError(
+        step?.require_comment === true && decision === "approve"
+          ? "Шаг требует комментарий и при согласовании"
+          : "При отказе/возврате комментарий обязателен",
+      );
       return;
     }
     setDecisionError("");
-    // Отказ: форму закрываем сразу, не дожидаясь ответа. После запроса карточка
-    // приходит обновлённой — показываем то, что в ней есть (can_act бэкенда).
-    setActStepHidden(decision === "reject");
+    setDeciding(true);
     const updated = await runAction(
       () => decideStep(requestId, order, decision, text || undefined),
       "Отметка сохранена",
     );
-    setActStepHidden(false);
+    setDeciding(false);
     if (!updated) return;
     setDecisionComment("");
     // Шаг с несколькими ответственными после моей отметки остаётся «На
@@ -640,8 +807,8 @@ export function RequestCard(props: RequestCardProps) {
     // все — последовательный): окно не закрываем, показываем, что учтено и
     // ждём остальных. Повторную отметку бэкенд не примет (409), поэтому
     // после перезагрузки can_act у шага уже false и кнопок нет.
-    const step = updated.steps.find((s) => s.order === order);
-    if (decision === "approve" && step && isMultiAssigneeStep(step) && step.status === "ожидает") {
+    const decided = updated.steps.find((s) => s.order === order);
+    if (decision === "approve" && decided && isMultiAssigneeStep(decided) && decided.status === "ожидает") {
       setCardActionStatus(
         "Ваша отметка учтена, ожидаются отметки остальных ответственных",
       );
@@ -768,6 +935,133 @@ export function RequestCard(props: RequestCardProps) {
       await refreshRequest();
     } catch (e: unknown) {
       setSedError(e instanceof Error ? e.message : "Ошибка отката");
+    }
+  }
+
+  // Открыть редактор маршрута: подставляем текущие ожидающие шаги, чтобы
+  // сохранение сохранило маршрут, а не обнулил его.
+  function openRouteEditor(): void {
+    if (!card) return;
+    setRouteBlocks(routeDraftFromSteps(card.steps, stepGroups.map((g) => g.id)));
+    setRouteReason("");
+    setRouteError("");
+    setRouteOpen(true);
+  }
+
+  // Правка блока маршрута: режим, шаги, добавление/удаление и порядок.
+  function patchRouteBlock(key: string, patch: Partial<RouteBlockDraft>): void {
+    setRouteBlocks((prev) => prev.map((b) => (b.key === key ? { ...b, ...patch } : b)));
+  }
+
+  function addRouteBlock(mode: "sequential" | "parallel"): void {
+    setRouteBlocks((prev) => [...prev, { key: nextRouteKey(), mode, steps: [] }]);
+  }
+
+  function removeRouteBlock(key: string): void {
+    const block = routeBlocks.find((b) => b.key === key);
+    const fixed = block?.steps.filter((s) => s.kind === "fixed") ?? [];
+    // Удаление блока с неизменяемым шагом — тоже потеря согласующих, поэтому
+    // спрашиваем явно, а не роняем молча (PATCH пересобирает маршрут целиком).
+    if (
+      fixed.length > 0 &&
+      !window.confirm(
+        `В блоке есть шаг с несколькими ответственными (${fixed.map((s) => s.label).join(", ")}). ` +
+          "Удаление уберёт его из маршрута вместе с ними. Удалить блок?",
+      )
+    ) {
+      return;
+    }
+    setRouteBlocks((prev) => prev.filter((b) => b.key !== key));
+  }
+
+  function addRouteStep(blockKey: string, kind: "group" | "user", value: string): void {
+    const trimmed = value.trim();
+    if (trimmed === "") return;
+    setRouteBlocks((prev) =>
+      prev.map((b) =>
+        b.key === blockKey
+          ? {
+              ...b,
+              steps: [
+                ...b.steps,
+                {
+                  key: nextRouteKey(),
+                  kind,
+                  value: trimmed,
+                  resolver: kind === "group" ? "by_group" : "by_user",
+                  requireComment: false,
+                  label: trimmed,
+                },
+              ],
+            }
+          : b,
+      ),
+    );
+  }
+
+  function removeRouteStep(blockKey: string, stepKey: string): void {
+    setRouteBlocks((prev) =>
+      prev.map((b) =>
+        b.key === blockKey ? { ...b, steps: b.steps.filter((s) => s.key !== stepKey) } : b,
+      ),
+    );
+  }
+
+  // Порядок шага: кнопки «вверх/вниз» (доступнее перетаскивания), как в
+  // редакторе состава бланка (admin-settings.tsx, moveStep).
+  function moveRouteStep(blockKey: string, stepKey: string, delta: number): void {
+    setRouteBlocks((prev) =>
+      prev.map((b) => {
+        if (b.key !== blockKey) return b;
+        const index = b.steps.findIndex((s) => s.key === stepKey);
+        const target = index + delta;
+        if (index < 0 || target < 0 || target >= b.steps.length) return b;
+        const steps = [...b.steps];
+        const [row] = steps.splice(index, 1);
+        steps.splice(target, 0, row);
+        return { ...b, steps };
+      }),
+    );
+  }
+
+  function patchRouteStep(blockKey: string, stepKey: string, patch: Partial<RouteStepDraft>): void {
+    setRouteBlocks((prev) =>
+      prev.map((b) =>
+        b.key === blockKey
+          ? { ...b, steps: b.steps.map((s) => (s.key === stepKey ? { ...s, ...patch } : s)) }
+          : b,
+      ),
+    );
+  }
+
+  // Сохранить маршрут: PATCH /requests/{id}/steps, карточка перечитывается.
+  async function handleSaveRoute(): Promise<void> {
+    if (!card || routeBusy) return;
+    setRouteError("");
+    const { blocks, blocked } = routeBlocksPayload(routeBlocks);
+    if (blocked.length > 0) {
+      setRouteError(
+        `Правка недоступна: ${blocked.join(", ")}. Такой шаг нельзя пересобрать — ` +
+          "удалите его (или блок) либо правьте состав в справочнике бланков.",
+      );
+      return;
+    }
+    if (blocks.length === 0) {
+      setRouteError("Маршрут пуст: добавьте блок с исполнителем");
+      return;
+    }
+    setRouteBusy(true);
+    try {
+      await replaceRequestSteps(requestId, blocks, routeReason);
+      setRouteOpen(false);
+      // Ответ редактор закрывает, поэтому подтверждение показываем в общей
+      // строке статуса карточки — иначе пользователь его не увидит.
+      setCardActionStatus("Маршрут сохранён");
+      await refreshRequest();
+    } catch (e: unknown) {
+      setRouteError(e instanceof Error ? e.message : "Ошибка сохранения маршрута");
+    } finally {
+      setRouteBusy(false);
     }
   }
 
@@ -916,8 +1210,14 @@ export function RequestCard(props: RequestCardProps) {
                     Комментарий к решению
                     <textarea
                       aria-label="Комментарий к решению"
+                      aria-required={actStep.require_comment === true}
                       rows={4}
-                      placeholder="Комментарий (обязателен при отказе/возврате)"
+                      required={actStep.require_comment === true}
+                      placeholder={
+                        actStep.require_comment === true
+                          ? "Комментарий обязателен (в том числе при согласовании)"
+                          : "Комментарий (обязателен при отказе/возврате)"
+                      }
                       value={decisionComment}
                       onChange={(e) => setDecisionComment(e.target.value)}
                     />
@@ -927,6 +1227,7 @@ export function RequestCard(props: RequestCardProps) {
                     <button
                       type="button"
                       className="sed-btn"
+                      disabled={deciding}
                       onClick={() => handleDecision(actStep.order, "approve")}
                     >
                       Согласовать
@@ -934,6 +1235,7 @@ export function RequestCard(props: RequestCardProps) {
                     <button
                       type="button"
                       className="sed-btn sed-btn--ghost"
+                      disabled={deciding}
                       onClick={() => handleDecision(actStep.order, "reject")}
                     >
                       Отказать
@@ -941,6 +1243,7 @@ export function RequestCard(props: RequestCardProps) {
                     <button
                       type="button"
                       className="sed-btn sed-btn--ghost"
+                      disabled={deciding}
                       onClick={() => handleDecision(actStep.order, "return")}
                     >
                       Вернуть
@@ -948,6 +1251,32 @@ export function RequestCard(props: RequestCardProps) {
                   </div>
                 </div>
               )}
+              {/* Комментарий к заявке доступен сразу на листе рассмотрения:
+                  после отказа/возврата форма решения скрывается по can_act
+                  бэкенда, и без этого поля дописать заявке комментарий было
+                  негде (раньше он был только на вкладке «История»). */}
+              <section aria-label="Комментарий к заявке" className="sed-mt-8">
+                <label className="sed-field">
+                  Комментарий к заявке
+                  <input
+                    aria-label="Текст комментария"
+                    placeholder="Комментарий к заявке"
+                    value={newComment}
+                    onChange={(e) => setNewComment(e.target.value)}
+                  />
+                </label>
+                <div className="sed-toolbar sed-mt-8">
+                  <button
+                    type="button"
+                    className="sed-btn"
+                    onClick={handleAddComment}
+                    disabled={newComment.trim() === ""}
+                  >
+                    Добавить комментарий
+                  </button>
+                  {commentError && <span role="alert">{commentError}</span>}
+                </div>
+              </section>
             </div>
           </div>
 
@@ -1043,10 +1372,11 @@ export function RequestCard(props: RequestCardProps) {
             })()}
           </div>
 
-          {/* Действия ОК/админа по статусу заявки. */}
-          {role !== "owner" && (
+          {/* Действия ОК/админа по статусу заявки (роль — как у _require_hr). */}
+          {canOperateRequest(role) && (
             <div className="sed-toolbar sed-mt-8" aria-label="Действия по заявке">
-              {(card.status === "Черновик" || card.status === "На доработке") && (
+              {(card.status === "Черновик" ||
+                (card.status === "На доработке" && REWORKED_STEPS(card.steps).length === 0)) && (
                 <button type="button" className="sed-btn" onClick={handleSubmit}>
                   Отправить на согласование
                 </button>
@@ -1072,6 +1402,18 @@ export function RequestCard(props: RequestCardProps) {
                   Отозвать заявку
                 </button>
               )}
+              {/* Правка маршрута — только у Черновика и на доработке: на «На
+                  согласовании» она сняла бы текущий ожидающий шаг из-под
+                  исполнителя (см. ROUTE_EDIT_STATUSES). */}
+              {ROUTE_EDIT_STATUSES.includes(card.status) && (
+                <button
+                  type="button"
+                  className="sed-btn sed-btn--ghost"
+                  onClick={openRouteEditor}
+                >
+                  Скорректировать маршрут
+                </button>
+              )}
               {role === "admin" && (
                 <button
                   type="button"
@@ -1083,6 +1425,231 @@ export function RequestCard(props: RequestCardProps) {
                 </button>
               )}
             </div>
+          )}
+
+          {/* Отклонённая/возвращённая заявка ждёт инициатора: «Повторить» — увести
+              по маршруту дальше (POST /submit), «Перенаправить» — скорректировать
+              шаги (PATCH /requests/{id}/steps). Статус заявки «Отклонено» в
+              системе не используется: отказ по шагу переводит заявку в
+              «На доработке», поэтому признак — закрытые с отказом/возвратом
+              шаги, а не статус. Блок только в «На доработке»: в прочих статусах
+              POST /submit отдал бы 409. */}
+          {canOperateRequest(role) &&
+            card.status === "На доработке" &&
+            REWORKED_STEPS(card.steps).length > 0 && (
+            <div className="sed-toolbar sed-mt-8" aria-label="Действия по доработке">
+              <div className="sed-note">
+                Заявка возвращена на доработку: шаги{" "}
+                {REWORKED_STEPS(card.steps).map((s) => stepLabel(s.order)).join(", ")}. Согласованные
+                шаги сохраняются, маршрут можно скорректировать.
+              </div>
+              <button type="button" className="sed-btn" onClick={handleSubmit}>
+                Повторить
+              </button>
+              <button
+                type="button"
+                className="sed-btn sed-btn--ghost"
+                onClick={openRouteEditor}
+              >
+                Перенаправить
+              </button>
+            </div>
+          )}
+
+          {/* Правка маршрута заявки (PATCH /requests/{id}/steps). Показывается по
+              кнопке «Скорректировать маршрут»: редактор меняет только ожидающие
+              шаги, закрытые (согласованные/отклонённые/возвращённые/просроченные)
+              бэкенд сохраняет сам. */}
+          {canOperateRequest(role) && routeOpen && ROUTE_EDIT_STATUSES.includes(card.status) && (
+            <section aria-label="Правка маршрута" className="sed-mt-8">
+              <h4>Маршрут заявки</h4>
+              <div className="sed-toolbar">
+                <button
+                  type="button"
+                  className="sed-btn sed-btn--ghost"
+                  onClick={() => addRouteBlock("sequential")}
+                >
+                  Добавить последовательный блок
+                </button>
+                <button
+                  type="button"
+                  className="sed-btn sed-btn--ghost"
+                  onClick={() => addRouteBlock("parallel")}
+                >
+                  Добавить параллельный блок
+                </button>
+              </div>
+              {routeBlocks.length === 0 && (
+                <div className="sed-note">Ожидающих шагов нет — добавьте блок с исполнителем.</div>
+              )}
+              {routeBlocks.map((block, bi) => (
+                <div key={block.key} className="sed-editor-card sed-mt-8">
+                  <div className="sed-blockcard__head">
+                    <b className="sed-blockcard__title">Блок {bi + 1}</b>
+                    <span className="sed-blockcard__type">
+                      {block.mode === "parallel" ? "Параллельно" : "Последовательно"}
+                    </span>
+                    <span className="sed-blockcard__spacer" />
+                    <select
+                      aria-label={`Режим блока ${bi + 1}`}
+                      value={block.mode}
+                      onChange={(e) =>
+                        patchRouteBlock(block.key, {
+                          mode: e.target.value === "parallel" ? "parallel" : "sequential",
+                        })
+                      }
+                    >
+                      <option value="sequential">Последовательно</option>
+                      <option value="parallel">Параллельно</option>
+                    </select>
+                    <button
+                      type="button"
+                      className="sed-btn sed-btn--danger"
+                      aria-label={`Удалить блок ${bi + 1}`}
+                      onClick={() => removeRouteBlock(block.key)}
+                    >
+                      Удалить блок
+                    </button>
+                  </div>
+                  {block.steps.length === 0 && (
+                    <div className="sed-note">Шагов нет.</div>
+                  )}
+                  {block.steps.map((step, si) => (
+                    <div className="sed-editor-row sed-mt-8" key={step.key}>
+                      <span className="sed-meta">
+                        {bi + 1}.{si + 1}
+                      </span>
+                      {step.kind === "fixed" ? (
+                        <span className="sed-note">
+                          Ответственные: {step.label}. Шаг с несколькими согласующими
+                          меняется только в справочнике бланков.
+                        </span>
+                      ) : step.kind === "user" ? (
+                        <label className="sed-field">
+                          Логин AD
+                          <input
+                            aria-label={`Логин исполнителя ${bi + 1}.${si + 1}`}
+                            value={step.value}
+                            onChange={(e) =>
+                              patchRouteStep(block.key, step.key, { value: e.target.value })
+                            }
+                          />
+                        </label>
+                      ) : (
+                        <label className="sed-field">
+                          Группа
+                          <select
+                            aria-label={`Группа блока ${bi + 1}, шаг ${si + 1}`}
+                            value={step.value}
+                            onChange={(e) =>
+                              patchRouteStep(block.key, step.key, { value: e.target.value })
+                            }
+                          >
+                            <option value="">— выберите группу —</option>
+                            {stepGroups.map((g) => (
+                              <option key={g.id} value={g.id}>
+                                {g.name}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      )}
+                      {/* Неизменяемый шаг (несколько ответственных) править и
+                          удалять нельзя: PATCH пересобирает маршрут целиком и
+                          StepSpec одного ответственного не выразит, поэтому
+                          сохранение с таким шагом блокируется. */}
+                      {step.kind !== "fixed" && (
+                        <>
+                          <button
+                            type="button"
+                            className="sed-btn sed-btn--ghost"
+                            aria-label={`Поднять шаг ${bi + 1}.${si + 1}`}
+                            disabled={si === 0}
+                            onClick={() => moveRouteStep(block.key, step.key, -1)}
+                          >
+                            Вверх
+                          </button>
+                          <button
+                            type="button"
+                            className="sed-btn sed-btn--ghost"
+                            aria-label={`Опустить шаг ${bi + 1}.${si + 1}`}
+                            disabled={si === block.steps.length - 1}
+                            onClick={() => moveRouteStep(block.key, step.key, 1)}
+                          >
+                            Вниз
+                          </button>
+                          <button
+                            type="button"
+                            className="sed-btn sed-btn--danger"
+                            aria-label={`Удалить шаг ${bi + 1}.${si + 1}`}
+                            onClick={() => removeRouteStep(block.key, step.key)}
+                          >
+                            Удалить
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  ))}
+                  <div className="sed-toolbar sed-mt-8">
+                    <select
+                      aria-label={`Группа для блока ${bi + 1}`}
+                      value=""
+                      onChange={(e) => {
+                        addRouteStep(block.key, "group", e.target.value);
+                        e.target.value = "";
+                      }}
+                    >
+                      <option value="">— добавить шаг-группу —</option>
+                      {stepGroups.map((g) => (
+                        <option key={g.id} value={g.id}>
+                          {g.name}
+                        </option>
+                      ))}
+                    </select>
+                    <input
+                      aria-label={`Логин исполнителя для блока ${bi + 1}`}
+                      placeholder="Логин AD"
+                      value={routeLogins[block.key] ?? ""}
+                      onChange={(e) =>
+                        setRouteLogins((prev) => ({ ...prev, [block.key]: e.target.value }))
+                      }
+                    />
+                    <button
+                      type="button"
+                      className="sed-btn sed-btn--ghost"
+                      aria-label={`Добавить шаг-исполнителя ${bi + 1}`}
+                      onClick={() => {
+                        addRouteStep(block.key, "user", routeLogins[block.key] ?? "");
+                        setRouteLogins((prev) => ({ ...prev, [block.key]: "" }));
+                      }}
+                    >
+                      Добавить шаг-исполнителя
+                    </button>
+                  </div>
+                </div>
+              ))}
+              <label className="sed-field sed-mt-8">
+                Причина правки
+                <input
+                  aria-label="Причина правки маршрута"
+                  value={routeReason}
+                  onChange={(e) => setRouteReason(e.target.value)}
+                />
+              </label>
+              <div className="sed-toolbar sed-mt-8">
+                <button type="button" className="sed-btn" onClick={handleSaveRoute} disabled={routeBusy}>
+                  Сохранить маршрут
+                </button>
+                <button
+                  type="button"
+                  className="sed-btn sed-btn--ghost"
+                  onClick={() => setRouteOpen(false)}
+                >
+                  Отмена
+                </button>
+              </div>
+              {routeError && <div role="alert">{routeError}</div>}
+            </section>
           )}
 
           {cardActionStatus && <div role="status">{cardActionStatus}</div>}

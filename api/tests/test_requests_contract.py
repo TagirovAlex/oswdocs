@@ -365,7 +365,7 @@ def test_folders_counts_by_status(
         json={"decision": "return", "comment": "На доработку"},
         headers=owner_headers,
     ).status_code == 200
-    # C — На доработке (отказ по первому шагу: возвращать некуда).
+    # C — На доработке (отказ по первому шагу: заявка всегда инициатору).
     c = _create(client, hr_headers).json()
     assert client.post(f"/requests/{c['id']}/submit", headers=hr_headers).status_code == 200
     assert client.post(
@@ -399,7 +399,8 @@ def test_folders_counts_by_status(
     assert by_id["revision"]["count"] == 2
     # E — согласовано (папка «К исполнению»).
     assert by_id["execution"]["count"] == 1
-    # Завершённые: D — отозвано (статус «Отклонено» недостижим, отказ = возврат по маршруту).
+    # Завершённые: D — отозвано (статус «Отклонено» недостижим, отказ = заявка
+    # инициатору на доработку).
     assert by_id["done"]["count"] == 1
     # У ОК нет шагов (группы SED_HR нет среди SED_STEP_*), поэтому mine=0.
     assert by_id["mine"]["count"] == 0

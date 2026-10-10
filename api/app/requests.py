@@ -662,6 +662,44 @@ def _build_steps(
     return steps
 
 
+def _same_executor(left: _Step, right: _Step) -> bool:
+    """Тот же исполнитель шага (владелец, резолвер, персональный исполнитель).
+
+    Признак, по которому снимок этапа одного шага можно отдать другому: текст и
+    название этапа относятся именно к этому исполнителю, а не к позиции в
+    маршруте (позиция при пересборке меняется)."""
+    return (
+        left.owner_group == right.owner_group
+        and left.resolver == right.resolver
+        and left.assignee == right.assignee
+    )
+
+
+def _carry_stage_snapshot(fresh: list[_Step], previous: list[_Step]) -> None:
+    """Перенести снимок этапа на пересобранные шаги (текст печати, название).
+
+    Правка маршрута пересобирает ожидающие шаги через _build_steps, а тот создаёт
+    шаг только с исполнительскими полями — без stage_lines/stage_title печать
+    бланка потеряла бы текст ещё не пройденных шагов (README: печать идёт по
+    снимку выданной заявки). Переносим снимок только при совпадении исполнителя
+    и один раз: чужой текст шага хуже никакого.
+
+    previous — ожидавшие шаги заявки до правки (в порядке маршрута)."""
+    unused = list(previous)
+    for step in fresh:
+        for index, old in enumerate(unused):
+            if _same_executor(old, step):
+                step.owner_kind = old.owner_kind
+                step.stage_id = old.stage_id
+                step.stage_code = old.stage_code
+                step.stage_title = old.stage_title
+                step.stage_lines = list(old.stage_lines)
+                step.profile_step_id = old.profile_step_id
+                step.optional = old.optional
+                del unused[index]
+                break
+
+
 # --- Маршрут из справочников (route_mode = auto) ---
 # Человекочитаемые причины подбора профиля (ключи reason из app.routing).
 _ROUTE_REASON_TEXT = {
@@ -3271,30 +3309,75 @@ def submit_request(
     user: CurrentUser = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
     store: RequestsStore = Depends(get_requests_store),
+    route: RouteSettings = Depends(get_route_settings),
     mail_queue: MailQueue = Depends(get_mail_queue),
     settings_store: DbSettingsStore = Depends(get_settings_store),
     ad_reader: object | None = Depends(get_ad_reader),
 ) -> RequestOut:
     """Черновик/На доработке → На согласовании (только ОК-автор, нужны шаги).
 
+    Из «На доработке» возврат идёт первому согласующему без решения: шаги со
+    статусом «отклонён»/«возвращён» снова ожидают с новым сроком, уже
+    согласованные шаги остаются закрытыми (их решения сохраняются). Причину
+    отказа в comment/approvals шага не сбрасываем — она и есть суть доработки,
+    и в audit_log она бы не осталась; отметки просроченного шага, наоборот,
+    сбрасываются (как в reissue): они относятся к истёкшему кругу. Если маршрут
+    правили через PATCH /requests/{id}/steps, заявка переведена в Черновик и
+    ветка не выполняется: там маршрут уже задан новыми ожидающими шагами.
+    Срок ожидающих шагов поздних блоков обновляется тем же кругом — иначе
+    затянувшаяся доработка открыла бы следующий блок уже просроченным.
+
     При подаче ставится письмо «назначена» владельцу первого шага (W3a);
     офлайн/нет AD/шаблона — уведомление тихо пропускается.
     """
     settings.ensure_read_only()
     _require_hr(user)
+    reopened: list[int] = []
     try:
         request = _get_request_or_404(store, request_id)
         if request.status not in (DRAFT, REWORK):
             raise HTTPException(status_code=409, detail="Подать можно только из Черновика/На доработке")
         if not request.steps:
             raise HTTPException(status_code=422, detail="Маршрут пуст: добавьте шаги")
+        now = _utcnow()
+        if request.status == REWORK:
+            # Шаги без решения (отказ/возврат/просрочка) снова ожидают: иначе
+            # после подачи не осталось бы ожидающего шага и заявка висела бы
+            # в «На согласовании» без единой доступной кнопки.
+            for step in request.steps:
+                expired = step.status == STEP_EXPIRED
+                if step.status not in (STEP_REJECTED, STEP_RETURNED, STEP_EXPIRED):
+                    continue
+                step.status = STEP_PENDING
+                step.done_by = None
+                step.done_at = None
+                step.expires_at = now + timedelta(days=route.approval_ttl_days)
+                if expired:
+                    # Отметки истёкшего круга к новому сроку не относятся (как в
+                    # reissue): оставленная approve закрыла бы шаг по старой
+                    # отметке, а сам согласовавший получил бы 409 «Вы уже
+                    # согласовали этот шаг».
+                    step.comment = None
+                    _clear_approvals(step)
+                reopened.append(step.order)
+            # Срок поздних блоков тоже обновляем: доработка могла занять дольше
+            # approval_ttl_days, и тогда следующий блок открылся бы уже
+            # просроченным — can_act у всех был бы false до срабатывания воркера.
+            for step in request.steps:
+                if step.status == STEP_PENDING:
+                    step.expires_at = now + timedelta(days=route.approval_ttl_days)
         request.status = IN_APPROVAL
         store.update(request)
     except RequestsUnavailable as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
-    _audit(user.sam, "request.submit", request.id, "")
+    _audit(
+        user.sam,
+        "request.submit",
+        request.id,
+        ("reopened=" + ",".join(str(order) for order in reopened)) if reopened else "",
+    )
     _notify_assigned(request, mail_queue, settings_store, ad_reader, settings)
     # Ридер AD передан зависимостью; при ad_reader=None (AD недоступен) _public_view
     # резолвит его повторно (fail-soft) — без ФИО согласующего, но ответ 200.
@@ -3323,6 +3406,28 @@ def withdraw_request(
         ) from exc
     _audit(user.sam, "request.withdraw", request.id, "")
     return _public_view(request, user)
+
+
+# Отзыв заявки принимается и POST (как остальные действия над заявкой), и PATCH —
+# QA-проверка зовёт `curl -X PATCH /requests/{id}/cancel`. Тело то же, поэтому
+# один обработчик на оба метода.
+@router.api_route(
+    "/requests/{request_id}/cancel",
+    methods=["POST", "PATCH"],
+    response_model=RequestOut,
+)
+def cancel_request(
+    request_id: str,
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+    store: RequestsStore = Depends(get_requests_store),
+) -> RequestOut:
+    """Отзыв заявки → Отозвано: синоним POST /requests/{id}/withdraw.
+
+    Клиент и QA-проверки зовут отзыв «cancel». Логика, аудит и проверка закрытой
+    заявки — общие с /withdraw, поэтому отозванная заявка не может получить
+    разные статусы через два входа."""
+    return withdraw_request(request_id, user=user, settings=settings, store=store)
 
 
 @router.post("/requests/{request_id}/to-execution", response_model=RequestOut)
@@ -3395,8 +3500,10 @@ def decide_step(
 ) -> RequestOut:
     """Отметка владельца: согласие/отказ/возврат (комментарий по require_comment).
 
-    Отказ — тоже назад по маршруту (переоткрывается предыдущий блок), шаг при
-    этом остаётся «отклонен» (в отличие от «возвращен»).
+    Отказ — заявка инициатору на доработку (REWORK) независимо от позиции шага:
+    маршрут сам не переоткрывается, решает инициатор (комментарии + правка шагов
+    либо повторная отправка), уже полученные согласия сохраняются. Шаг при этом
+    остаётся «отклонен» (в отличие от «возвращен»).
 
     Несколько ответственных (миграция 0013): право даёт снимок assignees, своя
     отметка согласия повторно не принимается (409). Согласие закрывает шаг, если
@@ -3406,9 +3513,9 @@ def decide_step(
     ответственного — они не требуют согласия остальных.
 
     Уведомление «назначена»: при согласии — новые ожидающие шаги следующего
-    блока (без дублей внутри параллельного блока), при отказе и возврате —
-    владельцы переоткрытого предыдущего блока, а если возвращать некуда — автор
-    заявки («возврат», заявка на доработке)."""
+    блока (без дублей внутри параллельного блока), при возврате — владельцы
+    переоткрытого предыдущего блока, а при отказе и если возвращать некуда —
+    автор заявки («возврат», заявка на доработке)."""
     settings.ensure_read_only()
     reopened: list[_Step] | None = None
     before_orders: set[int] = set()
@@ -3481,21 +3588,12 @@ def decide_step(
             step.done_at = now
             step.comment = (body.comment or "").strip() or None
             _audit(user.sam, "step.reject", request.id, f"order={order}")
-            # Отказ — назад по маршруту, как возврат: предыдущий блок снова в
-            # работе с новым TTL (route.approval_ttl_days), заявка остаётся на
-            # согласовании. Возвращать некуда — заявка автору на доработку.
-            reopened = _previous_block_steps(request, order)
-            if reopened:
-                for reopened_step in reopened:
-                    reopened_step.status = STEP_PENDING
-                    reopened_step.done_by = None
-                    reopened_step.done_at = None
-                    reopened_step.comment = None
-                    _clear_approvals(reopened_step)
-                    reopened_step.expires_at = now + timedelta(days=route.approval_ttl_days)
-                request.status = IN_APPROVAL
-            else:
-                request.status = REWORK
+            # Отказ — заявка инициатору на доработку (REWORK), маршрут не
+            # переоткрывается автоматически: инициатор смотрит причину, пишет
+            # комментарии и правит шаги (PATCH /requests/{id}/steps) либо просто
+            # отправляет заявку заново. Уже полученные согласия предыдущих
+            # согласующих при этом сохраняются — шаги «согласован» не трогаем.
+            request.status = REWORK
         else:
             step.status = STEP_RETURNED
             step.done_by = user.sam
@@ -3600,7 +3698,11 @@ def replace_steps(
     route: RouteSettings = Depends(get_route_settings),
     store: RequestsStore = Depends(get_requests_store),
 ) -> RequestOut:
-    """Правка шагов (включая замену руководителя) — только разрешенная группа + audit."""
+    """Правка шагов (включая замену руководителя) — только разрешенная группа + audit.
+
+    Закрытые шаги (с решениями) сохраняются как есть, ожидающие пересобираются
+    из payload; снимок этапа (текст/название для печати) переносится на шаги с
+    тем же исполнителем, чтобы печать бланка не потеряла текст."""
     settings.ensure_read_only()
     _require_hr(user)
     try:
@@ -3620,6 +3722,7 @@ def replace_steps(
         now = _utcnow()
         # Закрытые шаги сохраняем, ожидающие — заменяем новым набором.
         kept = [s for s in request.steps if s.status != STEP_PENDING]
+        pending_before = [s for s in request.steps if s.status == STEP_PENDING]
         if body.blocks is not None:
             # Блочная правка: новые блоки продолжают нумерацию после уже
             # существующих, чтобы order не столкнулся с сохранёнными шагами.
@@ -3651,6 +3754,10 @@ def replace_steps(
             for index, step in enumerate(fresh):
                 step.order = base + index + 1
         request.steps = sorted(kept + fresh, key=lambda s: s.order)
+        # Текст и название этапа печати переносим на пересобранные шаги с тем же
+        # исполнителем: иначе сохранение маршрута обнулило бы текст ещё не
+        # пройденных шагов (печать идёт по снимку выданной заявки).
+        _carry_stage_snapshot(fresh, pending_before)
         request.route_origin = "custom"
         if request.status == REWORK:
             request.status = DRAFT
