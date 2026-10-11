@@ -142,12 +142,15 @@ def upgrade() -> None:
 
     # Состав «шаблон → блок»: перенос текущих прав один в один (решение человека
     # 2026-10-11). Строки берутся по кодам справочников, а не по id: сиды
-    # идемпотентны и не зависят от порядка выдачи serial. JOIN-ы спрятаны в
-    # подзапрос — иначе ON CONFLICT после ON/WHERE разбирается неоднозначно.
+    # идемпотентны и не зависят от порядка выдачи serial.
+    # ГЛАВНОЕ: перед ON CONFLICT обязан стоять WHERE. Иначе PostgreSQL читает
+    # «ON CONFLICT» как продолжение «JOIN ... ON» и падает на разборе (проверено
+    # на стенде 2026-10-11: миграция откатилась целиком). «WHERE true» — пустой
+    # предикат, который снимает неоднозначность, а не фильтр.
     op.execute(
         """
         INSERT INTO perm_template_blocks (template_id, block_id)
-        SELECT src.template_id, src.block_id
+        SELECT template_id, block_id
         FROM (
           SELECT t.id AS template_id, b.id AS block_id
           FROM (VALUES
@@ -195,6 +198,8 @@ def upgrade() -> None:
         ) AS m(template_code, block_code)
         JOIN perm_templates t ON t.code = m.template_code
         JOIN perm_blocks b ON b.code = m.block_code
+        ) AS src
+        WHERE true
         ON CONFLICT (template_id, block_id) DO NOTHING
         """
     )
