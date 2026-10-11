@@ -80,6 +80,11 @@ const HISTORY_HIDDEN_ACTIONS = new Set([
   "document.read",
 ]);
 
+// Код строки-комментария в общей ленте истории. События с таким кодом в журнале
+// нет (комментарий к заявке пишется в request_comments, а не в audit_log) — это
+// машинный признак самой карточки.
+const HISTORY_COMMENT_ACTION = "comment.add";
+
 // Код события → человеческий текст. Номер шага дописывается отдельно, чтобы
 // «Согласование» в заявке на пять шагов не было двусмысленным.
 const HISTORY_ACTIONS: Record<string, string> = {
@@ -103,6 +108,8 @@ const HISTORY_ACTIONS: Record<string, string> = {
   "attachment.upload": "Загрузка вложения",
   "attachment.download": "Скачивание вложения",
   "attachment.delete": "Удаление вложения",
+  // Строка комментария в общей ленте (не событие журнала).
+  [HISTORY_COMMENT_ACTION]: "Комментарий",
 };
 
 // Текст действия для строки таблицы: название + номер шага, если событие о шаге.
@@ -110,6 +117,43 @@ function historyActionLabel(item: RequestHistoryItem): string {
   const base = HISTORY_ACTIONS[item.action] ?? "Действие по заявке";
   const order = Number(item.step ?? "");
   return order > 0 ? `${base} · шаг ${stepLabel(order)}` : base;
+}
+
+// Комментарий к заявке строкой общей ленты: действие — «Комментарий», текст
+// комментария — в одноимённую колонку, кто — ФИО автора (author_name, при
+// недоступном AD бэкенд отдаёт логин).
+function historyCommentItem(comment: RequestComment): RequestHistoryItem {
+  return {
+    at: comment.at,
+    actor_name: comment.author_name || comment.author || "",
+    action: HISTORY_COMMENT_ACTION,
+    comment: comment.body,
+  };
+}
+
+// Общая лента истории заявки: события журнала (без служебного шума) и
+// комментарии к заявке в одном списке, по времени.
+//
+// Комментарии причины отказа/возврата (kind="step") в ленту НЕ идут: бэкенд
+// пишет их ещё и событиями step.reject/step.return с тем же текстом, и такая
+// строка была бы дублем той же самой причины. Обсуждение заявки (kind="request")
+// событий в журнале не оставляет — в ленте ему самое место.
+function mergeHistoryFeed(
+  history: RequestHistoryItem[],
+  comments: RequestComment[],
+): RequestHistoryItem[] {
+  const rows = [
+    ...history.filter((item) => !HISTORY_HIDDEN_ACTIONS.has(item.action)),
+    ...comments.filter((c) => c.kind === "request").map(historyCommentItem),
+  ];
+  // Порядок при равном времени не важен; сортировка по ISO-строке (время UTC).
+  return rows.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
+}
+
+// Сырой details события (audit_log) — только для вкладки полной истории
+// администратора СЭД: JSON-строкой, как он лежит в журнале.
+function historyDetailsText(details: Record<string, unknown> | null | undefined): string {
+  return details ? JSON.stringify(details) : "—";
 }
 
 // Статусы, из которых заявку ещё можно отозвать (POST /requests/{id}/withdraw):
@@ -302,15 +346,17 @@ export function RequestCard(props: RequestCardProps) {
   // История изменений (GET /api/requests/{id}/history) и комментарии заявки.
   const [history, setHistory] = useState<RequestHistoryItem[]>([]);
   const [historyError, setHistoryError] = useState<string>("");
-  // Записи истории без служебного шума (порядок бэкенда — по времени).
-  const visibleHistory = history.filter((item) => !HISTORY_HIDDEN_ACTIONS.has(item.action));
   const [comments, setComments] = useState<RequestComment[]>([]);
   const [commentsError, setCommentsError] = useState<string>("");
   const [newComment, setNewComment] = useState<string>("");
   const [commentError, setCommentError] = useState<string>("");
+  // Единая лента истории: события журнала без служебного шума плюс комментарии
+  // к заявке, по времени.
+  const visibleHistory = mergeHistoryFeed(history, comments);
   // Вкладка карточки по образцу (doc.html): «Лист рассмотрения» (панели +
-  // таблица шагов) либо «История» (история + комментарии). Только вид.
-  const [cardTab, setCardTab] = useState<"sheet" | "history">("sheet");
+  // таблица шагов), «История» (лента событий и комментариев) либо «Полная
+  // история» (дополнительно — только администратору СЭД). Только вид.
+  const [cardTab, setCardTab] = useState<"sheet" | "history" | "full">("sheet");
   // Наименования групп (GET /api/step-groups: id → name) для колонки
   // «Должность / Группа» у групповых шагов; без наименования — код как раньше.
   const [groupNames, setGroupNames] = useState<Record<string, string>>({});
@@ -434,7 +480,8 @@ export function RequestCard(props: RequestCardProps) {
     };
   }, [requestId]);
 
-  // Комментарии заявки (GET /api/requests/{id}/comments; отдельная таблица).
+  // Комментарии заявки (GET /api/requests/{id}/comments). Отдельного блока
+  // просмотра нет: строки обсуждения встают в общую ленту истории.
   useEffect(() => {
     let alive = true;
     setCommentsError("");
@@ -1138,7 +1185,8 @@ export function RequestCard(props: RequestCardProps) {
   return (
     <section aria-label="Карточка заявки">
       <h3>Карточка заявки {requestId}</h3>
-      {/* Вкладки образца: лист рассмотрения либо история (только вид). */}
+      {/* Вкладки образца: лист рассмотрения, история либо (роль sed_admin)
+          полная история — только вид. */}
       <nav className="sed-tabs sed-tabs--inner" aria-label="Вкладки карточки">
         <button
           type="button"
@@ -1154,6 +1202,15 @@ export function RequestCard(props: RequestCardProps) {
         >
           История
         </button>
+        {isSedAdmin && (
+          <button
+            type="button"
+            className={cardTab === "full" ? "sed-tab sed-tab--active" : "sed-tab"}
+            onClick={() => setCardTab("full")}
+          >
+            Полная история
+          </button>
+        )}
       </nav>
       {cardError && <div role="alert">{cardError}</div>}
       {!card && !cardError && !deleted && <div className="sed-note">Загрузка карточки…</div>}
@@ -1729,12 +1786,15 @@ export function RequestCard(props: RequestCardProps) {
       )}
       {card && !deleted && cardTab === "history" && (
         <>
-          {/* История заявки таблицей: ФИО · действие · комментарий · дата и время.
+          {/* Единая лента истории заявки таблицей: ФИО · действие · комментарий ·
+              дата и время. Комментарии к заявке (kind="request") — её строки, по
+              времени вместе с событиями; отдельного блока просмотра нет.
               Служебных кодов (action) и сырых details здесь нет — бэкенд отдаёт
               ФИО и комментарий решения, а код разбирается в человеческий текст. */}
           <section aria-label="История" className="sed-review">
             <b>История заявки</b>
             {historyError && <div role="alert">История недоступна: {historyError}</div>}
+            {commentsError && <div role="alert">Комментарии недоступны: {commentsError}</div>}
             {!historyError && visibleHistory.length === 0 && (
               <div className="sed-note">Записей истории нет</div>
             )}
@@ -1768,24 +1828,9 @@ export function RequestCard(props: RequestCardProps) {
             )}
           </section>
 
-          {/* Комментарии к заявке: список + поле добавления. */}
-          <section aria-label="Комментарии" className="sed-review">
-            <b>Комментарии к заявке</b>
-            {commentsError && <div role="alert">Комментарии недоступны: {commentsError}</div>}
-            {comments.length === 0 && !commentsError && (
-              <div className="sed-note">Комментариев нет</div>
-            )}
-            {comments.length > 0 && (
-              <ul className="sed-list">
-                {comments.map((c) => (
-                  <li key={c.id}>
-                    <strong>{c.author_name || c.author}</strong>
-                    {c.step_id ? ` · шаг ${stepLabel(Number(c.step_id))}` : ""} ·{" "}
-                    {historyWhen(c.at)}: {c.body}
-                  </li>
-                ))}
-              </ul>
-            )}
+          {/* Поле добавления комментария к заявке (список комментариев — строки
+              ленты истории выше). */}
+          <section aria-label="Комментарий к заявке" className="sed-mt-8">
             <input
               aria-label="Новый комментарий"
               placeholder="Комментарий к заявке"
@@ -1803,6 +1848,47 @@ export function RequestCard(props: RequestCardProps) {
             {commentError && <div role="alert">{commentError}</div>}
           </section>
         </>
+      )}
+      {card && !deleted && cardTab === "full" && (
+        /* Полная история заявки — только администратору СЭД (роль sed_admin):
+           те же колонки плюс машинный код действия и сырой details из audit_log
+           (бэкенд отдаёт его только этой роли). Без фильтров и поиска. */
+        <section aria-label="Полная история" className="sed-review">
+          <b>Полная история заявки</b>
+          {historyError && <div role="alert">История недоступна: {historyError}</div>}
+          {!historyError && history.length === 0 && (
+            <div className="sed-note">Записей истории нет</div>
+          )}
+          {history.length > 0 && (
+            <table
+              className="sed-table sed-table--history"
+              aria-label="Таблица полной истории заявки"
+            >
+              <thead>
+                <tr>
+                  <th>Кто</th>
+                  <th>Действие</th>
+                  <th>Код действия</th>
+                  <th>Комментарий</th>
+                  <th>Дата и время</th>
+                  <th>Детали</th>
+                </tr>
+              </thead>
+              <tbody>
+                {history.map((item) => (
+                  <tr key={`${item.at}|${item.action}|${item.actor_name ?? ""}`}>
+                    <td>{item.actor_name || item.actor || "—"}</td>
+                    <td>{historyActionLabel(item)}</td>
+                    <td>{item.action || "—"}</td>
+                    <td>{item.comment || "—"}</td>
+                    <td className="sed-history__when">{historyWhen(item.at)}</td>
+                    <td>{historyDetailsText(item.details)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </section>
       )}
       {card && !deleted && (
         <>

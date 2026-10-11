@@ -932,9 +932,103 @@ describe("RequestCard", () => {
     expect(screen.queryByLabelText("Таблица истории заявки")).not.toBeInTheDocument();
   });
 
-  // Комментарии заявки показывают ФИО автора, а не логин: бэкенд отдаёт
-  // author_name (fail-soft на логин), карточка берёт именно его.
-  it("комментарии показывают ФИО автора, а не логин", async () => {
+  // Комментарий к заявке (kind="request") — строка общей ленты истории: действие
+  // «Комментарий», текст в колонке комментария, кто — ФИО автора (author_name,
+  // а не логин: бэкенд резолвит ФИО fail-soft).
+  it("комментарий kind=request попадает в общую ленту истории строкой", async () => {
+    vi.mocked(getRequest).mockResolvedValue(
+      requestWith("Громов Игорь Олегович", "На согласовании"),
+    );
+    vi.mocked(getHistory).mockResolvedValue([
+      {
+        at: "2026-10-05T09:00:00+00:00",
+        actor: "sidorova.as",
+        actor_name: "Сидорова Анна Сергеевна",
+        action: "request.create",
+        comment: "",
+      },
+    ]);
+    vi.mocked(getComments).mockResolvedValue([
+      {
+        id: "c-1",
+        request_id: "REQ-0001",
+        author: "petrov.pp",
+        author_name: "Петров Пётр Петрович",
+        body: "Вымышленный комментарий",
+        at: "2026-10-05T10:00:00+00:00",
+        kind: "request",
+      },
+    ]);
+
+    renderCard();
+    await waitFor(() => expect(screen.getByRole("button", { name: "История" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "История" }));
+    const table = await screen.findByLabelText("Таблица истории заявки");
+    // Заголовок + событие создания заявки + строка комментария (лента по времени).
+    const rows = within(table).getAllByRole("row");
+    expect(rows).toHaveLength(3);
+    expect(within(rows[1]).getByText("Заявка создана")).toBeInTheDocument();
+    expect(within(rows[2]).getByText("Петров Пётр Петрович")).toBeInTheDocument();
+    expect(within(rows[2]).getByText("Комментарий")).toBeInTheDocument();
+    expect(within(rows[2]).getByText("Вымышленный комментарий")).toBeInTheDocument();
+    // Логина автора в ленте нет — карточка берёт ФИО из author_name.
+    expect(table.textContent).not.toContain("petrov.pp");
+  });
+
+  // Комментарии причины отказа/возврата (kind="step") в общую ленту не идут:
+  // бэкенд пишет их ещё и событиями step.reject/step.return с тем же текстом,
+  // иначе одна и та же причина показалась бы в таблице дважды.
+  it("комментарий kind=step не дублируется в общей ленте", async () => {
+    vi.mocked(getRequest).mockResolvedValue(
+      requestWith("Громов Игорь Олегович", "На согласовании"),
+    );
+    const reason = "Вымышленная причина возврата";
+    vi.mocked(getHistory).mockResolvedValue([
+      {
+        at: "2026-10-05T10:00:00+00:00",
+        actor: "sidorova.as",
+        actor_name: "Сидорова Анна Сергеевна",
+        action: "step.return",
+        comment: reason,
+        step: "1",
+      },
+    ]);
+    vi.mocked(getComments).mockResolvedValue([
+      {
+        id: "c-1",
+        request_id: "REQ-0001",
+        author: "sidorova.as",
+        author_name: "Сидорова Анна Сергеевна",
+        body: reason,
+        at: "2026-10-05T10:00:00+00:00",
+        kind: "step",
+        step_id: "1",
+      },
+      {
+        id: "c-2",
+        request_id: "REQ-0001",
+        author: "petrov.pp",
+        author_name: "Петров Пётр Петрович",
+        body: "Дописка к заявке",
+        at: "2026-10-05T11:00:00+00:00",
+        kind: "request",
+      },
+    ]);
+
+    renderCard();
+    await waitFor(() => expect(screen.getByRole("button", { name: "История" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "История" }));
+    const table = await screen.findByLabelText("Таблица истории заявки");
+    // Заголовок + возврат по шагу + обсуждение заявки (kind="request").
+    expect(within(table).getAllByRole("row")).toHaveLength(3);
+    expect(within(table).getByText(reason)).toBeInTheDocument();
+    expect(within(table).getAllByText(reason)).toHaveLength(1);
+    expect(within(table).getByText("Дописка к заявке")).toBeInTheDocument();
+  });
+
+  // Отдельного блока «Комментарии к заявке» в карточке нет: комментарии видны
+  // строками ленты истории, писать их — полем добавления под лентой.
+  it("отдельного блока «Комментарии к заявке» в карточке нет", async () => {
     vi.mocked(getRequest).mockResolvedValue(
       requestWith("Громов Игорь Олегович", "На согласовании"),
     );
@@ -953,9 +1047,62 @@ describe("RequestCard", () => {
     renderCard();
     await waitFor(() => expect(screen.getByRole("button", { name: "История" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "История" }));
-    const list = await screen.findByLabelText("Комментарии");
-    expect(within(list).getByText(/Петров Пётр Петрович/)).toBeInTheDocument();
-    expect(list.textContent).not.toContain("petrov.pp");
+    expect(await screen.findByLabelText("Таблица истории заявки")).toBeInTheDocument();
+    expect(screen.queryByText("Комментарии к заявке")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Комментарии")).not.toBeInTheDocument();
+    // Поле и кнопка добавления на месте — комментарий по-прежнему пишется здесь.
+    expect(screen.getByLabelText("Новый комментарий")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Добавить комментарий" })).toBeInTheDocument();
+  });
+
+  // Полная история — дополнительная вкладка только роли sed_admin: те же
+  // колонки плюс машинный код действия и сырой details из audit_log.
+  it("вкладка полной истории видна только администратору СЭД и показывает код действия", async () => {
+    vi.mocked(getRequest).mockResolvedValue(
+      requestWith("Громов Игорь Олегович", "На согласовании"),
+    );
+    vi.mocked(getHistory).mockResolvedValue([
+      {
+        at: "2026-10-05T10:00:00+00:00",
+        actor: "sidorova.as",
+        actor_name: "Сидорова Анна Сергеевна",
+        action: "step.return",
+        comment: "Вымышленная причина возврата",
+        step: "1",
+        details: { detail: '{"comment": "Вымышленная причина возврата", "order": 1}' },
+      },
+    ]);
+
+    // Обычному сотруднику (ОК) и владельцу шага вкладки нет.
+    for (const role of ["hr", "owner"] as Role[]) {
+      const view = renderCard("REQ-0001", role);
+      await waitFor(() => expect(view.getByRole("button", { name: "История" })).toBeInTheDocument());
+      expect(view.queryByRole("button", { name: "Полная история" })).not.toBeInTheDocument();
+      view.unmount();
+    }
+
+    // Роль sed_admin приходит с бэкенда, в типе Role карточки её нет.
+    renderCard("REQ-0001", "sed_admin" as Role);
+    await waitFor(() => expect(screen.getByRole("button", { name: "История" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Полная история" }));
+    const table = await screen.findByLabelText("Таблица полной истории заявки");
+    expect(within(table).getAllByRole("columnheader").map((th) => th.textContent)).toEqual([
+      "Кто",
+      "Действие",
+      "Код действия",
+      "Комментарий",
+      "Дата и время",
+      "Детали",
+    ]);
+    expect(within(table).getByText("Сидорова Анна Сергеевна")).toBeInTheDocument();
+    expect(within(table).getByText("Возврат · шаг 1")).toBeInTheDocument();
+    expect(within(table).getByText("step.return")).toBeInTheDocument();
+    expect(within(table).getByText("Вымышленная причина возврата")).toBeInTheDocument();
+    // Сырой details из журнала — в своей колонке; таблица вкладки «История»
+    // при этом не показывается (вкладки переключают друг друга).
+    const cells = within(table).getAllByRole("cell");
+    expect(cells[cells.length - 1].textContent).toContain("order");
+    expect(screen.queryByLabelText("Таблица истории заявки")).not.toBeInTheDocument();
   });
 
   // Правка маршрута заявки (issue_report п.4): редактор открывается, шаг

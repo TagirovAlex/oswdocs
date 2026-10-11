@@ -456,6 +456,9 @@ export interface RequestHistoryItem {
   comment: string;
   // Номер шага заявки, если событие относится к шагу.
   step?: string;
+  // Сырой details события из audit_log; бэкенд отдаёт его только роли sed_admin
+  // (вкладка полной истории), остальным участникам заявки — null.
+  details?: Record<string, unknown> | null;
 }
 
 // Фильтры над таблицей заявок.

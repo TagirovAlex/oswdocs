@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from .audit import AuditEvent, audit_log
 from .config import Settings, get_settings
-from .deps import CurrentUser, SedAdminUser, get_current_user
+from .deps import CurrentUser, SedAdminUser, _is_sed_admin, get_current_user
 from .docs import request_url
 from .employees import get_ad_reader
 from .employee_sync import (
@@ -288,9 +288,10 @@ class HistoryOut(BaseModel):
     """Запись истории заявки под карточку (GET /requests/{id}/history).
 
     Карточка показывает ФИО, действие и комментарий, поэтому служебные поля
-    (сырой details с order=1/origin=custom/was-became, entity/entity_id) из
-    ответа убраны. actor остаётся машинным признаком и отдаётся только
-    привилегированным; actor_name падает на логин, когда AD недоступен."""
+    (entity/entity_id) из ответа убраны. actor остаётся машинным признаком и
+    отдаётся только привилегированным; actor_name падает на логин, когда AD
+    недоступен. Сырой details (order=1/origin=custom/was-became) участникам
+    заявки не отдаётся — он идёт только роли sed_admin (вкладка полной истории)."""
 
     at: str = Field(description="Момент события (ISO, UTC)")
     actor: str | None = Field(
@@ -303,6 +304,10 @@ class HistoryOut(BaseModel):
     )
     comment: str = Field(default="", description="Комментарий решения, если он был")
     step: str = Field(default="", description="Номер шага заявки, если событие о шаге")
+    details: dict[str, object] | None = Field(
+        default=None,
+        description="Сырой details события из audit_log; только роли sed_admin",
+    )
 
 
 class StepApprovalOut(BaseModel):
@@ -2264,6 +2269,22 @@ def _history_detail_value(event: dict, key: str) -> str:
     return ""
 
 
+def _history_raw_details(event: dict) -> dict[str, object] | None:
+    """Сырой details события аудита — только администратору СЭД (вкладка полной
+    истории). Разбирать его не нужно: это то, что лежит в audit_log.
+
+    Текст события хранилища отдают по-разному: in-memory кладёт его в поле
+    detail, Postgres — в details["detail"] (JSONB). Приводим оба вида к
+    одному виду audit_log; пустого текста события вовсе нет."""
+    details = event.get("details")
+    if isinstance(details, dict):
+        return details
+    raw = event.get("detail")
+    if not isinstance(raw, str) or raw.strip() == "":
+        return None
+    return {"detail": raw}
+
+
 def _is_step_viewer(step: _Step, user: CurrentUser, roster: _RosterResolver | None = None) -> bool:
     """Видит ли пользователь шаг заявки (только чтение карточки/списка).
 
@@ -3971,8 +3992,9 @@ def get_history(
 
     Запись приходит подготовленной под карточку: ФИО автора (из AD, fail-soft —
     при недоступном AD остаётся логин) и комментарий решения, разобранный из
-    details. Сырой details (order=1, origin=custom, was/became) наружу не
-    отдаётся; машинный код action остаётся — по нему UI строит человеческий
+    details. Сырой details (order=1, origin=custom, was/became) участникам
+    заявки не отдаётся — он есть только у роли sed_admin (вкладка полной
+    истории); машинный код action остаётся всем — по нему UI строит человеческий
     текст действия.
 
     Логин actor отдаётся только привилегированным (как done_by/assignee в
@@ -3997,6 +4019,9 @@ def get_history(
     # один и тот же человек в ней повторяется, а AD запрашивать на каждое событие
     # нельзя. Системные события (actor=system) мимо AD.
     privileged = _is_hr(user)
+    # Сырой details — только администратору СЭД; участникам заявки (в т.ч.
+    # сотрудникам ОК и администратору) он не достаётся.
+    raw_details = _is_sed_admin(user)
     names: dict[str, str] = {}
     for event in events:
         actor = str(event.get("actor") or "")
@@ -4011,6 +4036,7 @@ def get_history(
             action=str(event.get("action") or ""),
             comment=_history_detail_value(event, "comment"),
             step=_history_detail_value(event, "order"),
+            details=_history_raw_details(event) if raw_details else None,
         )
         for event in events
     ]

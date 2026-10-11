@@ -1447,10 +1447,11 @@ def test_history_returns_fio_comment_and_step_without_raw_details(
     client, hr, buh_owner, hr_step_owner, test_settings_override, route_override
 ):
     """История отдаётся под карточку: ФИО автора, комментарий решения и номер
-    шага; технические коды и сырой details наружу не выходят.
+    шага; технические коды и сырой details участникам не выходят.
 
     Код действия остаётся (машинный признак для UI), но сырой JSON-мусор,
-    который раньше показывался в карточке, из ответа убран."""
+    который раньше показывался в карточке, из ответа убран (details есть
+    только у роли sed_admin — см. test_history_details_only_for_sed_admin)."""
     rid = _create_and_submit(
         client,
         hr,
@@ -1469,8 +1470,11 @@ def test_history_returns_fio_comment_and_step_without_raw_details(
 
     history = client.get(f"/requests/{rid}/history", headers=hr).json()
     assert history, "история не пуста"
-    assert all(set(item) == {"at", "actor", "actor_name", "action", "comment", "step"}
+    assert all(set(item) == {"at", "actor", "actor_name", "action", "comment", "step",
+                             "details"}
                for item in history)
+    assert all(item["details"] is None for item in history), (
+        "сырой details участнику заявки не отдаётся")
     ret = next(item for item in history if item["action"] == "step.return")
     assert ret["comment"] == reason
     assert ret["step"] == "1001"
@@ -1523,6 +1527,46 @@ def test_history_without_ad_reader_falls_back_to_login(
     assert response.status_code == 200
     item = next(i for i in response.json() if i["actor"] == BUH_SAM)
     assert item["actor_name"] == BUH_SAM
+
+
+def test_history_details_only_for_sed_admin(
+    client, hr, buh_owner, hr_step_owner, test_settings_override, route_override,
+    monkeypatch,
+):
+    """Сырой details события отдаётся только роли sed_admin.
+
+    Вкладка полной истории в карточке заявки читает его; остальным участникам
+    заявки (в т.ч. владельцу шага) details в ответе нет — как и логина actor."""
+    # Роль считается по группам ролей; офлайн ключа в БД нет — фолбэк env.
+    monkeypatch.setenv("SED_ADMIN_GROUPS", TEST_ADMINS)
+    sed_admin = _headers_for("adm.sed.vymyshlennaya", [TEST_ADMINS])
+    rid = _create_and_submit(
+        client,
+        hr,
+        blocks=[
+            {"mode": "sequential", "steps": [{"owner_group": GROUP_BUH}]},
+            {"mode": "sequential", "steps": [{"owner_group": GROUP_HR}]},
+        ],
+    )
+    reason = "Вымышленная причина возврата"
+    _approve(client, rid, 1, buh_owner)
+    client.post(
+        f"/requests/{rid}/steps/1001/decision",
+        json={"decision": "return", "comment": reason},
+        headers=hr_step_owner,
+    )
+
+    for_admin = client.get(f"/requests/{rid}/history", headers=sed_admin).json()
+    ret = next(item for item in for_admin if item["action"] == "step.return")
+    assert ret["comment"] == reason, "разбор details в колонку комментария не сломан"
+    assert ret["details"], "администратору СЭД сырой details отдан"
+    assert reason in json.dumps(ret["details"], ensure_ascii=False), (
+        "в сыром details есть текст события")
+    # Владельцу шага и сотруднику ОК — без details.
+    for_owner = client.get(f"/requests/{rid}/history", headers=buh_owner).json()
+    for_hr = client.get(f"/requests/{rid}/history", headers=hr).json()
+    assert all(item["details"] is None for item in for_owner + for_hr), (
+        "сырой details участнику заявки отдавать нельзя")
 
 
 def test_history_masks_actor_login_for_non_privileged(
