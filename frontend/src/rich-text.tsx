@@ -26,6 +26,9 @@ interface RichTextEditorProps {
   // вставляется в позицию курсора. seq — счётчик запросов: одинаковый текст
   // вставляется повторно только с новым seq.
   insert?: { text: string; seq: number } | null;
+  // Курсор/фокус в редакторе (строки подвала: так выбранная строка сама
+  // становится целью вставки плейсхолдера). Без него — ничего не сообщается.
+  onFocus?: () => void;
 }
 
 // Общие атрибуты иконок панели (конвенция layout.tsx): инлайн-SVG, currentColor,
@@ -167,9 +170,86 @@ export function richTextToPlain(html: string): string {
   return text.replace(/\s+/g, " ").trim();
 }
 
+// ---------------------------------------------------------------------------
+// Строки бланка (<-> HTML редактора). Подвал (footer_lines) и текст шага
+// (stage_lines) хранятся СПИСКОМ СТРОК — это контракт хранения (TEMPLATES.md §1/§2),
+// поэтому редактор показывает все строки одним полем, а в список они делятся и
+// собираются обратно без потерь: границы строк те же, что у печати (абзац,
+// заголовок, пункт списка, <br>).
+// ---------------------------------------------------------------------------
+
+// Тег разбирается как имя + атрибуты: атрибуты на границы строк не влияют.
+const RICH_TEXT_TAG_RE = /<\s*(\/?)\s*([a-zA-Z][a-zA-Z0-9]*)([^>]*)>/g;
+// Похожий разбор без флага g — для проверки «значение уже размечено». Якорь в
+// начале обязателен: без него обычный текст вида «Подпись <b>взаимно» считался
+// бы разметкой и ушёл бы в редактор как есть, минуя обёртку в <p>.
+const RICH_TEXT_TAG_START_RE = /^<[a-zA-Z/!]/;
+// Теги-контейнеры: внутри них строка не режется (иначе блок списка уедет на две
+// строки и обратная сборка его разорвёт).
+const RICH_TEXT_CONTAINER_TAGS = new Set(["ul", "ol", "blockquote", "pre", "table", "div"]);
+// Теги конца строки: после закрывающего строка заканчивается.
+const RICH_TEXT_END_TAGS = new Set(["p", "h1", "h2", "h3", "h4", "h5", "h6", "li"]);
+// Теги без закрытия: на них счётчик вложенности не растёт.
+const RICH_TEXT_VOID_TAGS = new Set([
+  "br", "hr", "img", "input", "meta", "link", "source", "wbr", "col", "area", "base",
+  "embed", "param", "track",
+]);
+// Закрывающий тег в самом конце значения — вставка идёт перед ним (конец абзаца).
+const RICH_TEXT_TAIL_END_RE = /<\s*\/\s*(?:p|h[1-6]|li)\s*>\s*$/i;
+
+// HTML редактора → список строк бланка (footer_lines/stage_lines). Строка
+// заканчивается там же, где заканчивается абзац печати: закрытый абзац,
+// заголовок, пункт списка (на верхнем уровне) или <br>. Разметка самой строки
+// сохраняется — её печать разбирает тем же санитайзером, что шапку.
+export function richTextHtmlToLines(html: string): string[] {
+  const lines: string[] = [];
+  let start = 0;
+  let depth = 0;
+  for (const match of html.matchAll(RICH_TEXT_TAG_RE)) {
+    const closing = match[1] === "/";
+    const tag = match[2].toLowerCase();
+    const selfClosed = match[3].trimEnd().endsWith("/") || RICH_TEXT_VOID_TAGS.has(tag);
+    if (RICH_TEXT_CONTAINER_TAGS.has(tag)) {
+      if (!closing && !selfClosed) depth += 1;
+      if (closing) depth = Math.max(depth - 1, 0);
+      continue;
+    }
+    // Внутри контейнера строка не заканчивается: блок должен остаться целым.
+    if (depth > 0) continue;
+    const isEnd = closing ? RICH_TEXT_END_TAGS.has(tag) : tag === "br";
+    if (!isEnd) continue;
+    const cut = (match.index ?? 0) + match[0].length;
+    lines.push(html.slice(start, cut));
+    start = cut;
+  }
+  if (start < html.length) lines.push(html.slice(start));
+  return lines;
+}
+
+// Список строк бланка → HTML редактора: размеченные строки идут как есть,
+// простой текст оборачивается абзацем. Пустые строки пропускаются (пустой
+// абзац редактор всё равно создаёт сам).
+export function richTextLinesToHtml(lines: string[]): string {
+  const parts: string[] = [];
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (line === "") continue;
+    parts.push(RICH_TEXT_TAG_START_RE.test(line) ? line : `<p>${line}</p>`);
+  }
+  return parts.join("");
+}
+
+// Дописать текст в конец значения редактора (плейсхолдер в выбранную строку
+// подвала): в конец последнего абзаца разметки, иначе — в конец строки.
+export function richTextAppend(html: string, text: string): string {
+  const tail = RICH_TEXT_TAIL_END_RE.exec(html);
+  const at = tail ? (tail.index ?? html.length) : html.length;
+  return html.slice(0, at) + text + html.slice(at);
+}
+
 // Визуальный редактор текста этапа: панель кнопок + область ввода.
 export function RichTextEditor(props: RichTextEditorProps) {
-  const { label, value, onChange, hint, insert } = props;
+  const { label, value, onChange, hint, insert, onFocus } = props;
   // Последнее значение, отправленное редактором: правки изнутри в effect не
   // возвращаются (иначе setContent на каждом вводе сбрасывал бы курсор).
   const emitted = useRef<string>(value);
@@ -207,7 +287,7 @@ export function RichTextEditor(props: RichTextEditorProps) {
   }, [editor, insert]);
 
   return (
-    <div className="sed-rte">
+    <div className="sed-rte" onFocus={onFocus}>
       <div className="sed-rte__toolbar" role="toolbar" aria-label={`Форматирование: ${label}`}>
         {TOOLBAR.map((item) => {
           const { name, attrs } = item.active;

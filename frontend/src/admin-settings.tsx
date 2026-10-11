@@ -55,7 +55,14 @@ import type {
   SettingsOnecBase,
   StepGroupRef,
 } from "./settings-client";
-import { RichTextEditor, richTextToPlain } from "./rich-text";
+import { BlankPreview } from "./blank-preview";
+import {
+  RichTextEditor,
+  richTextAppend,
+  richTextHtmlToLines,
+  richTextLinesToHtml,
+  richTextToPlain,
+} from "./rich-text";
 import type { Role } from "./api-mock";
 
 interface AdminSettingsProps {
@@ -239,12 +246,14 @@ function groupsFromText(text: string): string[] | null {
   return list.length > 0 ? list : null;
 }
 
-// Описание поля секции: ключ, подпись с ключом, подсказка (назначение роли).
+// Описание поля секции: ключ, подпись с ключом, подсказка (назначение роли),
+// признак «только чтение» (ключ групп ролей после миграции 0020 на права не влияет).
 const ACCESS_ROLE_FIELDS: readonly {
   key: AccessRoleKey;
   ariaLabel: string;
   label: string;
   hint: string;
+  deprecated?: boolean;
 }[] = [
   {
     key: "access_groups",
@@ -256,35 +265,49 @@ const ACCESS_ROLE_FIELDS: readonly {
     key: "admin_groups",
     ariaLabel: "Группы администраторов",
     label: "Роль «Админ» — группы AD (admin_groups)",
-    hint: "Админ: все заявки и админка настроек; пусто — значение из env.",
+    hint: "Только чтение: права админа задаёт справочник шаблонов (миграция 0020), значение этого ключа служебное.",
+    deprecated: true,
   },
   {
     key: "hr_groups",
     ariaLabel: "Группы сотрудников ОК",
     label: "Роль «ОК» — группы AD (hr_groups)",
-    hint: "ОК: все заявки и полная карточка; пусто — значение из env.",
+    hint: "Только чтение: права сотрудника ОК задаёт справочник шаблонов (миграция 0020), значение этого ключа служебное.",
+    deprecated: true,
   },
   {
     key: "hr_admin_groups",
     ariaLabel: "Группы руководителей ОК",
     label: "Роль «Руководитель ОК» — группы AD (hr_admin_groups)",
-    hint: "Руководитель ОК: контентные настройки и конструктор шагов; пусто — значение из env.",
+    hint: "Только чтение: права руководителя ОК задаёт справочник шаблонов (миграция 0020), значение этого ключа служебное.",
+    deprecated: true,
   },
 ];
 
 // Секция «Доступ и роли» (только админ): группы AD для входа и группы ролей. В
 // форме — текст через запятую, в settings — списки. Ключи инфра-настроек (правит
 // только админ); пустое поле — сброс ключа в БД и фолбэк env на стороне сервера.
+//
+// ВАЖНО (миграция 0020): ключи ролевых групп больше НЕ определяют права.
+// Права резолвятся из справочника perm_template_groups (см. api/app/permissions.py),
+// который переносится из этих ключей один раз и правится отдельно. Поэтому поля
+// групп ролей показаны только для чтения: иначе админ убрал бы группу, увидел
+// «сохранено» и остался бы думать, что права сняты, а человек продолжал бы иметь
+// все админские блоки. Ключ access_groups остаётся рабочим — это вход в систему.
 function AccessRolesEditor(props: { value: AccessRoleGroups; onChange: (v: AccessRoleGroups) => void }) {
   const { value, onChange } = props;
   return (
     <fieldset>
       <legend>Доступ и роли (группы AD)</legend>
       <div className="sed-note">
-        Группы перечисляются через запятую (в settings хранятся списком). Пустое
-        поле — значение не задано в settings, сервер берёт его из env. Ключи групп
-        ролей показывают действующее значение (из БД или env), поэтому список может
-        прийти отсортированным. Группы владельцев шагов (allowed_ad_groups) правит
+        Кто может войти — ключ <code>access_groups</code>: он по-прежнему рабочий.
+        Ключи групп ролей (<code>admin_groups</code>, <code>hr_groups</code>,
+        {" "}<code>hr_admin_groups</code>, <code>sed_admin_groups</code>) перенесены
+        один раз в справочник прав (миграция 0020) и больше не определяют права:
+        права выдаёт справочник шаблонов, который настраивается отдельно. Поэтому
+        здесь они только для чтения — чтобы никто не «снял» права, которые на
+        самом деле остались. Пустое поле — значение не задано в settings, сервер
+        берёт его из env. Группы владельцев шагов (allowed_ad_groups) правит
         руководитель ОК во вкладке «Справочники».
       </div>
       {ACCESS_ROLE_FIELDS.map((field) => (
@@ -293,6 +316,7 @@ function AccessRolesEditor(props: { value: AccessRoleGroups; onChange: (v: Acces
           <input
             aria-label={field.ariaLabel}
             type="text"
+            readOnly={field.deprecated}
             value={value[field.key]}
             onChange={(e) => onChange({ ...value, [field.key]: e.target.value })}
           />
@@ -756,6 +780,8 @@ function BlanksEditor() {
   const [insertSeq, setInsertSeq] = useState<number>(0);
   // Индекс строки подвала, в которую вставляется плейсхолдер.
   const [footerTarget, setFooterTarget] = useState<number>(0);
+  // Показывать ли макет печати бланка (предпросмотр «как в печати»).
+  const [previewOpen, setPreviewOpen] = useState<boolean>(false);
 
   // Список бланков после любой правки (step_count/version из ответа сервера).
   function loadBlanks(): void {
@@ -903,14 +929,16 @@ function BlanksEditor() {
     setInsertSeq(insertSeq + 1);
   }
 
-  // Вставка плейсхолдера в выбранную строку подвала (обычный текст).
+  // Вставка плейсхолдера в выбранную строку подвала. Строка подвала — HTML
+  // абзаца редактора, поэтому текст дописывается в конец её содержимого
+  // (перед закрывающим тегом последнего абзаца), а не разрывается тегом.
   function insertFooterToken(token: string): void {
     // Строк нет — вставлять некуда: кнопки выключены (disabled) на стороне UI.
     setForm((prev) => {
       const lines = [...prev.footer_lines];
       const index = Math.min(Math.max(footerTarget, 0), Math.max(lines.length - 1, 0));
       if (lines.length === 0) return prev;
-      lines[index] = `${lines[index]}${token}`;
+      lines[index] = richTextAppend(lines[index], token);
       return { ...prev, footer_lines: lines };
     });
   }
@@ -1228,45 +1256,48 @@ function BlanksEditor() {
           <PlaceholderButtons target="шапку" onInsert={insertHeaderToken} />
         </div>
 
-        {/* Подвал бланка (footer_lines): список строк печати после таблицы шагов. */}
+        {/* Подвал бланка (footer_lines): список строк печати после шагов. Строки
+            редактируются визуальным редактором (как шапка); хранится тот же
+            список строк, каждая — HTML абзаца печати. */}
         <fieldset className="sed-mt-8">
           <legend>Подвал бланка</legend>
           {form.footer_lines.length === 0 && <div className="sed-note">строк нет</div>}
           {form.footer_lines.map((line, i) => (
-            <div key={i} className="sed-editor-row sed-editor-row--center">
-              <input
-                aria-label={`Строка подвала ${i + 1}`}
+            <div key={i} className="sed-footerline">
+              <RichTextEditor
+                label={`Строка подвала ${i + 1}`}
                 value={line}
                 onFocus={() => setFooterTarget(i)}
-                onClick={() => setFooterTarget(i)}
-                onChange={(e) =>
+                onChange={(html) =>
                   setForm({
                     ...form,
-                    footer_lines: form.footer_lines.map((l, k) => (k === i ? e.target.value : l)),
+                    footer_lines: form.footer_lines.map((l, k) => (k === i ? html : l)),
                   })
                 }
               />
-              <button
-                type="button"
-                className="sed-btn sed-btn--ghost"
-                aria-label={`Выбрать строку подвала ${i + 1}`}
-                onClick={() => setFooterTarget(i)}
-              >
-                Выбрать строку
-              </button>
-              <button
-                type="button"
-                className="sed-btn sed-btn--ghost"
-                aria-label={`Удалить строку подвала ${i + 1}`}
-                onClick={() =>
-                  setForm({
-                    ...form,
-                    footer_lines: form.footer_lines.filter((_, k) => k !== i),
-                  })
-                }
-              >
-                Удалить строку
-              </button>
+              <div className="sed-toolbar sed-mt-8">
+                <button
+                  type="button"
+                  className="sed-btn sed-btn--ghost"
+                  aria-label={`Выбрать строку подвала ${i + 1}`}
+                  onClick={() => setFooterTarget(i)}
+                >
+                  Выбрать строку
+                </button>
+                <button
+                  type="button"
+                  className="sed-btn sed-btn--ghost"
+                  aria-label={`Удалить строку подвала ${i + 1}`}
+                  onClick={() =>
+                    setForm({
+                      ...form,
+                      footer_lines: form.footer_lines.filter((_, k) => k !== i),
+                    })
+                  }
+                >
+                  Удалить строку
+                </button>
+              </div>
             </div>
           ))}
           <div className="sed-toolbar sed-mt-8">
@@ -1274,7 +1305,7 @@ function BlanksEditor() {
               type="button"
               className="sed-btn sed-btn--ghost"
               onClick={() => {
-                setForm({ ...form, footer_lines: [...form.footer_lines, ""] });
+                setForm({ ...form, footer_lines: [...form.footer_lines, "<p></p>"] });
                 setFooterTarget(form.footer_lines.length);
               }}
             >
@@ -1497,42 +1528,15 @@ function BlanksEditor() {
                 </label>
               </div>
 
-              {/* Текст шага и его пунктов — визуальный редактор (HTML уходит в
-                  stage_lines шага бланка; разметка попадёт в печать). */}
+              {/* Текст шага — визуальный редактор целиком: абзацы, набранные в одном
+                  редакторе, уходят в stage_lines списком строк (контракт
+                  хранения не меняется — разметка попадает в печать). */}
               <div className="sed-blanktext">
-                {step.stage_lines.map((line, li) => (
-                  <div key={li} className="sed-blanktext__line">
-                    <RichTextEditor
-                      label={`Пункт шага ${i + 1}.${li + 1}`}
-                      value={line}
-                      onChange={(html) =>
-                        patchStep(i, {
-                          stage_lines: step.stage_lines.map((l, k) => (k === li ? html : l)),
-                        })
-                      }
-                    />
-                    <button
-                      type="button"
-                      className="sed-btn sed-btn--ghost"
-                      aria-label={`Удалить пункт шага ${i + 1}.${li + 1}`}
-                      onClick={() =>
-                        patchStep(i, { stage_lines: step.stage_lines.filter((_, k) => k !== li) })
-                      }
-                    >
-                      Удалить пункт
-                    </button>
-                  </div>
-                ))}
-                <div className="sed-toolbar sed-mt-8">
-                  <button
-                    type="button"
-                    className="sed-btn sed-btn--ghost"
-                    aria-label={`Добавить пункт шага ${i + 1}`}
-                    onClick={() => patchStep(i, { stage_lines: [...step.stage_lines, "<p></p>"] })}
-                  >
-                    Добавить пункт
-                  </button>
-                </div>
+                <RichTextEditor
+                  label={`Текст шага ${i + 1}`}
+                  value={richTextLinesToHtml(step.stage_lines)}
+                  onChange={(html) => patchStep(i, { stage_lines: richTextHtmlToLines(html) })}
+                />
               </div>
             </div>
           ))}
@@ -1585,6 +1589,33 @@ function BlanksEditor() {
             </div>
           )}
           </div>
+        )}
+        {/* Макет печати бланка (предпросмотр): собирается из полей карточки и
+            состава шагов как есть, до сохранения бланка. */}
+        <div className="sed-toolbar sed-mt-8">
+          <button
+            type="button"
+            className="sed-btn sed-btn--ghost"
+            aria-pressed={previewOpen}
+            onClick={() => setPreviewOpen((open) => !open)}
+          >
+            {previewOpen ? "Скрыть предпросмотр печати" : "Предпросмотр «как в печати»"}
+          </button>
+        </div>
+        {previewOpen && (
+          <BlankPreview
+            blankName={form.name}
+            headerHtml={form.header_html}
+            footerLines={form.footer_lines}
+            steps={steps.map((step) => ({
+              title: step.title,
+              stageLines: step.stage_lines,
+              approvalMode: step.approval_mode ?? null,
+              executorKind: step.executor_kind,
+              assignees: step.assignees,
+              ownerGroup: step.executor_kind === "ad_group" ? step.owner_group : null,
+            }))}
+          />
         )}
         <div className="sed-toolbar sed-mt-8">
           <button type="button" className="sed-btn" onClick={handleSaveForm} disabled={busy}>
@@ -1766,13 +1797,6 @@ function StepsCatalogEditor() {
 
   function removeAssignee(sam: string): void {
     setForm({ ...form, assignees: form.assignees.filter((a) => a !== sam) });
-  }
-
-  function patchLine(index: number, html: string): void {
-    setForm({
-      ...form,
-      stage_lines: form.stage_lines.map((l, k) => (k === index ? html : l)),
-    });
   }
 
   const editing = form.id !== null;
@@ -2054,38 +2078,14 @@ function StepsCatalogEditor() {
           </label>
         </div>
 
-        {/* Текст шага и его пунктов — визуальный редактор (HTML уходит в
-            stage_lines; разметка попадёт в печать бланка). */}
+        {/* Текст шага справочника — визуальный редактор целиком: абзацы одного
+            редактора уходят в stage_lines списком строк (контракт хранения). */}
         <div className="sed-blanktext">
-          {form.stage_lines.map((line, li) => (
-            <div key={li} className="sed-blanktext__line">
-              <RichTextEditor
-                label={`Пункт шага справочника ${li + 1}`}
-                value={line}
-                onChange={(html) => patchLine(li, html)}
-              />
-              <button
-                type="button"
-                className="sed-btn sed-btn--ghost"
-                aria-label={`Удалить пункт шага справочника ${li + 1}`}
-                onClick={() =>
-                  setForm({ ...form, stage_lines: form.stage_lines.filter((_, k) => k !== li) })
-                }
-              >
-                Удалить пункт
-              </button>
-            </div>
-          ))}
-          <div className="sed-toolbar sed-mt-8">
-            <button
-              type="button"
-              className="sed-btn sed-btn--ghost"
-              aria-label="Добавить пункт шага справочника"
-              onClick={() => setForm({ ...form, stage_lines: [...form.stage_lines, "<p></p>"] })}
-            >
-              Добавить пункт
-            </button>
-          </div>
+          <RichTextEditor
+            label="Текст шага справочника"
+            value={richTextLinesToHtml(form.stage_lines)}
+            onChange={(html) => setForm({ ...form, stage_lines: richTextHtmlToLines(html) })}
+          />
         </div>
 
         <div className="sed-toolbar sed-mt-8">

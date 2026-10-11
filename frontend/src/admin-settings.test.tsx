@@ -930,7 +930,8 @@ describe("AdminSettings", () => {
   });
 
   // Шапка бланка: визуальный редактор + вставка плейсхолдера; подвал — список
-  // строк с добавлением строки и вставкой плейсхолдера в выбранную строку.
+  // строк, каждая своим визуальным редактором, с добавлением строки и вставкой
+  // плейсхолдера в выбранную строку.
   it("редакторы шапки и подвала: плейсхолдеры и строки уходят в карточку", async () => {
     vi.mocked(getSettings).mockResolvedValue(settings);
     vi.mocked(updateBlank).mockResolvedValue({ id: 10 });
@@ -942,15 +943,26 @@ describe("AdminSettings", () => {
 
     // Шапка из справочника показана в визуальном редакторе.
     expect(await screen.findByText("Заявка на увольнение {fio}")).toBeInTheDocument();
-    // Подвал: строка из справочника + добавление новой.
-    expect(screen.getByLabelText("Строка подвала 1")).toHaveValue("Подпись: {manager}");
-    fireEvent.click(screen.getByText("Добавить строку подвала"));
-    const line2 = await screen.findByLabelText("Строка подвала 2");
-    fireEvent.change(line2, { target: { value: "Дата" } });
+    // Подвал: строка из справочника — тоже визуальный редактор (абзац печати).
+    expect(screen.getByLabelText("Строка подвала 1")).toBeInTheDocument();
+    expect(within(screen.getByLabelText("Строка подвала 1")).getByText("Подпись: {manager}")).toBeInTheDocument();
 
-    // Плейсхолдер в выбранную строку подвала (после правки поля цель — строка 2).
+    // Плейсхолдер в выбранную строку подвала (по умолчанию — первая).
     fireEvent.click(screen.getByRole("button", { name: "Вставить {date} в подвал" }));
-    await waitFor(() => expect(screen.getByLabelText("Строка подвала 2")).toHaveValue("Дата{date}"));
+    await waitFor(() =>
+      expect(
+        within(screen.getByLabelText("Строка подвала 1")).getByText("Подпись: {manager}{date}"),
+      ).toBeInTheDocument(),
+    );
+
+    // Добавленная строка подвала — пустой абзац; целью вставки становится она.
+    fireEvent.click(screen.getByText("Добавить строку подвала"));
+    await screen.findByLabelText("Строка подвала 2");
+    expect(screen.getByText("Плейсхолдер вставится в строку 2.")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Вставить {fio} в подвал" }));
+    await waitFor(() =>
+      expect(within(screen.getByLabelText("Строка подвала 2")).getByText("{fio}")).toBeInTheDocument(),
+    );
 
     // Плейсхолдер в шапку: уходит в визуальный редактор.
     fireEvent.click(screen.getByRole("button", { name: "Вставить {fio} в шапку" }));
@@ -962,7 +974,8 @@ describe("AdminSettings", () => {
         10,
         expect.objectContaining({
           header_html: expect.stringContaining("Заявка на увольнение {fio}{fio}"),
-          footer_lines: ["Подпись: {manager}", "Дата{date}"],
+          // Строки подвала остаются списком строк; новая — абзац редактора.
+          footer_lines: ["Подпись: {manager}{date}", "<p>{fio}</p>"],
         }),
       ),
     );
@@ -992,6 +1005,60 @@ describe("AdminSettings", () => {
     await screen.findByLabelText("Строка подвала 1");
     expect(screen.getByRole("button", { name: "Вставить {fio} в подвал" })).not.toBeDisabled();
     expect(screen.getByText("Плейсхолдер вставится в строку 1.")).toBeInTheDocument();
+  });
+
+  // Предпросмотр «как в печати»: макет шапки, блоков шагов и подвала с
+  // подстановкой тех плейсхолдеров, значения которых известны в редакторе.
+  it("предпросмотр печати: макет шапки, шагов и подвала с плейсхолдерами", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Бланки" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Бланки" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Править бланк uvol_base" }));
+    // В шапку добавлен плейсхолдер со значением, известным в редакторе.
+    fireEvent.click(screen.getByRole("button", { name: "Вставить {blank_name} в шапку" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Предпросмотр «как в печати»" }));
+
+    const sheet = await screen.findByLabelText("Предпросмотр печати бланка");
+    // Макет подписан как приблизительный: документ собирает сервер при печати.
+    expect(screen.getByText(/Макет приблизителен/)).toBeInTheDocument();
+    // Шапка: известный плейсхолдер подставлен, неизвестный остался текстом.
+    expect(within(sheet).getByText("Заявка на увольнение {fio}Увольнение (базовый)")).toBeInTheDocument();
+    // Блок шага: номер, название с режимом, текст, ответственный и отметка.
+    expect(within(sheet).getByText("1. Непосредственный руководитель (параллельно)")).toBeInTheDocument();
+    expect(within(sheet).getByText("Ознакомить с приказом")).toBeInTheDocument();
+    // Ответственный и отметка — у каждого блока шага.
+    expect(within(sheet).getAllByText("Ответственный:")).toHaveLength(2);
+    expect(within(sheet).getByText("руководитель сотрудника")).toBeInTheDocument();
+    expect(within(sheet).getAllByText("Отметка/дата:")).toHaveLength(2);
+    // Групповой шаг печатается по группе AD, режим — последовательный.
+    expect(within(sheet).getByText("2. Бухгалтерия (последовательно)")).toBeInTheDocument();
+    expect(within(sheet).getByText("SED_STEP_BUH")).toBeInTheDocument();
+    // Подвал печатается по центру; неизвестный на клиенте плейсхолдер остаётся
+    // текстом — ровно как в печати.
+    expect(within(sheet).getByText("Подвал")).toBeInTheDocument();
+    expect(within(sheet).getByText("Подпись: {manager}")).toBeInTheDocument();
+  });
+
+  // Пустые шапка, подвал и состав: макет говорит, что напечатает сервер, и не
+  // показывает лишних блоков.
+  it("предпросмотр печати: без шапки, подвала и шагов объясняет, что печатает сервер", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+    vi.mocked(getBlankSteps).mockResolvedValue([]);
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Бланки" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Бланки" }));
+    // uvol_line — без шапки, подвала и состава.
+    fireEvent.click(await screen.findByRole("button", { name: "Править бланк uvol_line" }));
+    fireEvent.click(screen.getByRole("button", { name: "Предпросмотр «как в печати»" }));
+
+    const sheet = await screen.findByLabelText("Предпросмотр печати бланка");
+    expect(within(sheet).getByText(/Шапка не задана/)).toBeInTheDocument();
+    expect(within(sheet).getByText(/Строк подвала нет/)).toBeInTheDocument();
+    expect(within(sheet).getByText(/Шагов нет/)).toBeInTheDocument();
   });
 
   // Правка бланка: код неизменен (read-only), остальные поля уходят в updateBlank.
@@ -1138,8 +1205,8 @@ describe("AdminSettings", () => {
     expect(setBlankSteps).not.toHaveBeenCalled();
   });
 
-  // Текст шага и его пунктов — визуальный редактор: разметка уходит в
-  // stage_lines шага бланка, с предупреждением о печати.
+  // Текст шага — визуальный редактор целиком (абзацы набираются одним полем):
+  // разметка уходит в stage_lines списком строк, с предупреждением о печати.
   it("текст шага: визуальный редактор сохраняет HTML в stage_lines шага", async () => {
     vi.mocked(getSettings).mockResolvedValue(settings);
     vi.mocked(setBlankSteps).mockResolvedValue({ blank_id: 10, count: 2 });
@@ -1149,13 +1216,14 @@ describe("AdminSettings", () => {
     fireEvent.click(screen.getByRole("button", { name: "Бланки" }));
     fireEvent.click(await screen.findByRole("button", { name: "Править бланк uvol_base" }));
 
-    // Пункт первого шага редактируется визуально.
+    // Текст шага редактируется одним редактором на шаг (а не по редактору на пункт).
     expect(await screen.findByText("Ознакомить с приказом")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Пункт шага 1.1")).toBeNull();
     const toolbars = screen.getAllByRole("toolbar");
     expect(toolbars.length).toBeGreaterThanOrEqual(1);
 
-    // Помечаем выделенное в пункте шага: полужирный (панель редактора этого пункта).
-    const editorBlock = (await screen.findByLabelText("Пункт шага 1.1")).closest(".sed-rte");
+    // Помечаем выделенное в тексте шага: полужирный (панель редактора шага).
+    const editorBlock = (await screen.findByLabelText("Текст шага 1")).closest(".sed-rte");
     expect(editorBlock).not.toBeNull();
     const area = editorBlock?.querySelector<HTMLElement>(".ProseMirror");
     expect(area).not.toBeNull();
@@ -1171,8 +1239,6 @@ describe("AdminSettings", () => {
       within(editorBlock as HTMLElement).getByRole("button", { name: "Полужирный" }),
     );
 
-    // Добавляем пункт и сохраняем состав: разметка уходит в stage_lines.
-    fireEvent.click(screen.getByLabelText("Добавить пункт шага 1"));
     fireEvent.click(screen.getByRole("button", { name: "Сохранить состав" }));
 
     await waitFor(() => expect(setBlankSteps).toHaveBeenCalled());
@@ -1180,7 +1246,7 @@ describe("AdminSettings", () => {
     expect(sentSteps[0].title).toBe("Непосредственный руководитель");
     expect(sentSteps[0].stage_lines[0]).toContain("<strong>");
     expect(sentSteps[0].stage_lines[0]).toContain("Ознакомить с приказом");
-    // Пункты: прежний остался, добавленный пустой не уходит.
+    // Текст шага — список строк печати: пустых строк в него не уходит.
     expect(sentSteps[0].stage_lines).toHaveLength(1);
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Состав бланка сохранён"));
   });

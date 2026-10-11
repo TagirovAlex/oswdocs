@@ -422,6 +422,15 @@ _PRINT_ALIGN_RE = re.compile(r"(?i)text-align\s*:\s*(left|center|right|justify)\
 _HTML_TAG_RE = re.compile(r"<\s*(/?)\s*([a-zA-Z][a-zA-Z0-9]*)([^>]*)>")
 
 
+def _html_has_text(chunk: str) -> bool:
+    """Есть ли в HTML-фрагменте видимый текст (без тегов и сущностей).
+
+    Нужна печати подвала: пустой абзац редактора («<p></p>») после разбора по
+    закрывающему `</p>` даёт фрагмент «<p>» — без этой проверки на бланке
+    печаталась бы пустая строка, которой раньше (текстовые строки) не было."""
+    return bool(unescape(_HTML_TAG_RE.sub("", str(chunk))).strip())
+
+
 def _blank_title(context: Dict[str, object]) -> str:
     """Название бланка на бланке: снимок blank_name, иначе вид документа.
 
@@ -768,17 +777,31 @@ def _add_steps(document: object, context: Dict[str, object]) -> None:
 def _add_blank_footer_lines(document: object, context: Dict[str, object]) -> None:
     """Подвал бланка из снимка заявки: строки blank_footer_lines по центру.
 
-    Строки печатаются в порядке снимка с подставленными плейсхолдерами; подвала
-    в снимке нет — ничего не печатаем (подпись страницы ниже остаётся)."""
+    Строка подвала — абзац HTML визуального редактора (контракт хранения —
+    список строк, TEMPLATES.md §1), поэтому абзацы печатаются тем же разбором,
+    что шапка (_PRINT_BLOCK_RE + _add_stage_text): начертания, кегль заголовка и
+    выравнивание редактора доходят до бланка. Правило печати подвала — по
+    центру; выравнивание, заданное в редакторе, переопределяет его (как в шапке).
+
+    Обратная совместимость: строка БЕЗ разметки разбор не меняет — это один
+    абзац по центру с текстом, как печаталось до появления редактора подвала.
+    Значения плейсхолдеров подставляются с ЭКРАНИРОВАНИЕМ (как в шапке и тексте
+    шага): свободный текст заявки не должен стать разметкой подвала."""
     from docx.enum.text import WD_ALIGN_PARAGRAPH
 
     for raw in context.get("blank_footer_lines") or []:
         text = str(raw).strip()
         if not text:
             continue
-        paragraph = document.add_paragraph()
-        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        _add_runs(paragraph, render_blank_text(text, context))
+        rendered = render_blank_text(text, context, escape=True)
+        for chunk in _PRINT_BLOCK_RE.split(rendered):
+            # Чанк без текста пропускаем: пустой абзац редактора («<p></p>»)
+            # печатать нельзя — иначе на бланке появляется пустая строка.
+            if not _html_has_text(chunk):
+                continue
+            paragraph = document.add_paragraph()
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            _add_stage_text(paragraph, chunk)
 
 
 def _add_blank_footer(document: object, context: Dict[str, object]) -> None:

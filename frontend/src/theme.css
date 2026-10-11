@@ -1076,6 +1076,58 @@ fieldset textarea {
   margin-top: 8px;
 }
 
+/* Строка подвала бланка: визуальный редактор строки и действия над ней. */
+.sed-footerline {
+  margin-top: 8px;
+}
+
+/* Предпросмотр печати бланка (МАКЕТ, не документ): «лист» с шапкой, блоками
+   шагов и подвалом. Начертания и кегль редактора макет не повторяет — печать
+   собирает документ на сервере, поэтому лист нейтральный. */
+.sed-preview {
+  margin-top: 8px;
+}
+
+.sed-preview__sheet {
+  border: 1px solid var(--sed-border);
+  border-radius: var(--sed-radius);
+  background: var(--sed-surface);
+  color: var(--sed-text);
+  padding: 12px 16px;
+  font-family: "Times New Roman", Times, serif;
+}
+
+.sed-preview__block + .sed-preview__block {
+  margin-top: 12px;
+  border-top: 1px dashed var(--sed-border);
+  padding-top: 8px;
+}
+
+/* Блок шага макета: название с режимом, текст, ответственный, отметка. */
+.sed-preview__step + .sed-preview__step {
+  margin-top: 8px;
+}
+
+.sed-preview__heading {
+  font-weight: 700;
+  margin: 4px 0;
+}
+
+.sed-preview__line--center {
+  text-align: center;
+}
+
+.sed-preview__line--right {
+  text-align: right;
+}
+
+/* Пояснения макета (что сервер подставит сам) — не часть «листа». */
+.sed-preview__hint {
+  font-size: 12px;
+  color: var(--sed-text-muted);
+  margin: 2px 0;
+}
+
 /* Визуальный редактор текста этапа (TipTap): панель кнопок + область ввода. */
 .sed-rte {
   margin-top: 8px;

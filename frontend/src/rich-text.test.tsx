@@ -4,7 +4,12 @@
 // title/stage_lines этапа в админке).
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import { RichTextEditor } from "./rich-text";
+import {
+  RichTextEditor,
+  richTextAppend,
+  richTextHtmlToLines,
+  richTextLinesToHtml,
+} from "./rich-text";
 
 // Выделение всего текста редактора и синхронизация его с состоянием ProseMirror.
 // jsdom не шлёт selectionchange сам и не фокусирует contenteditable без
@@ -183,5 +188,59 @@ describe("RichTextEditor", () => {
     ) as HTMLElement;
     expect(area.textContent).toBe("Акт вымышленного увольнения");
     expect(area.style.textAlign).toBe("center");
+  });
+});
+
+// Строки бланка (<-> HTML редактора): контракт хранения подвала и текста шага —
+// список строк, а редактор показывает их одним полем.
+describe("строки бланка визуального редактора", () => {
+  // Абзацы редактора делятся на строки печати (границы те же, что у печати).
+  it("делит HTML редактора на строки по абзацам, заголовкам и <br>", () => {
+    expect(
+      richTextHtmlToLines("<p>Первый</p><p>Второй</p>"),
+    ).toEqual(["<p>Первый</p>", "<p>Второй</p>"]);
+    expect(richTextHtmlToLines("<h2>Раздел</h2><p>Текст</p>")).toEqual([
+      "<h2>Раздел</h2>",
+      "<p>Текст</p>",
+    ]);
+    expect(richTextHtmlToLines("<p>Первая<br>вторая</p>")).toEqual([
+      "<p>Первая<br>",
+      "вторая</p>",
+    ]);
+    expect(richTextHtmlToLines("")).toEqual([]);
+  });
+
+  // Список и разметка блока не рвутся: строка остаётся целым блоком (иначе
+  // обратная сборка разорвала бы его и редактор терял бы позицию каретки).
+  it("не рвёт список и оформленные абзацы пополам", () => {
+    const html = "<p>Текст</p><ul><li><p>Пункт</p></li></ul>";
+    expect(richTextHtmlToLines(html)).toEqual(["<p>Текст</p>", "<ul><li><p>Пункт</p></li></ul>"]);
+    expect(richTextHtmlToLines('<p style="text-align: right"><b>Дата</b></p>')).toEqual([
+      '<p style="text-align: right"><b>Дата</b></p>',
+    ]);
+  });
+
+  // Сборка и разбор — обратные операции: правка редактора не теряется при
+  // возврате значения в редактор (иначе каретка прыгала бы на каждый ввод).
+  it("собирает строки обратно в HTML без потерь", () => {
+    const html = '<p><strong>Первый</strong></p><h3 style="text-align: center">Заголовок</h3>';
+    expect(richTextHtmlToLines(richTextLinesToHtml(richTextHtmlToLines(html)))).toEqual(
+      richTextHtmlToLines(html),
+    );
+    expect(richTextLinesToHtml(richTextHtmlToLines(html))).toBe(html);
+    // Уже сохранённые бланки: простой текст оборачивается абзацем редактора.
+    expect(richTextLinesToHtml(["Подпись: {manager}", "<p>Дата {date}</p>"])).toBe(
+      "<p>Подпись: {manager}</p><p>Дата {date}</p>",
+    );
+    expect(richTextLinesToHtml([])).toBe("");
+  });
+
+// Плейсхолдер дописывается в конец содержимого выбранной строки подвала.
+  it("дописывает текст в конец абзаца значения", () => {
+    expect(richTextAppend("<p></p>", "{date}")).toBe("<p>{date}</p>");
+    expect(richTextAppend("Подпись: {manager}", "{date}")).toBe("Подпись: {manager}{date}");
+    expect(richTextAppend("<p>Первый</p><p>Дата</p>", "{fio}")).toBe(
+      "<p>Первый</p><p>Дата{fio}</p>",
+    );
   });
 });

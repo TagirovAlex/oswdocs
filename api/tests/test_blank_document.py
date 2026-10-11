@@ -659,6 +659,102 @@ def test_build_blank_document_without_footer_lines_prints_nothing():
         assert _opened(blob).tables == []
 
 
+def test_build_blank_document_footer_plain_line_unchanged():
+    """Строка подвала БЕЗ разметки печатается ровно как раньше: один абзац по
+    центру с текстом и подставленными плейсхолдерами (регрессия старых бланков)."""
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    lines = ["Подпись сотрудника ____________________", "Дата: {date}, ФИО: {fio}"]
+    blob = build_blank_document(_context(blank_footer_lines=lines))
+    paragraphs = _body_paragraphs(blob)
+    texts = [paragraph.text for paragraph in paragraphs]
+    assert texts[-2:] == [
+        "Подпись сотрудника ____________________",
+        f"Дата: 01.10.2026, ФИО: {FAKE_FIO}",
+    ]
+    assert all(paragraph.alignment == WD_ALIGN_PARAGRAPH.CENTER for paragraph in paragraphs[-2:])
+    # Разбор разметки не изменил и число абзацев: строка без разметки — одна.
+    assert all("<" not in text and ">" not in text for text in texts[-2:])
+
+
+def test_build_blank_document_footer_html_keeps_formatting_and_alignment():
+    """Подвал понимает HTML редактора: начертания печатаются, выравнивание
+    редактора переопределяет правило «подвал по центру»."""
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.shared import Pt
+
+    blob = build_blank_document(
+        _context(
+            blank_footer_lines=[
+                "<p><b>Подпись</b> сотрудника <i>{fio}</i></p>",
+                '<p style="text-align: right">Дата {date}</p>',
+                "<p style=\"text-align: center\">По центру</p>",
+            ]
+        )
+    )
+    paragraphs = _body_paragraphs(blob)
+    signed, dated, centered = paragraphs[-3], paragraphs[-2], paragraphs[-1]
+    assert signed.text == f"Подпись сотрудника {FAKE_FIO}"
+    assert [run.text for run in signed.runs if run.bold] == ["Подпись"]
+    assert [run.text for run in signed.runs if run.italic] == [FAKE_FIO]
+    # Выравнивание из редактора доходит до абзаца, без него — правило «по центру».
+    assert dated.text == "Дата 01.10.2026"
+    assert dated.alignment == WD_ALIGN_PARAGRAPH.RIGHT
+    assert centered.text == "По центру"
+    assert centered.alignment == WD_ALIGN_PARAGRAPH.CENTER
+
+
+def test_build_blank_document_footer_html_splits_blocks_and_sanitizes():
+    """Несколько абзацев в одной строке подвала печатаются абзацами, заголовок
+    — жирным кеглем заголовка, служебные теги на бланок не идут (санитайзер шапки)."""
+    from docx.shared import Pt
+
+    blob = build_blank_document(
+        _context(
+            blank_footer_lines=[
+                "<p>Подпись</p><p>Дата {date}</p>",
+                "<h3>Подраздел вымышленный</h3>",
+                "Подпись <script>alert(1)</script> и <img src=x onerror=alert(2)> табель",
+            ]
+        )
+    )
+    paragraphs = _body_paragraphs(blob)
+    texts = [paragraph.text for paragraph in paragraphs]
+    assert texts[-4:] == [
+        "Подпись",
+        "Дата 01.10.2026",
+        "Подраздел вымышленный",
+        "Подпись  и  табель",
+    ]
+    subheading = paragraphs[-2]
+    assert all(run.bold for run in subheading.runs)
+    assert [run.font.size for run in subheading.runs] == [Pt(BLANK_TITLE_PT - 2)]
+    text = _docx_text(blob)
+    assert "alert" not in text
+    assert "onerror" not in text
+    assert "<img" not in text
+
+
+def test_build_blank_document_footer_placeholder_value_stays_plain_text():
+    """Значение плейсхолдера в подвале печатается текстом: разметка из значения
+    не разрывает подвал и не превращается в начертание (как в шапке и шаге)."""
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    markup = "</p><b>жирно</b> и <script>alert(1)</script>"
+    blob = build_blank_document(
+        _context(
+            subject=f"тема {markup}",
+            blank_footer_lines=["<p>Подпись {subject}</p>"],
+        )
+    )
+    paragraphs = _body_paragraphs(blob)
+    assert paragraphs[-1].text == f"Подпись тема {markup}"
+    assert paragraphs[-1].alignment == WD_ALIGN_PARAGRAPH.CENTER
+    bold = [run.text for run in paragraphs[-1].runs if run.bold]
+    assert bold == []
+    assert _docx_names(blob)[0] == "[Content_Types].xml"
+
+
 def test_build_blank_document_substitutes_all_placeholders():
     """Плейсхолдеры контракта печатаются значениями (шапка, подвал, текст шага)."""
     context = _context(
