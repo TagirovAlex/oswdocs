@@ -1184,8 +1184,8 @@ def _request_for_notify(assignee: str | None = BUH_SAM) -> _Request:
 
 
 def test_notify_assigned_lazy_settings_read(tmp_path, ad_reader):
-    """Без адресатов mail_templates/smtp_from не читаются вовсе, с адресатами —
-    по одному чтению каждого ключа на заявку (регресс на лишний SELECT к настройкам)."""
+    """Без адресатов mail_templates не читаются вовсе, с адресатами — по одному
+    чтению ключа на заявку (регресс на лишний SELECT к настройкам)."""
     queue = FileMailQueue(tmp_path / "mail_queue.json")
     store = _CountingMailSettingsStore()
     settings = Settings(APP_BASE_URL="https://sed.example.local")
@@ -1195,7 +1195,7 @@ def test_notify_assigned_lazy_settings_read(tmp_path, ad_reader):
     assert queue.pending_count() == 0
     # С ридером AD — по одному чтению на заявку и письмо в очередь.
     _notify_assigned(_request_for_notify(), queue, store, ad_reader, settings)
-    assert store.reads == ["mail_templates", "smtp_from"]
+    assert store.reads == ["mail_templates"]
     assert queue.pending_count() == 1
 
 
@@ -1215,12 +1215,12 @@ MAIL_TEMPLATES_SEED = json.dumps(
         {
             "code": EVENT_ASSIGNED,
             "subject": "Назначена {{ request_id }}",
-            "body_html": "<html>{{ fio }} {{ url }}</html>",
+            "body_html": "<html>{{ fio }} {{ url }} {{ comment }}</html>",
         },
         {
             "code": EVENT_RETURNED,
             "subject": "Возврат {{ request_id }}",
-            "body_html": "<html>{{ url }}</html>",
+            "body_html": "<html>{{ url }} {{ comment }}</html>",
         },
         {
             "code": EVENT_CLOSED,
@@ -1704,6 +1704,46 @@ def test_return_without_previous_block_goes_to_rework(
         (_mail_of(BUH_SAM), EVENT_ASSIGNED),
         (_mail_of(hr["X-Mock-Sam"]), EVENT_RETURNED),
     ]
+
+
+def test_return_letter_carries_decision_comment(
+    client, hr, buh_owner, mail_queue, mail_settings_store, mail_ad_reader,
+    test_settings_override, route_override
+):
+    """{{ comment }} в письме — комментарий решения (возврат/отказ), который автор
+    вводит в этом действии: причина уходит вместе с письмом.
+
+    Текст подставляется текстом: разметка из комментария не собирается."""
+    rid = _create_and_submit(client, hr)
+    reason = 'Нет документов <script>alert("1")</script>'
+    assert client.post(
+        f"/requests/{rid}/steps/1/decision",
+        json={"decision": "return", "comment": reason},
+        headers=buh_owner,
+    ).status_code == 200
+    letter = [
+        message for message in mail_queue.pending() if message.event == EVENT_RETURNED
+    ]
+    assert len(letter) == 1
+    assert "<script>" not in letter[0].html
+    assert "&lt;script&gt;" in letter[0].html
+    assert "Нет документов" in letter[0].html
+
+
+def test_comment_placeholder_empty_without_decision_comment(
+    client, hr, buh_owner, mail_queue, mail_settings_store, mail_ad_reader,
+    test_settings_override, route_override
+):
+    """Без комментария решения {{ comment }} — пустая строка, письмо не падает.
+
+    Подача заявки — не решение: письмо «назначена» уходит без причины."""
+    rid = _create_and_submit(client, hr)
+    assigned = [
+        message for message in mail_queue.pending() if message.event == EVENT_ASSIGNED
+    ]
+    assert len(assigned) == 1
+    assert assigned[0].html.rstrip().endswith("</html>")
+    assert "{{ comment }}" not in assigned[0].html
 
 
 def test_reissue_notifies_step_owner(

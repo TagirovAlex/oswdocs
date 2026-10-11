@@ -68,11 +68,15 @@ def _escalation_recipient(ad_reader: object | None, request: object) -> str | No
 
 
 def _mail_context(request: object, base_url: str) -> dict:
-    """Контекст письма (без ПДн; ссылка на заявку — из APP_BASE_URL)."""
+    """Контекст письма (без ПДн; ссылка на заявку — из APP_BASE_URL).
+
+    comment пустой: у писем worker-а (напоминание/эскалация/просрочка) решения
+    согласующего нет — {{ comment }} подставится пустой строкой."""
     return {
         "fio": request.fio,
         "request_id": request.id,
         "url": request_url(base_url, request.id),
+        "comment": "",
     }
 
 
@@ -85,7 +89,6 @@ def run_once(
     approval_ttl_days: int,
     ad_reader: object | None,
     base_url: str,
-    smtp_from: str = "",
     now: datetime | None = None,
 ) -> WorkerResult:
     """Один проход: просрочки, напоминания, эскалация + разбор очереди писем.
@@ -117,7 +120,6 @@ def run_once(
                         EVENT_RETURNED,
                         mail_templates,
                         _mail_context(request, base_url),
-                        subject_prefix=smtp_from,
                     )
                 break  # заявка ушла на доработку: остальные шаги не трогаем
             if (
@@ -134,7 +136,6 @@ def run_once(
                         EVENT_REMINDER,
                         mail_templates,
                         _mail_context(request, base_url),
-                        subject_prefix=smtp_from,
                     ):
                         result.reminders += 1
         if request.status != IN_APPROVAL:
@@ -161,7 +162,6 @@ def run_once(
                 EVENT_ESCALATION,
                 mail_templates,
                 _mail_context(request, base_url),
-                subject_prefix=smtp_from,
             ):
                 result.escalations += 1
 
@@ -192,6 +192,7 @@ def main() -> None:
         DbMailQueue,
         SmtpMailer,
         resolve_smtp_from,
+        resolve_smtp_from_name,
         resolve_smtp_host,
         resolve_smtp_port,
         resolve_smtp_value,
@@ -244,7 +245,6 @@ def main() -> None:
                 settings_store,
                 mail_queue,
                 "schedule_enterprises_sync",
-                smtp_from,
                 "предприятий: %d" % len(enterprises),
             )
     except Exception:
@@ -304,7 +304,6 @@ def main() -> None:
                 settings_store,
                 mail_queue,
                 "schedule_ad_links_sync",
-                smtp_from,
                 "связок создано: %d; просмотрено: %d"
                 % (sync_result.created, sync_result.scanned),
             )
@@ -332,7 +331,6 @@ def main() -> None:
                 settings_store,
                 mail_queue,
                 "schedule_ad_groups_sync",
-                smtp_from,
                 "состав групп AD обновлён",
             )
     except Exception:
@@ -350,7 +348,6 @@ def main() -> None:
             settings.DATABASE_URL,
             settings.FILES_DIR,
             queue=mail_queue,
-            smtp_from=smtp_from,
         ):
             print("archive: регламентный бэкап выполнен")
     except Exception:
@@ -363,6 +360,9 @@ def main() -> None:
         username=smtp_user,
         password=smtp_password,
         from_addr=smtp_from,
+        from_name=resolve_smtp_from_name(
+            read_setting_value(settings_store, "smtp_from_name")
+        ),
     )
     result = run_once(
         store,
@@ -373,7 +373,6 @@ def main() -> None:
         approval_ttl_days,
         _build_ad_reader(),
         settings.APP_BASE_URL,
-        smtp_from=smtp_from,
     )
     print(
         "worker: просрочено=%d напоминаний=%d эскалаций=%d "

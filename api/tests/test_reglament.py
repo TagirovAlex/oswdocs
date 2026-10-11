@@ -55,19 +55,18 @@ def _schedule(**overrides):
 
 
 def test_notify_schedule_sends_to_each_recipient():
-    """Каждому адресату — письмо event=reglament; тема с префиксом smtp_from."""
+    """Каждому адресату — письмо event=reglament с темой из расписания."""
     queue = RecordingQueue()
     count = notify_schedule(
         _store(_schedule()),
         queue,
         "schedule_enterprises_sync",
-        "sed@example.com",
         "предприятий: 3",
     )
     assert count == 2
     assert [m.to for m in queue.enqueued] == ["a@example.com", "b@example.com"]
     assert all(m.event == "reglament" for m in queue.enqueued)
-    assert queue.enqueued[0].subject == "sed@example.com Регламент выполнен"
+    assert queue.enqueued[0].subject == "Регламент выполнен"
     assert "предприятий: 3" in queue.enqueued[0].html
 
 
@@ -78,7 +77,6 @@ def test_notify_schedule_summary_substituted():
         _store(_schedule(recipients=["a@example.com"])),
         queue,
         "schedule_enterprises_sync",
-        "",
         "связок создано: 5; просмотрено: 100",
     )
     assert len(queue.enqueued) == 1
@@ -92,7 +90,6 @@ def test_notify_schedule_notify_false_returns_zero():
         _store(_schedule(notify=False)),
         queue,
         "schedule_enterprises_sync",
-        "sed@example.com",
         "предприятий: 1",
     )
     assert count == 0
@@ -102,7 +99,7 @@ def test_notify_schedule_notify_false_returns_zero():
 def test_notify_schedule_no_schedule_returns_zero():
     """Расписания нет в settings — 0 писем."""
     queue = RecordingQueue()
-    assert notify_schedule(_store(None), queue, "schedule_enterprises_sync", "", "x") == 0
+    assert notify_schedule(_store(None), queue, "schedule_enterprises_sync", "x") == 0
 
 
 def test_notify_schedule_empty_recipients_skipped():
@@ -112,7 +109,6 @@ def test_notify_schedule_empty_recipients_skipped():
         _store(_schedule(recipients=["a@example.com", "", "  "])),
         queue,
         "schedule_enterprises_sync",
-        "",
         "x",
     )
     assert count == 1

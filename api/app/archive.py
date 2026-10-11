@@ -27,7 +27,7 @@ from pydantic import BaseModel, Field
 from .audit import AuditEvent, audit_log
 from .config import Settings, get_settings
 from .deps import CurrentUser, get_current_user
-from .mailer import MailQueue, get_mail_queue, resolve_smtp_from
+from .mailer import MailQueue, get_mail_queue
 from .settings_routes import (
     DbSettingsStore,
     SettingsUnavailable,
@@ -157,7 +157,6 @@ def _cleanup(backup_dir: Path, keep: int) -> None:
 def _notify_backup(
     store: DbSettingsStore,
     queue: MailQueue,
-    smtp_from: str,
     target: Path,
 ) -> None:
     """Уведомление о выполненном бэкапе по archive_schedule (event=reglament).
@@ -174,7 +173,6 @@ def _notify_backup(
             store,
             queue,
             "archive_schedule",
-            smtp_from,
             "бэкап создан: %s; размер: %.1f МБ" % (target.name, size_mb),
         )
     except Exception:
@@ -194,7 +192,6 @@ def create_backup(
     files_dir: str,
     moment: datetime | None = None,
     queue: MailQueue | None = None,
-    smtp_from: str = "",
 ) -> Path:
     """Ручной/регламентный бэкап: дамп БД + подчистка старых копий.
 
@@ -227,7 +224,7 @@ def create_backup(
     except SettingsUnavailable:
         pass  # техническая метка: бэкап уже создан
     if queue is not None:
-        _notify_backup(store, queue, smtp_from, target)
+        _notify_backup(store, queue, target)
     return target
 
 
@@ -261,7 +258,6 @@ def maybe_backup_weekly(
     files_dir: str,
     moment: datetime | None = None,
     queue: MailQueue | None = None,
-    smtp_from: str = "",
 ) -> bool:
     """Регламентный бэкап (worker): тихо, без сбоев.
 
@@ -282,7 +278,6 @@ def maybe_backup_weekly(
             files_dir,
             moment,
             queue=queue,
-            smtp_from=smtp_from,
         )
         return True
     except Exception:
@@ -436,15 +431,11 @@ def run_archive_backup(
     (восстановление вручную)."""
     _require_admin(user)
     try:
-        smtp_from = resolve_smtp_from(
-            read_setting_value(store, "smtp_from"), settings.SMTP_FROM
-        )
         target = create_backup(
             store,
             settings.DATABASE_URL,
             settings.FILES_DIR,
             queue=mail_queue,
-            smtp_from=smtp_from,
         )
     except SettingsUnavailable as exc:
         raise HTTPException(

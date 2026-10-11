@@ -83,6 +83,7 @@ CONTRACT_VALUES = {
     "smtp_host": "",
     "smtp_port": 587,
     "smtp_from": "sed@example.com",
+    "smtp_from_name": None,
     "smtp_user": "",
     "smtp_password": None,
     "require_comment": False,
@@ -132,6 +133,7 @@ UPDATED_VALUES = {
     "smtp_host": "mail-relay.example.com",
     "smtp_port": 465,
     "smtp_from": "noreply@example.com",
+    "smtp_from_name": "СЭД — увольнения",
     "smtp_user": "relay-user",
     "smtp_password": "relay-pass",
     "require_comment": True,
@@ -346,6 +348,7 @@ def test_settings_put_admin_200_persists(client, admin_headers, mock_store):
     assert mock_store._data["require_paper_signature"] == "false"
     assert mock_store._data["require_comment"] == "true"
     assert mock_store._data["smtp_from"] == '"noreply@example.com"'
+    assert mock_store._data["smtp_from_name"] == json.dumps("СЭД — увольнения")
     assert mock_store._data["smtp_user"] == '"relay-user"'
     assert mock_store._data["smtp_password"] == '"relay-pass"'  # в БД — настоящее значение
     assert json.loads(mock_store._data["enterprises"]) == UPDATED_VALUES["enterprises"]
@@ -419,6 +422,19 @@ def test_settings_put_explicit_null_stored(client, admin_headers, mock_store):
     assert response.status_code == 200
     assert response.json()["smtp_from"] is None
     assert mock_store._data["smtp_from"] == "null"
+
+
+def test_settings_smtp_from_name_saved_and_not_masked(client, admin_headers, mock_store):
+    """Имя отправителя (smtp_from_name) — обычный ключ инфраструктуры.
+
+    В ответе отдаётся как есть (в отличие от пароля SMTP): в нём нет секрета,
+    по нему админ узнаёт, какое имя увидит получатель в From."""
+    name = "СЭД — увольнения"
+    response = client.put("/settings", json={"smtp_from_name": name}, headers=admin_headers)
+    assert response.status_code == 200, response.text
+    assert response.json()["smtp_from_name"] == name
+    assert mock_store._data["smtp_from_name"] == json.dumps(name)
+    assert client.get("/settings", headers=admin_headers).json()["smtp_from_name"] == name
 
 
 def test_settings_put_hr_403(client, hr_headers, mock_store):

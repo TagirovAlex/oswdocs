@@ -39,8 +39,9 @@ class DocTypeConflict(Exception):
 
 # Прикладные ключи админки (состав — контракт B2 GET/PUT /settings, дополнен
 # W3a: mail_templates — письма; W5a: scan_allowed_types —
-# MIME-allowlist сканов; SMTP: smtp_host/smtp_port/smtp_from/smtp_user/smtp_password —
-# параметры релея из settings; пароль маскируется в GET и пишется только при вводе).
+# MIME-allowlist сканов; SMTP: smtp_host/smtp_port/smtp_from/smtp_from_name/
+# smtp_user/smtp_password — параметры релея из settings; пароль маскируется в GET
+# и пишется только при вводе.
 # Фаза «Справочник бланков»: файлы-шаблоны .docx как источник оформления
 # удалены — ключи doc_templates/position_sets и ручки файлов-бланков больше не
 # в контракте (печать собирает бланок из данных, docs.build_blank_document).
@@ -79,6 +80,7 @@ INFRA_KEYS: tuple[str, ...] = (
     "smtp_host",
     "smtp_port",
     "smtp_from",
+    "smtp_from_name",
     "smtp_user",
     "smtp_password",
     "onec_bases",
@@ -702,6 +704,13 @@ class SettingsPayload(BaseModel):
     )
     smtp_from: str | None = Field(
         default=None, description="Отправитель уведомлений (SMTP FROM)"
+    )
+    smtp_from_name: str | None = Field(
+        default=None,
+        description=(
+            "Имя отправителя писем (видимое в From рядом с адресом; пусто — "
+            "только адрес). Не секрет: значение наружу отдаётся как есть"
+        ),
     )
     smtp_user: str | None = Field(
         default=None, description="Логин SMTP-релея (пусто — без авторизации)"

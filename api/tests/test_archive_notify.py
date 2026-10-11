@@ -103,12 +103,11 @@ def test_create_backup_enqueues_reglament_letter(tmp_path, fake_dump):
         str(tmp_path),
         MOMENT,
         queue=queue,
-        smtp_from="sed@example.com",
     )
     assert target.is_file()
     assert [m.to for m in queue.enqueued] == ["a@example.com", "b@example.com"]
     assert all(m.event == "reglament" for m in queue.enqueued)
-    assert queue.enqueued[0].subject == "sed@example.com Архивация OSWDocs"
+    assert queue.enqueued[0].subject == "Архивация OSWDocs"
     assert target.name in queue.enqueued[0].html
     assert "МБ" in queue.enqueued[0].html
 
@@ -163,7 +162,6 @@ def test_queue_failure_does_not_fail_backup(tmp_path, fake_dump):
         str(tmp_path),
         MOMENT,
         queue=BrokenQueue(),
-        smtp_from="sed@example.com",
     )
     assert target.is_file()
     skips = [e for e in audit_log.all() if e.action == "archive.notify.skip"]
@@ -186,7 +184,6 @@ def test_maybe_backup_weekly_enqueues_when_due(tmp_path, fake_dump):
         "postgresql://unused",
         str(tmp_path),
         queue=queue,
-        smtp_from="sed@example.com",
     )
     assert done is True
     assert len(queue.enqueued) == 2
@@ -269,7 +266,7 @@ def test_manual_backup_endpoint_enqueues_letter(client, admin_headers, archive_e
     assert len(archive_endpoint.enqueued) == 2
     message = archive_endpoint.enqueued[0]
     assert message.event == "reglament"
-    assert message.subject == "sed@example.com Архивация OSWDocs"
+    assert message.subject == "Архивация OSWDocs"
     assert body["path"].endswith(".sql")
 
 

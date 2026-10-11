@@ -37,7 +37,6 @@ from .mailer import (
     enqueue_event,
     get_mail_queue,
     recipient_mail,
-    resolve_smtp_from,
     step_owner_mails,
 )
 from .requests_store import (
@@ -2354,12 +2353,20 @@ def _reopen_returned_if_current(
     return reopened
 
 
-def _mail_context(request: _Request, settings: Settings) -> dict[str, object]:
-    """Контекст письма по заявке (как у worker: без ПДн, ссылка из APP_BASE_URL)."""
+def _mail_context(
+    request: _Request, settings: Settings, comment: str = ""
+) -> dict[str, object]:
+    """Контекст письма по заявке (как у worker: без ПДн, ссылка из APP_BASE_URL).
+
+    comment — комментарий последнего действия, изменившего статус (отказ или
+    возврат); в шаблонах письма это {{ comment }}. Значение уходит в контекст
+    БЕЗ экранирования: тема письма — текст, а экранирование для HTML-тела
+    делает mailer.build_mail (иначе в тему попали бы HTML-сущности)."""
     return {
         "fio": request.fio,
         "request_id": request.id,
         "url": request_url(settings.APP_BASE_URL, request.id),
+        "comment": comment or "",
     }
 
 
@@ -2375,6 +2382,7 @@ def _notify_assigned(
     ad_reader: object | None,
     settings: Settings,
     steps: list[_Step] | None = None,
+    comment: str = "",
 ) -> None:
     """Письмо «назначена» владельцам шагов (W3a): подача, переход этапа,
     возврат на предыдущий блок, повтор просроченного шага.
@@ -2383,8 +2391,10 @@ def _notify_assigned(
     заданные шаги. Получатели — mail из AD (только чтение): у персонального шага
     один адресат, у группового — все активные участники группы (очередь
     mail_queue хранит по одному письму на строку, поэтому рассылка разворачивается
-    здесь). Шаблон — из mail_templates/settings. Любой сбой (офлайн без AD/БД, нет
-    шаблона) не роняет решение по заявке: пропуск пишется в аудит (notify.skip).
+    здесь). Шаблон — из mail_templates/settings. comment — причина возврата
+    ({{ comment }}, при переоткрытии блока), без неё пустая строка. Любой сбой
+    (офлайн без AD/БД, нет шаблона) не роняет решение по заявке: пропуск
+    пишется в аудит (notify.skip).
     """
     targets = list(steps) if steps is not None else _current_pending_steps(request)
     if ad_reader is None:
@@ -2398,11 +2408,10 @@ def _notify_assigned(
     if not recipients:
         _notify_skip(request, EVENT_ASSIGNED, "no_recipients")
         return
-    # Шаблон письма и адрес отправителя не зависят от шага — читаем один раз
-    # на заявку (иначе SELECT на каждый шаг); без адресатов настройки не читаем вовсе.
+    # Шаблон письма не зависит от шага — читаем один раз на заявку (иначе SELECT
+    # на каждый шаг); без адресатов настройки не читаем вовсе.
     try:
         templates = read_setting_value(settings_store, "mail_templates")
-        smtp_from = read_setting_value(settings_store, "smtp_from")
     except Exception as exc:
         _notify_skip(request, EVENT_ASSIGNED, f"settings_error={type(exc).__name__}")
         return
@@ -2415,8 +2424,7 @@ def _notify_assigned(
                 request.id,
                 EVENT_ASSIGNED,
                 templates or [],
-                _mail_context(request, settings),
-                subject_prefix=resolve_smtp_from(smtp_from, settings.SMTP_FROM),
+                _mail_context(request, settings, comment),
             ):
                 sent += 1
     except Exception as exc:
@@ -2446,7 +2454,6 @@ def _notify_author_closed(
         return
     try:
         templates = read_setting_value(settings_store, "mail_templates")
-        smtp_from = read_setting_value(settings_store, "smtp_from")
     except Exception as exc:
         _notify_skip(request, EVENT_CLOSED, f"settings_error={type(exc).__name__}")
         return
@@ -2458,7 +2465,6 @@ def _notify_author_closed(
             EVENT_CLOSED,
             templates or [],
             _mail_context(request, settings),
-            subject_prefix=resolve_smtp_from(smtp_from, settings.SMTP_FROM),
         )
     except Exception as exc:
         _notify_skip(request, EVENT_CLOSED, f"queue_error={type(exc).__name__}")
@@ -2473,9 +2479,11 @@ def _notify_author_returned(
     settings_store: DbSettingsStore,
     ad_reader: object | None,
     settings: Settings,
+    comment: str = "",
 ) -> None:
     """Письмо «возврат» автору заявки — заявка ушла на доработку (REWORK).
 
+    comment — причина возврата/отказа в {{ comment }} (без неё пустая строка).
     Ставится, когда возвращать некуда (предыдущего блока нет). Best-effort:
     сбой AD/настроек/очереди не роняет отметку — пишется notify.skip."""
     to = recipient_mail(ad_reader, request.created_by)
@@ -2484,7 +2492,6 @@ def _notify_author_returned(
         return
     try:
         templates = read_setting_value(settings_store, "mail_templates")
-        smtp_from = read_setting_value(settings_store, "smtp_from")
     except Exception as exc:
         _notify_skip(request, EVENT_RETURNED, f"settings_error={type(exc).__name__}")
         return
@@ -2495,8 +2502,7 @@ def _notify_author_returned(
             request.id,
             EVENT_RETURNED,
             templates or [],
-            _mail_context(request, settings),
-            subject_prefix=resolve_smtp_from(smtp_from, settings.SMTP_FROM),
+            _mail_context(request, settings, comment),
         )
     except Exception as exc:
         _notify_skip(request, EVENT_RETURNED, f"queue_error={type(exc).__name__}")
@@ -3725,13 +3731,27 @@ def decide_step(
                     request, mail_queue, settings_store, ad_reader, settings, steps=fresh
                 )
     elif body.decision in ("return", "reject"):
+        # Причина решения — в письме ({{ comment }}): её набрали в этом действии,
+        # и она нужна и переоткрытому блоку, и автору на доработку.
+        decision_comment = (body.comment or "").strip()
         if reopened:
             _notify_assigned(
-                request, mail_queue, settings_store, ad_reader, settings, steps=reopened
+                request,
+                mail_queue,
+                settings_store,
+                ad_reader,
+                settings,
+                steps=reopened,
+                comment=decision_comment,
             )
         else:
             _notify_author_returned(
-                request, mail_queue, settings_store, ad_reader, settings
+                request,
+                mail_queue,
+                settings_store,
+                ad_reader,
+                settings,
+                comment=decision_comment,
             )
     return _public_view(request, user)
 

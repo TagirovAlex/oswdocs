@@ -87,6 +87,7 @@ const settings: SettingsData = {
   smtp_host: "intsrvmail.fidelio.local",
   smtp_port: 587,
   smtp_from: "sed@example.com",
+  smtp_from_name: "СЭД — увольнения",
   smtp_user: "",
   smtp_password: null,
   require_comment: true,
@@ -122,6 +123,7 @@ const contentOnly: SettingsData = {
   smtp_host: null,
   smtp_port: null,
   smtp_from: null,
+  smtp_from_name: null,
   smtp_user: null,
   smtp_password: null,
   require_comment: true,
@@ -345,6 +347,12 @@ describe("AdminSettings", () => {
     expect(screen.queryByText("Шаблоны маршрутов")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Служба шаблона 1")).not.toBeInTheDocument();
     expect(screen.getByLabelText("Код письма 1")).toHaveValue("assigned");
+    // Подсказка по плейсхолдерам писем — включая {{ comment }}.
+    expect(screen.getByText("{{ comment }}")).toBeInTheDocument();
+    expect(screen.getByText("{{ request_id }}")).toBeInTheDocument();
+    expect(screen.getByText("{{ fio }}")).toBeInTheDocument();
+    expect(screen.getByText("{{ url }}")).toBeInTheDocument();
+    expect(screen.getByText("{{ event }}")).toBeInTheDocument();
 
     fireEvent.click(screen.getByText("Добавить письмо"));
     fireEvent.change(screen.getByLabelText("Код письма 2"), { target: { value: "reminder" } });
@@ -543,6 +551,33 @@ describe("AdminSettings", () => {
     await waitFor(() => expect(screen.getByLabelText("Длительность сессии")).toBeInTheDocument());
     expect(screen.getByLabelText("Длительность сессии")).toHaveValue(600);
     expect(screen.getByLabelText("Хост SMTP-релея")).toHaveValue("intsrvmail.fidelio.local");
+  });
+
+  // Имя отправителя (smtp_from_name): грузится, правится и уходит в PUT /settings.
+  it("админ правит имя отправителя и сохраняет его в PUT", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+    vi.mocked(saveSettings).mockImplementation(async (data: SettingsData) => data);
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Инфра" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Инфра" }));
+    await waitFor(() => expect(screen.getByLabelText("Имя отправителя")).toBeInTheDocument());
+    expect(screen.getByLabelText("Имя отправителя")).toHaveValue("СЭД — увольнения");
+    expect(screen.getByLabelText("Отправитель уведомлений")).toHaveValue("sed@example.com");
+
+    fireEvent.change(screen.getByLabelText("Имя отправителя"), {
+      target: { value: "СЭД — кадровые вопросы" },
+    });
+    fireEvent.click(screen.getByText("Сохранить"));
+
+    await waitFor(() =>
+      expect(saveSettings).toHaveBeenCalledWith(
+        expect.objectContaining({
+          smtp_from: "sed@example.com",
+          smtp_from_name: "СЭД — кадровые вопросы",
+        }),
+      ),
+    );
   });
 
   // Админ: на вкладке «Инфра» видит 1С-базы, добавляет базу и сохраняет (PUT с onec_bases).

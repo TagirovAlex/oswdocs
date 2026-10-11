@@ -167,12 +167,13 @@ def due_schedule(schedule, last_raw: str | None, now: datetime | None = None) ->
     return _weekly_due(moment, last)  # неизвестный режим — раз в 7 дней
 
 
-def notify_schedule(store, queue, schedule_key: str, smtp_from: str, summary: str) -> int:
+def notify_schedule(store, queue, schedule_key: str, summary: str) -> int:
     """Разослать уведомление о выполненном регламенте (event=reglament).
 
     Расписание — settings.schedule_key: notify=false или адресатов нет — 0.
-    Письмо каждому адресату: тема subject (с префиксом smtp_from, как у прочих
-    писем), тело body с подстановкой {{summary}}. Тексты — из настроек, не из кода.
+    Письмо каждому адресату: тема subject из настроек расписания (адрес
+    отправителя в тему не попадает — он только в заголовке From), тело body с
+    подстановкой {{summary}}. Тексты — из настроек, не из кода.
     """
     from .mailer import EVENT_REGLAMENT, MailMessage, new_message_id  # лениво: избегаем циклов импорта
 
@@ -183,8 +184,6 @@ def notify_schedule(store, queue, schedule_key: str, smtp_from: str, summary: st
     if not isinstance(recipients, list):
         return 0
     subject = str(schedule.get("subject") or "")
-    if smtp_from:
-        subject = (smtp_from + " " + subject).strip()
     body = str(schedule.get("body") or "").replace("{{summary}}", summary)
     count = 0
     for address in recipients:

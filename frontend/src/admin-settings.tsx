@@ -303,6 +303,16 @@ function AccessRolesEditor(props: { value: AccessRoleGroups; onChange: (v: Acces
   );
 }
 
+// Плейсхолдеры писем (контракт mailer/docs.render_text): список задан решением
+// человека, подстановка выполняется бэкендом при постановке письма в очередь.
+const MAIL_PLACEHOLDERS: readonly { token: string; hint: string }[] = [
+  { token: "{{ request_id }}", hint: "номер заявки" },
+  { token: "{{ fio }}", hint: "ФИО сотрудника" },
+  { token: "{{ url }}", hint: "ссылка на заявку" },
+  { token: "{{ comment }}", hint: "комментарий последнего отказа/возврата" },
+  { token: "{{ event }}", hint: "код события (служебное)" },
+];
+
 // Редактор писем (mail_templates): код события + тема + HTML-тело (Jinja).
 function MailTemplatesEditor(props: { value: SettingsMailTemplate[]; onChange: (v: SettingsMailTemplate[]) => void }) {
   const { value, onChange } = props;
@@ -312,6 +322,17 @@ function MailTemplatesEditor(props: { value: SettingsMailTemplate[]; onChange: (
   return (
     <fieldset>
       <legend>Письма (mail_templates)</legend>
+      <div className="sed-note">
+        Тема письма берётся только из поля «Тема письма» — адрес отправителя в тему не
+        подставляется. Плейсхолдеры в теме и теле:{" "}
+        {MAIL_PLACEHOLDERS.map((item, i) => (
+          <span key={item.token}>
+            {i > 0 && "; "}
+            <code>{item.token}</code> — {item.hint}
+          </span>
+        ))}
+        . Значения подставляются текстом; нет данных — пустая строка.
+      </div>
       {value.length === 0 && <div className="sed-note">не задано</div>}
       {value.map((mail, i) => (
         <div key={i} className="sed-editor-card">
@@ -1078,7 +1099,15 @@ function BlanksEditor() {
                   {blank.name}
                   {blank.description && <div className="sed-sub">{blank.description}</div>}
                 </td>
-                <td>{blank.doc_type_code ?? "—"}</td>
+                {/* Вид документа — названием из справочника: код вида служебный,
+                    числовой (миграция 0019), в таблице нечитаем. Нет названия —
+                    откат на код. */}
+                <td>
+                  {(blank.doc_type_code ?? "") === ""
+                    ? "—"
+                    : (docTypes.find((d) => d.code === blank.doc_type_code)?.name ??
+                      blank.doc_type_code)}
+                </td>
                 <td>{blank.step_count ?? 0}</td>
                 <td>{blank.version}</td>
                 <td>{blank.active ? "да" : "нет"}</td>
@@ -2307,6 +2336,7 @@ export function AdminSettings(props: AdminSettingsProps) {
   const [smtpHost, setSmtpHost] = useState<string | null>(null);
   const [smtpPort, setSmtpPort] = useState<number | null>(null);
   const [smtpFrom, setSmtpFrom] = useState<string | null>(null);
+  const [smtpFromName, setSmtpFromName] = useState<string | null>(null);
   const [smtpUser, setSmtpUser] = useState<string | null>(null);
   // Пароль релея в форме: поле всегда пустое; smtpPasswordSet — признак «задан».
   const [smtpPassword, setSmtpPassword] = useState<string>("");
@@ -2355,6 +2385,7 @@ export function AdminSettings(props: AdminSettingsProps) {
           setSmtpHost(full.smtp_host);
           setSmtpPort(full.smtp_port);
           setSmtpFrom(full.smtp_from);
+          setSmtpFromName(full.smtp_from_name);
           setSmtpUser(full.smtp_user ?? "");
           // Пароль из API не приходит (маска/null): поле пустое, только признак.
           setSmtpPassword("");
@@ -2429,6 +2460,7 @@ export function AdminSettings(props: AdminSettingsProps) {
           smtp_host: smtpHost,
           smtp_port: smtpPort,
           smtp_from: smtpFrom,
+          smtp_from_name: smtpFromName,
           smtp_user: smtpUser ?? "",
           // Пустое значение — сервер сохранит текущий пароль (не перезапишет).
           smtp_password: smtpPassword,
@@ -2637,6 +2669,19 @@ export function AdminSettings(props: AdminSettingsProps) {
               value={smtpFrom ?? ""}
               onChange={(e) => setSmtpFrom(e.target.value)}
             />
+          </label>
+          <label className="sed-field sed-mt-8">
+            Имя отправителя (smtp_from_name; пусто — в письме только адрес)
+            <input
+              aria-label="Имя отправителя"
+              type="text"
+              value={smtpFromName ?? ""}
+              onChange={(e) => setSmtpFromName(e.target.value)}
+            />
+            <div className="sed-note">
+              Показывается получателю в заголовке From рядом с адресом («СЭД — увольнения
+              sed@example.com») — по нему письма сортируются в почтовом клиенте.
+            </div>
           </label>
           <label className="sed-field sed-mt-8">
             Логин SMTP-релея (smtp_user; пусто — отправка без авторизации)

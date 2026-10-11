@@ -104,6 +104,8 @@ export interface SettingsData {
   smtp_port: number | null;
   // Отправитель уведомлений, e-mail (smtp_from).
   smtp_from: string | null;
+  // Имя отправителя писем (smtp_from_name) — видимая часть From; пусто — только адрес.
+  smtp_from_name: string | null;
   // Логин SMTP-релея (smtp_user; пусто — без авторизации).
   smtp_user: string | null;
   // Пароль SMTP-релея (smtp_password): в GET — null либо маска «задан»;

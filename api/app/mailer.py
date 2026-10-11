@@ -9,7 +9,9 @@
 # у шага с несколькими ответственными письмо уходит каждому, кому по шагу ещё
 # предстоит отметиться (снимок assignees/approvals, миграция 0013); нет
 # ридера/почты — письмо тихо пропускается (офлайн).
-# ПДн в письма не включаются (см. sanitize_context в docs.py).
+# ПДн в письма не включаются сверх перечисленных в TEMPLATES.md §6: получатель —
+# участник процесса, шаблону отдаются {{ request_id }}, {{ fio }}, {{ url }},
+# {{ event }}, {{ comment }} (см. _mail_context в requests.py), ничего больше.
 
 from __future__ import annotations
 
@@ -18,6 +20,7 @@ import smtplib
 import uuid
 from dataclasses import asdict, dataclass
 from email.message import EmailMessage
+from html import escape
 from pathlib import Path
 from typing import Dict, List, Protocol
 
@@ -64,6 +67,13 @@ def resolve_smtp_from(db_value: str | None, env_default: str) -> str:
     return (db_value or "").strip() or env_default
 
 
+def resolve_smtp_from_name(db_value: object) -> str:
+    """Имя отправителя письма (smtp_from_name): только из settings БД, фолбэка нет.
+
+    Пустое имя — не ошибка: в From остаётся голый адрес (format_from_header)."""
+    return str(db_value or "").strip()
+
+
 def resolve_smtp_value(db_value: object, env_default: str) -> str:
     """Строковый SMTP-параметр (хост/логин/пароль): из settings (smtp_*), иначе env."""
     return str(db_value or "").strip() or env_default
@@ -80,6 +90,25 @@ def resolve_smtp_port(db_value: object, env_default: int) -> int:
         return int(db_value)
     except (TypeError, ValueError):
         return env_default
+
+
+# Предел длины имени отправителя в заголовке From (длиннее — обрезаем).
+FROM_NAME_MAX_LEN = 64
+
+
+def format_from_header(from_addr: str, from_name: str = "") -> str:
+    """Заголовок From: «Имя <адрес>»; имя не задано — только адрес.
+
+    Имя приходит из настроек (его правит админ), поэтому перед подстановкой
+    санируется: убираются CR/LF и прочие непечатные символы (иначе ими можно
+    было бы дописать в письмо свои заголовки), кавычки и угловые скобки (ломают
+    разбор адреса), строка обрезается по длине. Санитайзер ничего не бросает:
+    админ с кривым именем получает письма как раньше, только без имени."""
+    name = "".join(ch for ch in str(from_name or "") if ch.isprintable())
+    name = name.replace('"', " ").replace("<", " ").replace(">", " ")
+    name = " ".join(name.split())[:FROM_NAME_MAX_LEN].strip()
+    address = str(from_addr or "").strip()
+    return "%s <%s>" % (name, address) if name else address
 
 
 @dataclass
@@ -119,13 +148,13 @@ def build_mail(
     event: str,
     templates: Dict[str, object],
     context: Dict[str, object],
-    subject_prefix: str = "",
 ) -> MailMessage:
     """Собрать письмо из mail_templates (текст шаблона — только из настроек).
 
     templates: словарь событие -> HTML-шаблон Jinja (строка) либо
-    событие -> {"subject": ..., "body_html": ...} (W3a: тема тоже из шаблона);
-    subject_prefix (smtp_from) — из настроек.
+    событие -> {"subject": ..., "body_html": ...} (W3a: тема тоже из шаблона).
+    Тема письма — ТОЛЬКО из шаблона: адрес отправителя в неё не попадает
+    (он живёт в заголовке From, см. SmtpMailer/format_from_header).
     """
     if event not in KNOWN_EVENTS:
         raise ValueError("неизвестное событие письма: %r" % event)
@@ -135,14 +164,21 @@ def build_mail(
         raise ValueError("нет шаблона письма для события %r" % event)
     ctx = dict(context, request_id=request_id, event=event)
     if isinstance(template, str):
+        # Строковый шаблон (легаси) темы не содержит: собираем человекочитаемую
+        # строку без машинного кода события — код наружу не показываем.
         template_html = template
-        subject = (subject_prefix + " " + event + " " + request_id).strip()
+        subject = ("Заявка %s" % request_id).strip()
     else:
         template_html = template.get("body_html", "") or ""
+        # Тема — текст, не HTML: подставляем значения КАК ЕСТЬ, иначе в неё
+        # попадут HTML-сущности (&lt;/&#x27;). Адрес отправителя в тему не
+        # попадает никогда — он живёт в заголовке From.
         subject = render_mail(template.get("subject", "") or "", ctx)
-        if subject_prefix:
-            subject = (subject_prefix + " " + subject).strip()
-    html = render_mail(template_html, ctx)
+    # Тело письма — HTML: значения экранируем (свободный текст согласующего,
+    # например {{ comment }}, не должен стать разметкой письма).
+    html = render_mail(
+        template_html, {k: escape(str(v)) for k, v in ctx.items()}
+    )
     return MailMessage(
         id=message_id,
         to=to,
@@ -284,7 +320,6 @@ def enqueue_event(
     event: str,
     templates: object,
     context: Dict[str, object],
-    subject_prefix: str = "",
     message_id: str | None = None,
 ) -> MailMessage | None:
     """Собрать письмо по mail_templates и положить в очередь.
@@ -299,9 +334,7 @@ def enqueue_event(
         return None
     mid = message_id or new_message_id()
     try:
-        message = build_mail(
-            mid, to, request_id, event, tmpl, context, subject_prefix=subject_prefix
-        )
+        message = build_mail(mid, to, request_id, event, tmpl, context)
     except ValueError:
         return None
     queue.enqueue(message)
@@ -459,7 +492,8 @@ class MailQueue(Protocol):
 class SmtpMailer:
     """Реальная отправка через smtplib (STARTTLS); параметры — из env.
 
-    From: значение settings smtp_from важнее env SMTP_FROM (resolve_smtp_from).
+    From: значение settings smtp_from важнее env SMTP_FROM (resolve_smtp_from);
+    рядом — видимое имя из smtp_from_name («Имя <адрес>», пусто — голый адрес).
     """
 
     def __init__(
@@ -469,6 +503,7 @@ class SmtpMailer:
         username: str,
         password: str,
         from_addr: str,
+        from_name: str = "",
         timeout: float = 15,
     ) -> None:
         self._host = host
@@ -476,12 +511,13 @@ class SmtpMailer:
         self._username = username
         self._password = password
         self._from = from_addr
+        self._from_name = from_name
         self._timeout = timeout
 
     def send(self, to: str, subject: str, html: str) -> None:
         """Отправить одно письмо (HTML); при сбое — исключение (ретрай выше)."""
         msg = EmailMessage()
-        msg["From"] = self._from
+        msg["From"] = format_from_header(self._from, self._from_name)
         msg["To"] = to
         msg["Subject"] = subject
         msg.set_content("СЭД: просмотрите письмо в HTML-клиенте")
@@ -667,9 +703,9 @@ def get_mail_queue() -> MailQueue:
 
 def get_mailer(store: "DbSettingsStore | None" = None) -> Mailer:
     """Боевой отправитель (SmtpMailer): параметры — из settings
-    (smtp_host/smtp_port/smtp_from/smtp_user/smtp_password, при отсутствии
-    ключа — env SMTP_*). Пароль в GET /settings маскируется, здесь читается
-    настоящее значение из хранилища."""
+    (smtp_host/smtp_port/smtp_from/smtp_from_name/smtp_user/smtp_password, при
+    отсутствии ключа — env SMTP_*). Пароль в GET /settings маскируется, здесь
+    читается настоящее значение из хранилища."""
     from .config import get_settings
     from .settings_routes import DbSettingsStore, read_setting_value
 
@@ -691,5 +727,8 @@ def get_mailer(store: "DbSettingsStore | None" = None) -> Mailer:
         ),
         from_addr=resolve_smtp_from(
             read_setting_value(store, "smtp_from"), current.SMTP_FROM
+        ),
+        from_name=resolve_smtp_from_name(
+            read_setting_value(store, "smtp_from_name")
         ),
     )

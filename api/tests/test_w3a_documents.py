@@ -37,6 +37,7 @@ from app.mailer import (  # noqa: E402
     SmtpMailer,
     build_mail,
     enqueue_event,
+    format_from_header,
     get_mail_queue,
     mail_templates_map,
 )
@@ -456,6 +457,110 @@ def test_build_mail_subject_rendered():
     assert "https://x/REQ-0001" in message.html
 
 
+def test_build_mail_subject_has_no_sender_address():
+    """В теме письма нет адреса отправителя: тема — только из шаблона.
+
+    Раньше адрес подставлялся префиксом в тему (subject_prefix) — получатель
+    видел «sed@example.com Заявка …» вместо нормальной темы."""
+    templates = {
+        EVENT_ASSIGNED: {"subject": "Заявка {{ request_id }} назначена",
+                         "body_html": "<html>{{ fio }}</html>"}
+    }
+    message = build_mail(
+        "m1", "owner@example.com", "REQ-0001", EVENT_ASSIGNED, templates, {},
+    )
+    assert message.subject == "Заявка REQ-0001 назначена"
+    assert "@" not in message.subject
+    assert "example.com" not in message.subject
+
+
+def test_build_mail_string_template_subject_without_event_code():
+    """Строковый (легаси) шаблон: тема человекочитаемая, кода события в ней нет."""
+    templates = {EVENT_ASSIGNED: "<html>Заявка {{ request_id }}</html>"}
+    message = build_mail(
+        "m1", "owner@example.com", "REQ-0001", EVENT_ASSIGNED, templates, {},
+    )
+    assert message.subject == "Заявка REQ-0001"
+    assert EVENT_ASSIGNED not in message.subject
+
+
+def test_build_mail_comment_placeholder_substituted():
+    """{{ comment }} в теме/теле — комментарий решения; без него — пустая строка."""
+    templates = {
+        EVENT_RETURNED: {"subject": "Возврат {{ request_id }}: {{ comment }}",
+                         "body_html": "<html><p>{{ comment }}</p></html>"}
+    }
+    with_comment = build_mail(
+        "m1", "author@example.com", "REQ-0001", EVENT_RETURNED, templates,
+        {"comment": "Нет документов"},
+    )
+    assert with_comment.subject == "Возврат REQ-0001: Нет документов"
+    assert "<p>Нет документов</p>" in with_comment.html
+    # Комментария в контексте нет — пустая строка, без ошибки.
+    without = build_mail(
+        "m2", "author@example.com", "REQ-0002", EVENT_RETURNED, templates, {},
+    )
+    assert without.subject == "Возврат REQ-0002: "
+    assert "<p></p>" in without.html
+
+
+def test_format_from_header_with_and_without_name():
+    """From: «Имя <адрес>»; имя не задано — голый адрес, без исключения."""
+    assert format_from_header("sed@example.com", "СЭД — увольнения") == (
+        "СЭД — увольнения <sed@example.com>"
+    )
+    for name in ("", "   ", None, "\r\n", '"\r\n'):
+        assert format_from_header("sed@example.com", name) == "sed@example.com"
+
+
+def test_format_from_header_sanitizes_name():
+    """Имя санируется: переводы строк, кавычки и скобки не попадают в заголовок."""
+    header = format_from_header("sed@example.com", 'СЭД "Отдел" <кадры>')
+    assert header == "СЭД Отдел кадры <sed@example.com>"
+    injection = format_from_header("sed@example.com", "СЭД\r\nBcc: bad@example.com")
+    assert "\r" not in injection and "\n" not in injection
+    assert injection == "СЭДBcc: bad@example.com <sed@example.com>"
+    assert len(format_from_header("sed@example.com", "я" * 100)) < 120
+
+
+def test_smtp_mailer_from_header_uses_name(monkeypatch):
+    """SmtpMailer подставляет в From видимое имя (из smtp_from_name)."""
+    sent = []
+
+    class FakeSMTP:
+        def __init__(self, host, port, timeout=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def ehlo(self):
+            pass
+
+        def starttls(self):
+            pass
+
+        def login(self, user, password):
+            pass
+
+        def send_message(self, message):
+            sent.append(message)
+
+    monkeypatch.setattr("app.mailer.smtplib", types.SimpleNamespace(SMTP=FakeSMTP))
+    SmtpMailer("smtp-mock.local", 587, "", "", "sed@example.com", "СЭД").send(
+        "to@example.com", "Тема", "<html>тело</html>"
+    )
+    assert sent[-1]["From"] == "СЭД <sed@example.com>"
+    # Имя не задано — откат на голый адрес (без исключения).
+    SmtpMailer("smtp-mock.local", 587, "", "", "sed@example.com").send(
+        "to@example.com", "Тема", "<html>тело</html>"
+    )
+    assert sent[-1]["From"] == "sed@example.com"
+
+
 def test_mail_templates_map():
     items = [
         {"code": "assigned", "subject": "S", "body_html": "H"},
@@ -571,7 +676,7 @@ def test_worker_overdue_to_rework_with_return_letter(tmp_path):
     ]
     result = run_once(
         store, queue, mailer, templates, {}, 7, ad, BASE_URL,
-        smtp_from="", now=_utcnow(),
+        now=_utcnow(),
     )
     stored = store.get("REQ-0001")
     assert stored.status == REWORK
