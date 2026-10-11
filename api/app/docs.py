@@ -407,7 +407,19 @@ _HIDDEN_TAGS = frozenset(
         "iframe", "object", "embed", "svg", "math",
     }
 )
-_HTML_TAG_RE = re.compile(r"<\s*(/?)\s*([a-zA-Z][a-zA-Z0-9]*)[^>]*>")
+# Заголовки редактора (h1–h3) печатаются жирным абзацем увеличенного кегля:
+# кегль — константы вёрстки (от BLANK_TITLE_PT вниз по ступени).
+_HEADING_PT = {
+    "h1": BLANK_TITLE_PT,
+    "h2": BLANK_TITLE_PT - 1,
+    "h3": BLANK_TITLE_PT - 2,
+}
+# Выравнивание абзаца из атрибута style редактора (text-align). Значения —
+# имена выравниваний python-docx; прочие свойства style на бланок не идут.
+_PRINT_ALIGN_RE = re.compile(r"(?i)text-align\s*:\s*(left|center|right|justify)\b")
+# Тег разбирается как имя + атрибуты: атрибуты на бланок не печатаются, из них
+# читается только выравнивание (_PRINT_ALIGN_RE).
+_HTML_TAG_RE = re.compile(r"<\s*(/?)\s*([a-zA-Z][a-zA-Z0-9]*)([^>]*)>")
 
 
 def _blank_title(context: Dict[str, object]) -> str:
@@ -431,8 +443,8 @@ def _blank_title(context: Dict[str, object]) -> str:
 _PRINT_PLACEHOLDER_RE = re.compile(r"(?<!\{)\{\s*(\w+)\s*\}(?!\})")
 
 # Граница абзацев пользовательской шапки (HTML редактора): каждый закрытый
-# <p> печатается своим абзацем DOCX.
-_PRINT_BLOCK_RE = re.compile(r"(?i)</\s*p\s*>")
+# <p> и каждый закрытый заголовок печатаются своим абзацем DOCX.
+_PRINT_BLOCK_RE = re.compile(r"(?i)</\s*(?:p|h[1-6])\s*>")
 
 
 def _format_print_date(value: object) -> str:
@@ -518,8 +530,11 @@ def _add_runs(
     bold: bool = False,
     italic: bool = False,
     underline: bool = False,
+    size_pt: int | None = None,
 ) -> None:
-    """Текст в абзац с начертанием; переносы строк — разрывом прогона."""
+    """Текст в абзац с начертанием; переносы строк — разрывом прогона.
+
+    size_pt — кегль прогона (заголовок бланка); None — базовый кегль вёрстки."""
     for index, line in enumerate(text.split("\n")):
         if index:
             paragraph.add_run().add_break()
@@ -529,18 +544,37 @@ def _add_runs(
         run.bold = bold
         run.italic = italic
         run.underline = underline
+        if size_pt is not None:
+            from docx.shared import Pt
+
+            run.font.size = Pt(size_pt)
+
+
+def _apply_paragraph_alignment(paragraph: object, align: str) -> None:
+    """Выравнивание абзаца печати по имени из style разметки редактора.
+
+    Имя приходит как left|center|right|justify — это имена выравниваний
+    python-docx; неизвестное имя выравнивание не меняет."""
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    alignment = getattr(WD_ALIGN_PARAGRAPH, align.upper(), None)
+    if alignment is not None:
+        paragraph.alignment = alignment
 
 
 def _add_stage_text(paragraph: object, text: str, *, bold: bool = False) -> None:
     """Текст этапа (может прийти HTML из визуального редактора) в абзац DOCX.
 
     В печать идут только разрешённые теги (_BOLD_TAGS/_ITALIC_TAGS/
-    _UNDERLINE_TAGS/_BREAK_TAGS); содержимое служебных тегов выбрасывается,
-    любые другие теги идут обычным текстом без разметки. Свой санитайзер не
-    пишем: ПДн-поля вычищает sanitize_context, здесь только отбор тегов,
-    разрешённых к печати (контракт фазы).
+    _UNDERLINE_TAGS/_BREAK_TAGS), заголовки редактора (_HEADING_PT) — жирным
+    абзацем увеличенного кегля, выравнивание из style (_PRINT_ALIGN_RE) — как
+    выбрано в редакторе; содержимое служебных тегов выбрасывается, любые другие
+    теги идут обычным текстом без разметки. Свой санитайзер не пишем: ПДн-поля
+    вычищает sanitize_context, здесь только отбор тегов, разрешённых к печати
+    (контракт фазы).
     """
     cur_bold, cur_italic, cur_underline = bold, False, False
+    size_pt: int | None = None
     hidden: List[str] = []
     emitted = False
     pos = 0
@@ -556,6 +590,7 @@ def _add_stage_text(paragraph: object, text: str, *, bold: bool = False) -> None
                 bold=cur_bold,
                 italic=cur_italic,
                 underline=cur_underline,
+                size_pt=size_pt,
             )
             emitted = True
         if tag in _HIDDEN_TAGS:
@@ -567,6 +602,11 @@ def _add_stage_text(paragraph: object, text: str, *, bold: bool = False) -> None
             continue
         if hidden:
             continue
+        # Выравнивание абзаца — из style открывающего тега (атрибуты на бланок
+        # не печатаются, читается только text-align).
+        align = _PRINT_ALIGN_RE.search(match.group(3) or "") if not closing else None
+        if align:
+            _apply_paragraph_alignment(paragraph, align.group(1).lower())
         if tag in _BREAK_TAGS:
             if not closing and emitted:
                 paragraph.add_run().add_break()
@@ -577,6 +617,10 @@ def _add_stage_text(paragraph: object, text: str, *, bold: bool = False) -> None
             cur_italic = not closing
         elif tag in _UNDERLINE_TAGS:
             cur_underline = not closing
+        elif tag in _HEADING_PT:
+            # Заголовок редактора — жирный абзац своего кегля до конца тега.
+            size_pt = None if closing else _HEADING_PT[tag]
+            cur_bold = bold if closing else True
     tail = text[pos:]
     if tail and not hidden:
         _add_runs(
@@ -585,17 +629,18 @@ def _add_stage_text(paragraph: object, text: str, *, bold: bool = False) -> None
             bold=cur_bold,
             italic=cur_italic,
             underline=cur_underline,
+            size_pt=size_pt,
         )
 
 
 def _add_blank_header_html(document: object, context: Dict[str, object]) -> None:
     """Шапка бланка из снимка заявки (HTML редактора) вместо списка полей.
 
-    Абзац на каждый закрытый <p>, начертания те же, что у текста этапа:
-    санитайзер _add_stage_text вырезает содержимое служебных тегов (script,
-    style, iframe и прочие), любые атрибуты (обработчики событий и внешние
-    ресурсы) и неразрешённые теги — на бланке остаются только начертания и
-    переносы строк."""
+    Абзац на каждый закрытый <p> и каждый закрытый заголовок редактора,
+    начертания те же, что у текста этапа: санитайзер _add_stage_text вырезает
+    содержимое служебных тегов (script, style, iframe и прочие), любые атрибуты
+    (обработчики событий и внешние ресурсы) и неразрешённые теги — на бланке
+    остаются только начертания, кегль заголовка, выравнивание и переносы строк."""
     # Подстановка значений ЗДЕСЬ, в HTML-шапке: значения экранируются, чтобы
     # свободный текст заявки не ломал разметку (ранее порядок был обратный).
     rendered = render_blank_text(

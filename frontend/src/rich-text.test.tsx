@@ -43,6 +43,38 @@ describe("RichTextEditor", () => {
     expect(screen.getByText("Разметка попадёт в печать")).toBeInTheDocument();
   });
 
+  // Панель расширена: выравнивание по краям и заголовки H1–H3, у каждой кнопки
+  // подпись текстом и иконка-инлайн-SVG (графика, не текстовый глиф).
+  it("рисует кнопки выравнивания и заголовков иконками", async () => {
+    render(
+      <RichTextEditor label="Шапка бланка" value="<p>Акт</p>" onChange={() => undefined} />,
+    );
+    const toolbar = await screen.findByRole("toolbar", { name: "Форматирование: Шапка бланка" });
+    const titles = [
+      "Полужирный",
+      "Курсив",
+      "Подчёркнутый",
+      "Маркированный список",
+      "Нумерованный список",
+      "По левому краю",
+      "По центру",
+      "По правому краю",
+      "Заголовок 1",
+      "Заголовок 2",
+      "Заголовок 3",
+      "Абзац",
+    ];
+    for (const title of titles) {
+      const button = screen.getByRole("button", { name: title });
+      expect(toolbar).toContainElement(button);
+      // Подпись — только подсказкой, в кнопке иконка инлайн-SVG.
+      expect(button).toHaveAttribute("title", title);
+      expect(button.querySelector("svg")).not.toBeNull();
+      expect(button).toHaveTextContent("");
+    }
+    expect(toolbar.querySelectorAll("button")).toHaveLength(titles.length);
+  });
+
   // Исходное значение показывается в области редактора.
   it("показывает переданное значение", async () => {
     render(
@@ -95,5 +127,61 @@ describe("RichTextEditor", () => {
     rerender(<RichTextEditor {...props} value="<p>Второй этап</p>" />);
     await waitFor(() => expect(screen.getByText("Второй этап")).toBeInTheDocument());
     expect(screen.queryByText("Первый этап")).not.toBeInTheDocument();
+  });
+
+  // Выравнивание по центру сохраняется в значении (печать читает его из style).
+  it("кнопка «По центру» отдаёт выравнивание в значение", async () => {
+    const seen: string[] = [];
+    render(
+      <RichTextEditor
+        label="Шапка бланка"
+        value="<p>Подпись сотрудника</p>"
+        onChange={(html) => seen.push(html)}
+      />,
+    );
+    await selectAllInEditor();
+    fireEvent.click(screen.getByRole("button", { name: "По центру" }));
+    await waitFor(() => expect(seen[seen.length - 1]).toContain("text-align: center"));
+    // Кнопка выравнивания остаётся нажатой (следующий шаг печати по центру).
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "По центру" })).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      ),
+    );
+  });
+
+  // Заголовок H2 сохраняется тегом в значении.
+  it("кнопка «Заголовок 2» отдаёт тег заголовка в значение", async () => {
+    const seen: string[] = [];
+    render(
+      <RichTextEditor label="Пункт этапа" value="<p>Раздел</p>" onChange={(html) => seen.push(html)} />,
+    );
+    await selectAllInEditor();
+    fireEvent.click(screen.getByRole("button", { name: "Заголовок 2" }));
+    await waitFor(() => expect(seen[seen.length - 1]).toContain("<h2>"));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Заголовок 2" })).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      ),
+    );
+  });
+
+  // Выравнивание и заголовок переживают перерисовку: значение, полученное
+  // снаружи (из сохранённого бланка), редактору не теряется.
+  it("значение с выравниванием и заголовком показывается без потерь", async () => {
+    render(
+      <RichTextEditor
+        label="Шапка бланка"
+        value='<h1 style="text-align: center">Акт вымышленного увольнения</h1>'
+        onChange={() => undefined}
+      />,
+    );
+    const area = await waitFor(() =>
+      document.querySelector<HTMLElement>(".sed-rte__field .ProseMirror h1"),
+    ) as HTMLElement;
+    expect(area.textContent).toBe("Акт вымышленного увольнения");
+    expect(area.style.textAlign).toBe("center");
   });
 });

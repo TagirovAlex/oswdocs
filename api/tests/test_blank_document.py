@@ -24,6 +24,7 @@ from app import docs as docs_module  # noqa: E402
 from app.config import Settings, get_settings  # noqa: E402
 from app.docs import (  # noqa: E402
     BypassResult,
+    BLANK_TITLE_PT,
     blank_placeholders,
     build_blank_document,
     generate_bypass,
@@ -433,6 +434,105 @@ def test_build_blank_document_header_html_keeps_allowed_formatting():
     italic = [run.text for run in runs if run.italic]
     assert bold == ["срочный"]
     assert italic == ["важный"]
+
+
+def test_build_blank_document_header_html_prints_heading():
+    """Заголовок редактора печатается своим абзацем: жирным и кеглем больше.
+
+    h1 печатается кеглем заголовка бланка (BLANK_TITLE_PT), h2/h3 — ступенькой
+    меньше; обычный абзац после заголовка остаётся базовым кеглем."""
+    from docx.shared import Pt
+
+    blob = build_blank_document(
+        _context(
+            blank_header_html=(
+                "<h1>Акт вымышленного увольнения</h1>"
+                "<h3>Подраздел</h3>"
+                "<p>Обычный текст</p>"
+            )
+        )
+    )
+    paragraphs = _body_paragraphs(blob)
+    heading, subheading, plain = paragraphs[1], paragraphs[2], paragraphs[3]
+    assert heading.text == "Акт вымышленного увольнения"
+    assert [run.font.size for run in heading.runs] == [Pt(BLANK_TITLE_PT)]
+    assert all(run.bold for run in heading.runs)
+    assert subheading.text == "Подраздел"
+    assert [run.font.size for run in subheading.runs] == [Pt(BLANK_TITLE_PT - 2)]
+    assert all(run.bold for run in subheading.runs)
+    assert plain.text == "Обычный текст"
+    assert [run.font.size for run in plain.runs] == [None]
+    assert not any(run.bold for run in plain.runs)
+
+
+def test_build_blank_document_header_html_keeps_alignment():
+    """Выравнивание редактора доходит до бланка: абзац печатается так же."""
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    blob = build_blank_document(
+        _context(
+            blank_header_html=(
+                '<p style="text-align: center">Подпись сотрудника</p>'
+                '<p style="text-align: right">Дата</p>'
+                "<p>Обычный текст</p>"
+            )
+        )
+    )
+    paragraphs = _body_paragraphs(blob)
+    assert paragraphs[1].text == "Подпись сотрудника"
+    assert paragraphs[1].alignment == WD_ALIGN_PARAGRAPH.CENTER
+    assert paragraphs[2].text == "Дата"
+    assert paragraphs[2].alignment == WD_ALIGN_PARAGRAPH.RIGHT
+    assert paragraphs[3].text == "Обычный текст"
+    assert paragraphs[3].alignment is None
+
+
+def test_build_blank_document_heading_keeps_formatting_and_alignment():
+    """Заголовок печатается жирным кеглем заголовка с выравниванием из редактора;
+    атрибуты кроме text-align на бланок не попадают."""
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.shared import Pt
+
+    blob = build_blank_document(
+        _context(
+            blank_header_html=(
+                '<h2 style="text-align: center; color: red">Подраздел</h2>'
+            )
+        )
+    )
+    paragraph = _body_paragraphs(blob)[1]
+    assert paragraph.text == "Подраздел"
+    assert paragraph.alignment == WD_ALIGN_PARAGRAPH.CENTER
+    assert all(run.bold for run in paragraph.runs)
+    assert [run.font.size for run in paragraph.runs] == [Pt(BLANK_TITLE_PT - 1)]
+    assert "color" not in _docx_text(blob)
+
+
+def test_build_blank_document_stage_lines_heading():
+    """Заголовок в тексте шага печатается жирным кеглем заголовка, текст шага
+    после него — обычным абзацем (как было до заголовков в редакторе)."""
+    from docx.shared import Pt
+
+    context = _context()
+    context["steps"] = [
+        {
+            "order": 1,
+            "owner": FAKE_GROUP,
+            "title": FAKE_STAGE,
+            "stage_lines": ["<h2>Подраздел вымышленный</h2>", "Обычный пункт"],
+            "fio": FAKE_ASSIGNEE_FIO,
+            "status": STEP_PENDING,
+            "done_at": "",
+        }
+    ]
+    blob = build_blank_document(context)
+    paragraphs = [paragraph for paragraph in _body_paragraphs(blob)]
+    subheading = next(p for p in paragraphs if p.text == "Подраздел вымышленный")
+    plain = next(p for p in paragraphs if p.text == "Обычный пункт")
+    assert all(run.bold for run in subheading.runs)
+    assert [run.font.size for run in subheading.runs] == [Pt(BLANK_TITLE_PT - 1)]
+    assert not any(run.bold for run in plain.runs)
+    assert [run.font.size for run in plain.runs] == [None]
 
 
 def test_build_blank_document_header_html_is_sanitized():
