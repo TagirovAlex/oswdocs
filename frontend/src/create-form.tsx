@@ -2012,17 +2012,17 @@ function changeRouteMode(mode: RouteMode): void {
       {/* Модальный выбор исполнителей из AD (кнопка «+ Добавить» в блоке):
           поиск + чекбоксы + нижняя панель выбранных (порядок кликов) +
           Очистить/ОК/Отмена. В последовательный блок встанут в порядке выбора,
-          в параллельный — все разом в блок. */}
+          в параллельный — все разом в блок. Клик по затемнению (подложке)
+          модалку НЕ закрывает — закрывают ОК, Отмена и Escape. */}
       {adPanelBlock !== null && (() => {
         const blockIndex = blocks.findIndex((b) => b.id === adPanelBlock);
         return (
-          <div className="sed-modal-backdrop" onClick={closeAdPanel}>
+          <div className="sed-modal-backdrop">
             <div
               className="sed-modal"
               role="dialog"
               aria-modal="true"
               aria-label={`Выбор исполнителей${blockIndex >= 0 ? ` — Блок ${blockIndex + 1}` : ""}`}
-              onClick={(e) => e.stopPropagation()}
               onKeyDown={(e) => {
                 if (e.key === "Escape") closeAdPanel();
               }}

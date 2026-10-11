@@ -633,6 +633,32 @@ describe("CreateForm", () => {
     expect(screen.queryByText(/petrov\.pp/)).not.toBeInTheDocument();
   });
 
+  // Модалка AD: клик по подложке (затемнению) не закрывает — закрывают
+  // ОК, Отмена и Escape.
+  it("модалка: клик по подложке не закрывает", async () => {
+    vi.mocked(searchAd).mockResolvedValue([adCandidate]);
+    vi.mocked(searchEmployees).mockRejectedValue(new ApiHttpError(503, "Клиент 1С не настроен"));
+
+    render(<CreateForm role="hr" />);
+    await fillEmployeeManually();
+    fireEvent.click(screen.getByText("Добавить последовательный блок"));
+    fireEvent.click(screen.getByRole("button", { name: "Добавить исполнителя" }));
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
+    fireEvent.change(screen.getByLabelText("Поиск в AD"), { target: { value: "Петров" } });
+    await waitFor(() => expect(screen.getByText("Петров Пётр Петрович")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("checkbox", { name: "Выбрать Петров Пётр Петрович" }));
+
+    // Клик по затемнению (родитель диалога) — выбор сохраняется, модалка открыта.
+    fireEvent.click(screen.getByRole("dialog").parentElement as HTMLElement);
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "Выбрать Петров Пётр Петрович" })).toBeChecked();
+
+    // Escape после клика по подложке по-прежнему закрывает.
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(screen.queryByText(/petrov\.pp/)).not.toBeInTheDocument();
+  });
+
   // Модалка AD: крестик в нижней панели убирает, Очистить — всех; ОК без
   // выбора недоступна.
   it("модалка: крестик и Очистить управляют выбором", async () => {

@@ -286,6 +286,9 @@ export function RequestCard(props: RequestCardProps) {
   const [deleteBusy, setDeleteBusy] = useState<boolean>(false);
   const [deleteError, setDeleteError] = useState<string>("");
   const [deleted, setDeleted] = useState<boolean>(false);
+  // Работа в карточке завершена в этой же вкладке (?view=request без opener):
+  // закрыть окно там нельзя, вместо закрытия показываем возврат к списку.
+  const [finished, setFinished] = useState<boolean>(false);
   const [attachments, setAttachments] = useState<AttachmentMeta[]>([]);
   const [attachmentsError, setAttachmentsError] = useState<string>("");
   const [uploadError, setUploadError] = useState<string>("");
@@ -814,11 +817,16 @@ export function RequestCard(props: RequestCardProps) {
   }
 
   // Завершающее действие в окне-попе: оповестить список (обновит счётчики
-  // папок в основном окне) и закрыть окно для скорости работы. Встроенная
-  // карточка (без opener) — только оповещение, window.close() там не работает.
+  // папок в основном окне) и закрыть окно для скорости работы. Карточка в той
+  // же вкладке (opener пуст) закрыть нельзя — показываем возврат к списку
+  // (как при удалении заявки).
   function closeIfPopup(): void {
     notifyRequestsChanged();
-    if (window.opener) window.close();
+    if (window.opener) {
+      window.close();
+      return;
+    }
+    setFinished(true);
   }
 
   async function handleDecision(order: number, decision: StepDecision): Promise<void> {
@@ -857,12 +865,15 @@ export function RequestCard(props: RequestCardProps) {
       );
       return;
     }
-    // Согласование завершает работу с карточкой — закрываем окно-попу.
-    if (decision === "approve") closeIfPopup();
+    // Отказ и возврат завершают работу с карточкой так же, как согласование:
+    // закрываем окно-попу (в той же вкладке — возврат к списку).
+    closeIfPopup();
   }
 
   async function handleSubmit(): Promise<void> {
-    await runAction(() => submitRequest(requestId), "Заявка отправлена на согласование");
+    if (await runAction(() => submitRequest(requestId), "Заявка отправлена на согласование")) {
+      closeIfPopup();
+    }
   }
   async function handleToExecution(): Promise<void> {
     if (await runAction(() => toExecution(requestId), "Заявка отправлена к исполнению")) {
@@ -875,7 +886,9 @@ export function RequestCard(props: RequestCardProps) {
     }
   }
   async function handleWithdraw(): Promise<void> {
-    await runAction(() => withdrawRequest(requestId), "Заявка отозвана");
+    if (await runAction(() => withdrawRequest(requestId), "Заявка отозвана")) {
+      closeIfPopup();
+    }
   }
 
   // Удаление заявки (только админ; для тестового периода). Подтверждение —
@@ -1149,6 +1162,20 @@ export function RequestCard(props: RequestCardProps) {
           <div>
             <div role="status">Заявка удалена</div>
             <div className="sed-toolbar sed-mt-8">
+            <a className="sed-btn" href="?">
+              К списку заявок
+            </a>
+          </div>
+        </div>
+      )}
+      {/* Работа в карточке завершена в этой же вкладке: закрыть окно нельзя —
+          возврат к списку (как при удалении заявки). Итог действия (статус
+          «Отметка сохранена» и т.п.) карточка показывает ниже, сама она
+          остаётся: комментарии и историю заявки смотреть по-прежнему нужно. */}
+      {finished && (
+        <div>
+          <div role="status">Действие выполнено — карточка завершена</div>
+          <div className="sed-toolbar sed-mt-8">
             <a className="sed-btn" href="?">
               К списку заявок
             </a>

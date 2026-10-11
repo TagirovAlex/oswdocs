@@ -629,6 +629,80 @@ describe("RequestCard", () => {
     clearOpener();
   });
 
+  // Отказ завершает работу с карточкой так же, как согласование: в окне-попе
+  // список оповещается, окно закрывается.
+  it("отказ в попапе закрывает окно и оповещает список", async () => {
+    const refused = requestWith(null, "На доработке", "REQ-0001", [
+      {
+        order: 1,
+        owner_group: "petrov.pp",
+        resolver: "by_user",
+        assignee: "petrov.pp",
+        can_act: false,
+        status: "отклонен",
+        expires_at: "2026-10-05T10:00:00+00:00",
+      },
+    ]);
+    vi.mocked(getRequest).mockResolvedValueOnce(requestForAction(null)).mockResolvedValue(refused);
+    vi.mocked(decideStep).mockResolvedValue(refused);
+    const close = vi.spyOn(window, "close").mockImplementation(() => undefined);
+    setOpener({});
+
+    renderCard("REQ-0001", "owner");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Отказать" })).toBeInTheDocument());
+    fireEvent.change(screen.getByLabelText("Комментарий к решению"), {
+      target: { value: "Вымышленная причина отказа" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Отказать" }));
+    await waitFor(() =>
+      expect(vi.mocked(decideStep)).toHaveBeenCalledWith(
+        "REQ-0001",
+        1,
+        "reject",
+        "Вымышленная причина отказа",
+      ),
+    );
+    await waitFor(() => expect(close).toHaveBeenCalled());
+    expect(window.localStorage.getItem("sed:requests-changed")).not.toBeNull();
+    clearOpener();
+  });
+
+  // Возврат — тоже завершение работы с карточкой: окно-попу закрывается.
+  it("возврат в попапе закрывает окно", async () => {
+    const returned = requestWith(null, "На доработке", "REQ-0001", [
+      {
+        order: 1,
+        owner_group: "petrov.pp",
+        resolver: "by_user",
+        assignee: "petrov.pp",
+        can_act: false,
+        status: "возвращен",
+        expires_at: "2026-10-05T10:00:00+00:00",
+      },
+    ]);
+    vi.mocked(getRequest).mockResolvedValueOnce(requestForAction(null)).mockResolvedValue(returned);
+    vi.mocked(decideStep).mockResolvedValue(returned);
+    const close = vi.spyOn(window, "close").mockImplementation(() => undefined);
+    setOpener({});
+
+    renderCard("REQ-0001", "owner");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Вернуть" })).toBeInTheDocument());
+    fireEvent.change(screen.getByLabelText("Комментарий к решению"), {
+      target: { value: "Вымышленная причина возврата" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Вернуть" }));
+    await waitFor(() =>
+      expect(vi.mocked(decideStep)).toHaveBeenCalledWith(
+        "REQ-0001",
+        1,
+        "return",
+        "Вымышленная причина возврата",
+      ),
+    );
+    await waitFor(() => expect(close).toHaveBeenCalled());
+    clearOpener();
+  });
+
   // Отказ без комментария на ходу: форма решения скрывается по can_act
   // обновлённой карточки, но комментарий к заявке на листе рассмотрения
   // остаётся (issue_report п.2) — дописать заявке можно, не листая «Историю».
@@ -1159,6 +1233,136 @@ describe("RequestCard", () => {
     await waitFor(() => expect(screen.getByText("Заявка отправлена на согласование")).toBeInTheDocument());
   });
 
+  // Отправка на согласование завершает работу в карточке: в окне-попе окно
+  // закрывается, список оповещается.
+  it("отправка на согласование в попапе закрывает окно", async () => {
+    vi.mocked(getRequest)
+      .mockResolvedValueOnce(requestWith("Громов Игорь Олегович", "Черновик"))
+      .mockResolvedValue(requestWith("Громов Игорь Олегович", "На согласовании"));
+    vi.mocked(submitRequest).mockResolvedValue(
+      requestWith("Громов Игорь Олегович", "На согласовании"),
+    );
+    const close = vi.spyOn(window, "close").mockImplementation(() => undefined);
+    setOpener({});
+
+    renderCard();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Отправить на согласование" })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Отправить на согласование" }));
+    await waitFor(() => expect(vi.mocked(submitRequest)).toHaveBeenCalledWith("REQ-0001"));
+    await waitFor(() => expect(close).toHaveBeenCalled());
+    expect(window.localStorage.getItem("sed:requests-changed")).not.toBeNull();
+    clearOpener();
+  });
+
+  // Отзыв завершает работу в карточке: в окне-попе окно закрывается.
+  it("отзыв в попапе закрывает окно", async () => {
+    vi.mocked(getRequest)
+      .mockResolvedValueOnce(requestWith("Громов Игорь Олегович", "На согласовании"))
+      .mockResolvedValue(requestWith("Громов Игорь Олегович", "Отозвано"));
+    vi.mocked(withdrawRequest).mockResolvedValue(
+      requestWith("Громов Игорь Олегович", "Отозвано"),
+    );
+    const close = vi.spyOn(window, "close").mockImplementation(() => undefined);
+    setOpener({});
+
+    renderCard("REQ-0001", "hr");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Отозвать заявку" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Отозвать заявку" }));
+    await waitFor(() => expect(vi.mocked(withdrawRequest)).toHaveBeenCalledWith("REQ-0001"));
+    await waitFor(() => expect(close).toHaveBeenCalled());
+    expect(window.localStorage.getItem("sed:requests-changed")).not.toBeNull();
+    clearOpener();
+  });
+
+  // Та же вкладка (?view=request в основном окне): window.close() не закрывает —
+  // после решения показываем блок с возвратом к списку (как при удалении).
+  it("отказ в той же вкладке показывает «К списку заявок» вместо закрытия окна", async () => {
+    const refused = requestWith(null, "На доработке", "REQ-0001", [
+      {
+        order: 1,
+        owner_group: "petrov.pp",
+        resolver: "by_user",
+        assignee: "petrov.pp",
+        can_act: false,
+        status: "отклонен",
+        expires_at: "2026-10-05T10:00:00+00:00",
+      },
+    ]);
+    vi.mocked(getRequest).mockResolvedValueOnce(requestForAction(null)).mockResolvedValue(refused);
+    vi.mocked(decideStep).mockResolvedValue(refused);
+    const close = vi.spyOn(window, "close").mockImplementation(() => undefined);
+    clearOpener();
+
+    renderCard("REQ-0001", "owner");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Отказать" })).toBeInTheDocument());
+    fireEvent.change(screen.getByLabelText("Комментарий к решению"), {
+      target: { value: "Вымышленная причина отказа" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Отказать" }));
+
+    await waitFor(() =>
+      expect(screen.getByText("Действие выполнено — карточка завершена")).toBeInTheDocument(),
+    );
+    expect(screen.getByRole("link", { name: "К списку заявок" })).toHaveAttribute("href", "?");
+    expect(close).not.toHaveBeenCalled();
+    expect(window.localStorage.getItem("sed:requests-changed")).not.toBeNull();
+  });
+
+  // Тот же блок после отзыва в той же вкладке (действие ОК, не решение шага).
+  it("отзыв в той же вкладке показывает «К списку заявок»", async () => {
+    vi.mocked(getRequest)
+      .mockResolvedValueOnce(requestWith("Громов Игорь Олегович", "На согласовании"))
+      .mockResolvedValue(requestWith("Громов Игорь Олегович", "Отозвано"));
+    vi.mocked(withdrawRequest).mockResolvedValue(
+      requestWith("Громов Игорь Олегович", "Отозвано"),
+    );
+    const close = vi.spyOn(window, "close").mockImplementation(() => undefined);
+    clearOpener();
+
+    renderCard("REQ-0001", "hr");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Отозвать заявку" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Отозвать заявку" }));
+
+    await waitFor(() =>
+      expect(screen.getByText("Действие выполнено — карточка завершена")).toBeInTheDocument(),
+    );
+    expect(screen.getByRole("link", { name: "К списку заявок" })).toHaveAttribute("href", "?");
+    expect(close).not.toHaveBeenCalled();
+  });
+
+  // Комментарий — не завершение работы: ни окно не закрывается, ни блока с
+  // возвратом к списку не появляется (и в окне-попе, и в той же вкладке).
+  it("добавление комментария карточку не завершает", async () => {
+    vi.mocked(getRequest).mockResolvedValue(
+      requestWith("Громов Игорь Олегович", "На согласовании"),
+    );
+    vi.mocked(addComment).mockResolvedValue({
+      id: "c-1",
+      request_id: "REQ-0001",
+      author: "petrov.pp",
+      body: "Вымышленный комментарий",
+      at: "2026-10-05T11:00:00+00:00",
+      kind: "request",
+    });
+    const close = vi.spyOn(window, "close").mockImplementation(() => undefined);
+    setOpener({});
+
+    renderCard();
+    await waitFor(() => expect(screen.getByLabelText("Текст комментария")).toBeInTheDocument());
+    fireEvent.change(screen.getByLabelText("Текст комментария"), {
+      target: { value: "Вымышленный комментарий" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Добавить комментарий" }));
+    await waitFor(() =>
+      expect(vi.mocked(addComment)).toHaveBeenCalledWith("REQ-0001", "Вымышленный комментарий"),
+    );
+    expect(close).not.toHaveBeenCalled();
+    expect(screen.queryByRole("link", { name: "К списку заявок" })).not.toBeInTheDocument();
+    clearOpener();
+  });
+
   // Скан-вложения: мета со ссылкой на окно просмотра.
   it("карточка показывает мета вложений со ссылкой на просмотр", async () => {
     vi.mocked(getRequest).mockResolvedValue(requestWith("Громов Игорь Олегович", "На согласовании"));
@@ -1587,6 +1791,8 @@ describe("RequestCard: шаг с несколькими ответственны
     ).toBeInTheDocument();
     await waitFor(() => expect(screen.getAllByText("1 из 3 согласовали").length).toBeGreaterThan(0));
     expect(close).not.toHaveBeenCalled();
+    // Шаг ждёт остальных — работа с карточкой не завершена: возврата к списку нет.
+    expect(screen.queryByRole("link", { name: "К списку заявок" })).not.toBeInTheDocument();
     // Повторную отметку бэкенд не примет (409) — кнопки больше не предлагаем.
     await waitFor(() =>
       expect(screen.queryByRole("button", { name: "Согласовать" })).not.toBeInTheDocument(),
