@@ -13,7 +13,16 @@
 ## API (api/app/)
 - `main.py` — точка входа, подключение роутеров.
 - `auth.py` — доменный вход/сессия (LDAPS), `/auth/login`, `/auth/me`.
-- `deps.py` — зависимости, роли (owner/hr/hr_admin/admin/sed_admin), `_detect_role`.
+- `deps.py` — зависимости, текущий пользователь; права — блоки функций из `permissions.py`
+  (`require_block`), роль (`owner/hr/hr_admin/admin/sed_admin`) — производная от совпавших шаблонов
+  для /auth/me (`_detect_role`).
+- `permissions.py` — справочник прав доступа (миграция 0020: `perm_blocks`/`perm_templates`/
+  `perm_template_blocks`/`perm_template_groups`): `DbPermissionsStore` (транзакционно,
+  `PermissionsUnavailable` → 503, fail-closed) и `InMemoryPermissionsStore` (офлайн); резолв —
+  объединение блоков шаблонов, чьи группы AD пересекаются с `memberOf`, плюс шаблон `owner`
+  (без групп по устройству — блоки «свои заявки/свой шаг» любому аутентифицированному);
+  `keeps_block_after_change` — правило «нельзя снять права у себя» (409). Область видимости
+  («только свои заявки/шаг») остаётся в `requests.py`/`documents.py`.
 - `config.py` — настройки/env (Settings), `get_settings`.
 - `requests.py` — заявки: создание, шаги, отметки (approve/reject/return), PATCH, rollback, история,
   комментарии; причина отказа/возврата пишется в ленту комментариев заявки (`kind="step"`), а не
@@ -81,8 +90,14 @@
   бланки (CRUD справочника и состава шагов):
   `GET/POST /settings/routing/blanks`, `PUT /settings/routing/blanks/{id}`,
   `GET/PUT /settings/routing/blanks/{id}/steps` и шаги справочника
-  `GET/POST/PUT/DELETE /settings/routing/step-catalog` (все — только admin); ключ `blank_autopick`
-  в `INFRA_KEYS`. Ключи `templates`/`position_to_category` (миграция 0014) и мёртвые
+  `GET/POST/PUT/DELETE /settings/routing/step-catalog` (блок `settings_blanks`; `/settings` и виды
+  документов — `settings_infra`, `/settings/content` — `settings_content`, `/enterprises` и
+  `/step-groups` — `request_create`); ключ `blank_autopick`
+  в `INFRA_KEYS`. Вкладка «Доступ и роли»: `GET /settings/permissions` (блоки, шаблоны, состав и
+  группы одним ответом), `PUT /settings/permissions/templates/{code}` (состав шаблона целиком,
+  аудит `permissions.update`, 409 при снятии у себя блока `settings_infra`),
+  `GET /settings/permissions/groups` (перечень групп из кэша `ad_group_members` + дата синка).
+  Ключи `templates`/`position_to_category` (миграция 0014) и мёртвые
   `doc_templates`/`position_sets` (миграция 0016) удалены из БД, ручки файлов-бланков удалены
   вместе с файлами-шаблонами .docx; вкладка «Шаблоны» из админки снята (редактор писем — на
   вкладке «Письма»).
@@ -186,7 +201,8 @@
   5 шаблонов с protected, perm_template_blocks — состав «шаблон → блок» переносом
   текущих прав один в один, perm_template_groups — группы AD шаблона, переносятся
   из ключей settings ролевых групп; access_groups остаётся ключом входа).
-  Планируется (волна F2/F3): резолв прав вместо ролевых гейтов, админка прав.
+  Планируется (волна F3): админка прав — вкладка «Доступ и роли» на блоках и шаблонах
+   (бэкенд прав — `permissions.py` + `/settings/permissions`, волна F2, сделано).
 
 ## Сценарии ключевых функций
 - Создание: create-form → POST /requests → шаги; отметки: request-card → POST .../steps/{order}/decide; печать: POST /print (pdf_b64) → iframe; история: GET /history (audit_log); сотрудники: GET /employees (локальная таблица); бэкапы: /api/archive*; настройки: /api/settings.

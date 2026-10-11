@@ -29,6 +29,14 @@ from .employee_sync import (
     get_employee_sync_store,
 )
 from .link_store import get_links_store
+from .permissions import (
+    BLOCK_REQUEST_CARD,
+    BLOCK_REQUEST_CREATE,
+    BLOCK_REQUEST_DELETE,
+    BLOCK_REQUESTS_LIST,
+    BLOCK_STEP_DECIDE,
+    require_block,
+)
 from .mailer import (
     EVENT_ASSIGNED,
     EVENT_CLOSED,
@@ -540,17 +548,25 @@ def _utcnow() -> datetime:
 
 
 def _is_hr(user: CurrentUser) -> bool:
-    """Разрешенная группа для конструктора/правок: ОК, руководители ОК и админы."""
+    """Обрезка ПДн по роли для карточки/истории: ОК, руководители ОК, админы.
+
+    Это НЕ гейт доступа (функции проверяются по блокам прав, см. require_block),
+    а правило видимости ПДн — поэтому роль здесь остаётся."""
     return user.role in ("hr", "hr_admin", "admin")
 
 
-def _require_hr(user: CurrentUser) -> None:
-    """Ручной конструктор и правки — только разрешенной группе, иначе 403."""
-    if not _is_hr(user):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Ручной маршрут и правки — только разрешенной группе",
-        )
+# Гейты ведения заявки (создание/подача/отзыв/повтор шага/правка шагов) — одна
+# проверка по блоку «Создание заявки» справочника прав вместо прежней ролевой
+# проверки _require_hr. Владельцу шага блок не положен — как и раньше.
+
+
+def _require_request_create(user: CurrentUser) -> None:
+    """Ведение заявки сотрудником ОК — по блоку request_create, иначе 403."""
+    require_block(
+        user,
+        BLOCK_REQUEST_CREATE,
+        "Ручной маршрут и правки — только разрешенной группе",
+    )
 
 
 # --- Кодирование блоков маршрута в step_order (без смены схемы БД) ---
@@ -1146,7 +1162,7 @@ def link_employee(
     только связка в нашей БД (плюс зеркала users/employee_base_map для внешних
     ключей); AD и 1С не пишутся. Действие аудируется как link.create."""
     settings.ensure_read_only()
-    _require_hr(user)
+    _require_request_create(user)
     if ad_reader is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -3039,7 +3055,7 @@ def preview_route(
     этапу и вид бланка. Путь объявлен до /requests/{request_id}/..., чтобы не
     конфликтовать с заявкой по id."""
     settings.ensure_read_only()
-    _require_hr(user)
+    _require_request_create(user)
     try:
         return _route_preview(body, ad_reader)
     except RoutingUnavailable as exc:
@@ -3061,7 +3077,7 @@ def list_route_blanks(
     что маршрут без выбора бланка собран не будет. Путь объявлен до
     /requests/{request_id}/..., чтобы не конфликтовать с заявкой по id."""
     settings.ensure_read_only()
-    _require_hr(user)
+    _require_request_create(user)
     store = _routing_store_or_none()
     if store is None:
         raise HTTPException(
@@ -3105,7 +3121,7 @@ def create_request(
     вариантами (см. _auto_route); в custom маршрут задаёт конструктор, бланк
     указывать не обязательно."""
     settings.ensure_read_only()
-    _require_hr(user)
+    _require_request_create(user)
     if body.doc_type_code:
         # Вид документа — из таблицы doc_types: передан — обязан существовать.
         try:
@@ -3207,8 +3223,12 @@ def list_requests(
     settings: Settings = Depends(get_settings),
     store: RequestsStore = Depends(get_requests_store),
 ) -> list[RequestOut]:
-    """Список: ОК/админы — все, владелец — только свои шаги (урезанные без ПДн)."""
+    """Список: ОК/админы — все, владелец — только свои шаги (урезанные без ПДн).
+
+    Право на функцию — блок «Просмотр списка заявок»; уточнение «только свои»
+    остаётся в обрезке ниже (роль/участие)."""
     settings.ensure_read_only()
+    require_block(user, BLOCK_REQUESTS_LIST, "Список заявок недоступен")
     try:
         requests = store.list_all()
     except RequestsUnavailable as exc:
@@ -3353,8 +3373,12 @@ def get_request(
     settings: Settings = Depends(get_settings),
     store: RequestsStore = Depends(get_requests_store),
 ) -> RequestOut:
-    """Карточка заявки с ролевой обрезкой ПДн."""
+    """Карточка заявки с ролевой обрезкой ПДн.
+
+    Право на функцию — блок «Просмотр карточки заявки»; уточнение «только свои»
+    (участники заявки) остаётся в проверке ниже."""
     settings.ensure_read_only()
+    require_block(user, BLOCK_REQUEST_CARD, "Карточка заявки недоступна")
     try:
         request = _get_request_or_404(store, request_id)
     except RequestsUnavailable as exc:
@@ -3381,13 +3405,10 @@ def delete_request(
     settings: Settings = Depends(get_settings),
     store: RequestsStore = Depends(get_requests_store),
 ) -> dict:
-    """Удалить заявку (только админ; для тестового периода). Удаление необратимо."""
+    """Удалить заявку (блок «Удаление заявки»; для тестового периода).
+    Удаление необратимо."""
     settings.ensure_read_only()
-    if user.role != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Удаление заявок — только админ",
-        )
+    require_block(user, BLOCK_REQUEST_DELETE, "Удаление заявок — только админ")
     try:
         _get_request_or_404(store, request_id)
         store.delete(request_id)
@@ -3427,7 +3448,7 @@ def submit_request(
     офлайн/нет AD/шаблона — уведомление тихо пропускается.
     """
     settings.ensure_read_only()
-    _require_hr(user)
+    _require_request_create(user)
     reopened: list[int] = []
     try:
         request = _get_request_or_404(store, request_id)
@@ -3489,7 +3510,7 @@ def withdraw_request(
 ) -> RequestOut:
     """Отзыв заявки → Отозвано (только разрешенная группа)."""
     settings.ensure_read_only()
-    _require_hr(user)
+    _require_request_create(user)
     try:
         request = _get_request_or_404(store, request_id)
         if request.status in (DONE, REJECTED, REVOKED):
@@ -3534,7 +3555,7 @@ def to_execution(
 ) -> RequestOut:
     """Согласовано → К исполнению (только разрешенная группа)."""
     settings.ensure_read_only()
-    _require_hr(user)
+    _require_request_create(user)
     try:
         request = _get_request_or_404(store, request_id)
         if request.status != AGREED:
@@ -3564,7 +3585,7 @@ def finish_request(
     При закрытии ставится письмо «закрыта» (EVENT_CLOSED) автору заявки; нет
     шаблона/адресата/настроек — тихо пропускается (notify.skip)."""
     settings.ensure_read_only()
-    _require_hr(user)
+    _require_request_create(user)
     try:
         request = _get_request_or_404(store, request_id)
         if request.status != TO_EXECUTION:
@@ -3616,6 +3637,10 @@ def decide_step(
     переоткрытого предыдущего блока, а при отказе и если возвращать некуда —
     автор заявки («возврат», заявка на доработке)."""
     settings.ensure_read_only()
+    # Право на отметку — блок «Отметки по шагам»; он есть и у владельца шага
+    # (шаблон owner), поэтому уточнение «только свой шаг» остаётся в проверке
+    # принадлежности шага ниже.
+    require_block(user, BLOCK_STEP_DECIDE, "Отметки по шагам недоступны")
     reopened: list[_Step] | None = None
     before_orders: set[int] = set()
     step_closed = False
@@ -3793,7 +3818,7 @@ def reissue_step(
 
     Возвращённый в работу шаг — уведомление «назначена» его владельцу(ям)."""
     settings.ensure_read_only()
-    _require_hr(user)
+    _require_request_create(user)
     try:
         request = _get_request_or_404(store, request_id)
         step = next((s for s in request.steps if s.order == order), None)
@@ -3836,7 +3861,7 @@ def replace_steps(
     из payload; снимок этапа (текст/название для печати) переносится на шаги с
     тем же исполнителем, чтобы печать бланка не потеряла текст."""
     settings.ensure_read_only()
-    _require_hr(user)
+    _require_request_create(user)
     try:
         request = _get_request_or_404(store, request_id)
         if request.status in (DONE, REJECTED, REVOKED):

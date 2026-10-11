@@ -28,6 +28,7 @@ from .audit import AuditEvent, audit_log
 from .config import Settings, get_settings
 from .deps import CurrentUser, get_current_user
 from .mailer import MailQueue, get_mail_queue
+from .permissions import BLOCK_ARCHIVE_BACKUPS, require_block
 from .settings_routes import (
     DbSettingsStore,
     SettingsUnavailable,
@@ -315,13 +316,9 @@ def _non_empty(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
-def _require_admin(user: CurrentUser) -> None:
-    """Архивация — админка: строго admin (как настройки), иначе 403."""
-    if user.role != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Архивация доступна только администраторам",
-        )
+def _require_archive(user: CurrentUser) -> None:
+    """Архивация — админка: блок «Архивация (бэкапы)» справочника прав, иначе 403."""
+    require_block(user, BLOCK_ARCHIVE_BACKUPS, "Архивация доступна только администраторам")
 
 
 def _archive_settings(store: DbSettingsStore, settings: Settings) -> dict:
@@ -342,7 +339,7 @@ def read_archive_settings(
     settings: Settings = Depends(get_settings),
 ) -> dict:
     """Настройки архивации: только admin, иначе 403; БД недоступна — 503."""
-    _require_admin(user)
+    _require_archive(user)
     try:
         values = _archive_settings(store, settings)
     except SettingsUnavailable as exc:
@@ -372,7 +369,7 @@ def update_archive_settings(
     Валидация: каталог/шаблон непустые, число копий >=1 (иначе 422);
     частичное обновление (пишутся только присутствующие ключи); ответ —
     полное эффективное состояние. RESTORE не реализован (вручную)."""
-    _require_admin(user)
+    _require_archive(user)
     updates = payload.model_dump(mode="json", exclude_unset=True)
     if "archive_backup_dir" in updates and not _non_empty(
         updates["archive_backup_dir"]
@@ -429,7 +426,7 @@ def run_archive_backup(
     так же, как при регламентном бэкапе; сбой уведомления бэкап не отменяет.
     БД/каталог недоступны — 503 (не 500). RESTORE не реализован
     (восстановление вручную)."""
-    _require_admin(user)
+    _require_archive(user)
     try:
         target = create_backup(
             store,
@@ -466,7 +463,7 @@ def list_archive_files(
 
     Каталог — archive_backup_dir (дефолт — FILES_DIR/backups); БД недоступна —
     503. RESTORE не реализован (восстановление вручную)."""
-    _require_admin(user)
+    _require_archive(user)
     try:
         backup_dir = _backup_dir(store, settings.FILES_DIR)
     except SettingsUnavailable as exc:
@@ -507,7 +504,7 @@ def download_archive_file(
     """Скачать файл бэкапа (только admin): attachment, имя — basename.
 
     Имя за пределами каталога или файл отсутствует — 404; БД недоступна — 503."""
-    _require_admin(user)
+    _require_archive(user)
     try:
         backup_dir = _backup_dir(store, settings.FILES_DIR)
     except SettingsUnavailable as exc:
@@ -542,7 +539,7 @@ def delete_archive_file(
 ) -> dict:
     """Удалить файл бэкапа (только admin): имя за пределами каталога или файла
     нет — 404; успех — {ok: true}. БД недоступна — 503."""
-    _require_admin(user)
+    _require_archive(user)
     try:
         backup_dir = _backup_dir(store, settings.FILES_DIR)
     except SettingsUnavailable as exc:

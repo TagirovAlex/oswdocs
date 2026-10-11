@@ -21,9 +21,27 @@ from sqlalchemy import bindparam, create_engine, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import sessionmaker
 
+from .ad_groups_cache import (
+    GroupsCacheStore,
+    GroupsCacheUnavailable,
+    get_groups_cache_store,
+)
 from .audit import AuditEvent, audit_log
 from .config import Settings, get_settings
 from .deps import CurrentUser, get_current_user
+from .permissions import (
+    BLOCK_REQUEST_CREATE,
+    BLOCK_SETTINGS_BLANKS,
+    BLOCK_SETTINGS_CONTENT,
+    BLOCK_SETTINGS_INFRA,
+    PermissionTemplate,
+    PermissionsStore,
+    PermissionsUnavailable,
+    clean_codes,
+    get_permissions_store,
+    keeps_block_after_change,
+    require_block,
+)
 from .routing_store import DbRoutingStore, RoutingUnavailable, get_routing_store
 
 router = APIRouter(tags=["настройки"])
@@ -802,30 +820,45 @@ class ContentSettingsPayload(BaseModel):
 
 
 def _require_admin(user: CurrentUser) -> None:
-    """Настройки — строго роль admin (ОК/владельцам 403; is_privileged не подходит)."""
-    if user.role != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Настройки доступны только администраторам",
-        )
+    """Инфраструктурные настройки — блок settings_infra справочника прав.
+
+    Прежде это была строгая роль admin; блок закрыт админу и администратору СЭД
+    (миграция 0020)."""
+    require_block(user, BLOCK_SETTINGS_INFRA, "Настройки доступны только администраторам")
 
 
-def _require_hr(user: CurrentUser) -> None:
-    """Справочники Волны 1 (предприятия/группы шагов) — только ОК,
-    руководителям ОК и админам."""
-    if user.role not in ("hr", "hr_admin", "admin"):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Справочники доступны только разрешенной группе",
-        )
+def _require_settings_blanks(user: CurrentUser) -> None:
+    """Справочники бланков, шагов, этапов и профилей — блок settings_blanks."""
+    require_block(user, BLOCK_SETTINGS_BLANKS, "Настройки доступны только администраторам")
+
+
+def _require_request_create(user: CurrentUser) -> None:
+    """Справочники Волны 1 (предприятия/группы шагов) — входные данные формы
+    заявки, поэтому проверяется блок «Создание заявки»: он есть у сотрудника ОК,
+    руководителя ОК и админа (как и прежняя ролевая проверка)."""
+    require_block(
+        user,
+        BLOCK_REQUEST_CREATE,
+        "Справочники доступны только разрешенной группе",
+    )
 
 
 def _require_content_admin(user: CurrentUser) -> None:
-    """Контент-настройки — роли admin и руководитель ОК (hr_admin), иначе 403."""
-    if user.role not in ("admin", "hr_admin"):
+    """Контент-настройки — блок settings_content (админ, руководитель ОК и
+    администратор СЭД)."""
+    require_block(user, BLOCK_SETTINGS_CONTENT, "Контент-настройки — руководителям ОК и админам")
+
+
+def _require_permission_admin(user: CurrentUser) -> None:
+    """Раздел «Доступ и роли» (справочник прав): править могут администратор и
+    администратор СЭД (решение человека 2026-10-11).
+
+    До волны F3 гейт остаётся ролевым — роль выводится из совпавших шаблонов
+    прав, поэтому лишних прав он не даёт."""
+    if user.role not in ("admin", "sed_admin"):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Контент-настройки — руководителям ОК и админам",
+            detail="Права доступа правит только администратор",
         )
 
 
@@ -1035,7 +1068,7 @@ def list_enterprises(
 ) -> list[dict]:
     """Предприятия (Волна 1): ОК/админы, иначе 403; БД недоступна — 503.
     Значения — только из таблицы settings (ключ enterprises), хардкода нет."""
-    _require_hr(user)
+    _require_request_create(user)
     try:
         raw = store.get("enterprises")
     except SettingsUnavailable as exc:
@@ -1063,7 +1096,7 @@ def list_step_groups(
     """Группы ручного конструктора шагов (Волна 1): ОК/админы, иначе 403;
     значения — из таблицы settings (ключ allowed_ad_groups), хардкода нет.
     Формат — объекты {id, name}: строки старого формата читаются как id=name."""
-    _require_hr(user)
+    _require_request_create(user)
     try:
         raw = store.get("allowed_ad_groups")
     except SettingsUnavailable as exc:
@@ -1716,7 +1749,7 @@ def read_routing_catalogs(
     профиль шёл бы свой SELECT (N+1). Состав этапов — по запросу на этап:
     отдельной выборки по всем этапам в хранилище нет, а справочник маленький и
     читается админской страницей один раз."""
-    _require_admin(user)
+    _require_settings_blanks(user)
     try:
         services = store.list_services()
         profiles = store.list_profiles()
@@ -1762,7 +1795,7 @@ def create_routing_stage(
 ) -> dict:
     """Создать этап маршрута (только admin): код уникален (409), группа-владелец
     должна быть в справочнике групп шагов (422). Аудит ведёт routing_store."""
-    _require_admin(user)
+    _require_settings_blanks(user)
     try:
         _reject_known_code(store.list_stages(), payload.code, "Этап")
         _require_known_step_group(settings_store, payload.owner_group)
@@ -1801,7 +1834,7 @@ def update_routing_stage(
 ) -> dict:
     """Изменить этап маршрута (только admin): частичное обновление полей этапа
     (version увеличивается), аудит — в routing_store."""
-    _require_admin(user)
+    _require_settings_blanks(user)
     updates = payload.model_dump(mode="json", exclude_unset=True)
     try:
         _require_known_step_group(settings_store, updates.get("owner_group"))
@@ -1827,7 +1860,7 @@ def replace_stage_assignees(
     """Заменить состав этапа (owner_kind = stage_roster, только admin): переданные
     логины добавляются/реактивируются, отсутствующие деактивируются одной
     транзакцией; аудит — в routing_store (без логинов в details)."""
-    _require_admin(user)
+    _require_settings_blanks(user)
     items = [
         {"sam": item.sam.strip(), "position_title": item.position_title}
         for item in payload.assignees
@@ -1849,7 +1882,7 @@ def create_routing_profile(
 ) -> dict:
     """Создать профиль маршрута (только admin): код уникален (409); service_id
     пуст — профиль по умолчанию (для всех служб). Аудит — в routing_store."""
-    _require_admin(user)
+    _require_settings_blanks(user)
     try:
         _reject_known_code(store.list_profiles(), payload.code, "Профиль")
         profile_id = store.create_profile(
@@ -1877,7 +1910,7 @@ def update_routing_profile(
 ) -> dict:
     """Изменить профиль маршрута (только admin): частичное обновление полей,
     аудит — в routing_store."""
-    _require_admin(user)
+    _require_settings_blanks(user)
     updates = payload.model_dump(mode="json", exclude_unset=True)
     try:
         store.update_profile(profile_id, {**updates, "actor": user.sam})
@@ -1898,7 +1931,7 @@ def replace_profile_steps(
     """Заменить состав шагов профиля (только admin): переданные шаги полностью
     заменяют прежние одной транзакцией, этапы должны существовать и быть активны
     (иначе 422, состав не меняется). Аудит — в routing_store (profile.steps.update)."""
-    _require_admin(user)
+    _require_settings_blanks(user)
     items = [
         {
             "stage_id": step.stage_id,
@@ -1929,7 +1962,7 @@ def list_routing_blanks(
 ) -> list[dict]:
     """Бланки из справочника (только admin, иначе 403): все, включая
     отключённые (active=false) — админка их правит. Хранилище недоступно — 503."""
-    _require_admin(user)
+    _require_settings_blanks(user)
     try:
         return store.list_blanks()
     except RoutingUnavailable as exc:
@@ -1948,7 +1981,7 @@ def create_routing_blank(
     справочником, включая отключённые). Шапка/подвал — вместе с бланком, состав
     шагов задаётся отдельно (PUT .../{id}/steps). Аудит — в routing_store
     (blank.create)."""
-    _require_admin(user)
+    _require_settings_blanks(user)
     try:
         _reject_known_code(store.list_blanks(), payload.code, "Бланк")
         blank_id = store.create_blank(
@@ -1979,7 +2012,7 @@ def update_routing_blank(
 ) -> dict:
     """Изменить бланк (только admin): частичное обновление полей (код неизменен,
     шапка/подвал включительно), аудит — в routing_store (blank.update)."""
-    _require_admin(user)
+    _require_settings_blanks(user)
     updates = payload.model_dump(mode="json", exclude_unset=True)
     try:
         store.update_blank(blank_id, {**updates, "actor": user.sam})
@@ -2001,7 +2034,7 @@ def delete_routing_blank(
     Шаги бланка сносятся каскадом, у выданных заявок blank_id становится NULL —
     печать идёт по снимку бланка, поэтому удаление безопасно. Аудит — в
     routing_store (blank.delete)."""
-    _require_admin(user)
+    _require_settings_blanks(user)
     try:
         deleted = store.delete_blank(blank_id, user.sam)
     except RoutingUnavailable as exc:
@@ -2021,7 +2054,7 @@ def read_blank_steps(
 ) -> list[dict]:
     """Собственные шаги бланка (для редактора админки): по порядку, с текстом
     шага (stage_lines — список) и видом исполнителя; этапа у шага нет."""
-    _require_admin(user)
+    _require_settings_blanks(user)
     try:
         return store.list_blank_steps(blank_id)
     except RoutingUnavailable as exc:
@@ -2045,7 +2078,7 @@ def replace_blank_steps(
     ad_group без группы — 422 в схеме запроса, группа вне справочника групп
     шагов (allowed_ad_groups) — 422 здесь. Аудит — в routing_store
     (blank.steps.update)."""
-    _require_admin(user)
+    _require_settings_blanks(user)
     items = [
         {
             "step_order": step.step_order,
@@ -2088,7 +2121,7 @@ def list_routing_step_catalog(
 ) -> list[dict]:
     """Шаги справочника (только admin, иначе 403): все, включая отключённые
     (active=false) — админка их правит. Хранилище недоступно — 503."""
-    _require_admin(user)
+    _require_settings_blanks(user)
     try:
         return store.list_catalog_steps()
     except RoutingUnavailable as exc:
@@ -2107,7 +2140,7 @@ def create_routing_step_catalog(
     """Создать шаг справочника (только admin): код уникален (409, сверка со всем
     справочником), группа-владелец должна быть в справочнике групп шагов (422).
     Аудит — в routing_store (step_catalog.create)."""
-    _require_admin(user)
+    _require_settings_blanks(user)
     try:
         _reject_known_code(store.list_catalog_steps(), payload.code, "Шаг справочника")
         _require_known_step_group(settings_store, payload.owner_group)
@@ -2147,7 +2180,7 @@ def update_routing_step_catalog(
 ) -> dict:
     """Изменить шаг справочника (только admin): частичное обновление полей (код
     неизменен), аудит — в routing_store (step_catalog.update)."""
-    _require_admin(user)
+    _require_settings_blanks(user)
     updates = payload.model_dump(mode="json", exclude_unset=True)
     try:
         _require_known_step_group(settings_store, updates.get("owner_group"))
@@ -2172,7 +2205,7 @@ def delete_routing_step_catalog(
     """Удалить шаг справочника (только admin); не найдено — 404. Копии шага в
     бланках не ссылаются на справочник, поэтому удаление безопасно. Аудит — в
     routing_store (step_catalog.delete)."""
-    _require_admin(user)
+    _require_settings_blanks(user)
     try:
         deleted = store.delete_catalog_step(step_id, user.sam)
     except RoutingUnavailable as exc:
@@ -2184,4 +2217,179 @@ def delete_routing_step_catalog(
             status_code=status.HTTP_404_NOT_FOUND, detail="Шаг справочника не найден"
         )
     return {"id": step_id, "deleted": True}
+
+
+# --- Справочник прав доступа (миграция 0020: perm_blocks/perm_templates/
+# perm_template_blocks/perm_template_groups) --- вкладка «Доступ и роли».
+# Править могут администратор и администратор СЭД (решение человека
+# 2026-10-11); до волны F3 гейт раздела ролевой (см. _require_permission_admin).
+
+
+class PermissionTemplateIn(BaseModel):
+    """Состав шаблона прав целиком: блоки и группы AD.
+
+    Переданные значения полностью заменяют прежние (одна транзакция), как в
+    составе шагов бланка. Коды блоков сверяются со справочником (422), группы
+    берутся из кэша AD силами администратора (сверки здесь нет — группа может
+    ещё не синхронизироваться)."""
+
+    blocks: list[str] = Field(
+        default_factory=list, description="Коды блоков прав из справочника"
+    )
+    groups: list[str] = Field(
+        default_factory=list, description="Имена групп AD шаблона (пусто — без групп)"
+    )
+
+    @model_validator(mode="after")
+    def _check_codes(self) -> "PermissionTemplateIn":
+        """Пробелы срезаются, пустые и повторы уходят."""
+        self.blocks = list(clean_codes(self.blocks))
+        self.groups = list(clean_codes(self.groups))
+        return self
+
+
+def _permissions_unavailable(exc: Exception) -> HTTPException:
+    """Справочник прав недоступен — 503 (доступ закрыт, но это не «нет прав»)."""
+    return HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
+
+
+@router.get("/settings/permissions")
+def read_permissions(
+    user: CurrentUser = Depends(get_current_user),
+    store: PermissionsStore = Depends(get_permissions_store),
+) -> dict:
+    """Справочник прав одним ответом: блоки, шаблоны, состав «шаблон → блок» и
+    группы AD шаблона (для загрузки вкладки «Доступ и роли» одним запросом).
+
+    Править могут администратор и администратор СЭД; остальным 403. Хранилище
+    недоступно — 503 (не 500)."""
+    _require_permission_admin(user)
+    try:
+        catalog = store.load_catalog()
+    except PermissionsUnavailable as exc:
+        raise _permissions_unavailable(exc) from exc
+    audit_log.append(
+        AuditEvent(
+            actor=user.sam,
+            action="permissions.read",
+            entity="permissions",
+            entity_id="catalog",
+        )
+    )
+    return {
+        "blocks": [
+            {
+                "code": block.code,
+                "title": block.title,
+                "description": block.description,
+                "sort_order": block.sort_order,
+                "active": block.active,
+            }
+            for block in catalog.blocks
+        ],
+        "templates": [
+            {
+                "code": template.code,
+                "title": template.title,
+                "description": template.description,
+                "protected": template.protected,
+                "sort_order": template.sort_order,
+                "blocks": list(template.blocks),
+                "groups": list(template.groups),
+            }
+            for template in catalog.templates
+        ],
+    }
+
+
+@router.put("/settings/permissions/templates/{code}")
+def update_permission_template(
+    code: str,
+    payload: PermissionTemplateIn,
+    user: CurrentUser = Depends(get_current_user),
+    store: PermissionsStore = Depends(get_permissions_store),
+) -> dict:
+    """Заменить состав шаблона (блоки и группы) целиком; аудит permissions.update.
+
+    Неизвестный шаблон — 404, неизвестный блок — 422, справочник недоступен —
+    503. Снять у себя блок settings_infra (доступ к разделу прав/инфраструктуре)
+    нельзя — 409 с понятным текстом: правило «нельзя снять права у себя»
+    (решение человека 2026-10-11). Проверка считается на копии справочника до
+    записи, поэтому отказ не оставляет состав изменённым наполовину."""
+    _require_permission_admin(user)
+    try:
+        catalog = store.load_catalog()
+        current = catalog.template(code)
+        if current is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Шаблон прав с кодом %s не найден" % code,
+            )
+        changed = PermissionTemplate(
+            code=current.code,
+            title=current.title,
+            description=current.description,
+            protected=current.protected,
+            sort_order=current.sort_order,
+            blocks=payload.blocks,
+            groups=payload.groups,
+        )
+        if not keeps_block_after_change(
+            catalog, user.groups, changed, BLOCK_SETTINGS_INFRA
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "Нельзя снять права у себя: блок «Настройки: инфраструктура "
+                    "и регламенты» нужен, чтобы открыть раздел прав доступа"
+                ),
+            )
+        updated = store.replace_template(code, payload.blocks, payload.groups)
+    except PermissionsUnavailable as exc:
+        raise _permissions_unavailable(exc) from exc
+    audit_log.append(
+        AuditEvent(
+            actor=user.sam,
+            action="permissions.update",
+            entity="permission_template",
+            entity_id=code,
+            detail="blocks=%s;groups=%s"
+            % (",".join(payload.blocks), ",".join(payload.groups)),
+        )
+    )
+    return {
+        "code": code,
+        "blocks": list(updated.blocks) if updated else [],
+        "groups": list(updated.groups) if updated else [],
+    }
+
+
+@router.get("/settings/permissions/groups")
+def list_permission_groups(
+    user: CurrentUser = Depends(get_current_user),
+    cache_store: GroupsCacheStore = Depends(get_groups_cache_store),
+) -> dict:
+    """Перечень групп AD для выбора в шаблон прав + дата последней синхронизации.
+
+    Источник — кэш состава групп ad_group_members (api/app/ad_groups_cache.py),
+    живой AD при правке прав не опрашивается (решение человека 2026-10-11)."""
+    _require_permission_admin(user)
+    try:
+        groups = cache_store.list_groups()
+    except GroupsCacheUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    synced = [item.synced_at for item in groups if item.synced_at is not None]
+    return {
+        "groups": [
+            {
+                "id": item.group_name,
+                "name": item.group_name,
+                "members": item.member_count,
+            }
+            for item in groups
+        ],
+        "synced_at": max(synced).isoformat() if synced else None,
+    }
 

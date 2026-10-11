@@ -14,6 +14,14 @@ from app.ad_reader import AdUser  # noqa: E402
 from app.auth import LdapAuthService  # noqa: E402
 from app.config import Settings  # noqa: E402
 from app.deps import _detect_role  # noqa: E402
+from app.main import app  # noqa: E402
+from app.permissions import (  # noqa: E402
+    InMemoryPermissionsStore,
+    PermissionBlock,
+    PermissionCatalog,
+    PermissionTemplate,
+    get_permissions_store,
+)
 from app.settings_routes import (  # noqa: E402
     SettingsUnavailable,
     is_group_allowed_with_settings,
@@ -206,25 +214,58 @@ def test_resolve_role_groups_without_store_only_env():
     }
 
 
-def test_detect_role_uses_db_role_groups():
+def _permission_store(template_groups: dict) -> InMemoryPermissionsStore:
+    """Справочник прав для юнит-тестов роли: шаблоны с группами по кодам."""
+    blocks = tuple(
+        PermissionBlock(code=code, title=code, sort_order=10 * (index + 1))
+        for index, code in enumerate(("requests_list", "step_decide"))
+    )
+    templates = tuple(
+        PermissionTemplate(
+            code=code,
+            title=code,
+            sort_order=10 * (index + 1),
+            blocks=("requests_list",),
+            groups=sorted(template_groups.get(code, set())),
+        )
+        for index, code in enumerate(
+            ("sed_admin", "admin", "hr_admin", "hr", "owner")
+        )
+    )
+    store = InMemoryPermissionsStore(PermissionCatalog(blocks=blocks, templates=templates))
+    app.dependency_overrides[get_permissions_store] = lambda: store
+    return store
+
+
+def test_detect_role_uses_template_groups():
+    """Роль по справочнику прав: шаблон совпал по группам memberOf."""
+    _permission_store(
+        {
+            "sed_admin": {"SED_SEDADM"},
+            "admin": {"SED_ADMINS"},
+            "hr_admin": {"SED_HR_ADMIN"},
+            "hr": {"SED_HR"},
+        }
+    )
+    settings = _role_settings()
+    assert _detect_role(["SED_SEDADM"], settings) == "sed_admin"
+    assert _detect_role(["SED_ADMINS"], settings) == "admin"
+    assert _detect_role(["SED_HR_ADMIN"], settings) == "hr_admin"
+    assert _detect_role(["SED_HR"], settings) == "hr"
+    assert _detect_role(["SED_STEP_BUH"], settings) == "owner"
+
+
+def test_detect_role_ignores_legacy_role_settings_keys():
+    """Ключи ролевых групп больше не дают роль: её задают шаблоны справочника."""
+    _permission_store({})
     store = _Store({"admin_groups": '["SED_ADMINS_DB"]'})
     settings = _role_settings()
-    assert _detect_role(["SED_ADMINS_DB"], settings, store) == "admin"
-    # Ключ admin_groups есть в БД, поэтому env-группа админа роли не даёт.
-    assert _detect_role(["SED_ADMINS"], settings, store) == "owner"
+    assert _detect_role(["SED_ADMINS_DB"], settings) == "owner"
 
 
-def test_detect_role_env_fallback_when_key_absent():
-    store = _Store({"access_groups": '["SED_ENTRY"]'})
+def test_detect_role_priority_preserved_with_matched_templates():
+    """Приоритет ролей прежний: sed_admin > admin > hr_admin > hr."""
+    _permission_store({"admin": {"A"}, "hr_admin": {"H"}, "hr": {"R"}})
     settings = _role_settings()
-    assert _detect_role(["SED_ADMINS"], settings, store) == "admin"
-    assert _detect_role(["SED_HR_ADMIN"], settings, store) == "hr_admin"
-    assert _detect_role(["SED_HR"], settings, store) == "hr"
-    assert _detect_role(["SED_STEP_BUH"], settings, store) == "owner"
-
-
-def test_detect_role_priority_preserved_with_db_groups():
-    store = _Store({"admin_groups": '["A"]', "hr_admin_groups": '["H"]', "hr_groups": '["R"]'})
-    settings = _role_settings()
-    assert _detect_role(["H", "R"], settings, store) == "hr_admin"
-    assert _detect_role(["A", "H", "R"], settings, store) == "admin"
+    assert _detect_role(["H", "R"], settings) == "hr_admin"
+    assert _detect_role(["A", "H", "R"], settings) == "admin"

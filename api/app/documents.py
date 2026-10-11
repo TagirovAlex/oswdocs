@@ -37,6 +37,7 @@ from .requests import (
     _routing_store_or_none,
     _stage_owner_kinds,
 )
+from .permissions import BLOCK_PRINT_BLANK, require_block
 from .requests_store import RequestsStore, RequestsUnavailable, get_requests_store
 from .settings_routes import (
     DbSettingsStore,
@@ -262,12 +263,9 @@ def get_documents_store(
     return _db_documents_store
 
 
-def _require_hr(user: CurrentUser) -> None:
-    """Печать бегунка — только разрешенной группе (ОК/руководители ОК/админы), иначе 403."""
-    if user.role not in ("hr", "hr_admin", "admin"):
-        raise HTTPException(
-            status_code=403, detail="Печать бегунка — только разрешенной группе"
-        )
+def _require_print(user: CurrentUser) -> None:
+    """Печать бегунка — по блоку «Печать бланка» справочника прав, иначе 403."""
+    require_block(user, BLOCK_PRINT_BLANK, "Печать бегунка — только разрешенной группе")
 
 
 def _doc_type_name(store: object, code: object) -> str:
@@ -454,7 +452,7 @@ def print_bypass(
     удаляются. Офлайн/нет LibreOffice — {"generated": false, "reason": ...} (не 500).
     """
     settings.ensure_read_only()
-    _require_hr(user)
+    _require_print(user)
     try:
         request = _get_request_or_404(store, request_id)
     except RequestsUnavailable as exc:

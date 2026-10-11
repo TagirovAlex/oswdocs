@@ -41,11 +41,23 @@ class CachedMember(BaseModel):
     mail: str | None = Field(default=None, description="Почта")
 
 
+class CachedGroup(BaseModel):
+    """Группа AD, известная кэшу состава (строка ad_group_sync_state)."""
+
+    group_name: str = Field(description="Имя группы AD")
+    member_count: int = Field(default=0, description="Участников в кэше")
+    synced_at: datetime | None = Field(default=None, description="Дата последнего синка")
+
+
 class GroupsCacheStore(Protocol):
     """Интерфейс хранилища состава групп: единый для in-memory и Postgres."""
 
     def load(self, group: str) -> tuple[bool, list[CachedMember]]:
         """Состав группы: (синхронизирована?, участники)."""
+        ...  # pragma: no cover
+
+    def list_groups(self) -> list[CachedGroup]:
+        """Перечень групп, которые есть в кэше, с датой последнего синка."""
         ...  # pragma: no cover
 
     def save(self, group: str, members: list[CachedMember]) -> None:
@@ -83,6 +95,13 @@ class InMemoryGroupsCacheStore:
 
     def load(self, group: str) -> tuple[bool, list[CachedMember]]:
         return group in self._synced, list(self._members.get(group, []))
+
+    def list_groups(self) -> list[CachedGroup]:
+        """Перечень синхронизированных групп кэша (даты синка в памяти нет)."""
+        return [
+            CachedGroup(group_name=group, member_count=len(self._members.get(group, [])))
+            for group in sorted(self._synced)
+        ]
 
     def save(self, group: str, members: list[CachedMember]) -> None:
         self._members[group] = list(members)
@@ -130,6 +149,13 @@ class DbGroupsCacheStore:
     _SELECT_STATE = text(
         """
         SELECT group_name FROM ad_group_sync_state WHERE group_name = :group_name
+        """
+    )
+    _SELECT_STATES = text(
+        """
+        SELECT group_name, member_count, synced_at
+        FROM ad_group_sync_state
+        ORDER BY group_name
         """
     )
     _DELETE_MEMBERS = text(
@@ -200,6 +226,24 @@ class DbGroupsCacheStore:
                 department=row.department,
                 title=row.title,
                 mail=row.mail,
+            )
+            for row in rows
+        ]
+
+    def list_groups(self) -> list[CachedGroup]:
+        """Перечень групп кэша с датой последнего синка (без чтения AD)."""
+        try:
+            with self._session_factory() as session:
+                rows = session.execute(self._SELECT_STATES).all()
+        except SQLAlchemyError as exc:
+            raise GroupsCacheUnavailable(
+                f"Хранилище состава групп недоступен: {exc}"
+            ) from exc
+        return [
+            CachedGroup(
+                group_name=row.group_name,
+                member_count=int(row.member_count or 0),
+                synced_at=row.synced_at,
             )
             for row in rows
         ]

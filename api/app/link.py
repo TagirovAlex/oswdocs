@@ -35,6 +35,7 @@ from .onec_client import (
     OneCError,
     OneCNotFound,
 )
+from .permissions import BLOCK_LINK_MATCH, require_block
 from .resolver import UnknownEnterpriseError, make_snapshot_1c, search_enterprise
 from .settings_routes import (
     DbSettingsStore,
@@ -127,13 +128,9 @@ def create_link(
     reader: AdReader | None = Depends(get_ad_reader),
     store: LinksStore = Depends(get_links_store),
 ) -> dict:
-    """Создать/подтвердить связку вручную. Только админ (ОК/владельцам — 403)."""
+    """Создать/подтвердить связку вручную (блок «Сопоставление 1С↔AD»)."""
     settings.ensure_read_only()
-    if user.role != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Связку 1С-AD привязывает только админ",
-        )
+    require_block(user, BLOCK_LINK_MATCH, "Связку 1С-AD привязывает только админ")
     if reader is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -279,11 +276,7 @@ def sync_links_endpoint(
     связок/настроек — 503 (не 500). Запись — только связки в нашу БД,
     1С/AD — только чтение. Ответ — итог прохода (диагностика)."""
     settings.ensure_read_only()
-    if user.role != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Автосвязку 1С-AD запускает только админ",
-        )
+    require_block(user, BLOCK_LINK_MATCH, "Автосвязку 1С-AD запускает только админ")
     if reader is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -443,11 +436,9 @@ def list_link_discrepancies(
     schedule_ad_links_sync). Здесь только чтение нашей таблицы; AD/1С не трогаем.
     Ответ: items + total + counts (счётчики по причинам) + page/page_size."""
     settings.ensure_read_only()
-    if user.role not in ("admin", "sed_admin"):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Расхождения сопоставления доступны только администратору",
-        )
+    require_block(
+        user, BLOCK_LINK_MATCH, "Расхождения сопоставления доступны только администратору"
+    )
     try:
         rows = store.list_discrepancies(
             reason=reason or None,
@@ -492,11 +483,9 @@ def confirm_link_discrepancies(
     связки в нашу БД (users/employee_base_map заполняются), AD/1С не пишутся.
     Ответ: {linked, skipped, errors, linked_sams}."""
     settings.ensure_read_only()
-    if user.role not in ("admin", "sed_admin"):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Подтверждать сопоставление может только администратор",
-        )
+    require_block(
+        user, BLOCK_LINK_MATCH, "Подтверждать сопоставление может только администратор"
+    )
     try:
         rows = store.get_discrepancies(body.keys)
         now = _dt.datetime.now(_dt.timezone.utc).isoformat()

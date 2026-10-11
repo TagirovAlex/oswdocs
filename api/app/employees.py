@@ -42,6 +42,7 @@ from .onec_client import (
     OneCError,
     OneCNotFound,
 )
+from .permissions import BLOCK_EMPLOYEE_DIRECTORY, require_block
 from .resolver import (
     UnknownEnterpriseError,
     is_snapshot_stale,
@@ -550,17 +551,15 @@ def ad_search(
     reader: AdReader | None = Depends(get_ad_reader),
 ) -> dict:
     """Кандидаты AD по подстроке ФИО (исполнители маршрута/ручная привязка):
-    только ОК, руководитель ОК и админ.
+    блок «Справочник сотрудников» справочника прав.
 
     Ридер AD не настроен — 503 (не 500); сбой каталога — 503. Возвращается
     минимальный набор (sam/displayName/депт/должность/mail) для выбора
     в карточке справочника. Только чтение AD."""
     settings.ensure_read_only()
-    if user.role not in ("hr", "hr_admin", "admin"):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Поиск AD доступен ОК и админу",
-        )
+    require_block(
+        user, BLOCK_EMPLOYEE_DIRECTORY, "Поиск AD доступен ОК и админу"
+    )
     if reader is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

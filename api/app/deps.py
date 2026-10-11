@@ -1,10 +1,12 @@
-# Зависимости FastAPI: текущий пользователь и ролевая проверка.
+# Зависимости FastAPI: текущий пользователь и проверка прав доступа.
 # Реальный путь — Bearer-токен через AuthService.me() (сессия в Redis);
 # мок-путь на заголовках X-Mock-* работает только при AUTH_MOCK_ENABLED=true
 # (офлайн-тесты; на ВМ флаг=false, README п.1 и TASKS_AUTH.md).
 # Вход по мок-пути — объединение env ALLOWED_AD_GROUPS (bootstrap) и
-# инфра-ключа access_groups из БД; роль — эффективные группы ролей (БД→env).
-# Контракт CurrentUser/401/403 сохраняется.
+# инфра-ключа access_groups из БД; права (блоки функций) и роль — из справочника
+# прав api/app/permissions.py (миграция 0020). Контракт CurrentUser/401/403
+# сохраняется; роль выводится из совпавших шаблонов для обратной совместимости
+# с фронтом (/auth/me не меняется).
 
 from __future__ import annotations
 
@@ -79,29 +81,20 @@ def _login_group_allowed(allowed: set[str], prefix: str, group: str) -> bool:
 
 
 def _detect_role(
-    groups: list[str], settings: Settings, store: object | None = None
+    groups: list[str], settings: Settings | None = None
 ) -> str:
-    """Роль по группам: эффективные группы ролей из настроек БД
-    (sed_admin_groups/admin_groups/hr_groups/hr_admin_groups), иначе env.
-    Администратор СЭД важнее админа, тот важнее руководителя ОК, тот —
-    ОК, а ОК — важнее владельца шага.
+    """Роль по справочнику прав: старший из совпавших шаблонов.
 
-    store — DbSettingsStore или его подмена (аннотация object, чтобы не тянуть
-    settings_routes на уровень модуля: цикл импорта); None/ошибка БД — env.
+    Права (блоки функций) резолвятся по группам memberOf и составу шаблонов
+    (api/app/permissions.py); роль — производная от совпавших шаблонов по
+    приоритету sed_admin > admin > hr_admin > hr, а если не совпал ни один —
+    владелец шага (owner), как и раньше. Ошибка справочника (БД недоступна) —
+    минимальная роль owner: вход и контракт /auth/me не ломаются, а права не
+    выдаются (fail-closed на гейтах по блокам).
     """
-    from .settings_routes import resolve_role_groups
+    from .permissions import role_for_groups
 
-    role_groups = resolve_role_groups(settings, store)
-    group_set = set(groups)
-    if group_set & role_groups["sed_admin_groups"]:
-        return "sed_admin"
-    if group_set & role_groups["admin_groups"]:
-        return "admin"
-    if group_set & role_groups["hr_admin_groups"]:
-        return "hr_admin"
-    if group_set & role_groups["hr_groups"]:
-        return "hr"
-    return "owner"
+    return role_for_groups(groups, settings=settings)
 
 
 def _bearer_token(authorization: str | None) -> str | None:
@@ -185,17 +178,20 @@ async def get_current_user(
         department=_decode_mock(x_mock_department),
         title=_decode_mock(x_mock_title),
         groups=groups,
-        role=_detect_role(groups, settings, store),
+        role=_detect_role(groups, settings),
     )
 
 
 def SedAdminUser(user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
-    """Текущий пользователь с ролью администратора СЭД (sed_admin), иначе 403.
+    """Текущий пользователь с блоком «Панель администратора СЭД в карточке»
+    (sed_admin_panel), иначе 403 — правка карточки заявки и откат маршрута.
 
     Импорт для других модулей: from app.deps import SedAdminUser."""
-    if not _is_sed_admin(user):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Действие доступно только администратору СЭД",
-        )
+    from .permissions import BLOCK_SED_ADMIN_PANEL, require_block
+
+    require_block(
+        user,
+        BLOCK_SED_ADMIN_PANEL,
+        "Действие доступно только администратору СЭД",
+    )
     return user

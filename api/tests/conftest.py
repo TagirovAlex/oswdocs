@@ -21,11 +21,114 @@ if str(API_DIR) not in sys.path:
 import app.audit as audit_module  # noqa: E402
 from app.ad_groups_cache import InMemoryGroupsCacheStore, get_groups_cache_store  # noqa: E402
 from app.audit import audit_log  # noqa: E402
+from app.config import get_settings  # noqa: E402
 from app.employee_sync import InMemoryEmployeeSyncStore, get_employee_sync_store  # noqa: E402
 from app.employees import get_ad_reader  # noqa: E402
 from app.main import app  # noqa: E402
+from app.permissions import (  # noqa: E402
+    InMemoryPermissionsStore,
+    PermissionBlock,
+    PermissionCatalog,
+    PermissionTemplate,
+    get_permissions_store,
+)
 from app.routing_store import get_routing_store  # noqa: E402
-from app.settings_routes import get_settings_store  # noqa: E402
+from app.settings_routes import get_settings_store, resolve_role_groups  # noqa: E402
+
+# --- Справочник прав для офлайн-прогонов ---
+# Тестовые данные повторяют состояние после миграции 0020: 13 блоков, 5 шаблонов
+# и состав «шаблон → блок» один в один (перенос текущих прав). Группы шаблонов
+# НЕ зашиты: они берутся из ролевых групп настроек (env + ключи settings) —
+# ровно те, что миграция переносила в perm_template_groups, поэтому офлайн-гейты
+# ведут себя как на стенде. Пустой справочник = «прав нет» (fail-closed).
+TEST_HR_BLOCKS = (
+    "requests_list",
+    "request_card",
+    "request_create",
+    "step_decide",
+    "print_blank",
+    "employee_directory",
+)
+TEST_HR_ADMIN_BLOCKS = TEST_HR_BLOCKS + ("settings_content",)
+TEST_ADMIN_BLOCKS = TEST_HR_ADMIN_BLOCKS + (
+    "request_delete",
+    "link_match",
+    "settings_infra",
+    "settings_blanks",
+    "archive_backups",
+)
+TEST_SED_ADMIN_BLOCKS = TEST_ADMIN_BLOCKS + ("sed_admin_panel",)
+TEST_OWNER_BLOCKS = ("requests_list", "request_card", "step_decide")
+
+
+def offline_permission_catalog() -> PermissionCatalog:
+    """Снимок справочника прав для офлайн-прогонов (см. комментарий выше).
+
+    Группы читаются на каждый вызов, поэтому подмена Settings/хранилища настроек
+    в конкретном тесте сразу видна гейтам (как раньше по ключам ролей)."""
+    overrides = app.dependency_overrides
+    factory = overrides.get(get_settings)
+    settings = factory() if factory is not None else get_settings()
+    store_factory = overrides.get(get_settings_store)
+    settings_store = store_factory() if store_factory is not None else None
+    role_groups = resolve_role_groups(settings, settings_store)
+    blocks = (
+        PermissionBlock(code=code, title=code, sort_order=10 * (index + 1))
+        for index, code in enumerate(
+            (
+                *TEST_OWNER_BLOCKS,
+                *TEST_HR_BLOCKS,
+                "request_delete",
+                "link_match",
+                "settings_content",
+                "settings_infra",
+                "settings_blanks",
+                "archive_backups",
+                "sed_admin_panel",
+            )
+        )
+    )
+    return PermissionCatalog(
+        blocks=tuple(blocks),
+        templates=(
+            PermissionTemplate(
+                code="sed_admin",
+                title="sed_admin",
+                protected=True,
+                sort_order=10,
+                blocks=TEST_SED_ADMIN_BLOCKS,
+                groups=sorted(role_groups.get("sed_admin_groups", set())),
+            ),
+            PermissionTemplate(
+                code="admin",
+                title="admin",
+                protected=True,
+                sort_order=20,
+                blocks=TEST_ADMIN_BLOCKS,
+                groups=sorted(role_groups.get("admin_groups", set())),
+            ),
+            PermissionTemplate(
+                code="hr_admin",
+                title="hr_admin",
+                sort_order=30,
+                blocks=TEST_HR_ADMIN_BLOCKS,
+                groups=sorted(role_groups.get("hr_admin_groups", set())),
+            ),
+            PermissionTemplate(
+                code="hr",
+                title="hr",
+                sort_order=40,
+                blocks=TEST_HR_BLOCKS,
+                groups=sorted(role_groups.get("hr_groups", set())),
+            ),
+            PermissionTemplate(
+                code="owner",
+                title="owner",
+                sort_order=50,
+                blocks=TEST_OWNER_BLOCKS,
+            ),
+        ),
+    )
 
 # --- Вымышленные пользователи (не реальные ФИО/логины) ---
 FAKE_HR = {
@@ -154,13 +257,16 @@ class OfflineRoutingStore:
 # (_enterprise_names_map -> get_settings_store) и ридер AD, поэтому без подмен
 # весь набор pytest зависал на несуществующем Postgres. Справочники маршрута
 # (get_routing_store) — по той же причине: подбор маршрута auto и состав этапа
-# читаются при создании заявки и выдаче карточки.
+# читаются при создании заявки и выдаче карточки. Справочник прав
+# (get_permissions_store) — третье такое же хранилище: без подмен гейты по
+# блокам читали бы perm_* из несуществующей БД.
 OFFLINE_BOUNDARIES = (
     get_settings_store,
     get_ad_reader,
     get_employee_sync_store,
     get_groups_cache_store,
     get_routing_store,
+    get_permissions_store,
 )
 
 
@@ -168,7 +274,8 @@ OFFLINE_BOUNDARIES = (
 def offline_boundaries(monkeypatch):
     """Подменить живые границы офлайн-прогонов: настройки — пусто, AD — None,
     локальный справочник — пустой (фолбэк поиска на живой 1С), справочники
-    маршрута — пустые.
+    маршрута — пустые, справочник прав — зеркало миграции 0020 (группы шаблонов
+    из действующих ролевых групп настроек).
 
     Тесты со своими override'ами перебивают эти значения своими (override ставится
     после autouse-фикстуры); для юнит-тестов ветки боевого кода без подмен —
@@ -178,6 +285,9 @@ def offline_boundaries(monkeypatch):
     app.dependency_overrides[get_employee_sync_store] = lambda: InMemoryEmployeeSyncStore()
     app.dependency_overrides[get_groups_cache_store] = lambda: InMemoryGroupsCacheStore()
     app.dependency_overrides[get_routing_store] = lambda: OfflineRoutingStore()
+    app.dependency_overrides[get_permissions_store] = (
+        lambda: InMemoryPermissionsStore(offline_permission_catalog())
+    )
     # Персистентный аудит (INSERT в audit_log) — best-effort, но офлайн Postgres
     # нет: отключаем БД-хранилище, журнал остаётся in-memory (контракт прежний).
     monkeypatch.setattr(audit_module, "_get_db_store", lambda: None)

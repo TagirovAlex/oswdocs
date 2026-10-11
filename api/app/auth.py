@@ -236,10 +236,10 @@ class LdapAuthService:
     """Реальная доменная аутентификация: AdReader (LDAPS) + SessionStore (Redis).
 
     Пароль проверяется bind'ом пользователя по DN (шлюз с bind_user добавит A1),
-    пароль нигде не хранится. Роль — существующий _detect_role (admin > hr_admin > hr
-    > owner) по группам ролей из БД (фолбэк env), вход — по env ALLOWED_AD_GROUPS
-    плюс access_groups из БД. AD недоступен -> 503, неверные данные/нет входных
-    групп -> 401.
+    пароль нигде не хранится. Роль — _detect_role: старший из шаблонов прав,
+    совпавших по группам memberOf (справочник прав, admin > hr_admin > hr >
+    owner), вход — по env ALLOWED_AD_GROUPS плюс access_groups из БД. AD
+    недоступен -> 503, неверные данные/нет входных групп -> 401.
     """
 
     def __init__(
@@ -292,7 +292,7 @@ class LdapAuthService:
             department=ad_user.department,
             title=ad_user.title,
             groups=groups,
-            role=_detect_role(groups, self._settings, store),
+            role=_detect_role(groups, self._settings),
         )
         token = secrets.token_urlsafe(32)
         self._sessions.set(token, user, self._session_ttl_seconds())
