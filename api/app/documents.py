@@ -270,6 +270,26 @@ def _require_hr(user: CurrentUser) -> None:
         )
 
 
+def _doc_type_name(store: object, code: object) -> str:
+    """Название вида документа по коду (для заголовка печати).
+
+    Хранилище недоступно или вида нет — пустая строка: заголовок печати
+    откатится на код, документ всё равно соберётся."""
+    name = str(code or "").strip()
+    if not name:
+        return ""
+    try:
+        items = store.get_doc_types()  # type: ignore[attr-defined]
+    except Exception:
+        return ""
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("code") or "") == name:
+            return str(item.get("name") or "")
+    return ""
+
+
 def _can_view(
     request: object, user: CurrentUser, roster: _RosterResolver | None = None
 ) -> bool:
@@ -452,6 +472,10 @@ def print_bypass(
     _fill_hr_placeholders(context, request, _routing_store_or_none(), employee_store)
     # Предприятие — названием из справочника (код 1С в бланке нечитаем).
     context["enterprise"] = _enterprise_name(settings_store, request.enterprise)
+    # Вид документа — названием из справочника: код вида служебный и числовой
+    # (миграция 0019), в заголовке бланка он нечитаем. Справочник недоступен —
+    # печать не падает, _blank_title откатится на код.
+    context["doc_type_name"] = _doc_type_name(store, getattr(request, "doc_type_code", None))
     result = generate_bypass(
         request_id=request.id,
         version="current",

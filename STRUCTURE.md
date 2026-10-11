@@ -174,7 +174,10 @@
   0017 удаление мёртвых колонок шага бланка (blank_steps.stage_id/optional_override/
   require_comment_override — вместе с FK на approval_stages и UNIQUE (blank_id, stage_id)),
   0018 справочник шагов step_catalog (переиспользуемые заготовки для бланков) и снятие
-  «макета печати» (DROP blanks.layout, DROP dismissal_requests.blank_layout — печать единая).
+  «макета печати» (DROP blanks.layout, DROP dismissal_requests.blank_layout — печать единая),
+  0019 коды видов документов числовые (doc_types.code = num::text; перенос ссылок
+  dismissal_requests.doc_type_code и blanks.doc_type_code, синхронизация doc_types_num_seq;
+  название вида живёт в doc_types.name, в печати и справочниках показывается оно).
 
 ## Сценарии ключевых функций
 - Создание: create-form → POST /requests → шаги; отметки: request-card → POST .../steps/{order}/decide; печать: POST /print (pdf_b64) → iframe; история: GET /history (audit_log); сотрудники: GET /employees (локальная таблица); бэкапы: /api/archive*; настройки: /api/settings.

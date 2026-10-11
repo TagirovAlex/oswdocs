@@ -411,9 +411,16 @@ _HTML_TAG_RE = re.compile(r"<\s*(/?)\s*([a-zA-Z][a-zA-Z0-9]*)[^>]*>")
 
 
 def _blank_title(context: Dict[str, object]) -> str:
-    """Название бланка на бланке: снимок blank_name, иначе вид документа."""
+    """Название бланка на бланке: снимок blank_name, иначе вид документа.
+
+    Вид документа печатается НАЗВАНИЕМ (doc_type_name): код вида служебный,
+    числовой (миграция 0019), в шапке бланка человеку нечего читать. Название
+    кладёт в контекст documents.py (у резолвера здесь доступа к справочнику
+    видов нет); нет названия — откат на код.
+    """
     return (
         str(context.get("blank_name") or "").strip()
+        or str(context.get("doc_type_name") or "").strip()
         or str(context.get("doc_type_code") or "").strip()
         or "Бланк"
     )
