@@ -1234,8 +1234,7 @@ function changeRouteMode(mode: RouteMode): void {
           полей (см. missingFields). Читается и списком, и по подсветке. */}
       {missingLabels.length > 0 && (
         <div role="alert" className="sed-missing">
-          Не заполнено: {missingLabels.join(", ")}. Подсвеченные поля нужно
-          заполнить перед отправкой на согласование.
+          {`Не заполнено: ${missingLabels.join(", ")}. Подсвеченные поля нужно заполнить перед отправкой на согласование.`}
         </div>
       )}
 
@@ -2227,7 +2226,11 @@ function changeRouteMode(mode: RouteMode): void {
         <button
           type="button"
           className="sed-btn"
-          disabled={!canCreate}
+          // Отправка на согласование НЕ выключается из-за пустых полей: нажатие
+          // должно доходить до проверки и показывать подсказку с подсветкой, а не
+          // выглядеть «кнопка не работает» (жалоба человека 2026-10-12). Проверку
+          // заполненности делает handleCreate (см. missingFields).
+          disabled={busy}
           onClick={() => handleCreate(true)}
         >
           {busy ? "Отправка…" : "Отправить на согласование"}

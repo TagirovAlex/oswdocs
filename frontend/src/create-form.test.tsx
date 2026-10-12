@@ -1766,6 +1766,62 @@ describe("CreateForm", () => {
   });
 });
 
+  // Пустые поля при отправке: кнопка нажимается, показывается подсказка со
+  // списком и подсвечиваются сами поля; API не вызывается. Раньше кнопка была
+  // выключена (disabled), и нажатие молча ничего не делало (жалоба человека
+  // 2026-10-12).
+  it("«Отправить» с незаполненными полями: подсказка, подсветка, без запроса", async () => {
+    vi.mocked(searchEmployees).mockRejectedValue(new ApiHttpError(503, "Клиент 1С не настроен"));
+    vi.mocked(searchAd).mockResolvedValue([adCandidate]);
+    vi.mocked(getRouteBlanks).mockResolvedValue(routeBlanks);
+
+    render(<CreateForm role="hr" />);
+    await fillEmployeeManually("custom");
+    await addAdExecutor();
+    // Тема и содержание оставлены пустыми (хелпер их заполняет — чистим).
+    fireEvent.change(screen.getByLabelText("Тема"), { target: { value: "" } });
+    fireEvent.change(screen.getByLabelText("Содержание"), { target: { value: "" } });
+    const submit = screen.getByText("Отправить на согласование");
+    expect(submit).toBeEnabled();
+
+    fireEvent.click(submit);
+
+    // Сводку ищем по тексту, а не по роли alert: в форме есть и другие сообщения
+  // (например, об ошибке предпросмотра маршрута) с той же ролью.
+  const summary = await screen.findByText(/Не заполнено/);
+  expect(summary).toHaveTextContent(/тема/);
+  expect(summary).toHaveTextContent(/содержание/);
+    // Поля помечены для доступности и подсвечены классом.
+    expect(screen.getByLabelText("Тема")).toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByLabelText("Содержание")).toHaveAttribute("aria-invalid", "true");
+    // Запрос на создание не уходил.
+    expect(createRequest).not.toHaveBeenCalled();
+  });
+
+  // Подсказка не врёт: ввод в поле снимает его из списка, остальные остаются.
+  it("ввод в подсвеченное поле убирает его из подсказки", async () => {
+    vi.mocked(searchEmployees).mockRejectedValue(new ApiHttpError(503, "Клиент 1С не настроен"));
+    vi.mocked(searchAd).mockResolvedValue([adCandidate]);
+    vi.mocked(getRouteBlanks).mockResolvedValue(routeBlanks);
+
+    render(<CreateForm role="hr" />);
+    await fillEmployeeManually("custom");
+    await addAdExecutor();
+    fireEvent.change(screen.getByLabelText("Тема"), { target: { value: "" } });
+    fireEvent.change(screen.getByLabelText("Содержание"), { target: { value: "" } });
+    fireEvent.click(screen.getByText("Отправить на согласование"));
+    await screen.findByText(/Не заполнено/);
+
+    fireEvent.change(screen.getByLabelText("Тема"), { target: { value: "Увольнение" } });
+
+    await waitFor(() =>
+      expect(screen.getByLabelText("Тема")).not.toHaveAttribute("aria-invalid", "true"),
+    );
+    // Содержание так и осталось не заполненным.
+    expect(screen.getByLabelText("Содержание")).toHaveAttribute("aria-invalid", "true");
+    expect(createRequest).not.toHaveBeenCalled();
+  });
+
 
 // --- Подтверждение связи 1С↔AD при создании заявки ---------------------------
 
@@ -1969,9 +2025,6 @@ describe("CreateForm: выбор бланка", () => {
     expect(body.blocks).toHaveLength(1);
   });
 
-  // Бланк задаёт форму печати (шапка, подвал, строки), а шаги в ручном режиме
-  // задаёт сама ОК: выбранный бланк не теряется и уходит в теле (жалоба
-  // человека 2026-10-12 — печать шла не по шаблону).
   it("бланк сохраняется при переходе на ручной маршрут и уходит в теле", async () => {
     vi.mocked(getRouteBlanks).mockResolvedValue(routeBlanks);
     vi.mocked(searchEmployees).mockRejectedValue(new ApiHttpError(503, "Клиент 1С не настроен"));
