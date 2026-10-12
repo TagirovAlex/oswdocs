@@ -656,6 +656,14 @@ a {
   gap: 8px;
 }
 
+/* Кнопки порядка и удаления исполнителя в блоке маршрута формы создания:
+   три одинаковые круглые кнопки в ряд у каждого шага. */
+.sed-stepbtns {
+  display: inline-flex;
+  gap: 4px;
+  vertical-align: middle;
+}
+
 .sed-editor-row--center {
   align-items: center;
 }

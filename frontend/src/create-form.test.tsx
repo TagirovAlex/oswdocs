@@ -1952,6 +1952,75 @@ it("предлагает подтвердить связь с AD и после �
   );
 });
 
+describe("CreateForm: порядок исполнителей в блоке", () => {
+  // В последовательном блоке порядок и есть маршрут, поэтому шаги переставляются
+  // кнопками «вверх/вниз» (решение человека 2026-10-12).
+  it("исполнителя блока можно поднять и опустить", async () => {
+    vi.mocked(getRouteBlanks).mockResolvedValue(routeBlanks);
+    vi.mocked(searchEmployees).mockRejectedValue(new ApiHttpError(503, "Клиент 1С не настроен"));
+    vi.mocked(getStepGroups).mockResolvedValue([
+      { id: "SED_STEP_BUH", name: "Бухгалтерия" },
+    ]);
+    vi.mocked(createRequest).mockResolvedValue({
+      id: "REQ-0322",
+      status: "Черновик",
+      route_origin: "custom",
+      department: "",
+      position: "",
+      created_by: "petrov.pp",
+      steps: [],
+    });
+
+    render(<CreateForm role="hr" />);
+    await fillEmployeeManually("custom");
+    fireEvent.click(screen.getByText("Добавить последовательный блок"));
+
+    // Первый шаг блока — сотрудник из AD (модалка выбора).
+    vi.mocked(searchAd).mockResolvedValue([adCandidate]);
+    fireEvent.click(screen.getByRole("button", { name: "Добавить исполнителя" }));
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
+    fireEvent.change(screen.getByLabelText("Поиск в AD"), { target: { value: "Петров" } });
+    await waitFor(() => expect(screen.getByText("Петров Пётр Петрович")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("checkbox", { name: "Выбрать Петров Пётр Петрович" }));
+    fireEvent.click(screen.getByRole("button", { name: "ОК" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+
+    // Первый шаг нельзя поднять.
+    expect(
+      screen.getByRole("button", { name: "Поднять исполнителя Петров Пётр Петрович" }),
+    ).toBeDisabled();
+    // Второй шаг-группа добавляется выбором группы.
+    fireEvent.change(screen.getByLabelText("Группа блока 1"), {
+      target: { value: "SED_STEP_BUH" },
+    });
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Добавить группу" })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Добавить группу" }));
+
+    // Групповой шаг встал вторым: его можно поднять наверх.
+    fireEvent.click(screen.getByRole("button", { name: "Поднять исполнителя SED_STEP_BUH" }));
+
+    // И «вверх» у первого шага больше не выключен.
+    expect(
+      screen.getByRole("button", { name: "Поднять исполнителя Петров Пётр Петрович" }),
+    ).toBeEnabled();
+
+    fireEvent.click(screen.getByText("Создать"));
+    await waitFor(() => expect(createRequest).toHaveBeenCalled());
+    const body = vi.mocked(createRequest).mock.calls[0][0];
+    expect(body.blocks).toEqual([
+      {
+        mode: "sequential",
+        steps: [
+          { owner_group: "SED_STEP_BUH", resolver: "by_group" },
+          { sam: "petrov.pp" },
+        ],
+      },
+    ]);
+  });
+});
+
 // --- Смешанный блок маршрута: сотрудник и группа -----------------------------
 
 describe("CreateForm: блок с сотрудником и группой", () => {

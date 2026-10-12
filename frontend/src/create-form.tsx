@@ -198,6 +198,41 @@ function PlusIcon() {
   );
 }
 
+// Стрелки порядка шага в блоке (те же иконки, что в редакторе состава бланка).
+function UpIcon() {
+  return (
+    <svg
+      width={14}
+      height={14}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      aria-hidden="true"
+    >
+      <path d="M12 19V5M5 12l7-7 7 7" />
+    </svg>
+  );
+}
+
+function DownIcon() {
+  return (
+    <svg
+      width={14}
+      height={14}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      aria-hidden="true"
+    >
+      <path d="M12 5v14M5 12l7 7 7-7" />
+    </svg>
+  );
+}
+
 // Форма создания: единый экран, блоки по зависимостям.
 export function CreateForm(props: CreateFormProps) {
   // Блоки маршрута в этом файле уже называются blocks, поэтому права из сессии
@@ -940,6 +975,25 @@ function removeStep(blockId: string, stepIndex: number): void {
       prev.map((b) =>
         b.id === blockId ? { ...b, steps: b.steps.filter((_, s) => s !== stepIndex) } : b,
       ),
+    );
+  }
+
+  // Порядок исполнителя внутри блока: кнопки «вверх/вниз». В последовательном
+  // блоке порядок и есть маршрут, поэтому перестановка нужна наравне с добавлением
+  // (решение человека 2026-10-12). В параллельном блоке порядок не влияет на
+  // маршрут, но кнопки оставлены — блок мог быть переключён из последовательного.
+  function moveStep(blockId: string, stepIndex: number, delta: number): void {
+    markTouched();
+    setBlocks((prev) =>
+      prev.map((b) => {
+        if (b.id !== blockId) return b;
+        const target = stepIndex + delta;
+        if (stepIndex < 0 || target < 0 || target >= b.steps.length) return b;
+        const steps = [...b.steps];
+        const [row] = steps.splice(stepIndex, 1);
+        steps.splice(target, 0, row);
+        return { ...b, steps };
+      }),
     );
   }
 
@@ -2031,15 +2085,37 @@ function removeStep(blockId: string, stepIndex: number): void {
                         {block.steps.map((s, si) => (
                           <li key={`${s.kind}-${s.sam || s.owner_group}-${si}`}>
                             {s.kind === "group" ? s.display_name : `${s.display_name} (${s.sam})`}
-                            <button
-                              type="button"
-                              aria-label={`Удалить исполнителя ${s.display_name}`}
-                              title="Удалить исполнителя"
-                              onClick={() => removeStep(block.id, si)}
-                              className="sed-roundbtn sed-ml-8"
-                            >
-                              <CrossIcon />
-                            </button>
+                            <span className="sed-stepbtns sed-ml-8">
+                              <button
+                                type="button"
+                                aria-label={`Поднять исполнителя ${s.display_name}`}
+                                title="Поднять"
+                                disabled={si === 0}
+                                onClick={() => moveStep(block.id, si, -1)}
+                                className="sed-roundbtn"
+                              >
+                                <UpIcon />
+                              </button>
+                              <button
+                                type="button"
+                                aria-label={`Опустить исполнителя ${s.display_name}`}
+                                title="Опустить"
+                                disabled={si === block.steps.length - 1}
+                                onClick={() => moveStep(block.id, si, 1)}
+                                className="sed-roundbtn"
+                              >
+                                <DownIcon />
+                              </button>
+                              <button
+                                type="button"
+                                aria-label={`Удалить исполнителя ${s.display_name}`}
+                                title="Удалить исполнителя"
+                                onClick={() => removeStep(block.id, si)}
+                                className="sed-roundbtn"
+                              >
+                                <CrossIcon />
+                              </button>
+                            </span>
                           </li>
                         ))}
                       </ul>
