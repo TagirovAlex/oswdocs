@@ -437,6 +437,153 @@ export async function deleteBackup(name: string): Promise<{ ok: boolean }> {
   return requestSettings<{ ok: boolean }>(`/api/archive/files/${encodeURIComponent(name)}`, "DELETE");
 }
 
+// ---------------------------------------------------------------------------
+// Справочник прав доступа (волна F3) — GET /api/settings/permissions (блоки,
+// шаблоны, состав и группы одним ответом), PUT /api/settings/permissions/templates/{code}
+// (состав шаблона целиком) и GET /api/settings/permissions/groups (перечень групп AD
+// из кэша + дата последней синхронизации). Править могут администратор и
+// администратор СЭД (решение человека 2026-10-11); проверка роли — на сервере.
+// ---------------------------------------------------------------------------
+
+// Блок функции прав (perm_blocks): код — стабильный идентификатор, по нему резолв
+// прав ссылается на справочник; название — для интерфейса.
+export interface PermissionBlock {
+  code: string;
+  title: string;
+  description: string | null;
+  sort_order: number;
+  // Неактивный блок не выдаётся никому (api/app/permissions.py).
+  active: boolean;
+}
+
+// Шаблон прав (perm_templates): состав блоков и группы AD шаблона.
+export interface PermissionTemplate {
+  code: string;
+  title: string;
+  description: string | null;
+  // Защищённый шаблон нельзя оставить без блоков — это основа доступа к разделу.
+  protected: boolean;
+  sort_order: number;
+  // Коды блоков в составе шаблона.
+  blocks: string[];
+  // Имена групп AD шаблона (владелец шага — без групп, они не нужны).
+  groups: string[];
+}
+
+// Снимок справочника целиком (GET /api/settings/permissions).
+export interface PermissionCatalog {
+  blocks: PermissionBlock[];
+  templates: PermissionTemplate[];
+}
+
+// Группа AD из кэша состава групп (ad_group_members) для выбора в шаблон.
+export interface PermissionGroup {
+  // Имя группы AD (и идентификатор — как в кэше).
+  id: string;
+  name: string;
+  // Участников в кэше на момент синхронизации.
+  members: number;
+}
+
+// Перечень групп AD для выбора + дата последней синхронизации кэша (живой AD при
+// правке прав не опрашивается — решение человека 2026-10-11).
+export interface PermissionGroupsData {
+  groups: PermissionGroup[];
+  synced_at: string | null;
+}
+
+// Состав шаблона в PUT: переданные блоки и группы полностью заменяют прежние.
+export interface PermissionTemplateSave {
+  blocks: string[];
+  groups: string[];
+}
+
+// Ответ PUT состава шаблона: сохранённые блоки и группы (как их сложил сервер).
+export interface PermissionTemplateSaved {
+  code: string;
+  blocks: string[];
+  groups: string[];
+}
+
+// Текст отказа из тела FastAPI (detail) либо null (тело не JSON/без detail).
+// Текст 409/422 показываем как есть: отказ «нельзя снять права у себя» или
+// «защищённый шаблон не может остаться без блоков» должен быть виден админу
+// дословно, а не как «ошибка запроса».
+async function readPermissionDetail(res: Response): Promise<string | null> {
+  try {
+    const data = await res.json();
+    if (typeof data?.detail === "string" && data.detail !== "") return data.detail;
+  } catch {
+    // тело не JSON — общий текст по коду ответа
+  }
+  return null;
+}
+
+// Запрос к /api/settings/permissions* с Bearer-токеном. Отказы: 403 — не администратор,
+// 404 — шаблона нет, 409 — нельзя снять права у себя, 422 — неверный состав
+// (неизвестный блок/защищённый пустым/лишний блок в owner), 503 — справочник
+// недоступен (доступ закрыт, но это не «нет прав»).
+async function requestPermissions<T>(path: string, method: "GET" | "PUT", data?: unknown): Promise<T> {
+  const token = getToken();
+  if (!token) {
+    throw new ApiHttpError(401, "Нет токена");
+  }
+  const init: RequestInit = { method, headers: { Authorization: `Bearer ${token}` } };
+  if (data !== undefined) {
+    init.headers = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
+    init.body = JSON.stringify(data);
+  }
+  let res: Response;
+  try {
+    res = await fetch(path, init);
+  } catch {
+    throw new Error("Сервис недоступен");
+  }
+  if (!res.ok) {
+    const detail = await readPermissionDetail(res);
+    switch (res.status) {
+      case 401:
+        throw new ApiHttpError(401, detail ?? "Сессия истекла");
+      case 403:
+        throw new ApiHttpError(403, detail ?? "Права доступа правит только администратор");
+      case 404:
+        throw new ApiHttpError(404, detail ?? "Шаблон прав не найден");
+      case 409:
+        throw new ApiHttpError(409, detail ?? "Нельзя снять права у себя");
+      case 422:
+        throw new ApiHttpError(422, detail ?? "Неверный состав шаблона прав");
+      case 503:
+        throw new ApiHttpError(503, detail ?? "Справочник прав доступа недоступен");
+      default:
+        throw new ApiHttpError(res.status, detail ?? "Ошибка сервера");
+    }
+  }
+  return (await res.json()) as T;
+}
+
+// GET /api/settings/permissions: справочник прав целиком (блоки, шаблоны, состав).
+export async function getPermissions(): Promise<PermissionCatalog> {
+  return requestPermissions<PermissionCatalog>("/api/settings/permissions", "GET");
+}
+
+// PUT /api/settings/permissions/templates/{code}: заменить состав шаблона целиком
+// (блоки и группы) одной транзакцией с аудитом.
+export async function savePermissionTemplate(
+  code: string,
+  data: PermissionTemplateSave,
+): Promise<PermissionTemplateSaved> {
+  return requestPermissions<PermissionTemplateSaved>(
+    `/api/settings/permissions/templates/${encodeURIComponent(code)}`,
+    "PUT",
+    data,
+  );
+}
+
+// GET /api/settings/permissions/groups: перечень групп AD из кэша + дата синхронизации.
+export async function getPermissionGroups(): Promise<PermissionGroupsData> {
+  return requestPermissions<PermissionGroupsData>("/api/settings/permissions/groups", "GET");
+}
+
 // Файлы-шаблоны .docx (doc_templates[].file) больше не используются: по решению
 // человека документ печати собирается из данных бланка из справочника. Поэтому
 // ключи настроек doc_templates/position_sets и методы загрузки/скачивания/замены/

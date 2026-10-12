@@ -27,17 +27,26 @@ import {
   deleteBackup,
   downloadBackup,
   getArchiveSettings,
+  getPermissionGroups,
+  getPermissions,
   getSettings,
   getSettingsContent,
   listBackups,
   runBackup,
   saveArchiveSettings,
+  savePermissionTemplate,
   saveSettings,
   saveSettingsContent,
   syncAdGroups,
   syncEnterprises,
 } from "./settings-client";
-import type { SettingsData } from "./settings-client";
+import type {
+  PermissionBlock,
+  PermissionCatalog,
+  PermissionGroupsData,
+  SettingsData,
+} from "./settings-client";
+import type { Role } from "./api-mock";
 
 // Мок клиента настроек (fetch не вызывается).
 vi.mock("./settings-client", () => ({
@@ -53,6 +62,9 @@ vi.mock("./settings-client", () => ({
   runBackup: vi.fn(),
   deleteBackup: vi.fn(),
   downloadBackup: vi.fn(),
+  getPermissions: vi.fn(),
+  savePermissionTemplate: vi.fn(),
+  getPermissionGroups: vi.fn(),
 }));
 
 // Мок клиента заявок: нужны только методы справочника бланков, шагов и виды
@@ -247,6 +259,67 @@ const stepCatalog: StepCatalogRow[] = [
   },
 ];
 
+// Справочник прав (GET /api/settings/permissions): блоки функций и два шаблона —
+// вымышленные значения теста (у admin protected=true, у hr — своя группа).
+const permissionBlocks: PermissionBlock[] = [
+  {
+    code: "requests_list",
+    title: "Просмотр списка заявок",
+    description: null,
+    sort_order: 10,
+    active: true,
+  },
+  {
+    code: "settings_infra",
+    title: "Настройки: инфраструктура и регламенты",
+    description: null,
+    sort_order: 20,
+    active: true,
+  },
+  {
+    code: "archive_backups",
+    title: "Архивация (бэкапы)",
+    description: null,
+    sort_order: 30,
+    active: true,
+  },
+];
+
+const permissionCatalog: PermissionCatalog = {
+  blocks: permissionBlocks,
+  templates: [
+    {
+      code: "admin",
+      title: "Администратор",
+      description: "Перенос текущих прав администратора один в один",
+      protected: true,
+      sort_order: 20,
+      blocks: ["requests_list", "settings_infra", "archive_backups"],
+      groups: ["TEST_ADMINS"],
+    },
+    {
+      code: "hr",
+      title: "Сотрудник ОК",
+      description: null,
+      protected: false,
+      sort_order: 40,
+      blocks: ["requests_list"],
+      groups: ["TEST_OK", "TEST_OK_2"],
+    },
+  ],
+};
+
+// Перечень групп AD из кэша (GET /api/settings/permissions/groups) с датой
+// синхронизации — кэш, а не живой AD.
+const permissionGroups: PermissionGroupsData = {
+  groups: [
+    { id: "TEST_ADMINS", name: "TEST_ADMINS", members: 3 },
+    { id: "TEST_OK", name: "TEST_OK", members: 12 },
+    { id: "TEST_OK_2", name: "TEST_OK_2", members: 5 },
+  ],
+  synced_at: "2026-10-11T06:00:00+00:00",
+};
+
 beforeEach(() => {
   vi.mocked(getSettings).mockReset();
   vi.mocked(saveSettings).mockReset();
@@ -260,6 +333,9 @@ beforeEach(() => {
   vi.mocked(runBackup).mockReset();
   vi.mocked(deleteBackup).mockReset();
   vi.mocked(downloadBackup).mockReset();
+  vi.mocked(getPermissions).mockReset();
+  vi.mocked(savePermissionTemplate).mockReset();
+  vi.mocked(getPermissionGroups).mockReset();
   vi.mocked(getBlanks).mockReset();
   vi.mocked(createBlank).mockReset();
   vi.mocked(updateBlank).mockReset();
@@ -284,6 +360,9 @@ beforeEach(() => {
   vi.mocked(getStepGroups).mockResolvedValue(stepGroups);
   vi.mocked(searchAd).mockResolvedValue([adCandidate]);
   vi.mocked(getStepCatalog).mockResolvedValue(stepCatalog);
+  // Справочник прав и перечень групп AD из кэша — по умолчанию нормальные.
+  vi.mocked(getPermissions).mockResolvedValue(permissionCatalog);
+  vi.mocked(getPermissionGroups).mockResolvedValue(permissionGroups);
 });
 
 describe("AdminSettings", () => {
@@ -1540,5 +1619,210 @@ describe("AdminSettings", () => {
     expect(screen.queryByText("Наборы должностей (для бланков)")).not.toBeInTheDocument();
     expect(screen.queryByText("Добавить набор")).not.toBeInTheDocument();
     expect(screen.queryByText("Выбрать из справочника")).not.toBeInTheDocument();
+  });
+
+  // Вкладка «Права доступа» (справочник прав) — администратору и администратору
+  // СЭД; руководителю ОК её нет. Секция «Доступ и роли» (ключи групп) осталась рядом.
+  it("вкладка «Права доступа» видна админу и администратору СЭД", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+    vi.mocked(getSettingsContent).mockResolvedValue(contentOnly);
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Права доступа" })).toBeInTheDocument(),
+    );
+    expect(screen.getByRole("button", { name: "Доступ и роли" })).toBeInTheDocument();
+
+    cleanup();
+    render(<AdminSettings role={"sed_admin" as Role} />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Права доступа" })).toBeInTheDocument(),
+    );
+
+    cleanup();
+    render(<AdminSettings role="hr_admin" />);
+    await waitFor(() => expect(screen.getByLabelText("TTL отметок")).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Права доступа" })).not.toBeInTheDocument();
+  });
+
+  // Список шаблонов прав: код, название, число блоков и групп, пометка «защищённый»
+  // у protected-шаблона.
+  it("список шаблонов прав: код, название, числа блоков и групп, защищённый", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Права доступа" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Права доступа" }));
+
+    const table = await screen.findByLabelText("Шаблоны прав");
+    const rows = within(table).getAllByRole("row");
+    expect(rows).toHaveLength(3);
+    const adminCells = within(rows[1]).getAllByRole("cell");
+    expect(adminCells[0]).toHaveTextContent("admin");
+    expect(adminCells[1]).toHaveTextContent("Администратор");
+    expect(adminCells[1]).toHaveTextContent("защищённый");
+    expect(adminCells[2]).toHaveTextContent("3");
+    expect(adminCells[3]).toHaveTextContent("1");
+    // У обычного шаблона пометки нет.
+    const hrCells = within(rows[2]).getAllByRole("cell");
+    expect(hrCells[1]).toHaveTextContent("Сотрудник ОК");
+    expect(hrCells[1]).not.toHaveTextContent("защищённый");
+    expect(hrCells[2]).toHaveTextContent("1");
+    expect(hrCells[3]).toHaveTextContent("2");
+  });
+
+  // Состав выбранного шаблона: чекбоксы всех блоков справочника и группы AD.
+  it("выбор шаблона показывает блоки и группы", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Права доступа" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Права доступа" }));
+
+    // Первый шаблон открывается сразу — лишнего клика не нужно.
+    await waitFor(() => expect(screen.getByLabelText("Блок requests_list")).toBeChecked());
+    expect(screen.getByLabelText("Блок settings_infra")).toBeChecked();
+    expect(screen.getByRole("list", { name: "Группы шаблона admin" })).toHaveTextContent("TEST_ADMINS");
+
+    fireEvent.click(screen.getByRole("button", { name: "Править шаблон hr" }));
+    expect(screen.getByLabelText("Блок settings_infra")).not.toBeChecked();
+    expect(screen.getByLabelText("Блок requests_list")).toBeChecked();
+    const hrGroups = screen.getByRole("list", { name: "Группы шаблона hr" });
+    expect(hrGroups).toHaveTextContent("TEST_OK");
+    expect(hrGroups).toHaveTextContent("TEST_OK_2");
+  });
+
+  // Сохранение состава уходит ОДНИМ PUT с блоками и группами целиком.
+  it("сохранение состава уходит одним PUT", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+    vi.mocked(savePermissionTemplate).mockImplementation(async (code, data) => ({
+      code,
+      blocks: data.blocks,
+      groups: data.groups,
+    }));
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Права доступа" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Права доступа" }));
+
+    fireEvent.click(await screen.findByRole("button", { name: "Править шаблон hr" }));
+    fireEvent.click(screen.getByLabelText("Блок settings_infra"));
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить состав" }));
+
+    await waitFor(() => expect(savePermissionTemplate).toHaveBeenCalledTimes(1));
+    expect(savePermissionTemplate).toHaveBeenCalledWith("hr", {
+      blocks: ["requests_list", "settings_infra"],
+      groups: ["TEST_OK", "TEST_OK_2"],
+    });
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent(/блоков 2, групп 2/));
+  });
+
+  // Отказ 409 («нельзя снять права у себя») показывается текстом сервера, а не
+  // безликим «ошибка запроса».
+  it("отказ 409 показывается текстом сервера", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+    vi.mocked(savePermissionTemplate).mockRejectedValue(
+      new ApiHttpError(
+        409,
+        "Нельзя снять права у себя: блок «Настройки: инфраструктура и регламенты» " +
+          "нужен, чтобы открыть раздел прав доступа",
+      ),
+    );
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Права доступа" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Права доступа" }));
+
+    fireEvent.click(await screen.findByRole("button", { name: "Сохранить состав" }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent(/Нельзя снять права у себя/),
+    );
+    expect(screen.getByRole("alert")).not.toHaveTextContent(/ошибка запроса/i);
+  });
+
+  // Модалка «Выбрать группы»: список из кэша AD с датой синхронизации и поиском;
+  // клик по подложке модалку НЕ закрывает (решение человека), Escape — закрывает.
+  it("модалка групп: подложка не закрывает, Escape закрывает", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Права доступа" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Права доступа" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Выбрать группы" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "Выбрать группы" });
+    await waitFor(() => expect(screen.getByLabelText("Выбрать группу TEST_OK_2")).toBeInTheDocument());
+    // Кэш, а не живой AD: в подписи есть источник и дата синхронизации.
+    expect(within(dialog).getByText(/последняя синхронизация/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/Это кэш, а не живой AD/)).toBeInTheDocument();
+    // Поиск по названию группы.
+    fireEvent.change(screen.getByLabelText("Поиск по названию группы"), {
+      target: { value: "TEST_ADMINS" },
+    });
+    expect(screen.queryByLabelText("Выбрать группу TEST_OK")).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Поиск по названию группы"), { target: { value: "" } });
+
+    // Клик по подложке (sed-modal-backdrop) модалку не закрывает.
+    const backdrop = document.querySelector(".sed-modal-backdrop");
+    expect(backdrop).not.toBeNull();
+    fireEvent.click(backdrop as HTMLElement);
+    expect(screen.getByRole("dialog", { name: "Выбрать группы" })).toBeInTheDocument();
+
+    // Escape закрывает.
+    fireEvent.keyDown(screen.getByLabelText("Поиск по названию группы"), { key: "Escape" });
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "Выбрать группы" })).not.toBeInTheDocument(),
+    );
+  });
+
+  // Выбранные в модалке группы попадают в состав и уходят в PUT.
+  it("модалка групп: выбор применяется к шаблону", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+    vi.mocked(savePermissionTemplate).mockImplementation(async (code, data) => ({
+      code,
+      blocks: data.blocks,
+      groups: data.groups,
+    }));
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Права доступа" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Права доступа" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Править шаблон hr" }));
+    fireEvent.click(screen.getByRole("button", { name: "Выбрать группы" }));
+
+    await screen.findByRole("dialog", { name: "Выбрать группы" });
+    fireEvent.click(await screen.findByLabelText("Выбрать группу TEST_ADMINS"));
+    fireEvent.click(screen.getByRole("button", { name: "ОК" }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("list", { name: "Группы шаблона hr" })).toHaveTextContent("TEST_ADMINS"),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить состав" }));
+    await waitFor(() =>
+      expect(savePermissionTemplate).toHaveBeenCalledWith("hr", {
+        blocks: ["requests_list"],
+        groups: ["TEST_OK", "TEST_OK_2", "TEST_ADMINS"],
+      }),
+    );
+  });
+
+  // Пустое состояние и сетевая ошибка справочника — по образцу соседних вкладок.
+  it("пустой справочник прав и ошибка загрузки — понятным текстом", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+    vi.mocked(getPermissions).mockResolvedValue({ blocks: [], templates: [] });
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Права доступа" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Права доступа" }));
+    expect(await screen.findByText("Шаблонов прав нет")).toBeInTheDocument();
+
+    cleanup();
+    vi.mocked(getPermissions).mockRejectedValue(new Error("Сервис недоступен"));
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Права доступа" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Права доступа" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/Справочник прав: Сервис недоступен/);
   });
 });

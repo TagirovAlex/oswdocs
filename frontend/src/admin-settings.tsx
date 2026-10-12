@@ -2,7 +2,8 @@
 // Значения — из settings БД (GET/PUT /api/settings для админа, /settings/content
 // для руководителя ОК), в коде не хардкодятся. Вкладки: Процесс / Справочники
 // (контент) и Бланки / Инфра / Регламенты / Доступ и роли / Архивация
-// (только админ). Вкладка «Бланки» — справочник бланков из requests-client.
+// (только админ). Вкладка «Права доступа» — админу и администратору СЭД.
+// Вкладка «Бланки» — справочник бланков из requests-client.
 import { useEffect, useState } from "react";
 import {
   createBlank,
@@ -33,11 +34,14 @@ import {
   deleteDocType,
   downloadBackup,
   getArchiveSettings,
+  getPermissionGroups,
+  getPermissions,
   getSettings,
   getSettingsContent,
   listBackups,
   runBackup,
   saveArchiveSettings,
+  savePermissionTemplate,
   saveSettings,
   saveSettingsContent,
   syncAdGroups,
@@ -48,6 +52,9 @@ import type {
   ArchiveSettingsData,
   BackupFile,
   ContentSettingsData,
+  PermissionBlock,
+  PermissionGroup,
+  PermissionTemplate,
   ScheduleReglament,
   SettingsData,
   SettingsEnterprise,
@@ -72,9 +79,13 @@ interface AdminSettingsProps {
 }
 
 // Вкладки админки: контент (Процесс/Справочники/Письма) + Инфра, Регламенты,
-// Доступ и роли, Архивация, Бланки и Шаги — только админ. Легаси-вкладка
-// «Шаблоны» (ключи templates/position_to_category) удалена вместе с ключами.
+// Доступ и роли, Права доступа, Архивация, Бланки и Шаги — только админ. Легаси-
+// вкладка «Шаблоны» (ключи templates/position_to_category) удалена вместе с ключами.
+// Вкладка «Права доступа» — администратору И администратору СЭД (решение человека
+// 2026-10-11); секция «Доступ и роли» остаётся рядом и объясняет ключ входа
+// access_groups (группы ролей после миграции 0020 только для чтения).
 const CONTENT_TABS = ["Процесс", "Справочники", "Письма"] as const;
+const PERMISSIONS_TAB = "Права доступа" as const;
 const ALL_TABS = [
   "Процесс",
   "Справочники",
@@ -84,6 +95,7 @@ const ALL_TABS = [
   "Инфра",
   "Регламенты",
   "Доступ и роли",
+  PERMISSIONS_TAB,
   "Архивация",
 ] as const;
 type SettingsTab = (typeof ALL_TABS)[number];
@@ -323,6 +335,316 @@ function AccessRolesEditor(props: { value: AccessRoleGroups; onChange: (v: Acces
           <div className="sed-note">{field.hint}</div>
         </label>
       ))}
+    </fieldset>
+  );
+}
+
+// Вкладка «Права доступа» (администратор и администратор СЭД, решение человека
+// 2026-10-11): справочник шаблонов — список (код, название, число блоков и групп,
+// пометка «защищённый») и состав выбранного шаблона: чекбоксы всех блоков справочника
+// и группы AD шаблона. Группы выбираются модалкой «Выбрать группы» из кэша состава
+// групп AD (живой AD при правке прав не опрашивается, поэтому в модалке подписаны
+// источник и дата последней синхронизации). Состав сохраняется целиком одним PUT
+// (PUT /api/settings/permissions/templates/{code}) — как состав шагов бланка;
+// отказы 409/422 показываются текстом сервера.
+function PermissionsEditor() {
+  const [blocks, setBlocks] = useState<PermissionBlock[]>([]);
+  const [templates, setTemplates] = useState<PermissionTemplate[]>([]);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [loadError, setLoadError] = useState<string>("");
+  // Выбранный шаблон и его состав в форме (черновик до нажатия «Сохранить»).
+  const [selected, setSelected] = useState<PermissionTemplate | null>(null);
+  const [draftBlocks, setDraftBlocks] = useState<string[]>([]);
+  const [draftGroups, setDraftGroups] = useState<string[]>([]);
+  const [busy, setBusy] = useState<boolean>(false);
+  const [error, setError] = useState<string>("");
+  const [saved, setSaved] = useState<string>("");
+  // Модалка «Выбрать группы»: перечень из кэша, поиск и черновик выбранных групп.
+  const [groupsOpen, setGroupsOpen] = useState<boolean>(false);
+  const [adGroups, setAdGroups] = useState<PermissionGroup[]>([]);
+  const [groupsSyncedAt, setGroupsSyncedAt] = useState<string | null>(null);
+  const [groupsLoading, setGroupsLoading] = useState<boolean>(false);
+  const [groupsError, setGroupsError] = useState<string>("");
+  const [groupsQuery, setGroupsQuery] = useState<string>("");
+  const [groupsPicked, setGroupsPicked] = useState<string[]>([]);
+
+  // Открыть шаблон в форме: состав берётся из справочника, до сохранения ничего
+  // на сервере не меняется.
+  function startEdit(template: PermissionTemplate): void {
+    setSelected(template);
+    setDraftBlocks([...template.blocks]);
+    setDraftGroups([...template.groups]);
+    setError("");
+    setSaved("");
+  }
+
+  useEffect(() => {
+    getPermissions()
+      .then((data) => {
+        setBlocks(data.blocks);
+        setTemplates(data.templates);
+        setLoadError("");
+        // Первый шаблон открывается сразу — вкладка не требует лишнего клика.
+        if (data.templates[0]) startEdit(data.templates[0]);
+      })
+      .catch((e: unknown) =>
+        setLoadError(e instanceof Error ? e.message : "Ошибка загрузки справочника прав"),
+      )
+      .finally(() => setLoading(false));
+  }, []);
+
+  // Сохранение состава целиком: сервер заменяет блоки и группы одной транзакцией,
+  // в списке шаблонов сразу видны новые числа.
+  async function handleSave(): Promise<void> {
+    if (busy || selected === null) return;
+    setBusy(true);
+    setError("");
+    setSaved("");
+    try {
+      const result = await savePermissionTemplate(selected.code, {
+        blocks: draftBlocks,
+        groups: draftGroups,
+      });
+      setTemplates((items) =>
+        items.map((template) =>
+          template.code === result.code
+            ? { ...template, blocks: result.blocks, groups: result.groups }
+            : template,
+        ),
+      );
+      setSelected((template) =>
+        template !== null && template.code === result.code
+          ? { ...template, blocks: result.blocks, groups: result.groups }
+          : template,
+      );
+      setDraftBlocks([...result.blocks]);
+      setDraftGroups([...result.groups]);
+      setSaved(`Сохранено: блоков ${result.blocks.length}, групп ${result.groups.length}`);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Ошибка сохранения состава шаблона");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Открыть модалку групп: список всегда свежий из кэша, вместе с датой
+  // синхронизации (кэш обновляется на вкладке «Справочники»).
+  function openGroupsModal(): void {
+    setGroupsOpen(true);
+    setGroupsQuery("");
+    setGroupsPicked([...draftGroups]);
+    setGroupsError("");
+    setGroupsLoading(true);
+    getPermissionGroups()
+      .then((data) => {
+        setAdGroups(data.groups);
+        setGroupsSyncedAt(data.synced_at);
+      })
+      .catch((e: unknown) => {
+        setAdGroups([]);
+        setGroupsError(e instanceof Error ? e.message : "Ошибка загрузки групп AD");
+      })
+      .finally(() => setGroupsLoading(false));
+  }
+
+  // Закрытие модалки без изменений: черновик выбора отбрасывается.
+  function closeGroupsModal(): void {
+    setGroupsOpen(false);
+  }
+
+  function confirmGroups(): void {
+    setDraftGroups([...groupsPicked]);
+    closeGroupsModal();
+  }
+
+  function togglePickedGroup(name: string, checked: boolean): void {
+    setGroupsPicked((items) => (checked ? [...items, name] : items.filter((item) => item !== name)));
+  }
+
+  const visibleGroups = adGroups.filter((group) =>
+    group.name.toLowerCase().includes(groupsQuery.trim().toLowerCase()),
+  );
+
+  return (
+    <fieldset>
+      <legend>Права доступа (шаблоны прав)</legend>
+      <div className="sed-note">
+        Единица прав — блок функции. Права человека — объединение блоков всех
+        шаблонов, чьи группы AD с ним пересекаются; состав шаблона сохраняется целиком.
+        Снять у себя доступ к разделу прав сервер не даст — вернётся объяснение.
+      </div>
+      {loading && <div className="sed-note">Загрузка справочника прав…</div>}
+      {loadError && <div role="alert">Справочник прав: {loadError}</div>}
+      {!loading && !loadError && templates.length === 0 && (
+        <div className="sed-note">Шаблонов прав нет</div>
+      )}
+      {templates.length > 0 && (
+        <table className="sed-table" aria-label="Шаблоны прав">
+          <thead>
+            <tr>
+              <th scope="col">Код</th>
+              <th scope="col">Название</th>
+              <th scope="col">Блоков</th>
+              <th scope="col">Групп</th>
+              <th scope="col">Действия</th>
+            </tr>
+          </thead>
+          <tbody>
+            {templates.map((template) => (
+              <tr
+                key={template.code}
+                className={template.code === selected?.code ? "sed-table__row--active" : undefined}
+              >
+                <td>{template.code}</td>
+                <td>
+                  {template.title}
+                  {template.protected && <span className="sed-note"> защищённый</span>}
+                  {template.description && <div className="sed-sub">{template.description}</div>}
+                </td>
+                <td>{template.blocks.length}</td>
+                <td>{template.groups.length}</td>
+                <td>
+                  <button
+                    type="button"
+                    className="sed-btn sed-btn--ghost"
+                    aria-label={`Править шаблон ${template.code}`}
+                    onClick={() => startEdit(template)}
+                  >
+                    Править
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      {/* Состав выбранного шаблона: чекбоксы всех блоков справочника и группы AD. */}
+      {selected !== null && (
+        <div className="sed-editor-card">
+          <div className="sed-blockcard__head">
+            <span className="sed-blockcard__title">
+              Состав шаблона: {selected.title} ({selected.code})
+            </span>
+            <span className="sed-blockcard__spacer" />
+            {selected.protected && <span className="sed-note">защищённый</span>}
+          </div>
+          {blocks.length === 0 && <div className="sed-note">Блоков в справочнике нет</div>}
+          {blocks.map((block) => (
+            <label key={block.code} className="sed-field">
+              <input
+                type="checkbox"
+                aria-label={`Блок ${block.code}`}
+                checked={draftBlocks.includes(block.code)}
+                disabled={!block.active}
+                onChange={(e) =>
+                  setDraftBlocks(
+                    e.target.checked
+                      ? [...draftBlocks, block.code]
+                      : draftBlocks.filter((code) => code !== block.code),
+                  )
+                }
+              />
+              {block.title} ({block.code})
+              {block.active ? "" : " — неактивен в справочнике, не выдаётся"}
+            </label>
+          ))}
+          <div className="sed-field sed-mt-8">
+            Группы AD шаблона
+            <div className="sed-note">
+              Шаблон действует на тех, кто входит хотя бы в одну из этих групп.
+            </div>
+            {draftGroups.length === 0 && <div className="sed-note">Групп не задано</div>}
+            {draftGroups.length > 0 && (
+              <ul className="sed-list" aria-label={`Группы шаблона ${selected.code}`}>
+                {draftGroups.map((name) => (
+                  <li key={name}>{name}</li>
+                ))}
+              </ul>
+            )}
+          </div>
+          <div className="sed-toolbar sed-mt-8">
+            <button type="button" className="sed-btn" onClick={openGroupsModal}>
+              Выбрать группы
+            </button>
+            <button type="button" className="sed-btn" onClick={() => void handleSave()} disabled={busy}>
+              {busy ? "Сохранение…" : "Сохранить состав"}
+            </button>
+          </div>
+          {error && <div role="alert">{error}</div>}
+          {saved && <div role="status">{saved}</div>}
+        </div>
+      )}
+
+      {/* Модалка «Выбрать группы»: список из кэша состава групп AD с поиском и
+          чекбоксами. Клик по подложке модалку НЕ закрывает (решение человека) —
+          закрывают ОК, Отмена и Escape. */}
+      {groupsOpen && (
+        <div className="sed-modal-backdrop">
+          <div
+            className="sed-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Выбрать группы"
+            onKeyDown={(e) => {
+              if (e.key === "Escape") closeGroupsModal();
+            }}
+          >
+            <h4>Выбрать группы</h4>
+            <div className="sed-note">
+              Список — из кэша состава групп AD{groupsSyncedAt
+                ? `, последняя синхронизация ${new Date(groupsSyncedAt).toLocaleString("ru-RU")}`
+                : ", синхронизация ещё не выполнялась"}
+              . Это кэш, а не живой AD: новые группы появятся после синхронизации
+              на вкладке «Справочники».
+            </div>
+            <label className="sed-field">
+              Поиск по названию группы
+              <input
+                autoFocus
+                aria-label="Поиск по названию группы"
+                placeholder="Название группы AD"
+                value={groupsQuery}
+                onChange={(e) => setGroupsQuery(e.target.value)}
+              />
+            </label>
+            {groupsLoading && <div className="sed-note">Загрузка групп…</div>}
+            {groupsError && <div role="alert">Группы AD: {groupsError}</div>}
+            {!groupsLoading && !groupsError && visibleGroups.length === 0 && (
+              <div className="sed-note">Групп нет</div>
+            )}
+            {visibleGroups.map((group) => (
+              <label key={group.id} className="sed-field">
+                <input
+                  type="checkbox"
+                  aria-label={`Выбрать группу ${group.name}`}
+                  checked={groupsPicked.includes(group.name)}
+                  onChange={(e) => togglePickedGroup(group.name, e.target.checked)}
+                />
+                {group.name}
+                <span className="sed-note"> участников в кэше: {group.members}</span>
+              </label>
+            ))}
+            <div className="sed-toolbar sed-mt-8">
+              <button
+                type="button"
+                className="sed-btn sed-btn--ghost"
+                onClick={() => setGroupsPicked([])}
+                disabled={groupsPicked.length === 0}
+              >
+                Очистить
+              </button>
+              <span className="sed-toolbar__spacer" />
+              <button type="button" className="sed-btn" onClick={confirmGroups}>
+                ОК
+              </button>
+              <button type="button" className="sed-btn sed-btn--ghost" onClick={closeGroupsModal}>
+                Отмена
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </fieldset>
   );
 }
@@ -2321,6 +2643,10 @@ function ArchiveTab() {
 export function AdminSettings(props: AdminSettingsProps) {
   const { role } = props;
   const isAdmin = role === "admin";
+  // Администратор СЭД (sed_admin) правит права наравне с админом: вкладка прав ему
+  // доступна, инфра-настройки — нет (проверку роли делает сервер).
+  const isSedAdmin = (role as string) === "sed_admin";
+  const canEditPermissions = isAdmin || isSedAdmin;
   const [activeTab, setActiveTab] = useState<SettingsTab>("Процесс");
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string>("");
@@ -2528,7 +2854,11 @@ export function AdminSettings(props: AdminSettingsProps) {
   if (error) return <div role="alert">Ошибка: {error}</div>;
   if (loading) return <div className="sed-note">Загрузка настроек…</div>;
 
-  const tabs: readonly SettingsTab[] = isAdmin ? ALL_TABS : CONTENT_TABS;
+  const tabs: readonly SettingsTab[] = isAdmin
+    ? ALL_TABS
+    : canEditPermissions
+      ? [...CONTENT_TABS, PERMISSIONS_TAB]
+      : CONTENT_TABS;
 
   return (
     <section aria-label="Настройки СЭД">
@@ -3016,19 +3346,25 @@ export function AdminSettings(props: AdminSettingsProps) {
         <AccessRolesEditor value={accessRoles} onChange={setAccessRoles} />
       )}
 
+      {/* Справочник прав (шаблоны, блоки, группы AD) — администратор и
+          администратор СЭД. Свой запрос и своя кнопка сохранения, поэтому общий
+          «Сохранить» на вкладке не показывается. */}
+      {activeTab === PERMISSIONS_TAB && canEditPermissions && <PermissionsEditor />}
+
       {activeTab === "Архивация" && isAdmin && <ArchiveTab />}
 
       {/* Общий «Сохранить» — не для вкладок с собственным сохранением:
-          «Архивация» (PUT /api/archive), «Бланки» и «Шаги» (свои CRUD-запросы). */}
-      {activeTab !== "Архивация" && activeTab !== "Бланки" && activeTab !== "Шаги" && (
+          «Архивация» (PUT /api/archive), «Бланки» и «Шаги» (свои CRUD-запросы),
+          «Права доступа» (PUT состава шаблона внутри раздела). */}
+      {activeTab !== "Архивация" && activeTab !== "Бланки" && activeTab !== "Шаги" && activeTab !== PERMISSIONS_TAB && (
         <div className="sed-toolbar sed-mt-12">
           <button type="button" className="sed-btn" onClick={handleSave} disabled={busy}>
             {busy ? "Сохранение…" : "Сохранить"}
           </button>
         </div>
       )}
-      {activeTab !== "Архивация" && saveError && <div role="alert">{saveError}</div>}
-      {activeTab !== "Архивация" && saved && <div role="status">{saved}</div>}
+      {activeTab !== "Архивация" && activeTab !== PERMISSIONS_TAB && saveError && <div role="alert">{saveError}</div>}
+      {activeTab !== "Архивация" && activeTab !== PERMISSIONS_TAB && saved && <div role="status">{saved}</div>}
     </section>
   );
 }
