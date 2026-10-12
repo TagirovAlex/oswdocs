@@ -1179,8 +1179,10 @@ function changeRouteMode(mode: RouteMode): void {
           }
           : {
             blocks: blocks.map((b) => ({
+              // Контракт RouteBlockSpec (api/app/requests.py): у блока только
+              // mode и steps. Вид исполнителя (человек/группа) несёт ШАГ —
+              // owner_group+resolver либо sam, поэтому поле kind в тело не шлём.
               mode: b.mode,
-              kind: b.kind,
               steps: b.steps.map((s) =>
                 s.kind === "group"
                   ? { owner_group: s.owner_group ?? s.display_name, resolver: s.resolver }
