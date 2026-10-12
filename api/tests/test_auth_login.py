@@ -18,6 +18,7 @@ from app.auth import AuthFailed, AuthResult, get_auth_service, get_login_limiter
 from app.config import Settings, get_settings  # noqa: E402
 from app.deps import CurrentUser  # noqa: E402
 from app.main import app  # noqa: E402
+from app.permissions import PermissionsUnavailable, get_permissions_store  # noqa: E402
 
 TEST_ALLOWED = "SED_HR,SED_ADMINS"
 TEST_ADMINS = "SED_ADMINS"
@@ -80,6 +81,16 @@ class AlwaysAllowLoginRateLimiter:
         self.reset_calls.append((ip, login))
 
 
+class BrokenPermissionsStore:
+    """Справочник прав, который недоступен (ошибка БД)."""
+
+    def load_catalog(self):
+        raise PermissionsUnavailable("Справочник прав доступа недоступен (тест)")
+
+    def replace_template(self, code, block_codes, group_names):
+        raise PermissionsUnavailable("Справочник прав доступа недоступен (тест)")
+
+
 # --- Вымышленные доменные учетки ---
 HR_USER = {
     "sam": "ok.ivnova",
@@ -140,6 +151,10 @@ def test_login_ok_200(client, mock_auth_service):
     assert body["user"]["sam"] == "ok.ivnova"
     assert body["user"]["role"] == "hr"
     assert body["user"]["fio"] == HR_USER["fio"]
+    # Блоки прав — сразу в ответе входа (как в /auth/me). Иначе интерфейс после
+    # входа остался бы без блоков до перезагрузки страницы.
+    assert "blocks" in body["user"]
+    assert isinstance(body["user"]["blocks"], list)
 
 
 def test_login_wrong_password_401(client, mock_auth_service):
@@ -233,14 +248,54 @@ def test_auth_me_hr_full(client, hr_headers, test_settings_override):
 
 
 def test_auth_me_owner_trimmed_no_pdn(client, owner_headers, test_settings_override):
-    """Владелец: /auth/me урезанная — только sam/groups/role, без ПДн."""
+    """Владелец: /auth/me урезанная — только sam/groups/role/blocks, без ПДн."""
     response = client.get("/auth/me", headers=owner_headers)
     assert response.status_code == 200
     body = response.json()
     assert body["role"] == "owner"
-    assert set(body) == {"sam", "groups", "role"}
+    assert set(body) == {"sam", "groups", "role", "blocks"}
     for forbidden in ("fio", "mail", "department", "title"):
         assert forbidden not in body
+
+
+def test_auth_me_returns_blocks(client, hr_headers, owner_headers, admin_headers, test_settings_override):
+    """В /auth/me приходит состав блоков прав (основа интерфейса), роль сохранена.
+
+    Раскладка — как после миграции 0020 (PLAN.md «МОДЕЛЬ ПРАВ ДОСТУПА»):
+    у ОК базовые блоки, у владельца шага — только свои, админские у ОК нет."""
+    hr = client.get("/auth/me", headers=hr_headers).json()
+    assert hr["role"] == "hr"
+    assert set(hr["blocks"]) == {
+        "requests_list",
+        "request_card",
+        "request_create",
+        "step_decide",
+        "print_blank",
+        "employee_directory",
+    }
+    owner = client.get("/auth/me", headers=owner_headers).json()
+    assert owner["role"] == "owner"
+    assert set(owner["blocks"]) == {"requests_list", "request_card", "step_decide"}
+    admin = client.get("/auth/me", headers=admin_headers).json()
+    assert admin["role"] == "admin"
+    assert {"link_match", "settings_infra", "request_delete"} <= set(admin["blocks"])
+    assert "sed_admin_panel" not in admin["blocks"]
+
+
+def test_auth_me_blocks_fail_closed_without_catalog(client, hr_headers, test_settings_override):
+    """Справочник прав недоступен — blocks пустой, ответ 200 (не 500).
+
+    Роль и обрезка ПДн прежние: контракт /auth/me не зависит от справочника,
+    права при этом закрыты (fail-closed на гейтах)."""
+    app.dependency_overrides[get_permissions_store] = lambda: BrokenPermissionsStore()
+    try:
+        response = client.get("/auth/me", headers=hr_headers)
+    finally:
+        app.dependency_overrides.pop(get_permissions_store, None)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["role"] == "owner"
+    assert body["blocks"] == []
 
 
 def test_auth_me_no_auth_401(client, noauth_headers):

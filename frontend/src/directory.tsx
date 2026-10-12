@@ -1,12 +1,12 @@
-// Справочник сотрудников (админ + ОК + руководитель ОК).
+// Справочник сотрудников (блок employee_directory из /auth/me).
 // Поиск/список — GET /api/employees (предприятие + подстрока ФИО/таб.№/логина);
 // карточка сотрудника — в ОТДЕЛЬНОМ окне (?view=employee&key=…, см. windows.tsx):
 // GET /api/employees/card (1С-блок + AD-блок + связка + расхождения);
 // привязка 1С→AD (POST /api/link_1c_ad) — ТОЛЬКО админ в окне карточки;
-// «Автосвязка 1С↔AD» (POST /api/link_1c_ad/sync) — только админ.
+// «Автосвязка 1С↔AD» (POST /api/link_1c_ad/sync) — по блоку link_match.
 // ПДн в фикстурах/тестах вымышленные; в коде значений нет.
 import { useEffect, useState } from "react";
-import type { Role } from "./api-mock";
+import { hasBlock } from "./auth-client";
 import { getEnterprises, searchEmployees, syncLinks } from "./requests-client";
 import type { EmployeeHit, Enterprise } from "./requests-client";
 import { getSettingsContent } from "./settings-client";
@@ -48,13 +48,14 @@ function pagerPages(current: number, total: number): Array<number | "…"> {
 }
 
 interface DirectoryProps {
-  // Роль (привязку AD и автосвязку видит только админ; ОК/руководитель — просмотр).
-  role: Role;
+  // Блоки прав из /auth/me: автосвязка 1С↔AD — по блоку link_match
+  // (POST /api/link_1c_ad/sync требует его на сервере).
+  blocks: string[];
 }
 
 export function Directory(props: DirectoryProps) {
-  const { role } = props;
-  const canLink = role === "admin";
+  const { blocks } = props;
+  const canLink = hasBlock(blocks, "link_match");
   const [enterprises, setEnterprises] = useState<Enterprise[]>([]);
   const [enterprise, setEnterprise] = useState<string>("");
   const [query, setQuery] = useState<string>("");

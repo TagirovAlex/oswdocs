@@ -7,6 +7,7 @@
 // админ; ОК и руководитель ОК — только чтение.
 import { useEffect, useState } from "react";
 import type { Role } from "./api-mock";
+import { hasBlock } from "./auth-client";
 import { createLink, getEmployeeCard, searchAd } from "./requests-client";
 import type { AdCandidate, EmployeeCardData } from "./requests-client";
 
@@ -16,6 +17,9 @@ interface EmployeeCardViewProps {
   baseCode: string;
   tabNum: string;
   role: Role;
+  // Права из /auth/me (блоки): подтверждение связки 1С↔AD — блок link_match
+  // (было: роль admin). Блоки не пришли (мок/старый вызов) — берём роль.
+  blocks?: string[];
 }
 
 // Строка «подпись: значение» в блоке.
@@ -30,8 +34,9 @@ function FieldRow({ label, value }: { label: string; value: string }) {
 
 // Учётная карточка сотрудника (1С + AD + связка).
 export function EmployeeCardView(props: EmployeeCardViewProps) {
-  const { enterprise, baseCode, tabNum, role } = props;
-  const canLink = role === "admin";
+  const { enterprise, baseCode, tabNum, role, blocks } = props;
+  const canLink =
+    blocks === undefined ? role === "admin" : hasBlock(blocks, "link_match");
   const [card, setCard] = useState<EmployeeCardData | null>(null);
   const [cardError, setCardError] = useState<string>("");
   const [adQuery, setAdQuery] = useState<string>("");

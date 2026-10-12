@@ -9,6 +9,7 @@ import { getEnterprises, getFolders, getRequests } from "./requests-client";
 import { toRequestRow } from "./requests-client";
 import type { Folder, RequestOut } from "./requests-client";
 import type { Role } from "./api-mock";
+import { MOCK_ROLE_BLOCKS } from "./api-mock";
 
 // Мок клиента заявок; чистые функции (toRequestRow/filterRequests) — реальные.
 vi.mock("./requests-client", async (importOriginal) => {
@@ -91,11 +92,17 @@ function visibleIds(): (string | null)[] {
     .map((row) => within(row).getAllByRole("cell")[0]?.textContent ?? null);
 }
 
-// Обёртка с темой для рендера каркаса.
-function renderWithTheme(role: Role = "hr", onLogout: () => void = () => undefined) {
+// Обёртка с темой для рендера каркаса. Блоки прав по умолчанию — из раскладки
+// ролей мока (та же, что справочник 0020 на стенде): старые проверки вкладок
+// по ролям остаются зелёными, а зависимость от блоков проверяется отдельно.
+function renderWithTheme(
+  role: Role = "hr",
+  onLogout: () => void = () => undefined,
+  blocks: string[] = MOCK_ROLE_BLOCKS[role],
+) {
   return render(
     <ThemeProvider initial="light">
-      <SedLayout role={role} onLogout={onLogout} />
+      <SedLayout role={role} blocks={blocks} onLogout={onLogout} />
     </ThemeProvider>,
   );
 }
@@ -239,6 +246,38 @@ describe("SedLayout", () => {
     expect(screen.getByText("Справочник")).toBeInTheDocument();
     expect(screen.getByText("Настройки")).toBeInTheDocument();
     expect(screen.queryByText("Создание")).not.toBeInTheDocument();
+  });
+
+  // Набор вкладок — по блокам прав, а не по роли: блоки решают.
+  it("вкладки зависят от блоков прав, а не от роли", () => {
+    vi.mocked(getFolders).mockResolvedValue(folders);
+    vi.mocked(getRequests).mockResolvedValue([]);
+    // Роль ОК, но блоки от администратора — видны «Сопоставление» и «Настройки».
+    renderWithTheme("hr", undefined, MOCK_ROLE_BLOCKS.admin);
+    expect(screen.getByText("Справочник")).toBeInTheDocument();
+    expect(screen.getByText("Сопоставление")).toBeInTheDocument();
+    expect(screen.getByText("Настройки")).toBeInTheDocument();
+  });
+
+  // Обратный случай: блоков нет — вкладок кроме «Заявки» нет (роль тут ни при чём).
+  it("без блоков остаётся только вкладка «Заявки»", () => {
+    vi.mocked(getFolders).mockResolvedValue([{ id: "mine", title: "Мои задачи", count: 0 }]);
+    vi.mocked(getRequests).mockResolvedValue([]);
+    renderWithTheme("admin", undefined, []);
+    expect(screen.getByText("Заявки")).toBeInTheDocument();
+    expect(screen.queryByText("Справочник")).not.toBeInTheDocument();
+    expect(screen.queryByText("Сопоставление")).not.toBeInTheDocument();
+    expect(screen.queryByText("Настройки")).not.toBeInTheDocument();
+  });
+
+  // Вкладка «Настройки» открывается и по одному блоку settings_infra
+  // (контентные вкладки видны при settings_content, остальные — при settings_infra).
+  it("«Настройки» видна по блоку settings_infra без settings_content", () => {
+    vi.mocked(getFolders).mockResolvedValue(folders);
+    vi.mocked(getRequests).mockResolvedValue([]);
+    renderWithTheme("hr", undefined, ["requests_list", "settings_infra"]);
+    expect(screen.getByText("Настройки")).toBeInTheDocument();
+    expect(screen.queryByText("Справочник")).not.toBeInTheDocument();
   });
 
   // Кнопка «Выйти» вызывает сброс сессии.

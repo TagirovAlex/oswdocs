@@ -311,7 +311,7 @@ def test_auth_me_role_from_db_groups(client, admin_headers, b1_mocks, group_stor
     trimmed = client.get("/auth/me", headers=admin_headers)
     assert trimmed.status_code == 200
     assert trimmed.json()["role"] == "owner"
-    assert set(trimmed.json()) == {"sam", "groups", "role"}
+    assert set(trimmed.json()) == {"sam", "groups", "role", "blocks"}
 
 
 def test_auth_me_role_env_fallback_without_db_key(client, admin_headers, hr_admin_headers, b1_mocks, group_store):
@@ -344,7 +344,7 @@ def test_auth_me_alias_matrix(client, hr_headers, owner_headers, nogroup_headers
     assert "fio" in full.json()
     trimmed = client.get("/auth/me", headers=owner_headers)
     assert trimmed.status_code == 200
-    assert set(trimmed.json()) == {"sam", "groups", "role"}
+    assert set(trimmed.json()) == {"sam", "groups", "role", "blocks"}
     denied = client.get("/auth/me", headers=nogroup_headers)
     assert denied.status_code == 403
 

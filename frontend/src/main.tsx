@@ -92,15 +92,19 @@ function App() {
   if (checking) return <div className="sed-note">Проверка сессии…</div>;
   // Нет сессии — экран логина.
   if (!auth) return <LoginScreen onSuccess={setAuth} />;
-  // Сессия есть — каркас с ролью из /auth/me; окна-попы — по ?view= (без шапки).
+  // Сессия есть — каркас с ролью и блоками прав из /auth/me; окна-попы — по
+  // ?view= (без шапки).
   const route = parseView();
-  if (route.view === "request") return <RequestWindow requestId={route.id} role={auth.role} />;
-  if (route.view === "employee") return <EmployeeWindow employeeKey={route.key} role={auth.role} />;
+  const blocks = auth.blocks ?? [];
+  if (route.view === "request") {
+    return <RequestWindow requestId={route.id} role={auth.role} blocks={blocks} />;
+  }
+  if (route.view === "employee") return <EmployeeWindow employeeKey={route.key} role={auth.role} blocks={blocks} />;
   if (route.view === "attachment") {
     return <AttachmentWindow attachmentId={route.id} fileName={route.name} mime={route.mime} />;
   }
-  if (route.view === "create") return <CreateWindow role={auth.role} />;
-  return <SedLayout role={auth.role} onLogout={handleLogout} />;
+  if (route.view === "create") return <CreateWindow role={auth.role} blocks={blocks} />;
+  return <SedLayout role={auth.role} blocks={blocks} onLogout={handleLogout} />;
 }
 
 createRoot(rootEl).render(

@@ -4,6 +4,7 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { RequestWindow } from "./request-window";
+import { MOCK_ROLE_BLOCKS } from "./api-mock";
 import { getAttachments, getDocuments, getRequest } from "./requests-client";
 import type { RequestOut } from "./requests-client";
 
@@ -51,7 +52,7 @@ beforeEach(() => {
 describe("RequestWindow", () => {
   // Кнопка «Закрыть» присутствует и расположена ПОСЛЕ карточки (внизу окна).
   it("кнопка «Закрыть» внизу, после содержимого карточки", async () => {
-    render(<RequestWindow requestId="REQ-0001" role="hr" />);
+    render(<RequestWindow requestId="REQ-0001" role="hr" blocks={MOCK_ROLE_BLOCKS.hr} />);
     await waitFor(() => expect(screen.getByText(/Карточка заявки REQ-0001/)).toBeInTheDocument());
     const heading = screen.getByText(/Карточка заявки REQ-0001/);
     const close = screen.getByRole("button", { name: "Закрыть" });
@@ -64,7 +65,7 @@ describe("RequestWindow", () => {
   // Верхней липкой полосы с кнопкой нет: «Закрыть» — единственная такая кнопка
   // и она последняя в окне.
   it("кнопка «Закрыть» единственная и последняя в окне", async () => {
-    render(<RequestWindow requestId="REQ-0001" role="hr" />);
+    render(<RequestWindow requestId="REQ-0001" role="hr" blocks={MOCK_ROLE_BLOCKS.hr} />);
     await waitFor(() => expect(screen.getByText(/Карточка заявки REQ-0001/)).toBeInTheDocument());
     const buttons = screen.getAllByRole("button");
     expect(buttons.filter((b) => b.textContent === "Закрыть")).toHaveLength(1);

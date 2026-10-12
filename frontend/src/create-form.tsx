@@ -7,7 +7,7 @@
 // route_mode=auto) либо ручной конструктор блоков с исполнителями из AD
 // (route_mode=custom; телом создания идут blocks, не группы steps).
 import { useEffect, useRef, useState } from "react";
-import { ApiHttpError, me } from "./auth-client";
+import { ApiHttpError, hasBlock, me } from "./auth-client";
 import {
   linkEmployee,
   createRequest,
@@ -45,7 +45,8 @@ import { employeeUrl, openPopup } from "./windows";
 interface CreateFormProps {
   // Роль (создание — только ОК/админам, гард как в API _is_hr).
   role: Role;
-  // Колбэк «грязности» формы: true после первого ввода, false после успешного
+  // Права из /auth/me (блоки): см. проверку mayCreateRequest ниже.
+  blocks?: string[];
   // создания (форма сброшена) — для подтверждения закрытия окна (create-window).
   onDirtyChange?: (dirty: boolean) => void;
   // В окне-попе (?view=create): после успешного создания закрыть окно.
@@ -198,7 +199,9 @@ function PlusIcon() {
 
 // Форма создания: единый экран, блоки по зависимостям.
 export function CreateForm(props: CreateFormProps) {
-  const { role, onDirtyChange, closeOnCreate, onClose } = props;
+  // Блоки маршрута в этом файле уже называются blocks, поэтому права из сессии
+  // разворачиваем в permBlocks — иначе проп перекрыл бы блоки конструктора.
+  const { role, blocks: permBlocks, onDirtyChange, closeOnCreate, onClose } = props;
   const [enterprises, setEnterprises] = useState<Enterprise[]>([]);
   const [enterprise, setEnterprise] = useState<string>("");
   const [loadError, setLoadError] = useState<string>("");
@@ -669,8 +672,16 @@ const confirmLink = async () => {
     return () => clearTimeout(timer);
   }, [adQuery, adPanelBlock]);
 
-  // Создание — ОК, руководителям ОК и админам (роль hr/hr_admin/admin, как в API _is_hr).
-  if (role !== "hr" && role !== "hr_admin" && role !== "admin") {
+  // Создание — по блоку request_create (как в API). Блоки не пришли (мок/старый
+  // вызов) — откатываемся на роль, чтобы форма не закрылась у работающих людей.
+  // Право создавать заявку по блоку request_create (было — по роли hr/hr_admin/admin,
+  // как в API _is_hr). Блоки не пришли (мок/старый вызов) — откат на роль,
+  // иначе форма закрылась бы у работающих людей.
+  const mayCreateRequest =
+    permBlocks === undefined
+      ? role === "hr" || role === "hr_admin" || role === "admin"
+      : hasBlock(permBlocks, "request_create");
+  if (!mayCreateRequest) {
     return <div role="alert">Создание заявок доступно только ОК.</div>;
   }
 

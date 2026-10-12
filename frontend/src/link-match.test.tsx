@@ -3,6 +3,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { TOKEN_KEY } from "./auth-client";
+import { MOCK_ROLE_BLOCKS } from "./api-mock";
 import { LinkMatch, pagerPages } from "./link-match";
 
 interface MockDiscrepancy {
@@ -75,7 +76,7 @@ describe("LinkMatch", () => {
       return jsonResponse({ schedule_ad_links_sync: { mode: "interval", interval_hours: 24 } });
     });
 
-    render(<LinkMatch role="admin" />);
+    render(<LinkMatch blocks={MOCK_ROLE_BLOCKS.admin} />);
 
     expect((await screen.findAllByText("Сказочников Иван Тестович")).length).toBeGreaterThan(0);
     expect(screen.getByText(/Всего расхождений: 8/)).toBeInTheDocument();
@@ -101,7 +102,7 @@ describe("LinkMatch", () => {
       return jsonResponse({});
     });
 
-    render(<LinkMatch role="admin" />);
+    render(<LinkMatch blocks={MOCK_ROLE_BLOCKS.admin} />);
     await screen.findAllByText("Сказочников Иван Тестович");
 
     fireEvent.click(screen.getByLabelText("Выбрать Сказочников Иван Тестович"));
@@ -137,7 +138,7 @@ describe("LinkMatch", () => {
       return jsonResponse({});
     });
 
-    render(<LinkMatch role="admin" />);
+    render(<LinkMatch blocks={MOCK_ROLE_BLOCKS.admin} />);
     expect((await screen.findAllByText(/В AD несколько записей ФИО/)).length).toBeGreaterThan(0);
     expect(screen.getByLabelText("Выбрать Сказочников Иван Тестович")).toBeDisabled();
     expect(screen.getByRole("button", { name: /Подтвердить все на странице/ })).toBeDisabled();
@@ -172,7 +173,7 @@ describe("LinkMatch", () => {
       return jsonResponse({});
     });
 
-    render(<LinkMatch role="admin" />);
+    render(<LinkMatch blocks={MOCK_ROLE_BLOCKS.admin} />);
     fireEvent.click(await screen.findByRole("button", { name: "Запустить сопоставление" }));
 
     await waitFor(() =>
@@ -195,10 +196,30 @@ describe("LinkMatch", () => {
     expect(middle).toContain("…");
   });
 
-  it("скрыт от ролей без права подтверждения", () => {
+  it("скрыт без блока link_match", () => {
     fetchMock.mockImplementation(() => jsonResponse({ items: [], counts: {}, total: 0 }));
-    render(<LinkMatch role="hr" />);
+    render(<LinkMatch blocks={MOCK_ROLE_BLOCKS.hr} />);
     expect(screen.queryByRole("button", { name: "Запустить сопоставление" })).toBeNull();
     expect(screen.getByRole("alert").textContent).toMatch(/администратору/);
+  });
+
+  // Доступ к разделу определяется блоком link_match, а не ролью.
+  it("открыт по блоку link_match независимо от роли", async () => {
+    fetchMock.mockImplementation((url: string) => {
+      if (String(url).includes("/link_1c_ad/discrepancies")) {
+        return jsonResponse({
+          items: [row({})],
+          counts: { one_c_duplicate: 1 },
+          page: 1,
+          page_size: 50,
+          total: 1,
+        });
+      }
+      return jsonResponse({});
+    });
+
+    render(<LinkMatch blocks={["link_match"]} />);
+
+    expect(await screen.findByRole("button", { name: "Запустить сопоставление" })).toBeInTheDocument();
   });
 });

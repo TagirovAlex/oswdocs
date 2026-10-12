@@ -2,7 +2,8 @@
 #
 # Контракт (TASKS_AUTH.md):
 #   POST /auth/login  {login, password} -> 200 {token, user} | 401 | 503 (AD недоступен)
-#   GET  /auth/me     Bearer -> CurrentUser (полный для admin/hr_admin/hr, урезанный для owner)
+#   GET  /auth/me     Bearer -> CurrentUser + blocks (коды блоков прав из справочника
+#                     0020); полный для admin/hr_admin/hr, урезанный для owner
 #   Токен — secrets.token_urlsafe; ключ Redis `sed:session:{token}`,
 #   TTL — SESSION_TTL_MINUTES из настроек (дефолт 20, README п.5: 15–20 мин).
 #   Пароль проверяется bind'ом пользователя по DN (шлюз Ldap3Gateway с bind_user
@@ -395,6 +396,27 @@ def get_auth_service(settings: Settings = Depends(get_settings)) -> AuthService:
 # Роутер: POST /auth/login, GET /auth/me (обрезка как /me)
 # ---------------------------------------------------------------------------
 
+def _user_blocks(user: CurrentUser, settings: Settings) -> list[str]:
+    """Блоки прав пользователя для /auth/me (по группам memberOf).
+
+    Источник тот же, что у гейтов (api/app/permissions.py): один снимок
+    справочника и resolve_permissions — без второго чтения и без новых
+    запросов. Справочник недоступен — пустой список (fail-closed, как на
+    гейтах), а не 500: контракт /auth/me и вход от блоков не зависят.
+    Сортировка — чтобы ответ был стабильным."""
+    try:
+        # Ленивый импорт: app.permissions тянет app.config, а сам ходит в
+        # справочник только по вызову (как и остальные границы в этом файле).
+        from .permissions import permissions_store_or_none, resolve_permissions
+
+        store = permissions_store_or_none(settings)
+        if store is None:
+            return []
+        return sorted(resolve_permissions(user.groups, store.load_catalog()).blocks)
+    except Exception:
+        return []
+
+
 class LoginRequest(BaseModel):
     """Тело POST /auth/login (пароль в открытом виде — только по HTTPS)."""
 
@@ -407,6 +429,7 @@ def login(
     payload: LoginRequest,
     request: Request,
     service: AuthService = Depends(get_auth_service),
+    settings: Settings = Depends(get_settings),
     limiter: LoginRateLimiter = Depends(get_login_limiter),
 ) -> dict:
     """Вход по доменной учетке: 200 {token, user} | 401 | 429 (rate-limit) | 503."""
@@ -428,7 +451,13 @@ def login(
         ) from exc
     # Успешный вход — сброс счётчика (подбор не копится).
     limiter.reset(ip, payload.login)
-    return {"token": result.token, "user": result.user.model_dump()}
+    # Блоки прав — сразу в ответе входа, как в /auth/me. Без этого интерфейс
+    # после входа остался бы с пустым списком блоков (схлопывание до уровня
+    # владельца) до перезагрузки страницы, которая заново спросила бы /auth/me.
+    return {
+        "token": result.token,
+        "user": {**result.user.model_dump(), "blocks": _user_blocks(result.user, settings)},
+    }
 
 
 @router.get("/auth/me")
@@ -436,11 +465,16 @@ def auth_me(
     user: CurrentUser = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
 ) -> dict:
-    """Текущий пользователь: ОК/админам — полная карточка, владельцам — без ПДн (как /me)."""
+    """Текущий пользователь: ОК/админам — полная карточка, владельцам — без ПДн (как /me).
+
+    Роль оставлена прежней (обрезка ПДн идёт по ней), рядом отдаётся список
+    блоков прав из справочника — по ним интерфейс решает, что видно и что можно
+    нажать."""
     settings.ensure_read_only()
     audit_log.append(
         AuditEvent(actor=user.sam, action="me.read", entity="user", entity_id=user.sam)
     )
+    blocks = _user_blocks(user, settings)
     if is_privileged(user):
         return {
             "sam": user.sam,
@@ -450,6 +484,7 @@ def auth_me(
             "mail": user.mail,
             "groups": user.groups,
             "role": user.role,
+            "blocks": blocks,
         }
     # Урезанная: без ФИО/подразделения/должности/почты (ПДн не светят владельцам).
-    return {"sam": user.sam, "groups": user.groups, "role": user.role}
+    return {"sam": user.sam, "groups": user.groups, "role": user.role, "blocks": blocks}

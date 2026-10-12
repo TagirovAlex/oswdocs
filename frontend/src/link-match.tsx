@@ -7,7 +7,7 @@
 // и подтверждает связи пачкой там, где кандидат в AD один.
 // ПДн в примерах/фикстурах вымышленные; в коде значений нет.
 import { useCallback, useEffect, useState } from "react";
-import type { Role } from "./api-mock";
+import { hasBlock } from "./auth-client";
 import {
   confirmLinkDiscrepancies,
   getLinkDiscrepancies,
@@ -59,14 +59,14 @@ export function pagerPages(current: number, total: number): Array<number | "…"
 }
 
 interface LinkMatchProps {
-  // Раздел доступен администратору: подтверждение связок пишет проверенные
-  // связи от имени пользователя. На уровне API раздел открыт и администратору
-  // СЭД (sed_admin), но такая роль в интерфейсе пока не выдаётся.
-  role: Role;
+  // Раздел открыт по блоку прав link_match из /auth/me: подтверждение связок
+  // пишет проверенные связи от имени пользователя (на уровне API — admin и
+  // администратор СЭД, см. require_block в app/link.py).
+  blocks: string[];
 }
 
 export function LinkMatch(props: LinkMatchProps) {
-  const { role } = props;
+  const { blocks } = props;
   const [reason, setReason] = useState("");
   const [query, setQuery] = useState("");
   const [onlyOpen, setOnlyOpen] = useState(true);
@@ -82,7 +82,7 @@ export function LinkMatch(props: LinkMatchProps) {
   const [report, setReport] = useState("");
   const [schedule, setSchedule] = useState<string>("");
 
-  const allowed = role === "admin";
+  const allowed = hasBlock(blocks, "link_match");
 
   const load = useCallback(async () => {
     if (!allowed) return;

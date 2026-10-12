@@ -6,10 +6,12 @@ import type { Role } from "./api-mock";
 
 interface CreateWindowProps {
   role: Role;
+  // Права из /auth/me (блоки). Создание заявки — блок request_create.
+  blocks?: string[];
 }
 
 export function CreateWindow(props: CreateWindowProps) {
-  const { role } = props;
+  const { role, blocks } = props;
   // «Грязность» формы: при несохранённых изменениях закрытие требует подтверждения.
   const [dirty, setDirty] = useState<boolean>(false);
 
@@ -29,7 +31,13 @@ export function CreateWindow(props: CreateWindowProps) {
       <main className="sed-content sed-window">
         {/* Кнопка «Закрыть» — в нижнем тулбаре самой формы, в одну строку
             с Создать/Отмена; при несохранённых данных — с подтверждением. */}
-        <CreateForm role={role} onDirtyChange={setDirty} closeOnCreate onClose={handleClose} />
+        <CreateForm
+          role={role}
+          blocks={blocks}
+          onDirtyChange={setDirty}
+          closeOnCreate
+          onClose={handleClose}
+        />
       </main>
     </div>
   );

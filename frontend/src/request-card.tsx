@@ -4,7 +4,7 @@
 // Данные — из реального API (requests-client); значения — из settings, хардкода нет.
 import { useEffect, useState } from "react";
 import type { ChangeEvent } from "react";
-import { me } from "./auth-client";
+import { hasBlock, me } from "./auth-client";
 import {
   addComment,
   base64ToBlob,
@@ -51,6 +51,9 @@ interface RequestCardProps {
   requestId: string;
   // Роль сессии (полная карточка — hr/hr_admin/admin; владельцу — свои шаги без ПДн).
   role: Role;
+  // Блоки прав из /auth/me — по ним видны печать, действия ОК, удаление и
+  // панель администратора СЭД (коды — см. PLAN.md «МОДЕЛЬ ПРАВ ДОСТУПА»).
+  blocks: string[];
 }
 
 // Исполнитель шага: ФИО (owner_name), если бэкенд его прислал, иначе название
@@ -198,12 +201,12 @@ interface RouteBlockDraft {
   steps: RouteStepDraft[];
 }
 
-// Роль, которой API разрешает оперировать заявкой (_require_hr в
-// api/app/requests.py): hr/hr_admin/admin. У владельца шага и у администратора
-// СЭД (_require_hr их не пропускает) такие кнопки давали бы 403, поэтому гейт
-// по роли, а не «не владелец».
-function canOperateRequest(role: Role | string): boolean {
-  return role === "hr" || role === "hr_admin" || role === "admin";
+// Блок request_create из /auth/me: его имеют сотрудник ОК, руководитель ОК и
+// администраторы — ровно те, кому API разрешает оперировать заявкой
+// (_require_request_create в api/app/requests.py). У владельца шага блока нет,
+// поэтому такие кнопки ему и не показываем.
+function canOperateRequest(blocks: readonly string[]): boolean {
+  return hasBlock(blocks, "request_create");
 }
 
 // Шаги, по которым заявка ушла инициатору на доработку (отказ/возврат). Их
@@ -312,7 +315,7 @@ function routeBlocksPayload(blocks: RouteBlockDraft[]): {
 
 // Карточка заявки со всеми блоками (W5b + документы + вложения).
 export function RequestCard(props: RequestCardProps) {
-  const { requestId, role } = props;
+  const { requestId, role, blocks } = props;
   const [card, setCard] = useState<RequestOut | null>(null);
   const [cardError, setCardError] = useState<string>("");
   const [printStatus, setPrintStatus] = useState<string>("");
@@ -368,8 +371,9 @@ export function RequestCard(props: RequestCardProps) {
   // Должность персонального исполнителя из стыковочной таблицы 1С+АД
   // (GET /api/employees/card по employee_key шага): приоритет — title из АД.
   const [stepPositions, setStepPositions] = useState<Record<number, string>>({});
-  // Панель администратора СЭД (роль sed_admin от бэкенда): правка полей и откат.
-  const isSedAdmin = (role as string) === "sed_admin";
+  // Панель администратора СЭД: блок sed_admin_panel из /auth/me (правка полей и
+  // откат маршрута — те же гейты require_block/SedAdminUser на сервере).
+  const isSedAdmin = hasBlock(blocks, "sed_admin_panel");
   const [sedDocTypes, setSedDocTypes] = useState<DocType[]>([]);
   const [sedSubject, setSedSubject] = useState<string>("");
   const [sedContent, setSedContent] = useState<string>("");
@@ -972,7 +976,10 @@ export function RequestCard(props: RequestCardProps) {
     }
   }
 
-  // Удалять вложение могут автор (uploaded_by), admin и администратор СЭД.
+  // Удалять вложение может автор (uploaded_by), админ и администратор СЭД.
+  // Серверная проверка _can_delete в api/app/attachments.py осталась ролевой:
+  // кнопку оставляем по роли — иначе UI предлагал бы действие, которое сервер
+  // отклонил бы 403.
   function canDeleteAttachment(att: AttachmentMeta): boolean {
     if (role === "admin" || (role as string) === "sed_admin") return true;
     return mySam !== "" && att.uploaded_by === mySam;
@@ -1309,16 +1316,18 @@ export function RequestCard(props: RequestCardProps) {
             <div className="sed-panel">
               <b>Инициатор и решение</b>
               {/* ПДн: владельцу fio/tab_num не приходят — маска «Сотрудник № id».
+                  Полная карточка — у кого есть блок request_create (ОК и
+                  администраторы), у остальных маска: видимость ПДн не расширяется.
                   Класс .sed-meta — метаданные (контракт теста), .sed-block — отступ. */}
               <div className="sed-block sed-meta">
-                {role === "owner" ? (
-                  <>Сотрудник № {card.id}</>
-                ) : (
+                {hasBlock(blocks, "request_create") ? (
                   <>
                     {employeeCell(card.fio ?? `Сотрудник № ${card.id}`)}
                     {card.tab_num ? ` · Таб.№ ${card.tab_num}` : ""} · {card.department} · {card.position}
                     {card.enterprise ? ` · ${card.enterprise_name ?? card.enterprise}` : ""}
                   </>
+                ) : (
+                  <>Сотрудник № {card.id}</>
                 )}
               </div>
               {/* Отметка своего шага — строго по can_act от бэкенда. */}
@@ -1407,8 +1416,8 @@ export function RequestCard(props: RequestCardProps) {
             </div>
           </div>
 
-          {/* Печать бегунка (ОК/админ) — в карточке, не в списке. */}
-          {role !== "owner" && (
+          {/* Печать бегунка — по блоку print_blank (ОК и администраторы). */}
+          {hasBlock(blocks, "print_blank") && (
             <div className="sed-toolbar sed-mt-8">
               <button type="button" className="sed-btn" onClick={handlePrint}>
                 Печать
@@ -1499,8 +1508,8 @@ export function RequestCard(props: RequestCardProps) {
             })()}
           </div>
 
-          {/* Действия ОК/админа по статусу заявки (роль — как у _require_hr). */}
-          {canOperateRequest(role) && (
+          {/* Действия ОК/админа по статусу заявки (блок request_create). */}
+          {canOperateRequest(blocks) && (
             <div className="sed-toolbar sed-mt-8" aria-label="Действия по заявке">
               {(card.status === "Черновик" ||
                 (card.status === "На доработке" && REWORKED_STEPS(card.steps).length === 0)) && (
@@ -1541,7 +1550,7 @@ export function RequestCard(props: RequestCardProps) {
                   Скорректировать маршрут
                 </button>
               )}
-              {role === "admin" && (
+              {hasBlock(blocks, "request_delete") && (
                 <button
                   type="button"
                   className="sed-btn sed-btn--danger"
@@ -1561,7 +1570,7 @@ export function RequestCard(props: RequestCardProps) {
               «На доработке», поэтому признак — закрытые с отказом/возвратом
               шаги, а не статус. Блок только в «На доработке»: в прочих статусах
               POST /submit отдал бы 409. */}
-          {canOperateRequest(role) &&
+          {canOperateRequest(blocks) &&
             card.status === "На доработке" &&
             REWORKED_STEPS(card.steps).length > 0 && (
             <div className="sed-toolbar sed-mt-8" aria-label="Действия по доработке">
@@ -1587,7 +1596,7 @@ export function RequestCard(props: RequestCardProps) {
               кнопке «Скорректировать маршрут»: редактор меняет только ожидающие
               шаги, закрытые (согласованные/отклонённые/возвращённые/просроченные)
               бэкенд сохраняет сам. */}
-          {canOperateRequest(role) && routeOpen && ROUTE_EDIT_STATUSES.includes(card.status) && (
+          {canOperateRequest(blocks) && routeOpen && ROUTE_EDIT_STATUSES.includes(card.status) && (
             <section aria-label="Правка маршрута" className="sed-mt-8">
               <h4>Маршрут заявки</h4>
               <div className="sed-toolbar">

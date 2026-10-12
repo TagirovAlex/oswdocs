@@ -5,6 +5,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Directory } from "./directory";
+import { MOCK_ROLE_BLOCKS } from "./api-mock";
 import { getEnterprises, searchEmployees, syncLinks } from "./requests-client";
 
 vi.mock("./requests-client", () => ({
@@ -40,7 +41,7 @@ describe("Directory", () => {
     vi.mocked(searchEmployees).mockResolvedValue({ items: hits });
     const open = vi.spyOn(window, "open").mockImplementation(() => null);
 
-    render(<Directory role="hr" />);
+    render(<Directory blocks={MOCK_ROLE_BLOCKS.hr} />);
     await waitFor(() => expect(screen.getByLabelText("Предприятие справочника")).toBeInTheDocument());
     fireEvent.click(screen.getByText("Найти"));
     await waitFor(() => expect(screen.getByText("Сказочников Тест Тестович")).toBeInTheDocument());
@@ -67,7 +68,7 @@ describe("Directory", () => {
       errors: [],
     });
 
-    render(<Directory role="admin" />);
+    render(<Directory blocks={MOCK_ROLE_BLOCKS.admin} />);
     await waitFor(() => expect(screen.getByLabelText("Предприятие справочника")).toBeInTheDocument());
     fireEvent.click(screen.getByText("Автосвязка 1С↔AD"));
     await waitFor(() =>
@@ -82,7 +83,7 @@ describe("Directory", () => {
     vi.mocked(getEnterprises).mockResolvedValue(enterprises);
     vi.mocked(searchEmployees).mockResolvedValue({ items: hits });
 
-    render(<Directory role="hr" />);
+    render(<Directory blocks={MOCK_ROLE_BLOCKS.hr} />);
     await waitFor(() => expect(screen.getByLabelText("Предприятие справочника")).toBeInTheDocument());
 
     // Пустой запрос (весь список справочника) — дефолтный размер страницы.
@@ -108,7 +109,7 @@ describe("Directory", () => {
       page_size: 50,
     });
 
-    render(<Directory role="hr" />);
+    render(<Directory blocks={MOCK_ROLE_BLOCKS.hr} />);
     await waitFor(() => expect(screen.getByLabelText("Предприятие справочника")).toBeInTheDocument());
     fireEvent.click(screen.getByText("Найти"));
     await waitFor(() => expect(screen.getByText("стр 1 из 3")).toBeInTheDocument());
@@ -127,5 +128,25 @@ describe("Directory", () => {
     // «Первая» → возврат на первую страницу.
     fireEvent.click(screen.getByRole("button", { name: "Первая страница" }));
     await waitFor(() => expect(searchEmployees).toHaveBeenLastCalledWith("A", "", 1, 50));
+  });
+
+  // Кнопка автосвязки — по блоку link_match, а не по роли.
+  it("кнопка автосвязки видна по блоку link_match", async () => {
+    vi.mocked(getEnterprises).mockResolvedValue(enterprises);
+    vi.mocked(searchEmployees).mockResolvedValue({ items: [] });
+
+    // Роль ОК, но блок сопоставления выдан (как у администратора СЭД).
+    render(<Directory blocks={[...MOCK_ROLE_BLOCKS.hr, "link_match"]} />);
+    await waitFor(() => expect(screen.getByLabelText("Предприятие справочника")).toBeInTheDocument());
+    expect(screen.getByText("Автосвязка 1С↔AD")).toBeInTheDocument();
+  });
+
+  it("без блока link_match кнопки автосвязки нет", async () => {
+    vi.mocked(getEnterprises).mockResolvedValue(enterprises);
+    vi.mocked(searchEmployees).mockResolvedValue({ items: [] });
+
+    render(<Directory blocks={[]} />);
+    await waitFor(() => expect(screen.getByLabelText("Предприятие справочника")).toBeInTheDocument());
+    expect(screen.queryByText("Автосвязка 1С↔AD")).not.toBeInTheDocument();
   });
 });

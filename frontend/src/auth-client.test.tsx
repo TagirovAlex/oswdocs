@@ -1,7 +1,7 @@
 // Тесты клиента аутентификации: /auth/login, /auth/me, выход.
 // Сеть не нужна — fetch подменяется фейком, токен — в localStorage.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ApiHttpError, TOKEN_KEY, clearToken, getToken, login, logout, me } from "./auth-client";
+import { ApiHttpError, TOKEN_KEY, clearToken, getToken, hasBlock, login, logout, me } from "./auth-client";
 
 // Фейковый ответ fetch (достаточно полей, что использует клиент).
 function fakeResponse(status: number, body: unknown): Response {
@@ -77,6 +77,43 @@ describe("authClient", () => {
     );
   });
 
+  // Состав блоков прав из /auth/me — основа видимости интерфейса.
+  it("me возвращает блоки прав из ответа", async () => {
+    localStorage.setItem(TOKEN_KEY, "token-123");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        fakeResponse(200, {
+          sam: "ok.ivnova",
+          fio: "Иванова Ольга Петровна",
+          groups: ["SED_HR"],
+          role: "hr",
+          blocks: ["requests_list", "request_create"],
+        }),
+      ),
+    );
+
+    const user = await me();
+
+    expect(user.blocks).toEqual(["requests_list", "request_create"]);
+    expect(hasBlock(user.blocks, "request_create")).toBe(true);
+    expect(hasBlock(user.blocks, "link_match")).toBe(false);
+  });
+
+  // Старая сборка без поля blocks — пустой список (прав нет), не «прав все».
+  it("me без поля blocks отдаёт пустой список", async () => {
+    localStorage.setItem(TOKEN_KEY, "token-123");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => fakeResponse(200, { sam: "step.sidorov", groups: [], role: "owner" })),
+    );
+
+    const user = await me();
+
+    expect(user.blocks).toEqual([]);
+    expect(hasBlock(user.blocks, "requests_list")).toBe(false);
+  });
+
   // me() без токена — 401 без запроса к серверу.
   it("me без токена бросает 401", async () => {
     const fetchMock = vi.fn();
@@ -104,5 +141,13 @@ describe("authClient", () => {
     localStorage.setItem(TOKEN_KEY, "token-123");
     clearToken();
     expect(getToken()).toBeNull();
+  });
+
+  // hasBlock: пустой/неизвестный список — блока нет (fail-closed).
+  it("hasBlock проверяет блок и не путает его с «права все»", () => {
+    expect(hasBlock(["print_blank"], "print_blank")).toBe(true);
+    expect(hasBlock([], "print_blank")).toBe(false);
+    expect(hasBlock(undefined, "print_blank")).toBe(false);
+    expect(hasBlock(null, "print_blank")).toBe(false);
   });
 });

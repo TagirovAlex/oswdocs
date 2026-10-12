@@ -6,14 +6,16 @@ import type { Role } from "./api-mock";
 interface RequestWindowProps {
   requestId: string;
   role: Role;
+  // Блоки прав из /auth/me — карточке они нужны для кнопок и обрезки ПДн.
+  blocks: string[];
 }
 
 export function RequestWindow(props: RequestWindowProps) {
-  const { requestId, role } = props;
+  const { requestId, role, blocks } = props;
   return (
     <div className="sed-shell">
       <main className="sed-content sed-window sed-window--wide">
-        <RequestCard requestId={requestId} role={role} />
+        <RequestCard requestId={requestId} role={role} blocks={blocks} />
         {/* Кнопка «Закрыть» — внизу содержимого (как в карточке сотрудника),
             не в верхней липкой полосе. Несохранённых правок в карточке нет:
             отметки отправляются сразу. */}

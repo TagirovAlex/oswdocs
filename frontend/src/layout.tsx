@@ -24,6 +24,7 @@ import type {
   RequestSortKey,
 } from "./requests-client";
 import type { Role } from "./api-mock";
+import { hasBlock } from "./auth-client";
 import { useTheme } from "./theme";
 import { AdminSettings } from "./admin-settings";
 import { Directory } from "./directory";
@@ -179,13 +180,15 @@ const ROLE_LABELS: Record<Role, string> = {
 interface SedLayoutProps {
   // Роль текущей сессии (из /auth/me); выбора роли на экране нет.
   role: Role;
+  // Блоки прав из /auth/me — по ним набор вкладок (роль — про ПДн, не про доступ).
+  blocks: string[];
   // Выход из системы: очистка сессии и возврат на экран логина.
   onLogout: () => void;
 }
 
 // Основной каркас экрана.
 export function SedLayout(props: SedLayoutProps) {
-  const { role, onLogout } = props;
+  const { role, blocks, onLogout } = props;
   const { theme, setTheme } = useTheme();
   const [tab, setTab] = useState<Tab>("Заявки");
   const [folder, setFolder] = useState<FolderId>("agreement");
@@ -201,18 +204,21 @@ export function SedLayout(props: SedLayoutProps) {
   // Версия папок: при возврате фокуса перезагружаются и счётчики папок.
   const [foldersVersion, setFoldersVersion] = useState<number>(0);
 
-  // Видимые вкладки по роли: «Настройки» — админу и руководителю ОК (контент),
-  // «Справочник» — ОК, руководителю ОК и админу.
+  // Видимые вкладки по блокам прав из /auth/me (коды — как в справочнике прав,
+  // см. PLAN.md «МОДЕЛЬ ПРАВ ДОСТУПА»): справочник — employee_directory,
+  // сопоставление 1С↔AD — link_match, настройки — settings_content (контентные
+  // вкладки) или settings_infra (остальные).
   const visibleTabs = useMemo(() => {
     const tabs: Tab[] = ["Заявки"];
-    if (role === "hr" || role === "hr_admin" || role === "admin") {
+    if (hasBlock(blocks, "employee_directory")) {
       tabs.push("Справочник");
     }
-    // Сопоставление 1С↔AD — администраторам (подтверждение связок).
-    if (role === "admin") tabs.push("Сопоставление");
-    if (role === "admin" || role === "hr_admin") tabs.push("Настройки");
+    if (hasBlock(blocks, "link_match")) tabs.push("Сопоставление");
+    if (hasBlock(blocks, "settings_content") || hasBlock(blocks, "settings_infra")) {
+      tabs.push("Настройки");
+    }
     return tabs;
-  }, [role]);
+  }, [blocks]);
 
   // Заголовок вкладки браузера — по активной вкладке («СЭД — Заявки» и т.п.).
   useEffect(() => {
@@ -393,8 +399,8 @@ export function SedLayout(props: SedLayoutProps) {
 
         {/* Контент: справочник/настройки — экраны B4, иначе таблица. */}
         <main className="sed-content">
-          {tab === "Справочник" && <Directory role={role} />}
-          {tab === "Сопоставление" && <LinkMatch role={role} />}
+          {tab === "Справочник" && <Directory blocks={blocks} />}
+          {tab === "Сопоставление" && <LinkMatch blocks={blocks} />}
           {tab === "Настройки" && <AdminSettings role={role} />}
           {tab === "Заявки" && (
           <>

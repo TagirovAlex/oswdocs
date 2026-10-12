@@ -27,6 +27,7 @@ import {
 } from "./requests-client";
 import type { AttachmentMeta, RequestOut } from "./requests-client";
 import type { Role } from "./api-mock";
+import { MOCK_ROLE_BLOCKS, MOCK_SED_ADMIN_BLOCKS } from "./api-mock";
 
 vi.mock("./requests-client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./requests-client")>();
@@ -111,12 +112,37 @@ function requestForAction(fio: string | null): RequestOut {
   ]);
 }
 
+// Заявка, возвращённая на доработку: отклонённый шаг (действия инициатора).
+function refusedRequest(): RequestOut {
+  return requestWith(null, "На доработке", "REQ-0001", [
+    {
+      order: 1,
+      owner_group: "petrov.pp",
+      resolver: "by_user",
+      assignee: "petrov.pp",
+      can_act: false,
+      status: "отклонен",
+      expires_at: "2026-10-05T10:00:00+00:00",
+    },
+  ]);
+}
+
 // Ключ карточки сотрудника, который бэкенд резолвит по локальному справочнику
 // (только привилегированным; в нём табельный номер — ПДн).
 const EMP_KEY = "ENT_PRIMER_1|zup|Т-000202";
 
-function renderCard(requestId: string = "REQ-0001", role: Role = "hr") {
-  return render(<RequestCard requestId={requestId} role={role} />);
+// Блоки прав по роли для карточки (раскладка мока повторяет справочник 0020:
+// у роли sed_admin в типе Role места нет, блоки у неё админские + панель СЭД).
+function roleBlocks(role: string): string[] {
+  return role === "sed_admin" ? MOCK_SED_ADMIN_BLOCKS : MOCK_ROLE_BLOCKS[role as Role];
+}
+
+function renderCard(
+  requestId: string = "REQ-0001",
+  role: Role = "hr",
+  blocks: string[] = roleBlocks(role),
+) {
+  return render(<RequestCard requestId={requestId} role={role} blocks={blocks} />);
 }
 
 // Имитация окна-попа (есть opener) и его отсутствия (та же вкладка).
@@ -200,6 +226,73 @@ describe("RequestCard", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Печать" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Печать" }));
     await waitFor(() => expect(screen.getByText("Печать доступна только ОК")).toBeInTheDocument());
+  });
+
+  // Кнопки карточки — по блокам прав из /auth/me, а не по роли.
+  it("печать видна по блоку print_blank и скрыта без него", async () => {
+    vi.mocked(getRequest).mockResolvedValue(requestWith("Громов Игорь Олегович", "На согласовании"));
+
+    // Блок печати есть — кнопка на месте.
+    renderCard("REQ-0001", "hr", ["requests_list", "print_blank"]);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Печать" })).toBeInTheDocument());
+  });
+
+  it("без блока print_blank кнопки печати нет", async () => {
+    vi.mocked(getRequest).mockResolvedValue(requestWith("Громов Игорь Олегович", "На согласовании"));
+
+    // Роль ОК, но блока печати нет (справочник прав решает, не роль).
+    renderCard("REQ-0001", "hr", ["requests_list", "request_card"]);
+    await waitFor(() => expect(screen.getByLabelText("Шаги заявки")).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Печать" })).not.toBeInTheDocument();
+  });
+
+  // Панель администратора СЭД — по блоку sed_admin_panel.
+  it("панель администратора СЭД — по блоку sed_admin_panel", async () => {
+    vi.mocked(getRequest).mockResolvedValue(requestWith("Громов Игорь Олегович", "На согласовании"));
+
+    // Роль ОК, но блок панели выдан — панель видна.
+    renderCard("REQ-0001", "hr", ["requests_list", "sed_admin_panel"]);
+    await waitFor(() =>
+      expect(screen.getByLabelText("Панель администратора СЭД")).toBeInTheDocument(),
+    );
+    expect(screen.getByRole("button", { name: "Полная история" })).toBeInTheDocument();
+  });
+
+  it("без блока sed_admin_panel панели и вкладки полной истории нет", async () => {
+    vi.mocked(getRequest).mockResolvedValue(requestWith("Громов Игорь Олегович", "На согласовании"));
+
+    renderCard("REQ-0001", "admin", MOCK_ROLE_BLOCKS.admin);
+    await waitFor(() => expect(screen.getByLabelText("Шаги заявки")).toBeInTheDocument());
+    expect(screen.queryByLabelText("Панель администратора СЭД")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Полная история" })).not.toBeInTheDocument();
+  });
+
+  // Удаление заявки — по блоку request_delete.
+  it("удаление заявки — по блоку request_delete", async () => {
+    vi.mocked(getRequest).mockResolvedValue(requestWith("Громов Игорь Олегович", "На согласовании"));
+
+    renderCard("REQ-0001", "hr", ["requests_list", "request_create", "request_delete"]);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Удалить заявку" })).toBeInTheDocument(),
+    );
+  });
+
+  // Обрезка ПДн по блоку request_create: у кого его нет — маска «Сотрудник № id».
+  it("без блока request_create карточка остаётся урезанной", async () => {
+    vi.mocked(getRequest).mockResolvedValue(requestWith("Громов Игорь Олегович", "На согласовании"));
+
+    // Роль ОК, но блока создания заявки нет — ПДн не показываем.
+    renderCard("REQ-0001", "hr", ["requests_list", "request_card"]);
+    await waitFor(() => expect(screen.getByText("Сотрудник № REQ-0001")).toBeInTheDocument());
+    expect(screen.queryByText(/Громов Игорь/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Таб\.№/)).not.toBeInTheDocument();
+  });
+
+  it("с блоком request_create карточка остаётся полной", async () => {
+    vi.mocked(getRequest).mockResolvedValue(requestWith("Громов Игорь Олегович", "На согласовании"));
+
+    renderCard("REQ-0001", "owner", MOCK_ROLE_BLOCKS.hr);
+    await waitFor(() => expect(screen.getByText(/Таб\.№ Т-000201/)).toBeInTheDocument());
   });
 
   // Карточка показывает шаги выбранной заявки (одна таблица рассмотрения).
@@ -1309,30 +1402,29 @@ describe("RequestCard", () => {
     expect(vi.mocked(replaceRequestSteps)).not.toHaveBeenCalled();
   });
 
-  // Владельцу шага и администратору СЭД новые действия не показываются: правку
-  // маршрута и отправку заявки делает роль, которой API открывает _require_hr.
-  it("владельцу и администратору СЭД не показываются правка маршрута и действия по доработке", async () => {
-    const refused = requestWith(null, "На доработке", "REQ-0001", [
-      {
-        order: 1,
-        owner_group: "petrov.pp",
-        resolver: "by_user",
-        assignee: "petrov.pp",
-        can_act: false,
-        status: "отклонен",
-        expires_at: "2026-10-05T10:00:00+00:00",
-      },
-    ]);
-    vi.mocked(getRequest).mockResolvedValue(refused);
+  // Владельцу шага новые действия не показываются: у него нет блока
+  // request_create, а правку маршрута и отправку заявки делает тот, кому API
+  // открывает _require_request_create.
+  it("владельцу не показываются правка маршрута и действия по доработке", async () => {
+    vi.mocked(getRequest).mockResolvedValue(refusedRequest());
 
-    for (const role of ["owner", "sed_admin"] as Role[]) {
-      const view = renderCard("REQ-0001", role);
-      await waitFor(() => expect(view.getByLabelText("Шаги заявки")).toBeInTheDocument());
-      expect(view.queryByRole("button", { name: "Скорректировать маршрут" })).not.toBeInTheDocument();
-      expect(view.queryByRole("button", { name: "Перенаправить" })).not.toBeInTheDocument();
-      expect(view.queryByRole("button", { name: "Повторить" })).not.toBeInTheDocument();
-      view.unmount();
-    }
+    const view = renderCard("REQ-0001", "owner");
+    await waitFor(() => expect(view.getByLabelText("Шаги заявки")).toBeInTheDocument());
+    expect(view.queryByRole("button", { name: "Скорректировать маршрут" })).not.toBeInTheDocument();
+    expect(view.queryByRole("button", { name: "Перенаправить" })).not.toBeInTheDocument();
+    expect(view.queryByRole("button", { name: "Повторить" })).not.toBeInTheDocument();
+  });
+
+  // Администратору СЭД эти действия, наоборот, доступны: блок request_create у
+  // него есть (шаблон sed_admin) — сервер их пропускает.
+  it("администратору СЭД правка маршрута и действия по доработке доступны", async () => {
+    vi.mocked(getRequest).mockResolvedValue(refusedRequest());
+
+    renderCard("REQ-0001", "sed_admin" as Role);
+    await waitFor(() => expect(screen.getByLabelText("Шаги заявки")).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Скорректировать маршрут" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Перенаправить" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Повторить" })).toBeInTheDocument();
   });
 
   // Пустой маршрут в редакторе — понятная ошибка, запрос не уходит.

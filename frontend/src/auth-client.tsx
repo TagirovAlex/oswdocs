@@ -13,8 +13,22 @@ export interface AuthUser {
   fio?: string;
   // Группы AD пользователя (memberOf).
   groups: string[];
-  // Роль по матрице README п.1.
+  // Роль по матрице README п.1. Решения «что видно и что можно нажать»
+  // принимаются по blocks, роль остаётся там, где речь о ПДн/представлении.
   role: Role;
+  // Блоки прав доступа из GET /auth/me (коды — как в справочнике прав,
+  // см. PLAN.md «МОДЕЛЬ ПРАВ ДОСТУПА»). Поля может не быть: ответ
+  // POST /auth/login отдаёт только профиль, состав блоков приходит из /auth/me.
+  blocks?: string[];
+}
+
+// Есть ли у пользователя блок права. Пустой/неизвестный список — блока нет
+// (fail-closed, как на сервере: нет данных справочника — доступа нет).
+export function hasBlock(
+  blocks: readonly string[] | null | undefined,
+  code: string,
+): boolean {
+  return Array.isArray(blocks) && blocks.includes(code);
 }
 
 // Ошибка ответа API с HTTP-статусом (для разбора 401/503 на экранах).
@@ -80,7 +94,10 @@ export async function me(): Promise<AuthUser> {
   if (!res.ok) {
     throw new ApiHttpError(res.status, "Ошибка загрузки пользователя");
   }
-  return (await res.json()) as AuthUser;
+  const user = (await res.json()) as AuthUser;
+  // Блоки приходят вместе с профилем; на старой сборке бэкенда поля может не
+  // быть — пустой список означает «прав нет», а не «права все».
+  return { ...user, blocks: user.blocks ?? [] };
 }
 
 // Выход: очистка токена сессии на клиенте (серверный logout — на волне B).

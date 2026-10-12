@@ -8,6 +8,50 @@
 // Роль текущего пользователя (матрица README п.1).
 export type Role = "hr" | "hr_admin" | "owner" | "admin" | "guest";
 
+// Блоки прав мока — раскладка ролей один в один из PLAN.md «МОДЕЛЬ ПРАВ
+// ДОСТУПА» (справочник 0020). В бою состав приходит из GET /auth/me; здесь
+// нужен демо-режиму и тестам, чтобы интерфейс вёл себя как по живым блокам.
+export const MOCK_ROLE_BLOCKS: Record<Role, string[]> = {
+  hr: [
+    "requests_list",
+    "request_card",
+    "request_create",
+    "step_decide",
+    "print_blank",
+    "employee_directory",
+  ],
+  hr_admin: [
+    "requests_list",
+    "request_card",
+    "request_create",
+    "step_decide",
+    "print_blank",
+    "employee_directory",
+    "settings_content",
+  ],
+  admin: [
+    "requests_list",
+    "request_card",
+    "request_create",
+    "step_decide",
+    "print_blank",
+    "employee_directory",
+    "request_delete",
+    "link_match",
+    "settings_content",
+    "settings_infra",
+    "settings_blanks",
+    "archive_backups",
+  ],
+  owner: ["requests_list", "request_card", "step_decide"],
+  guest: [],
+};
+
+// Блоки администратора СЭД (шаблон sed_admin): админские плюс панель в карточке.
+// Отдельная константа, потому что в типе Role такой роли нет (в UI она пока не
+// выдаётся), а блок sed_admin_panel нужен тестам карточки заявки.
+export const MOCK_SED_ADMIN_BLOCKS: string[] = [...MOCK_ROLE_BLOCKS.admin, "sed_admin_panel"];
+
 // Идентификатор папки в дереве слева.
 export type FolderId = "agreement" | "revision" | "execution" | "done" | "mine";
 
@@ -216,6 +260,16 @@ export function installMockFetch(role: Role): () => void {
     const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
     if (!url.includes("/api/")) return original(input, init);
     try {
+      if (url.includes("/api/auth/me")) {
+        // Профиль сессии мока: роль и состав блоков (как отдаёт бэкенд).
+        return Response.json({
+          sam: "mock.user",
+          fio: role === "owner" ? undefined : "Вымышлен Вымышленович",
+          groups: [],
+          role,
+          blocks: MOCK_ROLE_BLOCKS[role],
+        });
+      }
       if (url.includes("/api/folders")) {
         const data = await mockApi.getFolders(role);
         return Response.json(data);
