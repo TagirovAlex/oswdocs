@@ -418,6 +418,7 @@ def _fill_step_fio(context: dict, routing_store: object | None) -> None:
         if not logins:
             continue
         names = []
+        positions = []
         for sam in logins:
             if sam not in cards:
                 try:
@@ -426,7 +427,14 @@ def _fill_step_fio(context: dict, routing_store: object | None) -> None:
                     cards[sam] = None
             name = str((cards[sam] or {}).get("fio_full") or "").strip()
             names.append(name or sam)
+            position = str((cards[sam] or {}).get("title_ad") or "").strip()
+            if position:
+                positions.append(position)
         step["assignee_names"] = names
+        # Должности согласующих: у ручного шага нет названия этапа, на бланке
+        # в «Содержании шага» идёт «должность (режим)», ФИО — в «Ответственных»
+        # (жалоба человека 2026-10-12).
+        step["assignee_positions"] = positions
         if not step.get("fio"):
             step["fio"] = names[0]
 

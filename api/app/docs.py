@@ -314,10 +314,12 @@ def build_bypass_context(request: object) -> Dict[str, object]:
                 "status": step.status,
                 # Название этапа (снимок этапа) и текст его пунктов: в печать
                 # идут через build_blank_document (HTML из редактора — там).
-                "title": str(
-                    getattr(step, "stage_title", None) or step.owner_group or ""
-                ),
-                "position": str(getattr(step, "stage_title", None) or step.owner_group or ""),
+                # Рукной шаг (шаги задаёт ОК) этапа не имеет: название пустое,
+                # логин согласующего вместо названия печатать нельзя — на бланке
+                # он повторялся дважды (жалоба человека 2026-10-12). Должность
+                # согласующего подставляет documents._fill_step_fio.
+                "title": str(getattr(step, "stage_title", None) or ""),
+                "position": str(getattr(step, "stage_title", None) or ""),
                 # Снимок ответственных: логины (assignees, миграция 0013) плюс
                 # прежний одиночный assignee — у заявок, выданных до миграции,
                 # снимка нет, печатать надо прежнего исполнителя.
@@ -331,7 +333,15 @@ def build_bypass_context(request: object) -> Dict[str, object]:
                 # ФИО ответственных по логинам: подставляет documents.py
                 # (в бланке колонка «Ответственный» — по строке на ответственного).
                 "assignee_names": [],
-                "stage_lines": stage_lines or [owner],
+                # Должности ответственных по логинам (title_ad зеркала):
+                # подставляет documents._fill_step_fio. Нужны ручному шагу —
+                # у него нет названия этапа, на бланке идёт «должность, ФИО».
+                "assignee_positions": [],
+                # Текст шага — только свой (снимок этапа/бланка). Подставлять
+                # владельца по умолчанию нельзя: у ручного шага это логин, и он
+                # печатался вторым дублем под названием (жалоба человека
+                # 2026-10-12).
+                "stage_lines": stage_lines,
                 "done_at": _step_done_text(getattr(step, "done_at", None)),
                 # Режим шага (снимок): sequential — «все ответственные», parallel —
                 # «любой ответственный». Печатается пометкой в блоке шага.
@@ -853,6 +863,28 @@ def _table_compact(table: object) -> None:
         element.set(qn("w:type"), "dxa")
 
 
+def _step_heading(step: Dict[str, object], context: Dict[str, object]) -> str:
+    """Заголовок шага в таблице: «название (режим)», а у ручного — «должность (режим)».
+
+    Название берём у шага, а если его нет (ручной маршрут: этапа справочника за
+    шагом не стоит) — должность согласующего из assignee_positions. Режим
+    согласования печатается всегда: он объясняет, подписываются все или любой.
+    Ни названия, ни должности нет — печатаем один режим, пустую строку не оставляем."""
+    title = render_blank_text(
+        str(step.get("title") or "").strip(), context, escape=True
+    ).strip()
+    if not title:
+        positions = [
+            render_blank_text(str(item).strip(), context, escape=True).strip()
+            for item in (step.get("assignee_positions") or [])
+        ]
+        title = ", ".join(item for item in positions if item)
+    mode = _step_mode_text(step.get("approval_mode"))
+    if title and mode:
+        return "%s (%s)" % (title, mode)
+    return title or mode
+
+
 def _add_steps(document: object, context: Dict[str, object]) -> None:
     """Шаги маршрута — таблицей: №, содержание, ответственные, отметка.
 
@@ -899,16 +931,15 @@ def _add_steps(document: object, context: Dict[str, object]) -> None:
         number = _cell_paragraph(cells[0], center=True)
         number.add_run(str(position))
         # Столбец «Содержание шага»: название с режимом + текст шага.
+        # У ручного шага своего названия нет — печатаем ДОЛЖНОСТЬ согласующего
+        # (documents._fill_step_fio), ФИО идёт в «Ответственные». Должности и
+        # названия не заменяем логином: на бланке он повторялся дважды.
         title_cell = _cell_paragraph(cells[1])
-        _add_stage_text(
-            title_cell,
-            "%s (%s)"
-            % (
-                render_blank_text(str(step.get("title") or "").strip(), context, escape=True),
-                _step_mode_text(step.get("approval_mode")),
-            ),
-            bold=True,
-        )
+        heading = render_blank_text(
+            _step_heading(step, context), context, escape=True
+        ).strip()
+        if heading:
+            _add_stage_text(title_cell, heading, bold=True)
         for line in step.get("stage_lines") or []:
             text = str(line).strip()
             if text:

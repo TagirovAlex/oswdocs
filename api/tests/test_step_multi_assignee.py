@@ -958,6 +958,88 @@ def test_print_group_step_shows_group_roster(
     ]
 
 
+def _content_lines(blob: bytes, row_index: int = 1) -> list[str]:
+    """Абзацы ячейки «Содержание шага» строки таблицы (без пустых)."""
+    pytest.importorskip("docx")
+    from docx import Document
+
+    document = Document(io.BytesIO(blob))
+    tables = document.tables
+    assert tables, "в бланке нет таблицы шагов"
+    return [
+        paragraph.text
+        for paragraph in tables[0].rows[row_index].cells[1].paragraphs
+        if paragraph.text.strip()
+    ]
+
+
+def test_print_manual_step_shows_position_and_fio_not_login(
+    client, requests_store, routing_store, settings_override, route_override, ad_reader
+):
+    """Ручной шаг на бланке: должность и ФИО, логина AD нет нигде в строке.
+
+    У ручного шага нет названия этапа, и раньше вместо названия и текста печатался
+    логин согласующего — дважды («логин (последовательное согласование) логин»)
+    (жалоба человека 2026-10-12)."""
+    rid = _ready_request(client, BLANK_SEQ_ID, _hr())
+    context = _print_context(requests_store, routing_store, rid)
+    sam = ROSTER[0][0]
+    # Ручной шаг целиком: своего названия и текста нет, исполнитель — человек.
+    context["steps"] = [
+        {
+            "order": 1,
+            "owner": sam,
+            "status": "ожидает",
+            "title": "",
+            "position": "",
+            "assignees": [sam],
+            "assignee": sam,
+            "fio": "",
+            "assignee_names": [],
+            "assignee_positions": [],
+            "stage_lines": [],
+            "done_at": "",
+            "approval_mode": "sequential",
+        }
+    ]
+    _fill_step_fio(context, routing_store)
+
+    blob = build_blank_document(dict(context, qr_url=""))
+    lines = _content_lines(blob)
+    # Заголовок строки — должность согласующего из зеркала users (title_ad).
+    assert lines == ["Вымышленный участник реестра (последовательно)"], lines
+    assert _responsible_names(blob) == [ROSTER_FIOS[sam]]
+    # Логина согласующего на бланке нет: ни в содержании, ни в ответственных.
+    assert sam not in _blank_text(blob)
+
+
+def test_print_manual_step_without_position_keeps_mode_only(
+    client, requests_store, routing_store, settings_override, route_override, ad_reader
+):
+    """Нет ни названия, ни должности — печатается один режим, пустой строки нет."""
+    rid = _ready_request(client, BLANK_SEQ_ID, _hr())
+    context = _print_context(requests_store, routing_store, rid)
+    context["steps"] = [
+        {
+            "order": 1,
+            "owner": "",
+            "status": "ожидает",
+            "title": "",
+            "position": "",
+            "assignees": [],
+            "assignee": "",
+            "fio": "",
+            "assignee_names": [],
+            "assignee_positions": [],
+            "stage_lines": [],
+            "done_at": "",
+            "approval_mode": "sequential",
+        }
+    ]
+    blob = build_blank_document(dict(context, qr_url=""))
+    assert _content_lines(blob) == ["последовательно"]
+
+
 def test_print_context_reads_user_card_once_per_login(
     client, requests_store, routing_store, settings_override, route_override, ad_reader
 ):
