@@ -69,13 +69,14 @@ interface RouteStep {
   resolver: string;
 }
 
-// Блок маршрута: последовательный либо параллельный шаги одного типа исполнителя.
+// Блок маршрута: последовательный либо параллельный. Шаги внутри блока могут
+// быть и сотрудниками, и группами — переключателя «тип исполнителя» нет
+// (решение человека 2026-10-12: добавленный сотрудник не мешал добавить группу).
 // id стабилен (генерируется при добавлении): индекс блока «съезжает» при удалении,
 // а выбранная группа и её состав привязаны к блоку, а не к его позиции.
 interface RouteBlock {
   id: string;
   mode: "sequential" | "parallel";
-  kind: ExecutorKind;
   steps: RouteStep[];
 }
 
@@ -721,7 +722,8 @@ const confirmLink = async () => {
     enterprise !== "" &&
     employeeReady &&
     subject.trim() !== "" &&
-    content.trim() !== "" &&
+    // Содержание необязательно (решение человека 2026-10-12) — как и при
+    // отправке на согласование, так и для черновика.
     routeReady &&
     !busy;
 
@@ -914,7 +916,7 @@ function changeRouteMode(mode: RouteMode): void {
     markTouched();
     // Стабильный id блока: состояние группы привязано к нему, а не к индексу.
     const id = `blk-${++blockSeq.current}`;
-    setBlocks((prev) => [...prev, { id, mode, kind: "user", steps: [] }]);
+    setBlocks((prev) => [...prev, { id, mode, steps: [] }]);
   }
 
   function removeBlock(blockId: string): void {
@@ -932,14 +934,7 @@ function changeRouteMode(mode: RouteMode): void {
     setBlocks((prev) => prev.map((b) => (b.id === blockId ? { ...b, mode } : b)));
   }
 
-  // Тип исполнителя блока: сотрудник (поиск AD) либо группа (список из settings).
-  function setBlockKind(blockId: string, kind: ExecutorKind): void {
-    markTouched();
-    setBlocks((prev) => prev.map((b) => (b.id === blockId ? { ...b, kind } : b)));
-    if (adPanelBlock === blockId) closeAdPanel();
-  }
-
-  function removeStep(blockId: string, stepIndex: number): void {
+function removeStep(blockId: string, stepIndex: number): void {
     markTouched();
     setBlocks((prev) =>
       prev.map((b) =>
@@ -1974,18 +1969,10 @@ function changeRouteMode(mode: RouteMode): void {
                     </thead>
                     <tbody>
                       <tr>
-                        {/* Тип исполнителя и группа-владелец шага. */}
+                        {/* Группа-владелец шага: селект и добавление доступны
+                            всегда — блок может содержать и сотрудников, и
+                            группы (решение человека 2026-10-12). */}
                         <td>
-                      <select
-                        aria-label={`Тип исполнителя блока ${bi + 1}`}
-                        value={block.kind}
-                        onChange={(e) => setBlockKind(block.id, e.target.value as ExecutorKind)}
-                      >
-                        <option value="user">Сотрудник</option>
-                        <option value="group">Группа</option>
-                      </select>
-                      {block.kind === "group" && (
-                        <div className="sed-mt-8">
                           <label className="sed-field">
                             Группа
                             <select
@@ -2005,7 +1992,7 @@ function changeRouteMode(mode: RouteMode): void {
                             <div className="sed-note">Список групп пуст (задаётся в настройках).</div>
                           )}
                           {(groupPick[block.id] ?? "") !== "" && (() => {
-                            // Состав именно этого блока: у каждого группового блока своя группа.
+                            // Состав именно этого блока: у каждого блока своя группа.
                             const gm = groupMembers[block.id] ?? EMPTY_GROUP_MEMBERS;
                             return (
                               <>
@@ -2036,9 +2023,7 @@ function changeRouteMode(mode: RouteMode): void {
                               </>
                             );
                           })()}
-                        </div>
-                      )}
-                    </td>
+                        </td>
                     {/* Исполнители блока и выбор сотрудника из AD. */}
                     <td>
                       {block.steps.length === 0 && <div className="sed-note">Исполнители не добавлены.</div>}
@@ -2058,24 +2043,22 @@ function changeRouteMode(mode: RouteMode): void {
                           </li>
                         ))}
                       </ul>
-                      {block.kind === "user" && (
-                        <button
-                          type="button"
-                          className="sed-btn sed-delbtn"
-                          aria-label="Добавить исполнителя"
-                          title="Добавить исполнителя"
-                          onClick={() => openAdPanel(block.id)}
-                        >
-                          <PlusIcon />
-                          Добавить
-                        </button>
-                      )}
+                      <button
+                        type="button"
+                        className="sed-btn sed-delbtn"
+                        aria-label="Добавить исполнителя"
+                        title="Добавить исполнителя"
+                        onClick={() => openAdPanel(block.id)}
+                      >
+                        <PlusIcon />
+                        Добавить
+                      </button>
                     </td>
                     {/* Комментарий к блоку: пока не сохраняется в маршруте (пустая ячейка). */}
                     <td />
                     {/* Действия: добавить выбранную группу-владельца в маршрут. */}
                     <td>
-                      {block.kind === "group" && (groupPick[block.id] ?? "") !== "" && (
+                      {(groupPick[block.id] ?? "") !== "" && (
                         <button
                           type="button"
                           className="sed-btn"

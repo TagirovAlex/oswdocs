@@ -1456,9 +1456,10 @@ describe("RequestCard", () => {
     );
   });
 
-  // Кнопок «вверх/вниз» у шага больше нет: порядок задаётся удалением и
-  // добавлением (решение человека 2026-10-12).
-  it("скорректировать маршрут: у шага нет кнопок «вверх/вниз», есть удаление", async () => {
+  // Порядок шага задаётся кнопками «вверх/вниз» — они остались в блоке правки
+  // (решение человека 2026-10-12: кнопки нужно было выровнять, а не убирать),
+  // а удаление шага и блока — отдельными кнопками.
+  it("скорректировать маршрут: у шага есть вверх/вниз и удаление", async () => {
     vi.mocked(getStepGroups).mockResolvedValue([
       { id: "SED_STEP_BUH", name: "Бухгалтерия" },
     ]);
@@ -1482,8 +1483,9 @@ describe("RequestCard", () => {
     fireEvent.click(screen.getByRole("button", { name: "Скорректировать маршрут" }));
     const editor = screen.getByLabelText("Правка маршрута");
 
-    expect(within(editor).queryByRole("button", { name: "Поднять шаг 1.1" })).toBeNull();
-    expect(within(editor).queryByRole("button", { name: "Опустить шаг 1.1" })).toBeNull();
+    // Кнопки порядка на месте, удаление — отдельно.
+    expect(within(editor).getByRole("button", { name: "Поднять шаг 1.1" })).toBeDisabled();
+    expect(within(editor).getByRole("button", { name: "Опустить шаг 1.1" })).toBeInTheDocument();
     expect(within(editor).getByRole("button", { name: "Удалить шаг 1.1" })).toBeInTheDocument();
     expect(within(editor).getByRole("button", { name: "Удалить блок 1" })).toBeInTheDocument();
   });

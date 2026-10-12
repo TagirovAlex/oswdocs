@@ -1132,6 +1132,23 @@ export function RequestCard(props: RequestCardProps) {
     );
   }
 
+  // Порядок шага: кнопки «вверх/вниз» (доступнее перетаскивания), как в
+  // редакторе состава бланка (admin-settings.tsx, moveStep).
+  function moveRouteStep(blockKey: string, stepKey: string, delta: number): void {
+    setRouteBlocks((prev) =>
+      prev.map((b) => {
+        if (b.key !== blockKey) return b;
+        const index = b.steps.findIndex((s) => s.key === stepKey);
+        const target = index + delta;
+        if (index < 0 || target < 0 || target >= b.steps.length) return b;
+        const steps = [...b.steps];
+        const [row] = steps.splice(index, 1);
+        steps.splice(target, 0, row);
+        return { ...b, steps };
+      }),
+    );
+  }
+
   // Модалка выбора сотрудника AD: логин набирать руками нельзя — опечатка даёт
   // шаг, который никто не отметит (решение человека 2026-10-12). stepKey === null —
   // добавляем шаг в блок, иначе меняем исполнителя существующего.
@@ -1756,25 +1773,40 @@ export function RequestCard(props: RequestCardProps) {
                           </select>
                         </label>
                       )}
-                      {/* Неизменяемый шаг (несколько ответственных) править и
-                          удалять нельзя: PATCH пересобирает маршрут целиком и
-                          StepSpec одного ответственного не выразит, поэтому
-                          сохранение с таким шагом блокируется. */}
+                      {/* Порядок шага — кнопками «вверх/вниз», удаление — отдельной кнопкой. */}
                       {step.kind !== "fixed" && (
-                        <button
-                          type="button"
-                          className="sed-btn sed-btn--danger"
-                          aria-label={`Удалить шаг ${bi + 1}.${si + 1}`}
-                          onClick={() => removeRouteStep(block.key, step.key)}
-                        >
-                          Удалить
-                        </button>
+                        <>
+                          <button
+                            type="button"
+                            className="sed-btn sed-btn--ghost"
+                            aria-label={`Поднять шаг ${bi + 1}.${si + 1}`}
+                            disabled={si === 0}
+                            onClick={() => moveRouteStep(block.key, step.key, -1)}
+                          >
+                            Вверх
+                          </button>
+                          <button
+                            type="button"
+                            className="sed-btn sed-btn--ghost"
+                            aria-label={`Опустить шаг ${bi + 1}.${si + 1}`}
+                            disabled={si === block.steps.length - 1}
+                            onClick={() => moveRouteStep(block.key, step.key, 1)}
+                          >
+                            Вниз
+                          </button>
+                          <button
+                            type="button"
+                            className="sed-btn sed-btn--danger"
+                            aria-label={`Удалить шаг ${bi + 1}.${si + 1}`}
+                            onClick={() => removeRouteStep(block.key, step.key)}
+                          >
+                            Удалить
+                          </button>
+                        </>
                       )}
                     </div>
                   ))}
-                  {/* Добавление шага: группа — селектом, сотрудник — модалкой AD.
-                      Порядок шагов задаётся удалением и добавлением (кнопок
-                      «вверх/вниз» больше нет — решение человека 2026-10-12). */}
+                  {/* Добавление шага: группа — селектом, сотрудник — модалкой AD. */}
                   <div className="sed-toolbar sed-mt-8">
                     <select
                       aria-label={`Группа для блока ${bi + 1}`}

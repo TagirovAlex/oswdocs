@@ -1612,10 +1612,8 @@ describe("CreateForm", () => {
     await fillEmployeeManually();
     fireEvent.click(screen.getByText("Добавить последовательный блок"));
 
-    // Тип исполнителя блока: по умолчанию сотрудник, есть вариант «Группа».
-    const kind = screen.getByLabelText("Тип исполнителя блока 1");
-    expect(kind).toHaveValue("user");
-    fireEvent.change(kind, { target: { value: "group" } });
+    // Переключателя типа исполнителя нет: в блоке доступны и сотрудник, и группа.
+    expect(screen.queryByLabelText("Тип исполнителя блока 1")).toBeNull();
 
     // Группы — из /api/step-groups (settings), без хардкода: в селекте
     // наименование (name), значение — id группы.
@@ -1675,7 +1673,6 @@ describe("CreateForm", () => {
 
     // Блок 1 — группа SED_STEP_BUH.
     fireEvent.click(screen.getByText("Добавить последовательный блок"));
-    fireEvent.change(screen.getByLabelText("Тип исполнителя блока 1"), { target: { value: "group" } });
     await waitFor(() => expect(screen.getByLabelText("Группа блока 1")).toBeInTheDocument());
     fireEvent.change(screen.getByLabelText("Группа блока 1"), { target: { value: "SED_STEP_BUH" } });
     await waitFor(() => expect(vi.mocked(getAdGroupMembers)).toHaveBeenCalledWith("SED_STEP_BUH"));
@@ -1684,8 +1681,6 @@ describe("CreateForm", () => {
 
     // Блок 2 — группа SED_STEP_OK со своим составом.
     fireEvent.click(screen.getByText("Добавить последовательный блок"));
-    const groupKind2 = screen.getByLabelText("Тип исполнителя блока 2");
-    fireEvent.change(groupKind2, { target: { value: "group" } });
     await waitFor(() => expect(screen.getByLabelText("Группа блока 2")).toBeInTheDocument());
     fireEvent.change(screen.getByLabelText("Группа блока 2"), { target: { value: "SED_STEP_OK" } });
     await waitFor(() => expect(vi.mocked(getAdGroupMembers)).toHaveBeenCalledWith("SED_STEP_OK"));
@@ -1723,7 +1718,6 @@ describe("CreateForm", () => {
 
     // Блок 1 — группа SED_STEP_BUH (состав из AD загрузился).
     fireEvent.click(screen.getByText("Добавить последовательный блок"));
-    fireEvent.change(screen.getByLabelText("Тип исполнителя блока 1"), { target: { value: "group" } });
     await waitFor(() => expect(screen.getByLabelText("Группа блока 1")).toBeInTheDocument());
     fireEvent.change(screen.getByLabelText("Группа блока 1"), { target: { value: "SED_STEP_BUH" } });
     await waitFor(() =>
@@ -1732,7 +1726,6 @@ describe("CreateForm", () => {
 
     // Блок 2 — группа SED_STEP_OK со своим составом.
     fireEvent.click(screen.getByText("Добавить последовательный блок"));
-    fireEvent.change(screen.getByLabelText("Тип исполнителя блока 2"), { target: { value: "group" } });
     await waitFor(() => expect(screen.getByLabelText("Группа блока 2")).toBeInTheDocument());
     fireEvent.change(screen.getByLabelText("Группа блока 2"), { target: { value: "SED_STEP_OK" } });
     await waitFor(() =>
@@ -1783,7 +1776,6 @@ describe("CreateForm", () => {
     render(<CreateForm role="hr" />);
     await fillEmployeeManually();
     fireEvent.click(screen.getByText("Добавить последовательный блок"));
-    fireEvent.change(screen.getByLabelText("Тип исполнителя блока 1"), { target: { value: "group" } });
     await waitFor(() => expect(screen.getByLabelText("Группа блока 1")).toBeInTheDocument());
 
     // Выбрали группу с медленным ответом, сразу переключились на другую.
@@ -1811,9 +1803,6 @@ describe("CreateForm", () => {
     render(<CreateForm role="hr" />);
     await fillEmployeeManually();
     fireEvent.click(screen.getByText("Добавить последовательный блок"));
-    fireEvent.change(screen.getByLabelText("Тип исполнителя блока 1"), {
-      target: { value: "group" },
-    });
     await waitFor(() => expect(screen.getByLabelText("Группа блока 1")).toBeInTheDocument());
     fireEvent.change(screen.getByLabelText("Группа блока 1"), {
       target: { value: "SED_STEP_OK" },
@@ -1961,6 +1950,59 @@ it("предлагает подтвердить связь с AD и после �
   await waitFor(() =>
     expect(screen.queryByRole("button", { name: "Подтвердить связь с AD" })).toBeNull(),
   );
+});
+
+// --- Смешанный блок маршрута: сотрудник и группа -----------------------------
+
+describe("CreateForm: блок с сотрудником и группой", () => {
+  // Переключателя типа исполнителя нет: добавленный сотрудник не мешает
+  // добавить группу в тот же блок (решение человека 2026-10-12).
+  it("в одном блоке добавляются и сотрудник, и группа", async () => {
+    vi.mocked(getRouteBlanks).mockResolvedValue(routeBlanks);
+    vi.mocked(searchEmployees).mockRejectedValue(new ApiHttpError(503, "Клиент 1С не настроен"));
+    vi.mocked(searchAd).mockResolvedValue([adCandidate]);
+    vi.mocked(getStepGroups).mockResolvedValue([
+      { id: "SED_STEP_BUH", name: "Бухгалтерия" },
+    ]);
+    vi.mocked(createRequest).mockResolvedValue({
+      id: "REQ-0321",
+      status: "Черновик",
+      route_origin: "custom",
+      department: "",
+      position: "",
+      created_by: "petrov.pp",
+      steps: [],
+    });
+
+    render(<CreateForm role="hr" />);
+    await fillEmployeeManually("custom");
+    // addAdExecutor сам добавляет последовательный блок и сотрудника в него.
+    await addAdExecutor();
+
+    // В блоке с сотрудником селект группы и кнопка «Добавить группу» доступны.
+    expect(screen.queryByLabelText("Тип исполнителя блока 1")).toBeNull();
+    fireEvent.change(screen.getByLabelText("Группа блока 1"), {
+      target: { value: "SED_STEP_BUH" },
+    });
+    await waitFor(() =>
+      expect(screen.getByLabelText("Группа блока 1")).toHaveValue("SED_STEP_BUH"),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Добавить группу" }));
+
+    // Сотрудник не исчез, а группа добавилась следом.
+    expect(screen.getByText(/Петров Пётр Петрович/)).toBeInTheDocument();
+    expect(screen.getByText("Бухгалтерия")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("Создать"));
+    await waitFor(() => expect(createRequest).toHaveBeenCalled());
+    const body = vi.mocked(createRequest).mock.calls[0][0];
+    expect(body.blocks).toEqual([
+      {
+        mode: "sequential",
+        steps: [{ sam: "petrov.pp" }, { owner_group: "SED_STEP_BUH", resolver: "by_group" }],
+      },
+    ]);
+  });
 });
 
 // --- Выбор бланка при создании заявки ----------------------------------------
