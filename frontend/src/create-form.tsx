@@ -325,6 +325,10 @@ export function CreateForm(props: CreateFormProps) {
   // (как adSeq), иначе медленный ответ по прежней группе перезапишет состав текущей.
   const groupSeq = useRef<Record<string, number>>({});
 
+  // Незаполненные поля при «Отправить на согласование»: подсвечиваются поля и
+  // показывается сводка (решение человека 2026-10-12). Пусто — всё заполнено.
+  const [missing, setMissing] = useState<string[]>([]);
+
   // Флаг «грязности» формы: true после первого ввода пользователя — для
   // подтверждения закрытия окна (create-window). Сбрасывается после создания.
   const [touched, setTouched] = useState<boolean>(false);
@@ -879,10 +883,11 @@ function changeRouteMode(mode: RouteMode): void {
   setRouteMode(mode);
   // Переключение между режимами
   if (routeMode === "auto" && mode === "custom") {
-    // переход с auto → custom: очистить авто‑состояния, блоки и связанные
+    // переход с auto → custom: очистить авто‑состояния, блоки и связанные.
+    // Выбранный бланк ОСТАЁТСЯ: он задаёт форму печати (шапка, подвал, строки),
+    // а шаги в ручном режиме задаёт сама ОК.
     setDismissedStages([]);
     setAddedStages([]);
-    setBlankId("");
     setBlocks([]);
     setAddStageOpen(false);
     setPreview(null);
@@ -1076,6 +1081,57 @@ function changeRouteMode(mode: RouteMode): void {
     resetForm();
   }
 
+  // Поля, без которых заявку нельзя отправить на согласование: ключ поля ->
+  // подпись в сводке. Поля подсвечиваются (aria-invalid + класс), сводка —
+  // список подписей (решение человека 2026-10-12).
+  const REQUIRED_LABELS: Record<string, string> = {
+    enterprise: "предприятие",
+    tab_num: "табельный номер",
+    fio: "ФИО сотрудника",
+    department: "подразделение",
+    position: "должность",
+    subject: "тема",
+    content: "содержание",
+    blank: "бланк",
+    steps: "шаги маршрута",
+  };
+
+  // Перечень обязательного — по контракту CreateRequestIn: enterprise, fio,
+  // tab_num, department, position, subject, content без default (остальное
+  // необязательно, например doc_type_code — вид документа разрешено не задавать).
+  function missingFields(): string[] {
+    const gaps: string[] = [];
+    if (enterprise === "") gaps.push("enterprise");
+    if (tabNum.trim() === "") gaps.push("tab_num");
+    if (fio.trim() === "") gaps.push("fio");
+    if (department.trim() === "") gaps.push("department");
+    if (position.trim() === "") gaps.push("position");
+    if (subject.trim() === "") gaps.push("subject");
+    if (content.trim() === "") gaps.push("content");
+    if (routeMode === "auto") {
+      // Маршрут из справочников: нужен бланк (иначе 422 — см. _blank_required_422).
+      if (blankId === "" && !blankAutopick) gaps.push("blank");
+    } else if (blocks.length === 0 || blocks.every((b) => b.steps.length === 0)) {
+      gaps.push("steps");
+    }
+    return gaps;
+  }
+
+  // Поле подсвечено, если попало в список незаполненных.
+  function isMissing(key: string): boolean {
+    return missing.includes(key);
+  }
+
+  // Ввод в поле снимает ПОДСВЕТКУ ЭТОГО поля (остальные остаются): подсказка
+  // не должна мешать заполнять форму дальше.
+  function clearMissing(key: string): void {
+    markTouched();
+    if (missing.includes(key)) setMissing(missing.filter((item) => item !== key));
+  }
+
+  // Подписи незаполненных полей для сводки над формой.
+  const missingLabels = missing.map((key) => REQUIRED_LABELS[key] ?? key);
+
   // Создание заявки: POST /api/requests; при submit=true — сразу POST /{id}/submit
   // («Отправить на согласование»). При успехе — статус и сброс формы; при
   // ошибке (в т.ч. submit) — текст ошибки, окно не закрывается, а созданный
@@ -1084,6 +1140,19 @@ function changeRouteMode(mode: RouteMode): void {
     if (busy) return;
     setCreateError("");
     setCreated("");
+    // Отправка на согласование: сначала проверка заполненности — подсказка и
+    // подсветка пустых полей вместо ошибки от сервера (решение человека
+    // 2026-10-12). Черновик («Создать») создаём как раньше: он для заготовки.
+    if (submit) {
+      const gaps = missingFields();
+      setMissing(gaps);
+      if (gaps.length > 0) {
+        setCreateError(
+          `Заполните обязательные поля: ${gaps.map((key) => REQUIRED_LABELS[key] ?? key).join(", ")}`,
+        );
+        return;
+      }
+    }
     setBusy(true);
     try {
       const payload: CreateRequestBody = {
@@ -1099,9 +1168,11 @@ function changeRouteMode(mode: RouteMode): void {
         ...(adSam !== "" ? { ad_sam: adSam } : {}),
         ...(managerSam !== "" ? { manager: managerSam } : {}),
         route_mode: routeMode,
+        // blank_id шлём в ОБОИХ режимах: бланк задаёт форму печати (шапка, подвал,
+        // строки), а маршрут в ручном режиме задаёт ОК (жалоба человека 2026-10-12).
+        ...(blankId !== "" ? { blank_id: Number(blankId) } : {}),
         ...(routeMode === "auto"
           ? {
-            blank_id: Number(blankId),
             dismissed_stages: dismissedStages,
             dismissed_step_orders: dismissedStepOrders,
             added_stages: addedStages,
@@ -1157,19 +1228,28 @@ function changeRouteMode(mode: RouteMode): void {
 
       {loadError && <div role="alert">Ошибка: {loadError}</div>}
       {created && <div role="status">{created}</div>}
+      {/* Незаполненные поля при отправке: сводка над формой + подсветка самих
+          полей (см. missingFields). Читается и списком, и по подсветке. */}
+      {missingLabels.length > 0 && (
+        <div role="alert" className="sed-missing">
+          Не заполнено: {missingLabels.join(", ")}. Подсвеченные поля нужно
+          заполнить перед отправкой на согласование.
+        </div>
+      )}
 
       {/* Две панели макета (.panels/.panel): слева — предприятие и сотрудник,
           справа — инициатор (только чтение) и справочные данные из 1С. */}
       <div className="sed-panels">
         <div className="sed-panel">
           {/* Предприятие из настроек (без хардкод-массивов) — шаг 1 формы. */}
-          <label className="sed-field">
+          <label className={`sed-field${isMissing("enterprise") ? " sed-field--missing" : ""}`}>
             Предприятие
             <select
               aria-label="Предприятие"
+              aria-invalid={isMissing("enterprise") || undefined}
               value={enterprise}
               onChange={(e) => {
-                markTouched();
+                clearMissing("enterprise");
                 setEnterprise(e.target.value);
               }}
             >
@@ -1333,21 +1413,21 @@ function changeRouteMode(mode: RouteMode): void {
                 <fieldset className="sed-fieldset">
                   <legend>Данные сотрудника (вручную)</legend>
                   {manualNote && <div className="sed-note">{manualNote}</div>}
-                  <label className="sed-field">
+                  <label className={`sed-field${isMissing("fio") ? " sed-field--missing" : ""}`}>
                     ФИО
-                    <input aria-label="ФИО" value={fio} onChange={(e) => { markTouched(); setFio(e.target.value); }} />
+                    <input aria-label="ФИО" aria-invalid={isMissing("fio") || undefined} value={fio} onChange={(e) => { clearMissing("fio"); setFio(e.target.value); }} />
                   </label>
-                  <label className="sed-field">
+                  <label className={`sed-field${isMissing("tab_num") ? " sed-field--missing" : ""}`}>
                     Табельный №
-                    <input aria-label="Табельный №" value={tabNum} onChange={(e) => { markTouched(); setTabNum(e.target.value); }} />
+                    <input aria-label="Табельный №" aria-invalid={isMissing("tab_num") || undefined} value={tabNum} onChange={(e) => { clearMissing("tab_num"); setTabNum(e.target.value); }} />
                   </label>
-                  <label className="sed-field">
+                  <label className={`sed-field${isMissing("department") ? " sed-field--missing" : ""}`}>
                     Подразделение
-                    <input aria-label="Подразделение" value={department} onChange={(e) => { markTouched(); setDepartment(e.target.value); }} />
+                    <input aria-label="Подразделение" aria-invalid={isMissing("department") || undefined} value={department} onChange={(e) => { clearMissing("department"); setDepartment(e.target.value); }} />
                   </label>
-                  <label className="sed-field">
+                  <label className={`sed-field${isMissing("position") ? " sed-field--missing" : ""}`}>
                     Должность
-                    <input aria-label="Должность" value={position} onChange={(e) => { markTouched(); setPosition(e.target.value); }} />
+                    <input aria-label="Должность" aria-invalid={isMissing("position") || undefined} value={position} onChange={(e) => { clearMissing("position"); setPosition(e.target.value); }} />
                   </label>
                 </fieldset>
               )}
@@ -1361,13 +1441,14 @@ function changeRouteMode(mode: RouteMode): void {
               число шагов в подписи, описание бланка — подсказкой. Выбор задаёт
               этапы маршрута заявки; без него маршрут подбирается по службе,
               если это разрешено настройкой blank_autopick. */}
-          <label className="sed-field">
+          <label className={`sed-field${isMissing("blank") ? " sed-field--missing" : ""}`}>
             Бланк
             <select
               aria-label="Бланк"
+              aria-invalid={isMissing("blank") || undefined}
               value={blankId}
               onChange={(e) => {
-                markTouched();
+                clearMissing("blank");
                 setBlankId(e.target.value);
                 // Другой бланк — номера снятых шагов прежнего к нему не относятся
                 // (сервер отверг бы их как отсутствующие в маршруте).
@@ -1425,26 +1506,28 @@ function changeRouteMode(mode: RouteMode): void {
             </select>
           </label>
           {docTypesError && <div className="sed-note">Виды документов: {docTypesError}</div>}
-          <label className="sed-field">
+          <label className={`sed-field${isMissing("subject") ? " sed-field--missing" : ""}`}>
             Тема
             <input
               aria-label="Тема"
               required
+              aria-invalid={isMissing("subject") || undefined}
               value={subject}
               onChange={(e) => {
-                markTouched();
+                clearMissing("subject");
                 setSubject(e.target.value);
               }}
             />
           </label>
-          <label className="sed-field">
+          <label className={`sed-field${isMissing("content") ? " sed-field--missing" : ""}`}>
             Содержание
             <textarea
               aria-label="Содержание"
               rows={3}
+              aria-invalid={isMissing("content") || undefined}
               value={content}
               onChange={(e) => {
-                markTouched();
+                clearMissing("content");
                 setContent(e.target.value);
               }}
             />

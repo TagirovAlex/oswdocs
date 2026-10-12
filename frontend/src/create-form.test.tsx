@@ -212,6 +212,18 @@ async function addAdExecutor(): Promise<void> {
   fireEvent.click(screen.getByRole("button", { name: "ОК" }));
 }
 
+// Тема и содержание — обязательные поля отправки (контракт CreateRequestIn):
+// наполняем их перед «Отправить на согласование», иначе сработает проверка
+// незаполненного (см. missingFields).
+async function fillSubjectAndContent(): Promise<void> {
+  fireEvent.change(screen.getByLabelText("Тема"), {
+    target: { value: "Увольнение по собственному" },
+  });
+  fireEvent.change(screen.getByLabelText("Содержание"), {
+    target: { value: "Прошу уволить с 01.11.2026" },
+  });
+}
+
 describe("CreateForm", () => {
   // Полный путь: предприятие → сотрудник → маршрут (блоками) → 201 → статус + сброс.
   it("создаёт заявку через API с блоками и сбрасывает форму", async () => {
@@ -1345,6 +1357,7 @@ describe("CreateForm", () => {
     render(<CreateForm role="hr" closeOnCreate />);
     await fillEmployeeManually();
     await addAdExecutor();
+    await fillSubjectAndContent();
     fireEvent.click(screen.getByText("Отправить на согласование"));
 
     await waitFor(() => expect(submitRequest).toHaveBeenCalledWith("REQ-0001"));
@@ -1399,6 +1412,7 @@ describe("CreateForm", () => {
     render(<CreateForm role="hr" closeOnCreate />);
     await fillEmployeeManually();
     await addAdExecutor();
+    await fillSubjectAndContent();
     fireEvent.click(screen.getByText("Отправить на согласование"));
 
     await waitFor(() =>
@@ -1438,11 +1452,13 @@ describe("CreateForm", () => {
     render(<CreateForm role="hr" closeOnCreate />);
     await fillEmployeeManually();
     await addAdExecutor();
+    await fillSubjectAndContent();
     fireEvent.click(screen.getByText("Отправить на согласование"));
     await waitFor(() =>
       expect(screen.getByRole("alert")).toHaveTextContent(/Маршрут не согласован/),
     );
 
+    await fillSubjectAndContent();
     fireEvent.click(screen.getByText("Отправить на согласование"));
     await waitFor(() => expect(submitRequest).toHaveBeenCalledTimes(2));
     // Оба раза — по одному и тому же черновику; создание было одно.
@@ -1490,12 +1506,14 @@ describe("CreateForm", () => {
     render(<CreateForm role="hr" />);
     await fillEmployeeManually();
     await addAdExecutor();
+    await fillSubjectAndContent();
     fireEvent.click(screen.getByText("Отправить на согласование"));
     await waitFor(() =>
       expect(screen.getByRole("alert")).toHaveTextContent(/Маршрут не согласован/),
     );
 
     fireEvent.change(screen.getByLabelText("ФИО"), { target: { value: "Громов Игорь Петрович" } });
+    await fillSubjectAndContent();
     fireEvent.click(screen.getByText("Отправить на согласование"));
     await waitFor(() => expect(createRequest).toHaveBeenCalledTimes(2));
     expect(vi.mocked(submitRequest)).toHaveBeenLastCalledWith("REQ-0007");
@@ -1948,6 +1966,43 @@ describe("CreateForm: выбор бланка", () => {
     const body = vi.mocked(createRequest).mock.calls[0][0];
     expect(body.blank_id).toBeUndefined();
     expect(body.route_mode).toBe("custom");
+    expect(body.blocks).toHaveLength(1);
+  });
+
+  // Бланк задаёт форму печати (шапка, подвал, строки), а шаги в ручном режиме
+  // задаёт сама ОК: выбранный бланк не теряется и уходит в теле (жалоба
+  // человека 2026-10-12 — печать шла не по шаблону).
+  it("бланк сохраняется при переходе на ручной маршрут и уходит в теле", async () => {
+    vi.mocked(getRouteBlanks).mockResolvedValue(routeBlanks);
+    vi.mocked(searchEmployees).mockRejectedValue(new ApiHttpError(503, "Клиент 1С не настроен"));
+    vi.mocked(searchAd).mockResolvedValue([adCandidate]);
+    vi.mocked(createRequest).mockResolvedValue({
+      id: "REQ-0304",
+      status: "Черновик",
+      route_origin: "custom",
+      department: "Цех № 1",
+      position: "Слесарь",
+      created_by: "petrov.pp",
+      steps: [],
+    });
+
+    render(<CreateForm role="hr" />);
+    const select = await screen.findByLabelText("Бланк");
+    fireEvent.change(select, { target: { value: "11" } });
+    await waitFor(() => expect((select as HTMLSelectElement).value).toBe("11"));
+
+    // Переключение на ручной режим не сбрасывает выбор бланка.
+    await fillEmployeeManually("auto");
+    await switchToManualRoute();
+    expect((screen.getByLabelText("Бланк") as HTMLSelectElement).value).toBe("11");
+
+    await addAdExecutor();
+    fireEvent.click(screen.getByText("Создать"));
+
+    await waitFor(() => expect(createRequest).toHaveBeenCalled());
+    const body = vi.mocked(createRequest).mock.calls[0][0];
+    expect(body.route_mode).toBe("custom");
+    expect(body.blank_id).toBe(11);
     expect(body.blocks).toHaveLength(1);
   });
 

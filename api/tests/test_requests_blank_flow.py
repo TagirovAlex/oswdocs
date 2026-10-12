@@ -989,6 +989,57 @@ def test_create_custom_without_blank_still_works(
     assert stored.steps[0].owner_group == STEP_GROUP
 
 
+def test_create_custom_with_blank_snapshots_blank_for_print(
+    client, hr, settings_override, requests_store, routing_store, ad_reader
+):
+    """Ручной маршрут + выбранный бланк: снимок бланка сохраняется.
+
+    Шаги задаёт ОК сама, но печать идёт по бланку — без снимка шапка/подвал были
+    бы общими (жалоба человека 2026-10-12: «печатается не по шаблону»)."""
+    created = _create(
+        client,
+        hr,
+        route_mode="custom",
+        blank_id=BLANK_ID,
+        blocks=[
+            {
+                "mode": "sequential",
+                "steps": [{"owner_group": STEP_GROUP, "resolver": "by_group"}],
+            }
+        ],
+    )
+    assert created.status_code == 201, created.text
+    stored = requests_store.get(created.json()["id"])
+    assert stored.route_origin == "custom"
+    assert stored.steps[0].owner_group == STEP_GROUP  # шаги — из конструктора ОК
+    blank = next(item for item in routing_store.blanks if item["id"] == BLANK_ID)
+    assert stored.blank_id == BLANK_ID
+    assert stored.blank_name == blank["name"]
+    assert stored.blank_version == blank["version"]
+    assert stored.blank_header_html == blank["header_html"]
+    assert stored.blank_footer_lines == blank["footer_lines"]
+
+
+def test_create_custom_with_unknown_blank_is_422(
+    client, hr, settings_override, requests_store, routing_store, ad_reader
+):
+    """Неизвестный бланк при ручном маршруте — 422, а не тихая печать общей формы."""
+    created = _create(
+        client,
+        hr,
+        route_mode="custom",
+        blank_id=99999,
+        blocks=[
+            {
+                "mode": "sequential",
+                "steps": [{"owner_group": STEP_GROUP, "resolver": "by_group"}],
+            }
+        ],
+    )
+    assert created.status_code == 422
+    assert "Бланк не найден" in created.json()["detail"]
+
+
 # --- Снятие шага бланка по номеру шага (dismissed_step_orders) ---
 # У шага бланка нет кода этапа, поэтому снять его кодом (dismissed_stages)
 # нельзя — сотрудник ОК снимает шаг по его номеру в составе бланка

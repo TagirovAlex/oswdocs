@@ -1356,6 +1356,73 @@ def _blank_step_rows(store: DbRoutingStore, blank: dict) -> list[dict]:
     return [row for row in (rows or []) if isinstance(row, dict)]
 
 
+# Поля снимка бланка в заявке (общие для авто- и ручного маршрута).
+_BLANK_SNAPSHOT_KEYS = (
+    "blank_id",
+    "blank_name",
+    "blank_version",
+    "blank_header_html",
+    "blank_footer_lines",
+)
+
+
+def _empty_blank_snapshot() -> dict:
+    """Снимок без бланка: пустые значения (бланк не выбран)."""
+    return {
+        "blank_id": None,
+        "blank_name": None,
+        "blank_version": None,
+        "blank_header_html": None,
+        "blank_footer_lines": [],
+    }
+
+
+def _blank_snapshot(body: CreateRequestIn) -> dict:
+    """Снимок выбранного бланка для маршрута, заданного вручную.
+
+    ОК может задать шаги сам (steps/blocks) и всё равно выбрать бланк — печать
+    тогда идёт по бланку: шапка, подвал и название берутся из справочника на
+    момент выдачи заявки. Бланк не выбран — снимок пустой (маршрут подобран по
+    службе, печатается общая форма). Справочник недоступен — пустой снимок:
+    заявка создаётся, печать не падает."""
+    empty = _empty_blank_snapshot()
+    if body.blank_id is None:
+        return empty
+    store = _routing_store_or_none()
+    if store is None:
+        return empty
+    # Неизвестный/отключённый бланк — 422 тем же текстом, что и в авто-режиме:
+    # молча печатать общую форму, когда ОК выбрал бланк, — хуже внятной ошибки.
+    # Проверку «без шагов» НЕ делаем: в ручном режиме шаги задаёт сама ОК.
+    blank = _blank_row(store, body.blank_id)
+    if not blank:
+        raise HTTPException(
+            status_code=422,
+            detail="Бланк не найден (blank_id=%s) — выберите бланк из списка.%s"
+            % (body.blank_id, _blank_list_text(_available_blanks(store))),
+        )
+    if not blank.get("active"):
+        raise HTTPException(
+            status_code=422,
+            detail="Бланк «%s» отключён — выберите другой.%s"
+            % (
+                str(blank.get("name") or blank.get("code") or "?"),
+                _blank_list_text(_available_blanks(store)),
+            ),
+        )
+    return {
+        "blank_id": _int_or_none(blank.get("id")),
+        "blank_name": str(blank.get("name") or "") or None,
+        "blank_version": _int_or_none(blank.get("version")),
+        "blank_header_html": str(blank.get("header_html") or "") or None,
+        "blank_footer_lines": [
+            str(line).strip()
+            for line in (blank.get("footer_lines") or [])
+            if isinstance(line, str) and line.strip()
+        ],
+    }
+
+
 def _blank_or_422(store: DbRoutingStore, blank_id: int) -> dict:
     """Бланк маршрута: существует, активен и не пуст, иначе 422 с понятным текстом.
 
@@ -3193,6 +3260,13 @@ def create_request(
     # (справочник эскалации ключуется должностью 1С, а не должностью из AD).
     department = auto["department"] if auto else body.department
     position = auto["position"] if auto else body.position
+    # Снимок выбранного бланка (шапка/подвал/название/версия) нужен ЛЮБОМУ
+    # маршруту, а не только авто: шаги ОК задаёт вручную, а печать идёт по
+    # бланку. Без снимка печать выводила общую шапку с полями сотрудника и без
+    # подвала — то есть не по выбранному бланку (жалоба человека 2026-10-12).
+    blank_snapshot = (
+        {key: auto[key] for key in _BLANK_SNAPSHOT_KEYS} if auto else _blank_snapshot(body)
+    )
     try:
         request = _Request(
             id=store.next_id(),
@@ -3214,13 +3288,13 @@ def create_request(
             service_id=auto["service_id"] if auto else None,
             service_name=auto["service_name"] if auto else None,
             is_manager=auto["is_manager"] if auto else False,
-            # Снимок выбранного бланка (auto): правка справочника не должна
+            # Снимок выбранного бланка: правка справочника не должна
             # менять уже выданную заявку.
-            blank_id=auto["blank_id"] if auto else None,
-            blank_name=auto["blank_name"] if auto else None,
-            blank_version=auto["blank_version"] if auto else None,
-            blank_header_html=auto["blank_header_html"] if auto else None,
-            blank_footer_lines=list(auto["blank_footer_lines"] if auto else []),
+            blank_id=blank_snapshot["blank_id"],
+            blank_name=blank_snapshot["blank_name"],
+            blank_version=blank_snapshot["blank_version"],
+            blank_header_html=blank_snapshot["blank_header_html"],
+            blank_footer_lines=list(blank_snapshot["blank_footer_lines"]),
         )
         store.create(request)
     except RequestsUnavailable as exc:
