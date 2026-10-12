@@ -297,6 +297,20 @@ class StepsReplaceIn(BaseModel):
     manager: str | None = Field(
         default=None, description="Замена руководителя для шагов ad_direct_manager"
     )
+    # Отказавший шаг (статус «отклонён»/«возвращён») в правке маршрута решается
+    # одним из двух действий (решение человека 2026-10-12):
+    #   reopen_orders — вернуть в маршрут: снова ожидает, новый срок, отметки
+    #                   прежнего круга сняты (как при повторной подаче);
+    #   drop_orders   — убрать шаг из маршрута совсем (отказавшему больше не надо
+    #                   подписывать). Оба списка — по order, они не должны
+    #                   пересекаться; действовать могут только на отказавшие и
+    #                   возвращённые шаги (решения по ним не вытираются молча).
+    reopen_orders: list[int] = Field(
+        default_factory=list, description="Шаги, возвращённые в маршрут (order)"
+    )
+    drop_orders: list[int] = Field(
+        default_factory=list, description="Шаги, убранные из маршрута (order)"
+    )
 
 
 class HistoryOut(BaseModel):
@@ -3974,6 +3988,45 @@ def replace_steps(
         # Закрытые шаги сохраняем, ожидающие — заменяем новым набором.
         kept = [s for s in request.steps if s.status != STEP_PENDING]
         pending_before = [s for s in request.steps if s.status == STEP_PENDING]
+        # Отказавший шаг: либо вернуть в маршрут, либо убрать из него (решение
+        # человека 2026-10-12). Действия выполняются ДО пересборки ожидающих:
+        # вернувшийся шаг снова ждёт, а убранного среди шагов уже нет.
+        reopen = {int(order) for order in body.reopen_orders}
+        dropped = {int(order) for order in body.drop_orders}
+        if reopen & dropped:
+            raise HTTPException(
+                status_code=422,
+                detail="Шаг нельзя одновременно вернуть в маршрут и убрать из него",
+            )
+        if reopen or dropped:
+            # Только отказавшие/возвращённые: решение по шагу не стирается молча.
+            by_order = {s.order: s for s in request.steps}
+            for order in sorted(reopen | dropped):
+                step = by_order.get(order)
+                if step is None:
+                    raise HTTPException(
+                        status_code=422, detail="Шаг %s не найден в заявке" % order
+                    )
+                if step.status not in (STEP_REJECTED, STEP_RETURNED):
+                    raise HTTPException(
+                        status_code=422,
+                        detail="Вернуть или убрать можно только отказавший шаг "
+                        "(%s — %s)" % (order, step.status),
+                    )
+            for order in sorted(dropped):
+                request.steps = [s for s in request.steps if s.order != order]
+            for order in sorted(reopen):
+                step = next(s for s in request.steps if s.order == order)
+                step.status = STEP_PENDING
+                step.done_by = None
+                step.done_at = None
+                step.comment = None
+                # Отметки прежнего круга к новому сроку не относятся (как при
+                # повторной подаче): иначе согласовавший получил бы 409.
+                _clear_approvals(step)
+                step.expires_at = now + timedelta(days=route.approval_ttl_days)
+            kept = [s for s in request.steps if s.status != STEP_PENDING]
+            pending_before = [s for s in request.steps if s.status == STEP_PENDING]
         if body.blocks is not None:
             # Блочная правка: новые блоки продолжают нумерацию после уже
             # существующих, чтобы order не столкнулся с сохранёнными шагами.
@@ -4023,6 +4076,11 @@ def replace_steps(
         request.id,
         details={"reason": (body.reason or "").strip()[:200]},
     )
+    # Отдельными записями: по истории видно, что сделано с отказавшим шагом.
+    for order in sorted(dropped):
+        _audit(user.sam, "step.drop", request.id, f"order={order}")
+    for order in sorted(reopen):
+        _audit(user.sam, "step.reopen", request.id, f"order={order}")
     return _public_view(request, user)
 
 

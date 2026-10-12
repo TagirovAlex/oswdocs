@@ -181,10 +181,18 @@ const ROUTE_EDIT_STATUSES = ["Черновик", "На доработке"];
 //   group — группа AD (owner_group), user — персональный исполнитель (sam),
 //   fixed — несколько ответственных: StepSpec умеет одного, такой шаг править
 //   нельзя (см. routeBlocksPayload).
+//   refused — отказавший шаг (статус «отклонён»/«возвращён»): в маршрут сам он
+//   не входит, но ОК решает его судьбу двумя действиями — вернуть в маршрут или
+//   убрать (см. reopen_orders/drop_orders в StepsReplaceIn, решение человека
+//   2026-10-12).
 interface RouteStepDraft {
   key: string;
-  kind: "group" | "user" | "fixed";
+  kind: "group" | "user" | "fixed" | "refused";
   value: string;
+  // Порядок отказавшего шага — для действий «вернуть/убрать» (PATCH несёт order).
+  order?: number;
+  // Статус отказавшего шага — подпись в строке редактора.
+  refusedStatus?: string;
   // Резолвер шага (RESOLVERS в api/app/requests.py) — переносится в PATCH как
   // есть: без него шаг «руководитель сотрудника» стал бы групповым без
   // ответственных, и отметить его было бы некому (can_act вечно false).
@@ -240,7 +248,10 @@ function routeDraftFromSteps(steps: RequestStep[], knownGroups: string[]): Route
   const blocks: RouteBlockDraft[] = [];
   const byKey = new Map<number, RouteBlockDraft>();
   for (const step of steps) {
-    if (step.status !== "ожидает") continue;
+    // В правку входят ожидающие и отказавшие: судьбу отказавшего решает ОК
+    // («вернуть в маршрут» либо «убрать»). Согласованные и просроченные — нет.
+    const refused = step.status === "отклонён" || step.status === "возвращен";
+    if (step.status !== "ожидает" && !refused) continue;
     const blockIndex = Math.floor(step.order / 1000);
     const mode = Math.floor((step.order % 1000) / 100) === 1 ? "parallel" : "sequential";
     let block = byKey.get(blockIndex);
@@ -250,6 +261,19 @@ function routeDraftFromSteps(steps: RequestStep[], knownGroups: string[]): Route
       blocks.push(block);
     }
     block.mode = mode;
+    if (refused) {
+      block.steps.push({
+        key: nextRouteKey(),
+        kind: "refused",
+        value: step.owner_name || step.owner_group || `шаг ${step.order}`,
+        order: step.order,
+        refusedStatus: step.status,
+        resolver: step.resolver || "by_group",
+        requireComment: step.require_comment === true,
+        label: step.owner_name || step.owner_group || `шаг ${step.order}`,
+      });
+      continue;
+    }
     const assignees = step.assignees ?? [];
     const login = step.assignee ?? assignees[0] ?? "";
     const groupStep = step.resolver !== "by_user" && login === "";
@@ -283,16 +307,34 @@ function routeDraftFromSteps(steps: RequestStep[], knownGroups: string[]): Route
 // Тело PATCH /steps из черновика. Второе значение — список шагов, которые
 // отправить нельзя: правка блокируется понятным сообщением, молча выкидывать
 // согласующих или ронять шаг с забытым исполнителем нельзя.
-function routeBlocksPayload(blocks: RouteBlockDraft[]): {
+//
+// Отказавшие шаги (kind "refused") в маршрут не входят: их судьба передаётся
+// отдельно — reopen_orders (вернуть в маршрут) и drop_orders (убрать). Заранее
+// решённые шаги (помеченные в редакторе) в списки не попадают.
+function routeBlocksPayload(
+  blocks: RouteBlockDraft[],
+  // Решения по отказавшим шагам: order → «вернуть в маршрут» либо «убрать».
+  refusedDecisions: Record<number, "reopen" | "drop"> = {},
+): {
   blocks: Array<{ mode: "sequential" | "parallel"; steps: RouteStepSpec[] }>;
   blocked: string[];
+  reopenOrders: number[];
+  dropOrders: number[];
 } {
   const blocked: string[] = [];
+  const reopenOrders: number[] = [];
+  const dropOrders: number[] = [];
   const payload = blocks.map((block) => ({
     mode: block.mode,
     steps: block.steps.flatMap((step) => {
       if (step.kind === "fixed") {
         blocked.push(step.label);
+        return [];
+      }
+      if (step.kind === "refused") {
+        const decision = step.order === undefined ? undefined : refusedDecisions[step.order];
+        if (decision === "reopen") reopenOrders.push(step.order as number);
+        if (decision === "drop") dropOrders.push(step.order as number);
         return [];
       }
       // Пустой логин/группа — шаг выпал бы из маршрута молча, а ответственным
@@ -312,7 +354,12 @@ function routeBlocksPayload(blocks: RouteBlockDraft[]): {
       ];
     }),
   }));
-  return { blocks: payload.filter((block) => block.steps.length > 0), blocked };
+  return {
+    blocks: payload.filter((block) => block.steps.length > 0),
+    blocked,
+    reopenOrders,
+    dropOrders,
+  };
 }
 
 // Карточка заявки со всеми блоками (W5b + документы + вложения).
@@ -389,6 +436,12 @@ export function RequestCard(props: RequestCardProps) {
   const [routeOpen, setRouteOpen] = useState<boolean>(false);
   const [routeBlocks, setRouteBlocks] = useState<RouteBlockDraft[]>([]);
   const [routeReason, setRouteReason] = useState<string>("");
+  // Решения по отказавшим шагам в правке маршрута: order → «вернуть в маршрут»
+  // либо «убрать». Пока решения нет, шаг показывается и ждёт выбора; отправка
+  // несёт эти списки в PATCH (reopen_orders/drop_orders).
+  const [refusedDecisions, setRefusedDecisions] = useState<Record<number, "reopen" | "drop">>(
+    {},
+  );
   // Модалка выбора сотрудника AD для шага-исполнителя: логин набирать руками
   // нельзя — опечатка даёт шаг, который никто не отметит (решение человека
   // 2026-10-12). stepKey === null — добавляем шаг в блок, иначе меняем исполнителя.
@@ -1068,7 +1121,16 @@ export function RequestCard(props: RequestCardProps) {
     setRouteBlocks(routeDraftFromSteps(card.steps, stepGroups.map((g) => g.id)));
     setRouteReason("");
     setRouteError("");
+    // Каждый открытый редактор начинается без решений по отказавшим (решение
+    // человека 2026-10-12: судьба отказавшего — «вернуть» или «убрать»).
+    setRefusedDecisions({});
     setRouteOpen(true);
+  }
+
+  // Решение по отказавшему шагу: reopen — вернуть в маршрут, drop — убрать.
+  // Повторное нажатие другой кнопки меняет решение.
+  function decideRefusedStep(order: number, decision: "reopen" | "drop"): void {
+    setRefusedDecisions((prev) => ({ ...prev, [order]: decision }));
   }
 
   // Правка блока маршрута: режим, шаги, добавление/удаление и порядок.
@@ -1228,7 +1290,10 @@ export function RequestCard(props: RequestCardProps) {
   async function handleSaveRoute(): Promise<void> {
     if (!card || routeBusy) return;
     setRouteError("");
-    const { blocks, blocked } = routeBlocksPayload(routeBlocks);
+    const { blocks, blocked, reopenOrders, dropOrders } = routeBlocksPayload(
+      routeBlocks,
+      refusedDecisions,
+    );
     if (blocked.length > 0) {
       setRouteError(
         `Правка недоступна: ${blocked.join(", ")}. Такой шаг нельзя пересобрать — ` +
@@ -1242,7 +1307,10 @@ export function RequestCard(props: RequestCardProps) {
     }
     setRouteBusy(true);
     try {
-      await replaceRequestSteps(requestId, blocks, routeReason);
+      await replaceRequestSteps(requestId, blocks, routeReason, {
+        reopen: reopenOrders,
+        drop: dropOrders,
+      });
       setRouteOpen(false);
       // Ответ редактор закрывает, поэтому подтверждение показываем в общей
       // строке статуса карточки — иначе пользователь его не увидит.
@@ -1739,6 +1807,42 @@ export function RequestCard(props: RequestCardProps) {
                         <span className="sed-note">
                           Ответственные: {step.label}. Шаг с несколькими согласующими
                           меняется только в справочнике бланков.
+                        </span>
+                      ) : step.kind === "refused" ? (
+                        // Отказавший шаг: в маршрут сам не входит, но ОК решает —
+                        // вернуть в маршрут или убрать (решение человека 2026-10-12).
+                        <span className="sed-route-person">
+                          <span className="sed-meta">
+                            {step.value}
+                            {step.order !== undefined ? ` (отказ, шаг ${step.order})` : ""}
+                          </span>
+                          <button
+                            type="button"
+                            className="sed-btn sed-btn--ghost"
+                            aria-label={`Вернуть в маршрут ${bi + 1}.${si + 1}`}
+                            aria-pressed={
+                              step.order !== undefined &&
+                              refusedDecisions[step.order] === "reopen"
+                            }
+                            onClick={() =>
+                              step.order !== undefined && decideRefusedStep(step.order, "reopen")
+                            }
+                          >
+                            Вернуть в маршрут
+                          </button>
+                          <button
+                            type="button"
+                            className="sed-btn sed-btn--danger"
+                            aria-label={`Убрать шаг ${bi + 1}.${si + 1}`}
+                            aria-pressed={
+                              step.order !== undefined && refusedDecisions[step.order] === "drop"
+                            }
+                            onClick={() =>
+                              step.order !== undefined && decideRefusedStep(step.order, "drop")
+                            }
+                          >
+                            Убрать из маршрута
+                          </button>
                         </span>
                       ) : step.kind === "user" ? (
                         // Исполнитель выбирается модалкой AD: в шаге хранится

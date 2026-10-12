@@ -1999,7 +1999,7 @@ describe("CreateForm: порядок исполнителей в блоке", ()
     fireEvent.click(screen.getByRole("button", { name: "Добавить группу" }));
 
     // Групповой шаг встал вторым: его можно поднять наверх.
-    fireEvent.click(screen.getByRole("button", { name: "Поднять исполнителя SED_STEP_BUH" }));
+    fireEvent.click(screen.getByRole("button", { name: "Поднять исполнителя Бухгалтерия" }));
 
     // И «вверх» у первого шага больше не выключен.
     expect(
@@ -2058,9 +2058,9 @@ describe("CreateForm: блок с сотрудником и группой", () 
     );
     fireEvent.click(screen.getByRole("button", { name: "Добавить группу" }));
 
-    // Сотрудник не исчез, а группа добавилась следом.
+    // Сотрудник не исчез, а группа добавилась следом и показана названием.
     expect(screen.getByText(/Петров Пётр Петрович/)).toBeInTheDocument();
-    expect(screen.getByText("Бухгалтерия")).toBeInTheDocument();
+    expect(screen.getAllByText("Бухгалтерия").length).toBeGreaterThan(0);
 
     fireEvent.click(screen.getByText("Создать"));
     await waitFor(() => expect(createRequest).toHaveBeenCalled());

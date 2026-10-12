@@ -628,10 +628,17 @@ export async function replaceRequestSteps(
   id: string,
   blocks: Array<{ mode: "sequential" | "parallel"; steps: RouteStepSpec[] }>,
   reason?: string,
+  // Судьба отказавших шагов: вернуть в маршрут (reopen) либо убрать (drop).
+  refused?: { reopen: number[]; drop: number[] },
 ): Promise<RequestOut> {
   return requestJson<RequestOut>(`/api/requests/${encodeURIComponent(id)}/steps`, {
     method: "PATCH",
-    body: JSON.stringify({ blocks, reason: reason || undefined }),
+    body: JSON.stringify({
+      blocks,
+      reason: reason || undefined,
+      reopen_orders: refused?.reopen.length ? refused.reopen : undefined,
+      drop_orders: refused?.drop.length ? refused.drop : undefined,
+    }),
   });
 }
 

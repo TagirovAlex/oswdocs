@@ -1275,6 +1275,8 @@ describe("RequestCard", () => {
           },
         ],
         "Вымышленная причина правки",
+        // Отказанных шагов в этой заявке нет — оба списка пустая.
+        { reopen: [], drop: [] },
       ),
     );
   });
@@ -1452,11 +1454,125 @@ describe("RequestCard", () => {
           },
         ],
         "Вымышленная причина правки",
+        // Отказанных шагов в этой заявке нет — оба списка пустая.
+        { reopen: [], drop: [] },
       ),
     );
   });
 
-  // Порядок шага задаётся кнопками «вверх/вниз» — они остались в блоке правки
+  // Отказавший шаг в правке маршрута: его можно и вернуть в маршрут, и убрать
+  // из него (решение человека 2026-10-12). Решение уходит в PATCH полями
+  // reopen_orders/drop_orders.
+  it("скорректировать маршрут: отказавшего можно вернуть в маршрут", async () => {
+    vi.mocked(getStepGroups).mockResolvedValue([
+      { id: "SED_STEP_BUH", name: "Бухгалтерия" },
+      { id: "SED_STEP_HR", name: "Отдел кадров" },
+    ]);
+    vi.mocked(getRequest).mockResolvedValue(
+      requestWith("Громов Игорь Олегович", "На доработке", "REQ-0001", [
+        {
+          order: 1,
+          owner_group: "SED_STEP_BUH",
+          resolver: "by_group",
+          owner_name: "Сидорова Анна Сергеевна",
+          can_act: false,
+          status: "отклонён",
+          expires_at: "2026-10-05T10:00:00+00:00",
+        },
+        {
+          order: 2,
+          owner_group: "SED_STEP_HR",
+          resolver: "by_group",
+          can_act: false,
+          status: "ожидает",
+          expires_at: "2026-10-05T10:00:00+00:00",
+        },
+      ]),
+    );
+    vi.mocked(replaceRequestSteps).mockResolvedValue(
+      requestWith("Громов Игорь Олегович", "На доработке", "REQ-0001"),
+    );
+
+    renderCard();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Скорректировать маршрут" })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Скорректировать маршрут" }));
+    const editor = screen.getByLabelText("Правка маршрута");
+
+    // Отказавший показан в своём блоке с двумя действиями.
+    fireEvent.click(within(editor).getByRole("button", { name: "Вернуть в маршрут 1.1" }));
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить маршрут" }));
+
+    await waitFor(() =>
+      expect(vi.mocked(replaceRequestSteps)).toHaveBeenCalledWith(
+        "REQ-0001",
+        [
+          {
+            mode: "sequential",
+            steps: [{ owner_group: "SED_STEP_HR", resolver: "by_group", require_comment: false }],
+          },
+        ],
+        "",
+        { reopen: [1], drop: [] },
+      ),
+    );
+  });
+
+  it("скорректировать маршрут: отказавшего можно убрать из маршрута", async () => {
+    vi.mocked(getStepGroups).mockResolvedValue([
+      { id: "SED_STEP_BUH", name: "Бухгалтерия" },
+      { id: "SED_STEP_HR", name: "Отдел кадров" },
+    ]);
+    vi.mocked(getRequest).mockResolvedValue(
+      requestWith("Громов Игорь Олегович", "На доработке", "REQ-0001", [
+        {
+          order: 1,
+          owner_group: "SED_STEP_BUH",
+          resolver: "by_group",
+          owner_name: "Сидорова Анна Сергеевна",
+          can_act: false,
+          status: "возвращен",
+          expires_at: "2026-10-05T10:00:00+00:00",
+        },
+        {
+          order: 2,
+          owner_group: "SED_STEP_HR",
+          resolver: "by_group",
+          can_act: false,
+          status: "ожидает",
+          expires_at: "2026-10-05T10:00:00+00:00",
+        },
+      ]),
+    );
+    vi.mocked(replaceRequestSteps).mockResolvedValue(
+      requestWith("Громов Игорь Олегович", "На доработке", "REQ-0001"),
+    );
+
+    renderCard();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Скорректировать маршрут" })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Скорректировать маршрут" }));
+    const editor = screen.getByLabelText("Правка маршрута");
+
+    fireEvent.click(within(editor).getByRole("button", { name: "Убрать шаг 1.1" }));
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить маршрут" }));
+
+    await waitFor(() =>
+      expect(vi.mocked(replaceRequestSteps)).toHaveBeenCalledWith(
+        "REQ-0001",
+        [
+          {
+            mode: "sequential",
+            steps: [{ owner_group: "SED_STEP_HR", resolver: "by_group", require_comment: false }],
+          },
+        ],
+        "",
+        { reopen: [], drop: [1] },
+      ),
+    );
+  });
   // (решение человека 2026-10-12: кнопки нужно было выровнять, а не убирать),
   // а удаление шага и блока — отдельными кнопками.
   it("скорректировать маршрут: у шага есть вверх/вниз и удаление", async () => {

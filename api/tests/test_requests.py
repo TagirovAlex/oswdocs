@@ -35,7 +35,10 @@ from app.mailer import (  # noqa: E402
 )
 from app.requests import (  # noqa: E402
     IN_APPROVAL,
+    REWORK,
     STEP_APPROVED,
+    STEP_PENDING,
+    STEP_REJECTED,
     _employee_keys,
     _enterprise_names_map,
     _notify_assigned,
@@ -499,6 +502,120 @@ def test_patch_empty_blocks_422(client, hr, test_settings_override, route_overri
         headers=hr,
     )
     assert response.status_code == 422
+
+
+def _refused_request(client, requests_store, hr) -> tuple[str, int]:
+    """Заявка «На доработке»: первый шаг отказ��, второй ожидает.
+
+    Возвращает id заявки и order отказавшего шага (он же первый)."""
+    rid = _create(
+        client,
+        hr,
+        blocks=[
+            {
+                "mode": "sequential",
+                "steps": [
+                    {"owner_group": "SED_STEP_BUH"},
+                    {"owner_group": "SED_STEP_BUH"},
+                ],
+            }
+        ],
+    ).json()["id"]
+    requests_store.get(rid).steps[0].status = STEP_REJECTED
+    requests_store.get(rid).status = REWORK
+    requests_store.update(requests_store.get(rid))
+    return rid, requests_store.get(rid).steps[0].order
+
+
+def test_patch_route_reopens_refused_step(
+    client, hr, requests_store, test_settings_override, route_override
+):
+    """Отказавший шаг можно вернуть в маршрут: снова ожидает, отметки сняты.
+
+    Решение человека 2026-10-12: у ОК есть оба действия над отказавшим."""
+    rid, order = _refused_request(client, requests_store, hr)
+    response = client.patch(
+        f"/requests/{rid}/steps",
+        json={
+            "blocks": [
+                {"mode": "sequential", "steps": [{"owner_group": "SED_STEP_BUH"}]}
+            ],
+            "reopen_orders": [order],
+        },
+        headers=hr,
+    )
+    assert response.status_code == 200, response.text
+    steps = {s["order"]: s for s in response.json()["steps"]}
+    # Отказавший снова ожидает; второй шаг пересобран как был.
+    assert any(s["status"] == STEP_PENDING for s in steps.values())
+    assert any(e.action == "step.reopen" for e in audit_log.all())
+
+
+def test_patch_route_drops_refused_step(
+    client, hr, requests_store, test_settings_override, route_override
+):
+    """Отказавший шаг можно убрать из маршрута: шага в заявке больше нет."""
+    rid, order = _refused_request(client, requests_store, hr)
+    response = client.patch(
+        f"/requests/{rid}/steps",
+        json={
+            "blocks": [
+                {"mode": "sequential", "steps": [{"owner_group": "SED_STEP_BUH"}]}
+            ],
+            "drop_orders": [order],
+        },
+        headers=hr,
+    )
+    assert response.status_code == 200, response.text
+    # Отказавшего в заявке больше нет, а его order освободился под пересобранный шаг.
+    assert all(
+        s["status"] != STEP_REJECTED for s in response.json()["steps"]
+    )
+    assert all(
+        step.status != STEP_REJECTED for step in requests_store.get(rid).steps
+    )
+    assert any(e.action == "step.drop" for e in audit_log.all())
+
+
+def test_patch_route_refused_step_conflict_422(
+    client, hr, requests_store, test_settings_override, route_override
+):
+    """Один шаг нельзя одновременно вернуть и убрать — 422."""
+    rid, order = _refused_request(client, requests_store, hr)
+    response = client.patch(
+        f"/requests/{rid}/steps",
+        json={
+            "blocks": [
+                {"mode": "sequential", "steps": [{"owner_group": "SED_STEP_BUH"}]}
+            ],
+            "reopen_orders": [order],
+            "drop_orders": [order],
+        },
+        headers=hr,
+    )
+    assert response.status_code == 422
+    assert "одновременно" in response.json()["detail"]
+
+
+def test_patch_route_cannot_drop_approved_step(
+    client, hr, requests_store, test_settings_override, route_override
+):
+    """Согласованный шаг убрать нельзя — решение по нему не вытирается молча."""
+    rid = _create(client, hr).json()["id"]
+    requests_store.get(rid).steps[0].status = STEP_APPROVED
+    requests_store.update(requests_store.get(rid))
+    response = client.patch(
+        f"/requests/{rid}/steps",
+        json={
+            "blocks": [
+                {"mode": "sequential", "steps": [{"owner_group": "SED_STEP_BUH"}]}
+            ],
+            "drop_orders": [1],
+        },
+        headers=hr,
+    )
+    assert response.status_code == 422
+    assert "только отказавший" in response.json()["detail"]
 
 
 def test_reject_without_comment_422(client, hr, buh_owner, test_settings_override, route_override):

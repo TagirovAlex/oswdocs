@@ -233,6 +233,14 @@ function DownIcon() {
   );
 }
 
+// Название группы по коду из справочника (GET /api/step-groups). Шаг-группа в
+// списке исполнителей показывается названием, а не служебным кодом SED_STEP_* —
+// иначе сотрудник ОК видит в маршруте машинные коды (решение человека
+// 2026-10-12). Кода в справочнике нет (группа удалена) — показываем код.
+function groupTitle(groups: StepGroup[], id: string): string {
+  return groups.find((g) => g.id === id)?.name || id;
+}
+
 // Форма создания: единый экран, блоки по зависимостям.
 export function CreateForm(props: CreateFormProps) {
   // Блоки маршрута в этом файле уже называются blocks, поэтому права из сессии
@@ -1057,8 +1065,10 @@ function removeStep(blockId: string, stepIndex: number): void {
     loadGroupMembers(blockId, group);
   }
 
-  // Добавление выбранной группы в текущий блок: owner_group + резолвер by_group.
-  function addGroupToBlock(blockId: string, group: string): void {
+// Добавление выбранной группы в текущий блок: owner_group + резолвер by_group.
+// display_name — название из справочника, чтобы шаг в списке читался по-человечески
+// (в PATCH уходит owner_group, см. payload).
+function addGroupToBlock(blockId: string, group: string): void {
     if (group === "") return;
     markTouched();
     setBlocks((prev) =>
@@ -1068,7 +1078,7 @@ function removeStep(blockId: string, stepIndex: number): void {
               ...b,
               steps: [
                 ...b.steps,
-                { kind: "group", sam: "", display_name: group, owner_group: group, resolver: "by_group" },
+                { kind: "group", sam: "", display_name: groupTitle(groups, group), owner_group: group, resolver: "by_group" },
               ],
             }
           : b,
