@@ -638,6 +638,24 @@ a {
   flex-wrap: wrap;
 }
 
+/* Правка маршрута: поля и кнопки одной высоты, блок выглядит ровно (решение
+   человека 2026-10-12). Высота кнопки — 6px padding + 2px рамка + строка
+   16px, поэтому полям задаём ту же величину. */
+.sed-editor-row select,
+.sed-editor-row input,
+.sed-toolbar select,
+.sed-toolbar input {
+  min-height: 32px;
+  box-sizing: border-box;
+}
+
+/* Строка шага-исполнителя: ФИО с должностью слева, кнопка выбора рядом. */
+.sed-route-person {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .sed-editor-row--center {
   align-items: center;
 }

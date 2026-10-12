@@ -20,6 +20,7 @@ import {
   getStepGroups,
   printRequest,
   replaceRequestSteps,
+  searchAd,
   submitRequest,
   toExecution,
   uploadAttachment,
@@ -50,6 +51,7 @@ vi.mock("./requests-client", async (importOriginal) => {
     replaceRequestSteps: vi.fn(),
     getHistory: vi.fn(),
     getComments: vi.fn(),
+    searchAd: vi.fn(),
   };
 });
 
@@ -1375,15 +1377,97 @@ describe("RequestCard", () => {
     expect(vi.mocked(replaceRequestSteps)).not.toHaveBeenCalled();
   });
 
-  // С пустым исполнителем шаг не должен молча выпасть из маршрута.
-  it("скорректировать маршрут: шаг без исполнителя блокирует сохранение", async () => {
+  // Логин исполнителя не набирается руками: шаг-исполнитель выбирается модалкой
+  // AD (решение человека 2026-10-12) — опечатка в поле дала бы шаг, который
+  // никто не отметит.
+  it("скорректировать маршрут: исполнитель выбирается модалкой AD, логина поля нет", async () => {
+    vi.mocked(getStepGroups).mockResolvedValue([
+      { id: "SED_STEP_BUH", name: "Бухгалтерия" },
+    ]);
+    vi.mocked(searchAd).mockResolvedValue([
+      {
+        sam: "petrov.pp",
+        display_name: "Петров Пётр Петрович",
+        title: "Мастер участка",
+        department: "Цех № 1",
+        mail: "petrov@example.local",
+      },
+    ]);
     vi.mocked(getRequest).mockResolvedValue(
       requestWith("Громов Игорь Олегович", "Черновик", "REQ-0001", [
         {
           order: 1,
-          owner_group: "petrov.pp",
-          resolver: "by_user",
-          assignee: "petrov.pp",
+          owner_group: "SED_STEP_BUH",
+          resolver: "by_group",
+          can_act: false,
+          status: "ожидает",
+          expires_at: "2026-10-05T10:00:00+00:00",
+        },
+      ]),
+    );
+    vi.mocked(replaceRequestSteps).mockResolvedValue(
+      requestWith("Громов Игорь Олегович", "Черновик", "REQ-0001"),
+    );
+
+    renderCard();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Скорректировать маршрут" })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Скорректировать маршрут" }));
+    const editor = screen.getByLabelText("Правка маршрута");
+
+    // Поля ввода логина в редакторе нет.
+    expect(within(editor).queryByLabelText("Логин исполнителя 1.1")).toBeNull();
+    expect(within(editor).queryByLabelText("Логин исполнителя для блока 1")).toBeNull();
+
+    // Добавление шага-исполнителя открывает модалку выбора в AD.
+    fireEvent.click(within(editor).getByRole("button", { name: "Добавить шаг-исполнителя 1" }));
+    const dialog = await screen.findByRole("dialog", { name: "Выбрать сотрудника" });
+    fireEvent.change(within(dialog).getByLabelText("Поиск в AD"), { target: { value: "Петров" } });
+    await waitFor(() =>
+      expect(within(dialog).getByLabelText("Выбрать Петров Пётр Петрович")).toBeInTheDocument(),
+    );
+    fireEvent.click(within(dialog).getByLabelText("Выбрать Петров Пётр Петрович"));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Выбрать" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+    // В строке шага — ФИО с должностью, логина не видно.
+    expect(within(editor).getByText(/Петров Пётр Петрович, Мастер участка/)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Причина правки маршрута"), {
+      target: { value: "Вымышленная причина правки" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить маршрут" }));
+    await waitFor(() =>
+      expect(vi.mocked(replaceRequestSteps)).toHaveBeenCalledWith(
+        "REQ-0001",
+        [
+          {
+            mode: "sequential",
+            steps: [
+              { owner_group: "SED_STEP_BUH", resolver: "by_group", require_comment: false },
+              // Шаг-исполнитель: sam выбранного сотрудника, резолвер по умолчанию.
+              { sam: "petrov.pp", require_comment: false },
+            ],
+          },
+        ],
+        "Вымышленная причина правки",
+      ),
+    );
+  });
+
+  // Кнопок «вверх/вниз» у шага больше нет: порядок задаётся удалением и
+  // добавлением (решение человека 2026-10-12).
+  it("скорректировать маршрут: у шага нет кнопок «вверх/вниз», есть удаление", async () => {
+    vi.mocked(getStepGroups).mockResolvedValue([
+      { id: "SED_STEP_BUH", name: "Бухгалтерия" },
+    ]);
+    vi.mocked(getRequest).mockResolvedValue(
+      requestWith("Громов Игорь Олегович", "Черновик", "REQ-0001", [
+        {
+          order: 1,
+          owner_group: "SED_STEP_BUH",
+          resolver: "by_group",
           can_act: false,
           status: "ожидает",
           expires_at: "2026-10-05T10:00:00+00:00",
@@ -1396,10 +1480,12 @@ describe("RequestCard", () => {
       expect(screen.getByRole("button", { name: "Скорректировать маршрут" })).toBeInTheDocument(),
     );
     fireEvent.click(screen.getByRole("button", { name: "Скорректировать маршрут" }));
-    fireEvent.change(screen.getByLabelText("Логин исполнителя 1.1"), { target: { value: "" } });
-    fireEvent.click(screen.getByRole("button", { name: "Сохранить маршрут" }));
-    expect(screen.getByRole("alert")).toHaveTextContent("шаг без исполнителя");
-    expect(vi.mocked(replaceRequestSteps)).not.toHaveBeenCalled();
+    const editor = screen.getByLabelText("Правка маршрута");
+
+    expect(within(editor).queryByRole("button", { name: "Поднять шаг 1.1" })).toBeNull();
+    expect(within(editor).queryByRole("button", { name: "Опустить шаг 1.1" })).toBeNull();
+    expect(within(editor).getByRole("button", { name: "Удалить шаг 1.1" })).toBeInTheDocument();
+    expect(within(editor).getByRole("button", { name: "Удалить блок 1" })).toBeInTheDocument();
   });
 
   // Владельцу шага новые действия не показываются: у него нет блока

@@ -2,7 +2,7 @@
 // документы бегунка (печать) и скан-вложения. Используется в попапе
 // «карточка заявки» (?view=request&id=…) и на вкладке «Заявки».
 // Данные — из реального API (requests-client); значения — из settings, хардкода нет.
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ChangeEvent } from "react";
 import { hasBlock, me } from "./auth-client";
 import {
@@ -24,6 +24,7 @@ import {
   printRequest,
   replaceRequestSteps,
   rollbackRequest,
+  searchAd,
   stepLabel,
   submitRequest,
   toExecution,
@@ -32,6 +33,7 @@ import {
   withdrawRequest,
 } from "./requests-client";
 import type {
+  AdCandidate,
   AdGroupMember,
   AttachmentMeta,
   DocType,
@@ -387,8 +389,19 @@ export function RequestCard(props: RequestCardProps) {
   const [routeOpen, setRouteOpen] = useState<boolean>(false);
   const [routeBlocks, setRouteBlocks] = useState<RouteBlockDraft[]>([]);
   const [routeReason, setRouteReason] = useState<string>("");
-  // Логины AD, набранные для добавления шага-исполнителя (по блоку, черновик).
-  const [routeLogins, setRouteLogins] = useState<Record<string, string>>({});
+  // Модалка выбора сотрудника AD для шага-исполнителя: логин набирать руками
+  // нельзя — опечатка даёт шаг, который никто не отметит (решение человека
+  // 2026-10-12). stepKey === null — добавляем шаг в блок, иначе меняем исполнителя.
+  const [adPicker, setAdPicker] = useState<{ blockKey: string; stepKey: string | null } | null>(
+    null,
+  );
+  const [adQuery, setAdQuery] = useState<string>("");
+  const [adCandidates, setAdCandidates] = useState<AdCandidate[]>([]);
+  const [adSearching, setAdSearching] = useState<boolean>(false);
+  const [adSearchError, setAdSearchError] = useState<string>("");
+  const [adPickedSam, setAdPickedSam] = useState<string>("");
+  // Порядковый номер поиска: устаревшие ответы AD отбрасываем.
+  const adSeq = useRef(0);
   const [routeBusy, setRouteBusy] = useState<boolean>(false);
   const [routeError, setRouteError] = useState<string>("");
 
@@ -1084,7 +1097,7 @@ export function RequestCard(props: RequestCardProps) {
     setRouteBlocks((prev) => prev.filter((b) => b.key !== key));
   }
 
-  function addRouteStep(blockKey: string, kind: "group" | "user", value: string): void {
+  function addRouteStep(blockKey: string, kind: "group" | "user", value: string, label?: string): void {
     const trimmed = value.trim();
     if (trimmed === "") return;
     setRouteBlocks((prev) =>
@@ -1100,7 +1113,9 @@ export function RequestCard(props: RequestCardProps) {
                   value: trimmed,
                   resolver: kind === "group" ? "by_group" : "by_user",
                   requireComment: false,
-                  label: trimmed,
+                  // label — представление шага для интерфейса (у шага-исполнителя
+                  // это ФИО и должность, выбранные в модалке AD).
+                  label: label ?? trimmed,
                 },
               ],
             }
@@ -1117,21 +1132,69 @@ export function RequestCard(props: RequestCardProps) {
     );
   }
 
-  // Порядок шага: кнопки «вверх/вниз» (доступнее перетаскивания), как в
-  // редакторе состава бланка (admin-settings.tsx, moveStep).
-  function moveRouteStep(blockKey: string, stepKey: string, delta: number): void {
-    setRouteBlocks((prev) =>
-      prev.map((b) => {
-        if (b.key !== blockKey) return b;
-        const index = b.steps.findIndex((s) => s.key === stepKey);
-        const target = index + delta;
-        if (index < 0 || target < 0 || target >= b.steps.length) return b;
-        const steps = [...b.steps];
-        const [row] = steps.splice(index, 1);
-        steps.splice(target, 0, row);
-        return { ...b, steps };
-      }),
-    );
+  // Модалка выбора сотрудника AD: логин набирать руками нельзя — опечатка даёт
+  // шаг, который никто не отметит (решение человека 2026-10-12). stepKey === null —
+  // добавляем шаг в блок, иначе меняем исполнителя существующего.
+  function openAdPicker(blockKey: string, stepKey: string | null): void {
+    setAdPicker({ blockKey, stepKey });
+    setAdQuery("");
+    setAdCandidates([]);
+    setAdSearchError("");
+    setAdPickedSam("");
+  }
+
+  function closeAdPicker(): void {
+    setAdPicker(null);
+    setAdQuery("");
+    setAdCandidates([]);
+    setAdSearchError("");
+    setAdPickedSam("");
+  }
+
+  // Живой поиск сотрудников в AD для модалки (debounce 300 мс).
+  useEffect(() => {
+    if (adPicker === null) return;
+    const q = adQuery.trim();
+    if (q.length < 2) {
+      setAdCandidates([]);
+      setAdSearchError("");
+      return;
+    }
+    const seq = adSeq.current + 1;
+    adSeq.current = seq;
+    setAdSearching(true);
+    const timer = setTimeout(() => {
+      searchAd(q)
+        .then((items) => {
+          if (adSeq.current !== seq) return;
+          setAdCandidates(items);
+          setAdSearching(false);
+          setAdSearchError("");
+        })
+        .catch((e: unknown) => {
+          if (adSeq.current !== seq) return;
+          setAdSearching(false);
+          setAdCandidates([]);
+          setAdSearchError(
+            e instanceof Error ? e.message : "Не удалось найти сотрудников в AD",
+          );
+        });
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [adQuery, adPicker]);
+
+  // Подтверждение выбора: новый шаг-исполнитель либо смена существующего.
+  function applyAdPick(): void {
+    if (adPicker === null) return;
+    const picked = adCandidates.find((item) => item.sam === adPickedSam);
+    if (!picked) return;
+    const label = [picked.display_name, picked.title].filter(Boolean).join(", ");
+    if (adPicker.stepKey !== null) {
+      patchRouteStep(adPicker.blockKey, adPicker.stepKey, { value: picked.sam, label });
+    } else {
+      addRouteStep(adPicker.blockKey, "user", picked.sam, label);
+    }
+    closeAdPicker();
   }
 
   function patchRouteStep(blockKey: string, stepKey: string, patch: Partial<RouteStepDraft>): void {
@@ -1661,16 +1724,19 @@ export function RequestCard(props: RequestCardProps) {
                           меняется только в справочнике бланков.
                         </span>
                       ) : step.kind === "user" ? (
-                        <label className="sed-field">
-                          Логин AD
-                          <input
-                            aria-label={`Логин исполнителя ${bi + 1}.${si + 1}`}
-                            value={step.value}
-                            onChange={(e) =>
-                              patchRouteStep(block.key, step.key, { value: e.target.value })
-                            }
-                          />
-                        </label>
+                        // Исполнитель выбирается модалкой AD: в шаге хранится
+                        // логин (sam), в строке показываем ФИО и должность.
+                        <span className="sed-route-person">
+                          <span className="sed-meta">{step.label || step.value}</span>
+                          <button
+                            type="button"
+                            className="sed-btn sed-btn--ghost"
+                            aria-label={`Выбрать сотрудника ${bi + 1}.${si + 1}`}
+                            onClick={() => openAdPicker(block.key, step.key)}
+                          >
+                            Выбрать сотрудника
+                          </button>
+                        </span>
                       ) : (
                         <label className="sed-field">
                           Группа
@@ -1695,37 +1761,20 @@ export function RequestCard(props: RequestCardProps) {
                           StepSpec одного ответственного не выразит, поэтому
                           сохранение с таким шагом блокируется. */}
                       {step.kind !== "fixed" && (
-                        <>
-                          <button
-                            type="button"
-                            className="sed-btn sed-btn--ghost"
-                            aria-label={`Поднять шаг ${bi + 1}.${si + 1}`}
-                            disabled={si === 0}
-                            onClick={() => moveRouteStep(block.key, step.key, -1)}
-                          >
-                            Вверх
-                          </button>
-                          <button
-                            type="button"
-                            className="sed-btn sed-btn--ghost"
-                            aria-label={`Опустить шаг ${bi + 1}.${si + 1}`}
-                            disabled={si === block.steps.length - 1}
-                            onClick={() => moveRouteStep(block.key, step.key, 1)}
-                          >
-                            Вниз
-                          </button>
-                          <button
-                            type="button"
-                            className="sed-btn sed-btn--danger"
-                            aria-label={`Удалить шаг ${bi + 1}.${si + 1}`}
-                            onClick={() => removeRouteStep(block.key, step.key)}
-                          >
-                            Удалить
-                          </button>
-                        </>
+                        <button
+                          type="button"
+                          className="sed-btn sed-btn--danger"
+                          aria-label={`Удалить шаг ${bi + 1}.${si + 1}`}
+                          onClick={() => removeRouteStep(block.key, step.key)}
+                        >
+                          Удалить
+                        </button>
                       )}
                     </div>
                   ))}
+                  {/* Добавление шага: группа — селектом, сотрудник — модалкой AD.
+                      Порядок шагов задаётся удалением и добавлением (кнопок
+                      «вверх/вниз» больше нет — решение человека 2026-10-12). */}
                   <div className="sed-toolbar sed-mt-8">
                     <select
                       aria-label={`Группа для блока ${bi + 1}`}
@@ -1742,22 +1791,11 @@ export function RequestCard(props: RequestCardProps) {
                         </option>
                       ))}
                     </select>
-                    <input
-                      aria-label={`Логин исполнителя для блока ${bi + 1}`}
-                      placeholder="Логин AD"
-                      value={routeLogins[block.key] ?? ""}
-                      onChange={(e) =>
-                        setRouteLogins((prev) => ({ ...prev, [block.key]: e.target.value }))
-                      }
-                    />
                     <button
                       type="button"
                       className="sed-btn sed-btn--ghost"
                       aria-label={`Добавить шаг-исполнителя ${bi + 1}`}
-                      onClick={() => {
-                        addRouteStep(block.key, "user", routeLogins[block.key] ?? "");
-                        setRouteLogins((prev) => ({ ...prev, [block.key]: "" }));
-                      }}
+                      onClick={() => openAdPicker(block.key, null)}
                     >
                       Добавить шаг-исполнителя
                     </button>
@@ -1786,6 +1824,89 @@ export function RequestCard(props: RequestCardProps) {
               </div>
               {routeError && <div role="alert">{routeError}</div>}
             </section>
+          )}
+
+          {/* Модалка выбора сотрудника AD для шага-исполнителя. Логин вводится
+              только выбором из каталога: опечатка в поле дала бы шаг, который
+              никто не отметит (решение человека 2026-10-12). */}
+          {adPicker !== null && (
+            <div className="sed-modal-backdrop">
+              <div
+                className="sed-modal"
+                role="dialog"
+                aria-modal="true"
+                aria-label="Выбрать сотрудника"
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") closeAdPicker();
+                }}
+              >
+                <h4>Выбор сотрудника</h4>
+                <label className="sed-field">
+                  Поиск в AD
+                  <input
+                    autoFocus
+                    aria-label="Поиск в AD"
+                    placeholder="ФИО в AD"
+                    value={adQuery}
+                    onChange={(e) => setAdQuery(e.target.value)}
+                  />
+                </label>
+                {adSearching && <div className="sed-note">Поиск в AD…</div>}
+                {adSearchError && <div role="alert">{adSearchError}</div>}
+                {adCandidates.length > 0 && (
+                  <table className="sed-table" aria-label="Найденные сотрудники">
+                    <thead>
+                      <tr>
+                        <th scope="col">
+                          <span className="sed-hidden">Выбор</span>
+                        </th>
+                        <th scope="col">ФИО</th>
+                        <th scope="col">Должность</th>
+                        <th scope="col">Подразделение</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {adCandidates.map((item) => (
+                        <tr key={item.sam}>
+                          <td>
+                            <input
+                              type="radio"
+                              name="ad-pick"
+                              aria-label={`Выбрать ${item.display_name}`}
+                              checked={adPickedSam === item.sam}
+                              onChange={() => setAdPickedSam(item.sam)}
+                            />
+                          </td>
+                          <td>{item.display_name}</td>
+                          <td>{item.title}</td>
+                          <td>{item.department}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+                {adCandidates.length === 0 && !adSearching && adSearchError === "" && (
+                  <div className="sed-note">
+                    {adQuery.trim().length < 2
+                      ? "Введите фамилию (от двух символов)."
+                      : "Никого не нашли."}
+                  </div>
+                )}
+                <div className="sed-toolbar sed-mt-8">
+                  <button
+                    type="button"
+                    className="sed-btn"
+                    disabled={adPickedSam === ""}
+                    onClick={applyAdPick}
+                  >
+                    Выбрать
+                  </button>
+                  <button type="button" className="sed-btn sed-btn--ghost" onClick={closeAdPicker}>
+                    Отмена
+                  </button>
+                </div>
+              </div>
+            </div>
           )}
 
           {cardActionStatus && <div role="status">{cardActionStatus}</div>}
