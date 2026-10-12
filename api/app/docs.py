@@ -731,28 +731,91 @@ def _step_marks(step: Dict[str, object]) -> List[str]:
     ]
 
 
-def _add_steps(document: object, context: Dict[str, object]) -> None:
-    """Шаги маршрута: каждый отдельным блоком строк (не таблицей).
+# Колонки таблицы шагов (мм). Полезная ширина A4 при полях 20/15 — 175 мм.
+STEP_TABLE_WIDTHS_MM = (10.0, 85.0, 45.0, 35.0)
+STEP_TABLE_HEADERS = ("№", "Содержание шага", "Ответственные", "Отметка")
 
-    Блок шага: «№. Название (последовательно/параллельно)» жирным, пункты текста
-    (stage_lines), «Ответственный: …» (все ответственные снимка) и
-    «Отметка/дата: …» (статус + дата либо место для росчерка). Плейсхолдеры
-    подставляются в названии и пунктах с ЭКРАНИРОВАНИЕМ значений (как в шапке):
-    текст шага разбирается как разметка бланка, свободный текст заявки из
-    {content}/{subject} не должен становиться его тегами."""
-    for position, step in enumerate(
-        (item for item in (context.get("steps") or []) if isinstance(item, dict)),
-        start=1,
-    ):
-        heading = document.add_paragraph()
+
+def _cell_paragraph(cell: object, *, bold: bool = False, center: bool = False, first: bool = True):
+    """Абзац ячейки с плотными отступами (шаг не должен «раздувать» строку).
+
+    first=True — взять пустой абзац, который python-docx создаёт в ячейке;
+    False — добавить следующий (иначе все строки ячейки слиплись бы в одну)."""
+    from docx.shared import Pt
+
+    paragraph = cell.paragraphs[0] if first else cell.add_paragraph()
+    fmt = paragraph.paragraph_format
+    fmt.space_before = Pt(0)
+    fmt.space_after = Pt(0)
+    fmt.line_spacing = 1.0
+    if center:
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    if bold:
+        run = paragraph.add_run("")
+        run.bold = True
+    return paragraph
+
+
+def _row_flag(row: object, tag: str) -> None:
+    """Включить свойство строки таблицы: повтор «шапки» на странице / запрет разрыва."""
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    tr_pr = row._tr.get_or_add_trPr()
+    element = OxmlElement("w:%s" % tag)
+    element.set(qn("w:val"), "true")
+    tr_pr.append(element)
+
+
+def _add_steps(document: object, context: Dict[str, object]) -> None:
+    """Шаги маршрута — таблицей: №, содержание, ответственные, отметка.
+
+    По решению человека 2026-10-12 шаги печатаются таблицей, а не набором
+    абзацев: номер, содержание шага (название с режимом и текст), ответственные
+    (каждый с новой строки — так подписывать удобнее) и отметка (статус с датой
+    либо пустая строка под росчерк на бумаге). Над таблицей — строка заголовков,
+    повторяющаяся на следующей странице; строка шага не разрывается между
+    страницами, отступы плотные — типовой бланк из 5–8 шагов укладывается в
+    одну страницу (гарантии на сотню шагов нет, это свойство объёма текста).
+
+    Плейсхолдеры подставляются в названии и тексте с ЭКРАНИРОВАНИЕМ значений
+    (как в шапке): свободный текст заявки из {content}/{subject} не должен
+    становиться тегами бланка."""
+    from docx.shared import Mm
+
+    steps = [item for item in (context.get("steps") or []) if isinstance(item, dict)]
+    if not steps:
+        return
+    table = document.add_table(rows=1, cols=len(STEP_TABLE_HEADERS))
+    try:
+        table.style = "Table Grid"
+    except KeyError:
+        # Стиля нет в минимальном шаблоне — печатаем без явной рамки.
+        pass
+    header = table.rows[0]
+    _row_flag(header, "tblHeader")  # повтор заголовков на новой странице
+    for index, (cell, title) in enumerate(zip(header.cells, STEP_TABLE_HEADERS)):
+        paragraph = _cell_paragraph(cell, bold=True, center=True)
+        paragraph.runs[0].text = title
+        cell.width = Mm(STEP_TABLE_WIDTHS_MM[index])
+    for position, step in enumerate(steps, start=1):
+        row = table.add_row()
+        _row_flag(row, "cantSplit")  # шаг не рвётся между страницами
+        cells = row.cells
+        for index, cell in enumerate(cells):
+            cell.width = Mm(STEP_TABLE_WIDTHS_MM[index])
+        # Столбец «№».
+        number = _cell_paragraph(cells[0], center=True)
+        number.add_run(str(position))
+        # Столбец «Содержание шага»: название с режимом + текст шага.
+        title_cell = _cell_paragraph(cells[1])
         _add_stage_text(
-            heading,
-            "%d. %s (%s)"
+            title_cell,
+            "%s (%s)"
             % (
-                position,
-                render_blank_text(
-                    str(step.get("title") or "").strip(), context, escape=True
-                ),
+                render_blank_text(str(step.get("title") or "").strip(), context, escape=True),
                 _step_mode_text(step.get("approval_mode")),
             ),
             bold=True,
@@ -761,17 +824,21 @@ def _add_steps(document: object, context: Dict[str, object]) -> None:
             text = str(line).strip()
             if text:
                 _add_stage_text(
-                    document.add_paragraph(),
+                    _cell_paragraph(cells[1], first=False),
                     render_blank_text(text, context, escape=True),
                 )
-        responsible = document.add_paragraph()
-        responsible.add_run("Ответственный: ").bold = True
-        responsible.add_run(", ".join(_step_responsible(step)))
-        marks = document.add_paragraph()
-        marks.add_run("Отметка/дата: ").bold = True
-        marks.add_run(", ".join(_step_marks(step)))
-        # Пустая строка после блока каждого шага (отделяет шаги друг от друга).
-        document.add_paragraph()
+        # Столбец «Ответственные»: каждый — с новой строки.
+        for index, name in enumerate(_step_responsible(step)):
+            paragraph = _cell_paragraph(cells[2], bold=index == 0, first=index == 0)
+            if index == 0:
+                paragraph.runs[0].text = name
+            else:
+                paragraph.add_run(name)
+        # Столбец «Отметка»: статус и дата выполнения либо место под росчерк.
+        marks_cell = _cell_paragraph(cells[3], bold=True)
+        marks_cell.runs[0].text = ", ".join(_step_marks(step))
+    # Отбивка перед подвалом (пустой абзац не «схлопывается» в LibreOffice).
+    document.add_paragraph()
 
 
 def _add_blank_footer_lines(document: object, context: Dict[str, object]) -> None:

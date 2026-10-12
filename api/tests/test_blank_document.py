@@ -156,13 +156,35 @@ def _opened(blob: bytes):
 
 
 def _paragraph_texts(blob: bytes) -> list[str]:
-    """Тексты абзацев тела документа по порядку (таблиц в единой вёрстке нет)."""
-    return [paragraph.text for paragraph in _opened(blob).paragraphs]
+    """Тексты абзацев бланка: тело и ячейки таблиц (шаги печатаются таблицей)."""
+    document = _opened(blob)
+    texts = [paragraph.text for paragraph in document.paragraphs]
+    for table in document.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                texts.extend(paragraph.text for paragraph in cell.paragraphs)
+    return texts
 
 
 def _body_paragraphs(blob: bytes) -> list:
-    """Абзацы тела документа по порядку."""
+    """Абзацы тела документа по порядку (шаги таблицей в тело не входят)."""
     return _opened(blob).paragraphs
+
+
+def _step_table(blob: bytes):
+    """Таблица шагов бланка (первая таблица документа)."""
+    tables = _opened(blob).tables
+    assert tables, "в бланке нет таблицы шагов"
+    return tables[0]
+
+
+def _cell_texts(table: object, row_index: int) -> list[str]:
+    """Тексты абзацев ячеек строки таблицы."""
+    return [
+        paragraph.text
+        for cell in table.rows[row_index].cells
+        for paragraph in cell.paragraphs
+    ]
 
 
 def _request(**overrides) -> _Request:
@@ -265,7 +287,7 @@ def _fake_result(pdf_path: str) -> BypassResult:
 # ---------------------------------------------------------------------------
 
 def test_build_blank_document_is_docx_with_header_steps_and_footer():
-    """DOCX из данных: название бланка, поля сотрудника, шаги блоками, подвал."""
+    """DOCX из данных: название бланка, поля сотрудника, шаги таблицей, подвал."""
     blob = build_blank_document(_context())
     assert blob[:2] == b"PK"
     text = _docx_text(blob)
@@ -278,41 +300,53 @@ def test_build_blank_document_is_docx_with_header_steps_and_footer():
         FAKE_ENTERPRISE_NAME,  # предприятие
     ):
         assert expected in text, expected
-    texts = _paragraph_texts(blob)
-    # Каждый шаг — отдельным блоком строк: заголовок с режимом, пункты,
-    # ответственный и отметка.
-    assert "1. Бухгалтерия вымышленная (последовательно)" in texts
-    assert "Проверить расчёты" in texts
-    assert f"Ответственный: {FAKE_ASSIGNEE_FIO}" in texts
-    assert "Отметка/дата: Согласовано, 05.10.2026 12:00" in texts
+    # Шаги печатаются таблицей: строка заголовков + строка на шаг.
+    table = _step_table(blob)
+    assert len(_opened(blob).tables) == 1
+    assert len(table.rows) == len(_context()["steps"]) + 1
+    # Каждый шаг — строкой: номер в своей ячейке, название с режимом и текст
+    # в ячейке «Содержание шага», ответственные и отметка — в своих ячейках.
+    assert _cell_texts(table, 1) == [
+        "1",
+        "Бухгалтерия вымышленная (последовательно)",
+        "Проверить расчёты",
+        "Подписать акт",
+        FAKE_ASSIGNEE_FIO,
+        "Согласовано, 05.10.2026 12:00",
+    ]
     # Группа AD печатается как есть.
-    assert "Ответственный: SED_STEP_HR" in texts
+    assert "SED_STEP_HR" in _cell_texts(table, 2)
     footer = _opened(blob).sections[0].footer.paragraphs[0].text
     assert "REQ-0001" in footer and FAKE_BLANK in footer and "v2" in footer
-    # Таблиц в единой вёрстке нет.
-    assert _opened(blob).tables == []
 
 
 def test_build_blank_document_step_mode_parallel_and_sequential_labels():
     """Режим шага печатается пометкой: parallel — «параллельно», иначе — «последовательно»."""
     context = _context()
     context["steps"][1]["approval_mode"] = "parallel"
-    texts = _paragraph_texts(build_blank_document(context))
-    assert "1. Бухгалтерия вымышленная (последовательно)" in texts
-    assert "2. Отдел кадров вымышленный (параллельно)" in texts
+    table = _step_table(build_blank_document(context))
+    assert _cell_texts(table, 1)[1] == "Бухгалтерия вымышленная (последовательно)"
+    assert _cell_texts(table, 2)[1] == "Отдел кадров вымышленный (параллельно)"
     # Без режима в снимке (старая заявка) — «последовательно».
     plain = _context()
     plain["steps"] = [dict(plain["steps"][0], approval_mode=None)]
-    plain_texts = _paragraph_texts(build_blank_document(plain))
-    assert "1. Бухгалтерия вымышленная (последовательно)" in plain_texts
+    plain_table = _step_table(build_blank_document(plain))
+    assert _cell_texts(plain_table, 1)[1] == "Бухгалтерия вымышленная (последовательно)"
 
 
 def test_build_blank_document_step_mark_without_date_has_paper_line():
-    """Шаг без даты: статус и место под росчерк (печать от руки)."""
-    texts = _paragraph_texts(build_blank_document(_context()))
-    marks = [text for text in texts if text.startswith("Отметка/дата:")]
-    assert marks[0] == "Отметка/дата: Согласовано, 05.10.2026 12:00"
-    assert marks[1] == f"Отметка/дата: {STEP_PENDING}, " + "_" * 10
+    """Шаг без даты: статус и место под росчерк (печать от руки). Отметка в своей
+    ячейке и без префикса «Отметка/дата:» — он печатается в заголовке столбца."""
+    table = _step_table(build_blank_document(_context()))
+    assert _cell_texts(table, 1) == [
+        "1",
+        "Бухгалтерия вымышленная (последовательно)",
+        "Проверить расчёты",
+        "Подписать акт",
+        FAKE_ASSIGNEE_FIO,
+        "Согласовано, 05.10.2026 12:00",
+    ]
+    assert _cell_texts(table, 2)[-1] == STEP_PENDING + ", " + "_" * 10
 
 
 def test_build_blank_document_qr_image_and_caption():
@@ -342,6 +376,92 @@ def test_build_blank_document_title_falls_back_to_doc_type():
     context["blank_name"] = ""
     context["doc_type_code"] = "УВОЛЬНЕНИЕ"
     assert "УВОЛЬНЕНИЕ" in _docx_text(build_blank_document(context))
+
+
+# ---------------------------------------------------------------------------
+# Вёрстка шагов таблицей (решение человека 2026-10-12)
+# ---------------------------------------------------------------------------
+
+def test_build_blank_document_step_table_column_headers():
+    """Первая строка таблицы — заголовки столбцов, жирные и по центру."""
+    table = _step_table(build_blank_document(_context()))
+    header = table.rows[0]
+    assert [cell.text for cell in header.cells] == [
+        "№",
+        "Содержание шага",
+        "Ответственные",
+        "Отметка",
+    ]
+    for cell in header.cells:
+        assert all(run.bold for run in cell.paragraphs[0].runs)
+    # Столбцов ровно четыре — под каждый заголовок свой.
+    assert len(table.columns) == 4
+    assert all(len(row.cells) == 4 for row in table.rows)
+
+
+def test_build_blank_document_step_table_step_number_in_first_cell():
+    """Номер шага печатается в первой ячейке своей строки (без «N. » в названии)."""
+    table = _step_table(build_blank_document(_context()))
+    assert table.rows[1].cells[0].text == "1"
+    assert table.rows[2].cells[0].text == "2"
+    # В ячейке «Содержание шага» номера нет — он уже в своей ячейке.
+    assert _cell_texts(table, 1)[1] == "Бухгалтерия вымышленная (последовательно)"
+
+
+def test_build_blank_document_step_table_responsible_are_separate_paragraphs():
+    """Несколько ответственных — каждый абзацем своей ячейки (подписывать удобно).
+
+    Пустой снимок (групповой шаг) — группа AD печатается как есть."""
+    context = _context()
+    context["steps"] = [
+        dict(
+            context["steps"][0],
+            fio="",
+            assignee_names=[FAKE_ASSIGNEE_FIO, "Кассир Вымышленный"],
+        ),
+        context["steps"][1],
+    ]
+    table = _step_table(build_blank_document(context))
+    responsible = table.rows[1].cells[2]
+    assert [paragraph.text for paragraph in responsible.paragraphs] == [
+        FAKE_ASSIGNEE_FIO,
+        "Кассир Вымышленный",
+    ]
+    # Первый абзац ячейки ответственных — жирный, остальные обычные.
+    assert all(run.bold for run in responsible.paragraphs[0].runs)
+    assert not any(run.bold for run in responsible.paragraphs[1].runs)
+    # Группа AD — одна ячейка, одна строка.
+    assert table.rows[2].cells[2].text == "SED_STEP_HR"
+
+
+def test_build_blank_document_step_table_rows_keep_flags():
+    """Строка заголовков повторяется на странице (tblHeader), строка шага не
+    разрывается (cantSplit)."""
+    from docx.oxml.ns import qn
+
+    table = _step_table(build_blank_document(_context()))
+
+    def flagged(row, tag):
+        properties = row._tr.trPr
+        return properties is not None and properties.find(qn("w:%s" % tag)) is not None
+
+    assert flagged(table.rows[0], "tblHeader")
+    for row in table.rows[1:]:
+        assert flagged(row, "cantSplit"), row
+        assert not flagged(row, "tblHeader")
+
+
+def test_build_blank_document_step_table_mark_without_prefix():
+    """Отметка в ячейке «Отметка» печатается без префикса «Отметка/дата:» —
+    он вынесен в заголовок столбца."""
+    table = _step_table(build_blank_document(_context()))
+    marks = [row.cells[3].text for row in table.rows[1:]]
+    assert marks == [
+        "Согласовано, 05.10.2026 12:00",
+        STEP_PENDING + ", " + "_" * 10,
+    ]
+    assert not any("Отметка" in mark for mark in marks)
+    assert "Отметка/дата" not in _docx_text(build_blank_document(_context()))
 
 
 # ---------------------------------------------------------------------------
@@ -380,9 +500,14 @@ def test_build_blank_document_keeps_only_allowed_tags():
     assert "<img" not in text
     # Голые спецсимволы остаются текстом (Word экранирует их сам).
     assert any("Сумма 5 < 7 и 8 > 3" in value for value in texts)
-    paragraphs = _body_paragraphs(blob)
-    bolded = [run.text for paragraph in paragraphs for run in paragraph.runs if run.bold]
-    italiced = [run.text for paragraph in paragraphs for run in paragraph.runs if run.italic]
+    # Начертания разрешённых тегов работают и в ячейке «Содержание шага».
+    step_paragraphs = [
+        paragraph
+        for cell in _step_table(blob).rows[1].cells
+        for paragraph in cell.paragraphs
+    ]
+    bolded = [run.text for paragraph in step_paragraphs for run in paragraph.runs if run.bold]
+    italiced = [run.text for paragraph in step_paragraphs for run in paragraph.runs if run.italic]
     assert "расчёты" in bolded
     assert "долги" in italiced
 
@@ -401,7 +526,7 @@ def test_build_blank_document_breaks_line_on_allowed_tag():
             "done_at": "",
         }
     ]
-    texts = _paragraph_texts(build_blank_document(context))
+    texts = _cell_texts(_step_table(build_blank_document(context)), 1)
     assert any(value.splitlines() == ["Первый пункт", "второй пункт"] for value in texts)
 
 
@@ -420,7 +545,8 @@ def test_build_blank_document_header_html_comes_from_snapshot():
     assert f"Бланк {FAKE_BLANK}, количество шагов: 2, руководитель {FAKE_MANAGER_FIO}" in paragraphs
     # Шапка заменяет список полей: подписей полей на бланке нет.
     assert "Табельный номер" not in _docx_text(blob)
-    assert _opened(blob).tables == []
+    # Шаги печатаются таблицей, шапка осталась абзацами тела.
+    assert len(_step_table(blob).rows) == 3
 
 
 def test_build_blank_document_header_html_keeps_allowed_formatting():
@@ -526,7 +652,11 @@ def test_build_blank_document_stage_lines_heading():
         }
     ]
     blob = build_blank_document(context)
-    paragraphs = [paragraph for paragraph in _body_paragraphs(blob)]
+    paragraphs = [
+        paragraph
+        for cell in _step_table(blob).rows[1].cells
+        for paragraph in cell.paragraphs
+    ]
     subheading = next(p for p in paragraphs if p.text == "Подраздел вымышленный")
     plain = next(p for p in paragraphs if p.text == "Обычный пункт")
     assert all(run.bold for run in subheading.runs)
@@ -591,11 +721,22 @@ def test_build_blank_document_header_placeholder_value_stays_plain_text():
         f"Тема: тема {markup}",
     ]
     # Начертание осталось только у разметки самой шапки и жирных заголовков
-    # шагов; значение плейсхолдера начертания не дало.
-    bold = [run.text for paragraph in paragraphs for run in paragraph.runs if run.bold]
+    # шагов (теперь в таблице); значение плейсхолдера начертания не дало.
+    step_paragraphs = [
+        paragraph
+        for row in _step_table(blob).rows
+        for cell in row.cells
+        for paragraph in cell.paragraphs
+    ]
+    bold = [
+        run.text
+        for paragraph in list(paragraphs) + step_paragraphs
+        for run in paragraph.runs
+        if run.bold
+    ]
     assert FAKE_BLANK in bold
     assert "Акт вымышленного увольнения" in bold
-    assert not any("жирно" in run for run in bold)
+    assert "жирно" not in bold
 
 
 def test_build_blank_document_placeholder_markup_does_not_break_print():
@@ -619,8 +760,9 @@ def test_build_blank_document_placeholder_markup_does_not_break_print():
     assert paragraphs[1] == f"Содержание: {markup}"
     # Подвал печатается целиком, неизвестный плейсхолдер остаётся текстом.
     assert paragraphs[-2:] == [f"Подпись {markup}", "Подпись {не_существует}"]
-    # Содержащее значение из {content} печатается в тексте шага, документ цел.
-    assert _opened(blob).tables == []
+    # Значение плейсхолдера печатается СИМВОЛАМИ: разметка из значения не
+    # становится разметкой бланка (начертание получают только свои теги шага).
+    assert f"Этап {markup} (последовательно)" in _cell_texts(_step_table(blob), 1)
     assert _docx_names(blob)[0] == "[Content_Types].xml"
 
 
@@ -656,7 +798,7 @@ def test_build_blank_document_without_footer_lines_prints_nothing():
     for lines in (None, [], [" ", ""]):
         blob = build_blank_document(_context(blank_footer_lines=lines))
         assert "Подпись" not in _docx_text(blob)
-        assert _opened(blob).tables == []
+        assert len(_step_table(blob).rows) == 3
 
 
 def test_build_blank_document_footer_plain_line_unchanged():
@@ -854,8 +996,8 @@ def test_build_blank_document_step_text_substitutes_placeholders():
             "done_at": "",
         }
     ]
-    texts = _paragraph_texts(build_blank_document(context))
-    assert f"1. Согласование {FAKE_FIO} (последовательно)" in texts
+    texts = _cell_texts(_step_table(build_blank_document(context)), 1)
+    assert "Согласование " + FAKE_FIO + " (последовательно)" in texts
     for expected in (
         f"Должность {FAKE_POSITION}",
         f"Табельный {FAKE_TAB_NUM}",
@@ -887,20 +1029,24 @@ def test_build_blank_document_step_placeholder_value_stays_plain_text():
         }
     ]
     blob = build_blank_document(context)
-    paragraphs = _body_paragraphs(blob)
-    texts = [paragraph.text for paragraph in paragraphs]
-    # Заголовок шага — один абзац: значение печатается символами, неизвестный
-    # плейсхолдер остаётся текстом.
-    assert f"1. Этап согласование — прощайте {markup} (последовательно)" in texts
+    table = _step_table(blob)
+    texts = _cell_texts(table, 1)
+    # Заголовок шага — один абзац ячейки «Содержание шага»: значение печатается
+    # символами, неизвестный плейсхолдер остаётся текстом.
+    assert f"Этап согласование — прощайте {markup} (последовательно)" in texts
     assert any(value == f"Пункт тема {markup}" for value in texts)
     assert "Пункт {не_существует}" in texts
     # Начертание — только у разметки самого шага (название этапа печатается
     # жирным), значение плейсхолдера начертания не дало.
-    bold = [run.text for paragraph in paragraphs for run in paragraph.runs if run.bold]
+    step_paragraphs = [
+        paragraph for cell in table.rows[1].cells for paragraph in cell.paragraphs
+    ]
+    bold = [run.text for paragraph in step_paragraphs for run in paragraph.runs if run.bold]
     assert "согласование" in bold
+    assert not any("жирно" in run for run in bold)
     # Документ собран целиком (значение печать не сломало).
     assert _docx_names(blob)[0] == "[Content_Types].xml"
-    assert _opened(blob).tables == []
+    assert len(table.rows) == 2
 
 
 # ---------------------------------------------------------------------------

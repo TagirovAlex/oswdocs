@@ -754,16 +754,22 @@ def _blank_text(blob: bytes) -> str:
         return archive.read("word/document.xml").decode("utf-8")
 
 
-def _responsible_line(blob: bytes) -> str:
-    """Строка «Ответственный: …» готового бланка (docx нужен на стенде)."""
+def _responsible_names(blob: bytes) -> list[str]:
+    """Ответственные шага с готового бланка: абзацы ячейки «Ответственные».
+
+    Шаги печатаются таблицей (решение человека 2026-10-12), каждый
+    ответственный — с новой строки, поэтому собираем список абзацев ячейки."""
     pytest.importorskip("docx")
     from docx import Document
 
-    prefix = "Ответственный: "
-    for paragraph in Document(io.BytesIO(blob)).paragraphs:
-        if paragraph.text.startswith(prefix):
-            return paragraph.text[len(prefix):]
-    return ""
+    document = Document(io.BytesIO(blob))
+    tables = document.tables
+    assert tables, "в бланке нет таблицы шагов"
+    names: list[str] = []
+    for cell in tables[0].rows[1].cells[2].paragraphs:
+        if cell.text.strip():
+            names.append(cell.text)
+    return names
 
 
 def _print_context(requests_store, routing_store, rid: str) -> dict:
@@ -831,7 +837,7 @@ def test_print_lists_all_step_assignees(
     blob = build_blank_document(dict(context, qr_url=""))
     for _sam, fio in ROSTER:
         assert fio in _blank_text(blob), fio
-    assert _responsible_line(blob) == ", ".join(fio for _sam, fio in ROSTER)
+    assert _responsible_names(blob) == [fio for _sam, fio in ROSTER]
 
 
 def test_print_single_assignee_has_one_name(
@@ -847,7 +853,7 @@ def test_print_single_assignee_has_one_name(
         fio=ROSTER[0][1],
     )
     blob = build_blank_document(dict(context, qr_url=""))
-    assert _responsible_line(blob) == ROSTER[0][1]
+    assert _responsible_names(blob) == [ROSTER[0][1]]
 
 
 def test_print_group_step_shows_group_name(
@@ -860,7 +866,7 @@ def test_print_group_step_shows_group_name(
         assignees=[], assignee="", assignee_names=[], fio="", owner=STEP_GROUP
     )
     blob = build_blank_document(dict(context, qr_url=""))
-    assert _responsible_line(blob) == STEP_GROUP
+    assert _responsible_names(blob) == [STEP_GROUP]
 
 
 def test_print_context_reads_user_card_once_per_login(
