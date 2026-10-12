@@ -1181,6 +1181,16 @@ fieldset textarea {
   min-height: 24px;
 }
 
+/* Высокий вариант области ввода (шапка бланка, текст шага): без него редактор
+   выглядит однострочным текстовым полем и не читается как визуальный. */
+.sed-rte__field--tall {
+  padding: 8px 10px;
+}
+
+.sed-rte__field--tall .ProseMirror {
+  min-height: 120px;
+}
+
 .sed-rte__field p {
   margin: 4px 0;
 }

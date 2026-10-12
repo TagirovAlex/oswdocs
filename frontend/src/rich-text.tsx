@@ -29,6 +29,9 @@ interface RichTextEditorProps {
   // Курсор/фокус в редакторе (строки подвала: так выбранная строка сама
   // становится целью вставки плейсхолдера). Без него — ничего не сообщается.
   onFocus?: () => void;
+  // Размер области ввода: compact — строка подвала, tall — многострочный текст
+  // (шапка бланка, текст шага). Без него редактор выглядит однострочным полем.
+  area?: "compact" | "tall";
 }
 
 // Общие атрибуты иконок панели (конвенция layout.tsx): инлайн-SVG, currentColor,
@@ -249,7 +252,7 @@ export function richTextAppend(html: string, text: string): string {
 
 // Визуальный редактор текста этапа: панель кнопок + область ввода.
 export function RichTextEditor(props: RichTextEditorProps) {
-  const { label, value, onChange, hint, insert, onFocus } = props;
+  const { label, value, onChange, hint, insert, onFocus, area = "compact" } = props;
   // Последнее значение, отправленное редактором: правки изнутри в effect не
   // возвращаются (иначе setContent на каждом вводе сбрасывал бы курсор).
   const emitted = useRef<string>(value);
@@ -317,7 +320,11 @@ export function RichTextEditor(props: RichTextEditorProps) {
           );
         })}
       </div>
-      <div className="sed-rte__field" role="group" aria-label={label}>
+      <div
+        className={area === "tall" ? "sed-rte__field sed-rte__field--tall" : "sed-rte__field"}
+        role="group"
+        aria-label={label}
+      >
         <EditorContent editor={editor} />
       </div>
       {hint && <div className="sed-note">{hint}</div>}

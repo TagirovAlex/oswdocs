@@ -1654,7 +1654,8 @@ function BlanksEditor() {
           <RichTextEditor
             label="Шапка бланка"
             value={form.header_html}
-            hint="Разметка попадёт в печатный документ; подставьте плейсхолдеры кнопками ниже."
+            area="tall"
+            hint="Шапка печатается первой: разметка и выравнивание попадут в документ. Плейсхолдеры вставляются кнопками ниже."
             insert={headerInsert}
             onChange={(html) => setForm({ ...form, header_html: html })}
           />
@@ -1940,6 +1941,7 @@ function BlanksEditor() {
                 <RichTextEditor
                   label={`Текст шага ${i + 1}`}
                   value={richTextLinesToHtml(step.stage_lines)}
+                  area="tall"
                   onChange={(html) => patchStep(i, { stage_lines: richTextHtmlToLines(html) })}
                 />
               </div>
@@ -2489,6 +2491,7 @@ function StepsCatalogEditor() {
           <RichTextEditor
             label="Текст шага справочника"
             value={richTextLinesToHtml(form.stage_lines)}
+            area="tall"
             onChange={(html) => setForm({ ...form, stage_lines: richTextHtmlToLines(html) })}
           />
         </div>
