@@ -1490,22 +1490,26 @@ export function RequestCard(props: RequestCardProps) {
                       {actStep.approved_count ?? 0} из {stepAssigneeCount(actStep)} согласовали
                     </div>
                   )}
-                  <label className="sed-field">
+<label className="sed-field">
                     Комментарий к решению
                     <textarea
                       aria-label="Комментарий к решению"
-                      aria-required={actStep.require_comment === true}
+                      // Причина обязательна ВСЕГДА: сервер не принимает отказ и
+                      // возврат без неё (_check_comment), даже если шаг не
+                      // помечен require_comment (решение человека 2026-10-12).
+                      aria-required={true}
                       rows={4}
-                      required={actStep.require_comment === true}
-                      placeholder={
-                        actStep.require_comment === true
-                          ? "Комментарий обязателен (в том числе при согласовании)"
-                          : "Комментарий (обязателен при отказе/возврате)"
-                      }
+                      required
+                      placeholder="Комментарий; при отказе или возврате — причина обязательна"
                       value={decisionComment}
                       onChange={(e) => setDecisionComment(e.target.value)}
                     />
                   </label>
+                  <div className="sed-note">
+                    Отказ и возврат без причины не сохраняются: причина уходит инициатору
+                    в письме и в историю заявки. При согласовании комментарий обязателен,
+                    если это требует шаг.
+                  </div>
                   {decisionError && <div role="alert">{decisionError}</div>}
                   <div className="sed-toolbar sed-mt-8">
                     <button
