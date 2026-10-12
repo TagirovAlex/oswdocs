@@ -310,6 +310,81 @@ describe("CreateForm", () => {
     expect(screen.queryByRole("textbox", { name: "Табельный №" })).not.toBeInTheDocument();
   });
 
+  // Справочные поля из карточки 1С (подразделение, должность) и содержание не
+  // обязательны: карточка может быть без них, а содержание разрешено пустым —
+  // отправка проходит (решения человека 2026-10-12).
+  it("карточка 1С без подразделения и должности + пустое содержание: отправка проходит", async () => {
+    vi.mocked(searchAd).mockResolvedValue([adCandidate]);
+    vi.mocked(searchEmployees).mockResolvedValue({
+      items: [
+        {
+          key: "ENT_PRIMER_1|zup_t1|Т-000201",
+          tab_num: "Т-000201",
+          fio: "Громов Игорь Олегович",
+          dept: "",
+          position: "",
+          needs_manual_review: false,
+        },
+      ],
+    });
+    vi.mocked(getEmployeeCard).mockResolvedValue({
+      key: "ENT_PRIMER_1|zup_t1|Т-000201",
+      enterprise: "ENT_PRIMER_1",
+      base_code: "zup_t1",
+      tab_num: "Т-000201",
+      truth_source: "1c",
+      link: { linked: false },
+      divergences: [],
+      needs_manual_review: false,
+      fio: "Громов Игорь Олегович",
+      dept: "",
+      position: "",
+    });
+    vi.mocked(createRequest).mockResolvedValue({
+      id: "REQ-0311",
+      status: "Черновик",
+      route_origin: "custom",
+      department: "",
+      position: "",
+      created_by: "petrov.pp",
+      steps: [],
+    });
+    vi.mocked(submitRequest).mockResolvedValue({
+      id: "REQ-0311",
+      status: "На согласовании",
+      route_origin: "custom",
+      department: "",
+      position: "",
+      created_by: "petrov.pp",
+      steps: [],
+    });
+
+    render(<CreateForm role="hr" />);
+    await waitFor(() => expect(screen.getByLabelText("Предприятие")).toBeInTheDocument());
+    fireEvent.change(screen.getByLabelText("Предприятие"), { target: { value: "ENT_PRIMER_1" } });
+    fireEvent.change(screen.getByLabelText("Поиск сотрудника"), { target: { value: "Громов" } });
+    await waitFor(() => expect(screen.getByText("Громов Игорь Олегович")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("Громов Игорь Олегович"));
+    await waitFor(() => expect(screen.getByText("Маршрут согласования")).toBeInTheDocument());
+
+    await switchToManualRoute();
+    await addAdExecutor();
+    // Тема заполнена, содержание — намеренно пустое.
+    fireEvent.change(screen.getByLabelText("Тема"), { target: { value: "Увольнение" } });
+    fireEvent.change(screen.getByLabelText("Содержание"), { target: { value: "" } });
+
+    fireEvent.click(screen.getByText("Отправить на согласование"));
+
+    await waitFor(() => expect(submitRequest).toHaveBeenCalledWith("REQ-0311"));
+    // Подсказки о незаполненном нет.
+    expect(screen.queryByText(/Не заполнено/)).toBeNull();
+    // В теле содержание уходит пустым, подразделение/должность — как из 1С.
+    const body = vi.mocked(createRequest).mock.calls[0][0];
+    expect(body.content).toBe("");
+    expect(body.department).toBe("");
+    expect(body.position).toBe("");
+  });
+
   // Выбранный сотрудник — текст-ссылка на карточку (окно-попап), рядом крестик
   // очистки в ту же строку; крестик возвращает поиск.
   it("выбранный сотрудник — ссылка на карточку, крестик возвращает поиск", async () => {
@@ -1778,7 +1853,8 @@ describe("CreateForm", () => {
     render(<CreateForm role="hr" />);
     await fillEmployeeManually("custom");
     await addAdExecutor();
-    // Тема и содержание оставлены пустыми (хелпер их заполняет — чистим).
+    // Тема пустая (хелпер её заполняет — чистим); содержание оставляем пустым
+    // и убеждаемся, что в списке недостающих его нет.
     fireEvent.change(screen.getByLabelText("Тема"), { target: { value: "" } });
     fireEvent.change(screen.getByLabelText("Содержание"), { target: { value: "" } });
     const submit = screen.getByText("Отправить на согласование");
@@ -1788,15 +1864,17 @@ describe("CreateForm", () => {
 
     // Сводку ищем по тексту, а не по роли alert: в форме есть и другие сообщения
   // (например, об ошибке предпросмотра маршрута) с той же ролью.
+// Содержание обязательным не считается (решение человека 2026-10-12): пустое
+  // содержание не попадает в сводку и не подсвечивается.
   const summary = await screen.findByText(/Не заполнено/);
   expect(summary).toHaveTextContent(/тема/);
-  expect(summary).toHaveTextContent(/содержание/);
-    // Поля помечены для доступности и подсвечены классом.
-    expect(screen.getByLabelText("Тема")).toHaveAttribute("aria-invalid", "true");
-    expect(screen.getByLabelText("Содержание")).toHaveAttribute("aria-invalid", "true");
-    // Запрос на создание не уходил.
-    expect(createRequest).not.toHaveBeenCalled();
-  });
+  expect(summary).not.toHaveTextContent(/содержание/);
+  // Поля помечены для доступности и подсвечены классом.
+  expect(screen.getByLabelText("Тема")).toHaveAttribute("aria-invalid", "true");
+  expect(screen.getByLabelText("Содержание")).not.toHaveAttribute("aria-invalid");
+  // Запрос на создание не уходил.
+  expect(createRequest).not.toHaveBeenCalled();
+});
 
   // Подсказка не врёт: ввод в поле снимает его из списка, остальные остаются.
   it("ввод в подсвеченное поле убирает его из подсказки", async () => {
@@ -1817,8 +1895,8 @@ describe("CreateForm", () => {
     await waitFor(() =>
       expect(screen.getByLabelText("Тема")).not.toHaveAttribute("aria-invalid", "true"),
     );
-    // Содержание так и осталось не заполненным.
-    expect(screen.getByLabelText("Содержание")).toHaveAttribute("aria-invalid", "true");
+    // Содержание так и осталось пустым — и это больше не проблема.
+    expect(screen.queryByText(/Не заполнено/)).toBeNull();
     expect(createRequest).not.toHaveBeenCalled();
   });
 

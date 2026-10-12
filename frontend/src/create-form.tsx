@@ -753,10 +753,13 @@ const confirmLink = async () => {
     if (parts.length < 3) {
       return; // битый ключ — подразделение/должность останутся пустыми («—»)
     }
+    // Подразделение и должность приходят из карточки сотрудника АСХД — запрос
+    // асинхронный, а сама карточка может быть без этих значений. Поля СПРАВОЧНЫЕ
+    // (решение человека 2026-10-12), поэтому пустыми они отправку не блокируют.
     void getEmployeeCard(enterprise, parts[1], hit.tab_num)
       .then((card) => {
-        setDepartment(card.dept ?? "");
-        setPosition(card.position ?? "");
+        setDepartment(card?.dept ?? "");
+        setPosition(card?.position ?? "");
       })
       .catch(() => {
         // Карточка недоступна — подразделение/должность останутся «—».
@@ -1088,26 +1091,24 @@ function changeRouteMode(mode: RouteMode): void {
     enterprise: "предприятие",
     tab_num: "табельный номер",
     fio: "ФИО сотрудника",
-    department: "подразделение",
-    position: "должность",
     subject: "тема",
-    content: "содержание",
     blank: "бланк",
     steps: "шаги маршрута",
   };
 
-  // Перечень обязательного — по контракту CreateRequestIn: enterprise, fio,
-  // tab_num, department, position, subject, content без default (остальное
-  // необязательно, например doc_type_code — вид документа разрешено не задавать).
+  // Обязательное при отправке: предприятие, табельный номер, ФИО и тема.
+  // НЕ обязательны (решения человека 2026-10-12):
+  //  - содержание — API принимает пустую строку;
+  //  - подразделение и должность — справочные значения из карточки 1С, сам
+  //    раздел только показывает их и не редактируется; карточка может быть
+  //    без этих значений;
+  //  - вид документа (doc_type_code) — необязателен по контракту.
   function missingFields(): string[] {
     const gaps: string[] = [];
     if (enterprise === "") gaps.push("enterprise");
     if (tabNum.trim() === "") gaps.push("tab_num");
     if (fio.trim() === "") gaps.push("fio");
-    if (department.trim() === "") gaps.push("department");
-    if (position.trim() === "") gaps.push("position");
     if (subject.trim() === "") gaps.push("subject");
-    if (content.trim() === "") gaps.push("content");
     if (routeMode === "auto") {
       // Маршрут из справочников: нужен бланк (иначе 422 — см. _blank_required_422).
       if (blankId === "" && !blankAutopick) gaps.push("blank");
