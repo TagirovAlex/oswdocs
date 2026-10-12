@@ -553,6 +553,23 @@ def require_block(
         )
 
 
+def has_block(
+    user,
+    code: str,
+    store: PermissionsStore | None = None,
+    settings: Settings | None = None,
+) -> bool:
+    """Есть ли у пользователя блок права — БЕЗ отказа (для показа, а не гейта).
+
+    Там, где нет блока, ничего не показываем, но 403 пользователю не возвращаем:
+    это витрина (счётчики папок, вкладки настроек), а не операция. Справочник
+    недоступен — False: показывать нечего, показывать будем после починки."""
+    try:
+        return code in user_permissions(user, store, settings).blocks
+    except PermissionsUnavailable:
+        return False
+
+
 def keeps_block_after_change(
     catalog: PermissionCatalog,
     user_groups: Sequence[str],

@@ -523,7 +523,7 @@ async function readPermissionDetail(res: Response): Promise<string | null> {
 // 404 — шаблона нет, 409 — нельзя снять права у себя, 422 — неверный состав
 // (неизвестный блок/защищённый пустым/лишний блок в owner), 503 — справочник
 // недоступен (доступ закрыт, но это не «нет прав»).
-async function requestPermissions<T>(path: string, method: "GET" | "PUT", data?: unknown): Promise<T> {
+async function requestPermissions<T>(path: string, method: "GET" | "PUT" | "POST", data?: unknown): Promise<T> {
   const token = getToken();
   if (!token) {
     throw new ApiHttpError(401, "Нет токена");
@@ -582,6 +582,15 @@ export async function savePermissionTemplate(
 // GET /api/settings/permissions/groups: перечень групп AD из кэша + дата синхронизации.
 export async function getPermissionGroups(): Promise<PermissionGroupsData> {
   return requestPermissions<PermissionGroupsData>("/api/settings/permissions/groups", "GET");
+}
+
+// Проверить группу AD по ТОЧНОМУ имени и добавить её состав в кэш: без этого
+// группа, которой не было в справочнике владельцев шагов, в выборе прав не
+// появлялась (ридер AD ищет группу только по точному CN, не по подстроке).
+export async function addPermissionGroup(name: string): Promise<PermissionGroup> {
+  return requestPermissions<PermissionGroup>("/api/settings/permissions/groups", "POST", {
+    name,
+  });
 }
 
 // Файлы-шаблоны .docx (doc_templates[].file) больше не используются: по решению

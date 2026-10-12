@@ -558,3 +558,73 @@ def test_protected_template_rejects_empty_blocks(perms):
     assert raised.value.status_code == 422
     assert "Защищённый шаблон" in raised.value.detail
     assert perms.load_catalog().template("admin").blocks
+
+
+# --- Правка прав: папки по блоку и проверка группы AD по точному имени ---
+
+
+def test_folders_full_tree_for_block_request_create(client, hr_headers, perms):
+    """Полное дерево папок — по блоку request_create (решение человека 2026-10-12)."""
+    data = client.get("/folders", headers=hr_headers).json()
+    assert {item["id"] for item in data} >= {"agreement", "revision", "execution", "done", "draft"}
+
+
+def test_permission_group_lookup_by_exact_name(client, admin_headers):
+    """Группа по точному имени проверяется в AD и попадает в кэш (только чтение)."""
+    from app.employees import get_ad_reader
+
+    class _Reader:
+        def group_members(self, group: str):
+            assert group == "TEST_AD_GROUP_X"
+            return []
+
+        def list_all_titles(self):
+            return []
+
+    # Подменяем ридер AD: обёртка настройки прав берёт подмену из
+    # dependency_overrides (как и остальные офлайн-тесты).
+    app.dependency_overrides[get_ad_reader] = lambda: _Reader()
+    try:
+        response = client.post(
+            "/settings/permissions/groups",
+            json={"name": "TEST_AD_GROUP_X"},
+            headers=admin_headers,
+        )
+        assert response.status_code == 200
+        assert response.json()["name"] == "TEST_AD_GROUP_X"
+        assert audit_log.all()[-1].action == "permissions.group.add"
+    finally:
+        app.dependency_overrides.pop(get_ad_reader, None)
+
+
+def test_permission_group_lookup_unknown_name_404(client, admin_headers):
+    """Группы нет в AD — 404 с понятным текстом, а не 500."""
+    from app.ad_reader import AdNotFound
+    from app.employees import get_ad_reader
+
+    class _Reader:
+        def group_members(self, group: str):
+            raise AdNotFound("Группа %r не найдена" % group)
+
+        def list_all_titles(self):
+            return []
+
+    app.dependency_overrides[get_ad_reader] = lambda: _Reader()
+    try:
+        response = client.post(
+            "/settings/permissions/groups",
+            json={"name": "TEST_NO_SUCH_GROUP"},
+            headers=admin_headers,
+        )
+        assert response.status_code == 404
+        assert "не найдена" in response.json()["detail"]
+    finally:
+        app.dependency_overrides.pop(get_ad_reader, None)
+
+
+def test_permission_group_lookup_empty_name_422(client, admin_headers):
+    """Пустое имя — 422 до похода в AD."""
+    response = client.post(
+        "/settings/permissions/groups", json={"name": "  "}, headers=admin_headers
+    )
+    assert response.status_code == 422

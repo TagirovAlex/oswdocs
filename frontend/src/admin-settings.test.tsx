@@ -1753,9 +1753,9 @@ describe("AdminSettings", () => {
 
     const dialog = await screen.findByRole("dialog", { name: "Выбрать группы" });
     await waitFor(() => expect(screen.getByLabelText("Выбрать группу TEST_OK_2")).toBeInTheDocument());
-    // Кэш, а не живой AD: в подписи есть источник и дата синхронизации.
+    // Источник — кэш: в диалоге сказано прямо, откуда берётся список.
     expect(within(dialog).getByText(/последняя синхронизация/)).toBeInTheDocument();
-    expect(within(dialog).getByText(/Это кэш, а не живой AD/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/Поиск ниже ищет по кэшу/)).toBeInTheDocument();
     // Поиск по названию группы.
     fireEvent.change(screen.getByLabelText("Поиск по названию группы"), {
       target: { value: "TEST_ADMINS" },

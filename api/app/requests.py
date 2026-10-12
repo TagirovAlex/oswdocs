@@ -35,6 +35,7 @@ from .permissions import (
     BLOCK_REQUEST_DELETE,
     BLOCK_REQUESTS_LIST,
     BLOCK_STEP_DECIDE,
+    has_block,
     require_block,
 )
 from .mailer import (
@@ -3307,7 +3308,13 @@ def list_folders(
     settings: Settings = Depends(get_settings),
     store: RequestsStore = Depends(get_requests_store),
 ) -> list[FolderOut]:
-    """Счетчики папок (Волна 1): всем авторизованным; владельцу — только mine."""
+    """Счетчики папок (Волна 1): всем авторизованным; владельцу — только mine.
+
+    Полное дерево папок — по блоку request_create (ОК и выше, включая
+    администратора СЭД): раньше проверка шла по ролям `_is_hr` (hr/hr_admin/
+    admin), и администратор СЭД видел одну папку «Мои задачи», хотя его карточка
+    показывалась без обрезки ПДн — дерево и карточка расходились (решение
+    человека 2026-10-12: дерево дать по блоку)."""
     settings.ensure_read_only()
     try:
         requests = store.list_all()
@@ -3323,7 +3330,7 @@ def list_folders(
     for item in requests:
         _restore_step_owner_kinds(item, stage_kinds)
     folders: list[FolderOut] = []
-    if _is_hr(user):
+    if has_block(user, BLOCK_REQUEST_CREATE, settings=settings):
         folders = [
             FolderOut(
                 id="agreement",

@@ -401,7 +401,7 @@ export function SedLayout(props: SedLayoutProps) {
         <main className="sed-content">
           {tab === "Справочник" && <Directory blocks={blocks} />}
           {tab === "Сопоставление" && <LinkMatch blocks={blocks} />}
-          {tab === "Настройки" && <AdminSettings role={role} />}
+          {tab === "Настройки" && <AdminSettings role={role} blocks={blocks} />}
           {tab === "Заявки" && (
           <>
           {/* Фильтры одним блоком во всю ширину правой колонки, выше тулбара. */}

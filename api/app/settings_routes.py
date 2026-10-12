@@ -15,7 +15,7 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import bindparam, create_engine, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -25,7 +25,11 @@ from .ad_groups_cache import (
     GroupsCacheStore,
     GroupsCacheUnavailable,
     get_groups_cache_store,
+    sync_ad_group_members,
 )
+from .ad_reader import AdUnavailable
+# Ридер AD для проверки группы по имени — берём лениво: employees.py импортирует
+# этот модуль, прямой импорт создал бы цикл.
 from .audit import AuditEvent, audit_log
 from .config import Settings, get_settings
 from .deps import CurrentUser, get_current_user
@@ -2391,5 +2395,88 @@ def list_permission_groups(
             for item in groups
         ],
         "synced_at": max(synced).isoformat() if synced else None,
+    }
+
+
+class PermissionGroupIn(BaseModel):
+    """Имя группы AD для проверки и добавления в справочник (точное имя CN)."""
+
+    name: str = Field(description="Точное имя группы AD (CN)")
+
+
+def _ad_reader_dependency(request: Request) -> object | None:
+    """Ридер AD для проверки группы (ленивый импорт: employees.py импортирует нас).
+
+    Подмену берём из dependency_overrides приложения — так же, как в
+    deps._settings_store_or_none: иначе офлайн-тесты подменяли бы get_ad_reader
+    через приложение, а мы звали бы функцию напрямую и получали настоящий ридер.
+    Вернёт None без настроенного AD — эндпоинт тогда отвечает 503, а не падает."""
+    from .employees import get_ad_reader
+
+    overrides = getattr(request.app, "dependency_overrides", {})
+    factory = overrides.get(get_ad_reader, get_ad_reader)
+    try:
+        return factory()
+    except Exception:
+        return None
+
+
+@router.post("/settings/permissions/groups")
+def add_permission_group(
+    payload: PermissionGroupIn,
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+    cache_store: GroupsCacheStore = Depends(get_groups_cache_store),
+    reader: object | None = Depends(_ad_reader_dependency),
+) -> dict:
+    """Проверить группу AD по точному имени и добавить её в локальный кэш.
+
+    Зачем: перечень для выбора в разделе прав берётся из кэша
+    (ad_group_members/ad_group_sync_state), а наполняется он только группами из
+    справочника «владельцы шагов». Группа, которой там не было, в выборе прав не
+    появлялась вообще — даже если она в AD есть (жалоба человека 2026-10-12).
+
+    Здесь группа ищется в AD по точному имени CN (только чтение, поиск по
+    подстроке ридер не умеет) и её состав кладётся в кэш — после этого группа
+    видна в выборе и в списке, а её участники годятся адресатами уведомлений.
+    Группа не найдена — 404 с текстом; AD недоступен — 503; ридер не настроен —
+    503. Всё в аудит, состав кэша пополняется только чтением AD."""
+    _require_permission_admin(user)
+    name = (payload.name or "").strip()
+    if not name:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Укажите имя группы AD",
+        )
+    if reader is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Ридер AD не настроен: проверить группу нечем",
+        )
+    try:
+        result = sync_ad_group_members(reader, [name], cache_store)
+    except GroupsCacheUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    if result["errors"]:
+        # AdNotFound/AdUnavailable внутри — по тексту понятно, что именно.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=result["errors"][0]
+        )
+    audit_log.append(
+        AuditEvent(
+            actor=user.sam,
+            action="permissions.group.add",
+            entity="permission_group",
+            entity_id=name,
+            detail=f"members={result['members']}",
+        )
+    )
+    return {
+        "id": name,
+        "name": name,
+        "members": result["members"],
+        "synced_at": None,
     }
 

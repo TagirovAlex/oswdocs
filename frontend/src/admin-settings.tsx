@@ -35,6 +35,7 @@ import {
   downloadBackup,
   getArchiveSettings,
   getPermissionGroups,
+  addPermissionGroup,
   getPermissions,
   getSettings,
   getSettingsContent,
@@ -63,6 +64,7 @@ import type {
   StepGroupRef,
 } from "./settings-client";
 import { BlankPreview } from "./blank-preview";
+import { hasBlock } from "./auth-client";
 import {
   RichTextEditor,
   richTextAppend,
@@ -76,6 +78,10 @@ interface AdminSettingsProps {
   // Роль (админ — все вкладки; руководитель ОК — только контент; проверку
   // доступа делает сервер, 403 для остальных).
   role: Role;
+  // Права из /auth/me (блоки): вкладки настроек видны по блокам, а не по роли —
+  // иначе администратор СЭД (у него блоки settings_infra/settings_blanks) не видел
+  // бы инфраструктуру и бланки, хотя сервер их ему разрешает.
+  blocks?: string[];
 }
 
 // Вкладки админки: контент (Процесс/Справочники/Письма) + Инфра, Регламенты,
@@ -86,6 +92,9 @@ interface AdminSettingsProps {
 // access_groups (группы ролей после миграции 0020 только для чтения).
 const CONTENT_TABS = ["Процесс", "Справочники", "Письма"] as const;
 const PERMISSIONS_TAB = "Права доступа" as const;
+// Порядок вкладок полного доступа. Кто какую видит — по блокам (см. AdminSettings):
+// инфраструктурные вкладки (Инфра/Регламенты/Доступ и роли/Архивация) — блок
+// settings_infra, бланки и справочник шагов — settings_blanks.
 const ALL_TABS = [
   "Процесс",
   "Справочники",
@@ -99,6 +108,21 @@ const ALL_TABS = [
   "Архивация",
 ] as const;
 type SettingsTab = (typeof ALL_TABS)[number];
+
+// Какая вкладка за каким блоком (для видимости по правам, AGENTS: настройки —
+// только в settings, хардкод ролей здесь быть не должно).
+const TAB_BLOCK: Record<SettingsTab, string | null> = {
+  "Процесс": "settings_content",
+  "Справочники": "settings_content",
+  "Письма": "settings_content",
+  "Бланки": "settings_blanks",
+  "Шаги": "settings_blanks",
+  "Инфра": "settings_infra",
+  "Регламенты": "settings_infra",
+  "Доступ и роли": "settings_infra",
+  "Архивация": "settings_infra",
+  [PERMISSIONS_TAB]: null, // видна по отдельному правилу (см. canEditPermissions)
+};
 
 // Редактор предприятий: список code+name, добавить/удалить/переименовать.
 function EnterprisesEditor(props: { value: SettingsEnterprise[]; onChange: (v: SettingsEnterprise[]) => void }) {
@@ -367,6 +391,10 @@ function PermissionsEditor() {
   const [groupsError, setGroupsError] = useState<string>("");
   const [groupsQuery, setGroupsQuery] = useState<string>("");
   const [groupsPicked, setGroupsPicked] = useState<string[]>([]);
+  const [groupLookupName, setGroupLookupName] = useState<string>("");
+  const [groupLookupBusy, setGroupLookupBusy] = useState<boolean>(false);
+  const [groupLookupStatus, setGroupLookupStatus] = useState<string>("");
+  const [groupLookupError, setGroupLookupError] = useState<string>("");
 
   // Открыть шаблон в форме: состав берётся из справочника, до сохранения ничего
   // на сервере не меняется.
@@ -432,6 +460,9 @@ function PermissionsEditor() {
   function openGroupsModal(): void {
     setGroupsOpen(true);
     setGroupsQuery("");
+    setGroupLookupName("");
+    setGroupLookupStatus("");
+    setGroupLookupError("");
     setGroupsPicked([...draftGroups]);
     setGroupsError("");
     setGroupsLoading(true);
@@ -459,6 +490,34 @@ function PermissionsEditor() {
 
   function togglePickedGroup(name: string, checked: boolean): void {
     setGroupsPicked((items) => (checked ? [...items, name] : items.filter((item) => item !== name)));
+  }
+
+  // Проверка группы по ТОЧНОМУ имени в AD и добавление её состава в кэш:
+  // без этого группа, которой не было в справочнике владельцев шагов, в выборе
+  // прав не появлялась вообще (жалоба человека 2026-10-12).
+  async function handleLookupGroup(): Promise<void> {
+    const name = groupLookupName.trim();
+    if (name === "" || groupLookupBusy) return;
+    setGroupLookupBusy(true);
+    setGroupLookupStatus("");
+    setGroupLookupError("");
+    try {
+      const found = await addPermissionGroup(name);
+      setAdGroups((items) =>
+        [...items.filter((item) => item.id !== found.id), { ...found, synced_at: null }].sort(
+          (a, b) => a.name.localeCompare(b.name),
+        ),
+      );
+      setGroupLookupStatus(
+        `Группа ${found.name} найдена в AD, участников: ${found.members}. Отметьте её в списке.`,
+      );
+      setGroupsQuery("");
+      setGroupLookupName("");
+    } catch (e: unknown) {
+      setGroupLookupError(e instanceof Error ? e.message : "Ошибка поиска группы в AD");
+    } finally {
+      setGroupLookupBusy(false);
+    }
   }
 
   const visibleGroups = adGroups.filter((group) =>
@@ -595,8 +654,10 @@ function PermissionsEditor() {
               Список — из кэша состава групп AD{groupsSyncedAt
                 ? `, последняя синхронизация ${new Date(groupsSyncedAt).toLocaleString("ru-RU")}`
                 : ", синхронизация ещё не выполнялась"}
-              . Это кэш, а не живой AD: новые группы появятся после синхронизации
-              на вкладке «Справочники».
+              . Поиск ниже ищет по кэшу. Если группы в списке нет, введите её
+              ТОЧНОЕ имя и нажмите «Найти в AD»: система проверит группу в
+              каталоге (только чтение) и добавит её состав в кэш — тогда её
+              можно будет выбрать.
             </div>
             <label className="sed-field">
               Поиск по названию группы
@@ -608,6 +669,28 @@ function PermissionsEditor() {
                 onChange={(e) => setGroupsQuery(e.target.value)}
               />
             </label>
+            {/* Точное имя группы, которой ещё нет в кэше: проверка по AD. */}
+            <div className="sed-fieldrow">
+              <label className="sed-field">
+                Точное имя группы AD
+                <input
+                  aria-label="Точное имя группы AD"
+                  placeholder="Например SED_ADMINS"
+                  value={groupLookupName}
+                  onChange={(e) => setGroupLookupName(e.target.value)}
+                />
+              </label>
+              <button
+                type="button"
+                className="sed-btn"
+                onClick={handleLookupGroup}
+                disabled={groupLookupName.trim() === "" || groupLookupBusy}
+              >
+                {groupLookupBusy ? "Ищем…" : "Найти в AD"}
+              </button>
+            </div>
+            {groupLookupStatus && <div role="status">{groupLookupStatus}</div>}
+            {groupLookupError && <div role="alert">Группа AD: {groupLookupError}</div>}
             {groupsLoading && <div className="sed-note">Загрузка групп…</div>}
             {groupsError && <div role="alert">Группы AD: {groupsError}</div>}
             {!groupsLoading && !groupsError && visibleGroups.length === 0 && (
@@ -2641,12 +2724,23 @@ function ArchiveTab() {
 // /api/settings), руководитель ОК — только контент (GET/PUT /api/settings/content).
 // Всё — из settings БД.
 export function AdminSettings(props: AdminSettingsProps) {
-  const { role } = props;
-  const isAdmin = role === "admin";
-  // Администратор СЭД (sed_admin) правит права наравне с админом: вкладка прав ему
-  // доступна, инфра-настройки — нет (проверку роли делает сервер).
+  const { role, blocks } = props;
+  // Вкладки — по блокам прав. Блоки не пришли (мок/старый вызов) — по роли,
+  // как было до перевода: контент — ОК и выше, инфраструктура — админ.
+  const can = (code: string): boolean => {
+    if (blocks !== undefined) return hasBlock(blocks, code);
+    const allowed = code === "settings_content"
+      ? ["hr", "hr_admin", "admin"]
+      : ["admin"];
+    return allowed.includes(role as string);
+  };
+  const canInfra = can("settings_infra");
+  const canBlanks = can("settings_blanks");
+  // Полный режим (GET/PUT /api/settings целиком) — когда есть и инфра, и бланки.
+  const isAdmin = blocks === undefined ? role === "admin" : canInfra && canBlanks;
+  // Администратор СЭД (sed_admin) правит права наравне с админом (решение человека).
   const isSedAdmin = (role as string) === "sed_admin";
-  const canEditPermissions = isAdmin || isSedAdmin;
+  const canEditPermissions = isAdmin || isSedAdmin || can("settings_infra");
   const [activeTab, setActiveTab] = useState<SettingsTab>("Процесс");
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string>("");
@@ -2854,11 +2948,13 @@ export function AdminSettings(props: AdminSettingsProps) {
   if (error) return <div role="alert">Ошибка: {error}</div>;
   if (loading) return <div className="sed-note">Загрузка настроек…</div>;
 
-  const tabs: readonly SettingsTab[] = isAdmin
-    ? ALL_TABS
-    : canEditPermissions
-      ? [...CONTENT_TABS, PERMISSIONS_TAB]
-      : CONTENT_TABS;
+  const tabs: readonly SettingsTab[] = ALL_TABS.filter((name) => {
+    if (name === PERMISSIONS_TAB) return canEditPermissions;
+    const code = TAB_BLOCK[name];
+    if (code === "settings_infra") return canInfra;
+    if (code === "settings_blanks") return canBlanks;
+    return can(code as string);
+  });
 
   return (
     <section aria-label="Настройки СЭД">
