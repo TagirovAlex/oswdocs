@@ -353,10 +353,11 @@ def test_build_blank_document_step_mark_without_date_has_paper_line():
 
 
 def test_build_blank_document_qr_image_and_caption():
-    """QR подставлен картинкой (qr_url контекста), рядом читается ссылка."""
-    blob = build_blank_document(_context())
+    """QR печатается картинкой на месте плейсхолдера {qr} в шапке."""
+    context = _context(blank_header_html="<p>{qr}</p>")
+    blob = build_blank_document(context)
     assert any(name.startswith("word/media/") for name in _docx_names(blob))
-    assert QR_URL in _docx_text(blob)
+    assert _qr_paragraphs(blob)
 
 
 def test_build_blank_document_without_qr_url_still_builds():
@@ -1490,15 +1491,16 @@ def test_blank_header_qr_placeholder_keeps_surrounding_text():
     assert "Слева" in paragraphs[0].text and "справа" in paragraphs[0].text
 
 
-def test_blank_header_without_qr_placeholder_keeps_qr_block():
-    """Без плейсхолдера {qr} в шапке QR печатается отдельным блоком с подписью."""
+def test_blank_header_without_qr_placeholder_prints_no_qr():
+    """Без плейсхолдера {qr} в шапке QR НЕ печатается.
+
+    Отдельный блок QR после шапки ломал вёрстку (жалоба человека 2026-10-12) —
+    QR печатается только там, где админ поставил плейсхолдер."""
     context = _context(blank_header_html="<p>Кому: {fio}</p>")
     blob = build_blank_document(context)
-    paragraphs = _qr_paragraphs(blob)
-    assert len(paragraphs) == 1
-    # Отдельный блок: абзац с картинкой пустой, подпись с URL — рядом.
-    assert paragraphs[0].text.strip() == ""
-    assert any(QR_URL in paragraph.text for paragraph in _body_paragraphs(blob))
+    assert _qr_paragraphs(blob) == []
+    assert not any(name.startswith("word/media/") for name in _docx_names(blob))
+    assert FAKE_FIO in _docx_text(blob)
 
 
 def test_qr_placeholder_without_url_leaves_no_empty_line():

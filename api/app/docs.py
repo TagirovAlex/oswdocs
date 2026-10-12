@@ -377,13 +377,12 @@ def build_bypass_context(request: object) -> Dict[str, object]:
 BLANK_FONT_NAME = "Times New Roman"
 
 # Константы вёрстки печатной формы: поля страницы (В/П/Н/Л, мм), кегль
-# обычного текста и заголовка, сторона QR (мм) и подпись под ним. Единая
-# вёрстка — макета/пресетов оформления больше нет.
+# обычного текста и заголовка, сторона QR (мм). Единая вёрстка — макета/пресетов
+# оформления больше нет.
 BLANK_MARGINS_MM = (20, 15, 18, 15)
 BLANK_FONT_PT = 11
 BLANK_TITLE_PT = 14
 BLANK_QR_MM = 30
-BLANK_QR_CAPTION_PT = 8
 
 # Подписи полей шапки бланка: (подпись, ключ контекста).
 _HEADER_FIELDS = (
@@ -697,14 +696,16 @@ def _add_blank_header_html(document: object, context: Dict[str, object]) -> None
 def _add_blank_header(document: object, context: Dict[str, object]) -> None:
     """Шапка бланка: название, поля сотрудника, QR на заявку (qr_url контекста).
 
-    Название — по центру жирным; если в снимке заявки есть blank_header_html,
-    печатается он вместо полей сотрудника (санитаризация _add_stage_text +
+Название — по центру жирным; если в снимке заявки есть blank_header_html,
+    печатается он вместо полей сотрудника (санитатизация _add_stage_text +
     плейсхолдеры с escape); шапки нет — поля сотрудника списком с жирной подписью.
 
-    QR — справа с подписью URL (qr_url контекста, кладёт generate_bypass).
+    QR печатается ТОЛЬКО на месте плейсхолдера {qr} в шапке (_add_blank_header_html).
+    Отдельного блока QR после шапки нет: он ломал вёрстку шапки (жалоба человека
+    2026-10-12), поэтому без плейсхолдера QR просто не печатается.
     """
     from docx.enum.text import WD_ALIGN_PARAGRAPH
-    from docx.shared import Mm, Pt
+    from docx.shared import Pt
 
     title = document.add_paragraph()
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -718,25 +719,6 @@ def _add_blank_header(document: object, context: Dict[str, object]) -> None:
             paragraph = document.add_paragraph()
             paragraph.add_run(label + ": ").bold = True
             paragraph.add_run(str(context.get(key) or "").strip())
-    qr_url = str(context.get("qr_url") or "").strip()
-    if not qr_url:
-        return
-    # В шапке плейсхолдер {qr} — QR печатается на своём месте (см.
-    # _add_blank_header_html). Дублировать его отдельным блоком нельзя: он
-    # ломал вёрстку шапки, поэтому при плейсхолдере отдельный блок не добавляем.
-    if _QR_PLACEHOLDER_RE.search(str(context.get("blank_header_html") or "")):
-        return
-    picture = document.add_paragraph()
-    picture.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-    picture.add_run().add_picture(
-        io.BytesIO(_render_qr_png(qr_url)),
-        width=Mm(BLANK_QR_MM),
-        height=Mm(BLANK_QR_MM),
-    )
-    caption = document.add_paragraph()
-    caption.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-    note = caption.add_run(qr_url)
-    note.font.size = Pt(BLANK_QR_CAPTION_PT)
 
 
 def _step_responsible(step: Dict[str, object]) -> List[str]:
