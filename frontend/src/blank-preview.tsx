@@ -43,6 +43,10 @@ interface BlankPreviewProps {
 // ({{ ... }} из шаблонов писем) в бланках не бывает.
 const PREVIEW_PLACEHOLDER_RE = /\{\s*(\w+)\s*\}/g;
 
+// Плейсхолдер QR в макете: печать вставляет картинку (docs.QR_PLACEHOLDER), в
+// макете показываем подпись на её месте — иначе админ видит "{qr}".
+const QR_PREVIEW_MARK = "[QR-код]";
+
 // Выравнивание абзаца редактора (style — печать читает только text-align).
 const PREVIEW_ALIGN_RE = /text-align\s*:\s*(center|right|left|justify)/i;
 // Классы темы под выравнивание; левое и по ширине печатает как есть (default).
@@ -128,17 +132,21 @@ function responsibleText(step: BlankPreviewStep): string {
 export function BlankPreview(props: BlankPreviewProps) {
   const { blankName, headerHtml, footerLines, steps } = props;
   const values = previewValues(blankName, steps.length);
-  const header = previewLines(headerHtml, values);
+  // {qr} печатается картинкой ТОЛЬКО в шапке (docs._add_blank_header_html),
+  // поэтому подстановка [QR-код] ограничена шапкой: в подвале и тексте шага
+  // печать оставит {qr} как есть.
+  const header = previewLines(headerHtml, { ...values, qr: QR_PREVIEW_MARK });
   const footer = previewBlock(footerLines, values, PREVIEW_FOOTER_ALIGN);
   return (
     <div className="sed-preview" aria-label="Предпросмотр печати бланка">
       <div className="sed-note">
         Макет приблизителен: настоящий документ печати собирает сервер при печати
         заявки. Здесь видны состав, текст и порядок блоков; начертания, кегль,
-        переносы строк, разбивка по страницам, QR и подпись страницы не
-        воспроизводятся — сверять макет с листом нельзя. Значения плейсхолдеров
-        подставляет сервер: показаны только те, что известны здесь (название
-        бланка, количество шагов, дата), остальные остаются текстом.
+        переносы строк, разбивка по страницам, картинка QR (на её месте подпись
+        [QR-код]) и подпись страницы не воспроизводятся — сверять макет с листом
+        нельзя. Значения плейсхолдеров подставляет сервер: показаны только те,
+        что известны здесь (название бланка, количество шагов, дата), остальные
+        остаются текстом.
       </div>
       <div className="sed-preview__sheet">
         <div className="sed-preview__block">
@@ -195,8 +203,9 @@ export function BlankPreview(props: BlankPreviewProps) {
           )}
         </div>
         <div className="sed-preview__hint">
-          Номер заявки, название бланка и его версия печатаются в подписи страницы,
-          QR — рядом с шапкой; макетом это не показано.
+          Номер заявки, название бланка и его версия печатаются в подписи страницы —
+          макетом это не показано. QR печатается на месте плейсхолдера {"{qr}"} в
+          шапке; без него QR печатается отдельным блоком сразу после шапки.
         </div>
       </div>
     </div>

@@ -28,7 +28,10 @@ from app.docs import (  # noqa: E402
     blank_placeholders,
     build_blank_document,
     generate_bypass,
+    QR_PLACEHOLDER,
     render_blank_text,
+    STEP_TABLE_PT,
+    STEP_TABLE_WIDTHS_MM,
 )
 from app.main import app  # noqa: E402
 from app.requests import _Request, _Step, _utcnow, get_memory_requests_store  # noqa: E402
@@ -662,7 +665,9 @@ def test_build_blank_document_stage_lines_heading():
     assert all(run.bold for run in subheading.runs)
     assert [run.font.size for run in subheading.runs] == [Pt(BLANK_TITLE_PT - 1)]
     assert not any(run.bold for run in plain.runs)
-    assert [run.font.size for run in plain.runs] == [None]
+    # Обычный текст в таблице шагов печатается ужатым кеглем (одна страница),
+    # заголовок при этом сохраняет свой кегль.
+    assert [run.font.size for run in plain.runs] == [Pt(STEP_TABLE_PT)]
 
 
 def test_build_blank_document_header_html_is_sanitized():
@@ -1378,3 +1383,133 @@ def test_render_blank_text_escapes_values_for_html_header():
     # Обычный текст (подвал, шаги) подставляется как есть — без разметки.
     plain = render_blank_text("{content}", context)
     assert plain == context["content"]
+
+
+def test_step_table_columns_have_fixed_widths():
+    """Столбцы таблицы шагов имеют заданные ширины и фиксированную раскладку.
+
+    Без фиксированной раскладки Word/LibreOffice подгоняет столбцы под текст, и
+    колонка «№» становится такой же широкой, как содержание (жалоба человека
+    2026-10-12)."""
+    blob = build_blank_document(_context())
+    table = _step_table(blob)
+    grid = _docx_text(blob)
+    assert 'w:tblLayout w:type="fixed"' in grid
+    # Допуск на округление: мм → EMU → мм теряет доли миллиметра.
+    widths = [column.width.mm for column in table.columns]
+    for actual, expected in zip(widths, STEP_TABLE_WIDTHS_MM):
+        assert abs(actual - expected) <= 1, (actual, expected)
+    # Ширина таблицы укладывается в полосу набора A4 при полях 20/15 мм (175 мм).
+    assert sum(widths) <= 175
+    # Колонка «№» — самая узкая, содержание шага — самое широкое.
+    assert widths[0] == min(widths)
+    assert widths[1] == max(widths)
+
+
+def test_step_table_is_compact():
+    """Таблица шагов печатается ужатой: кегль на пункт меньше и поля ячеек 1 мм.
+
+    Цель — уложить типовой бланк в одну страницу (решение человека 2026-10-12)."""
+    from docx.shared import Pt
+
+    context = _context()
+    context["steps"] = [
+        {
+            "order": 1,
+            "owner": FAKE_GROUP,
+            "title": FAKE_STAGE,
+            "stage_lines": ["<h2>Подраздел вымышленный</h2>", "Обычный пункт"],
+            "fio": FAKE_ASSIGNEE_FIO,
+            "status": STEP_PENDING,
+            "done_at": "",
+        }
+    ]
+    blob = build_blank_document(context)
+    table = _step_table(blob)
+    paragraphs = [
+        paragraph
+        for cell in table.rows[1].cells
+        for paragraph in cell.paragraphs
+    ]
+    plain = next(p for p in paragraphs if p.text == "Обычный пункт")
+    subheading = next(p for p in paragraphs if p.text == "Подраздел вымышленный")
+    # Весь обычный текст ячеек ужат, заголовок сохранил свой кегль.
+    assert [run.font.size for run in plain.runs] == [Pt(STEP_TABLE_PT)]
+    assert [run.font.size for run in subheading.runs] == [Pt(BLANK_TITLE_PT - 1)]
+    # Поля ячеек заданы явно (1 мм = 57 двадцатых пункта) и стоят на своём месте
+    # по схеме CT_TblPrBase: tblCellMar идёт ПЕРЕД tblLook, иначе Word считает
+    # файл битым и может проигнорировать поля.
+    tbl_pr = table._tbl.tblPr.xml
+    assert "tblCellMar" in tbl_pr
+    assert tbl_pr.count('w:w="57"') == 4
+    assert tbl_pr.index("tblCellMar") < tbl_pr.index("tblLook")
+
+
+def _qr_paragraphs(blob: bytes) -> list:
+    """Абзацы тела бланка, содержащие картинку (QR)."""
+    return [
+        paragraph
+        for paragraph in _body_paragraphs(blob)
+        if paragraph._element.findall(
+            ".//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}drawing"
+        )
+    ]
+
+
+def test_blank_header_qr_placeholder_is_picture_in_place():
+    """Плейсхолдер {qr} печатается картинкой в потоке абзаца шапки.
+
+    Отдельного блока QR после шапки быть не должно — именно он ломал вёрстку
+    шапки (жалоба человека 2026-10-12)."""
+    context = _context(blank_header_html="<p>Кому: {fio}</p><p>QR: {qr}</p>")
+    blob = build_blank_document(context)
+    assert QR_PLACEHOLDER not in _docx_text(blob)
+    paragraphs = _qr_paragraphs(blob)
+    assert len(paragraphs) == 1
+    # Картинка стоит В ТОМ ЖЕ абзаце, где был плейсхолдер (текст строки «QR:»
+    # сохранился), а не отдельным пустым блоком под шапкой.
+    assert paragraphs[0].text.strip() == "QR:"
+    # Подписи URL под картинкой нет: URL остаётся только в подвале бланка.
+    assert not any(QR_URL in paragraph.text for paragraph in _body_paragraphs(blob))
+
+
+def test_blank_header_qr_placeholder_accepts_spaces():
+    """{ qr } с пробелами распознаётся так же, как {qr} (общий регекс печати)."""
+    context = _context(blank_header_html="<p>QR: { qr }</p>")
+    blob = build_blank_document(context)
+    assert len(_qr_paragraphs(blob)) == 1
+    assert "{ qr }" not in _docx_text(blob)
+
+
+def test_blank_header_qr_placeholder_keeps_surrounding_text():
+    """Текст рядом с {qr} в том же абзаце печатается, а не теряется."""
+    context = _context(blank_header_html="<p>Слева {qr} справа</p>")
+    blob = build_blank_document(context)
+    paragraphs = _qr_paragraphs(blob)
+    assert len(paragraphs) == 1
+    assert "Слева" in paragraphs[0].text and "справа" in paragraphs[0].text
+
+
+def test_blank_header_without_qr_placeholder_keeps_qr_block():
+    """Без плейсхолдера {qr} в шапке QR печатается отдельным блоком с подписью."""
+    context = _context(blank_header_html="<p>Кому: {fio}</p>")
+    blob = build_blank_document(context)
+    paragraphs = _qr_paragraphs(blob)
+    assert len(paragraphs) == 1
+    # Отдельный блок: абзац с картинкой пустой, подпись с URL — рядом.
+    assert paragraphs[0].text.strip() == ""
+    assert any(QR_URL in paragraph.text for paragraph in _body_paragraphs(blob))
+
+
+def test_qr_placeholder_without_url_leaves_no_empty_line():
+    """Без QR-ссылки плейсхолдер {qr} не печатается и не оставляет пустой строки."""
+    context = _context(blank_header_html="<p>Кому: {fio}</p><p>{qr}</p>")
+    context.pop("qr_url", None)
+    blob = build_blank_document(context)
+    assert QR_PLACEHOLDER not in _docx_text(blob)
+    assert _qr_paragraphs(blob) == []
+    texts = [paragraph.text for paragraph in _body_paragraphs(blob)]
+    assert any(FAKE_FIO in text for text in texts)
+    # Пустых строк ровно одна — разделитель после таблицы шагов. Раньше {qr}
+    # без ссылки добавлял ещё и пустой абзац шапки.
+    assert texts.count("") == 1

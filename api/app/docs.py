@@ -642,6 +642,23 @@ def _add_stage_text(paragraph: object, text: str, *, bold: bool = False) -> None
         )
 
 
+def _add_qr_inline(paragraph: object, context: Dict[str, object]) -> None:
+    """Вставить QR как картинку В ПОТОКЕ абзаца (плейсхолдер {qr}).
+
+    Так QR стоит там, где админ его поставил в шапке, и не выносится отдельным
+    блоком, который ломал вёрстку шапки. URL пуст — молча пропускаем (печать не
+    падает), плейсхолдер без картинки просто исчезает."""
+    url = str(context.get("qr_url") or "").strip()
+    if not url:
+        return
+    from docx.shared import Mm
+
+    run = paragraph.add_run()
+    run.add_picture(
+        io.BytesIO(_render_qr_png(url)), width=Mm(BLANK_QR_MM), height=Mm(BLANK_QR_MM)
+    )
+
+
 def _add_blank_header_html(document: object, context: Dict[str, object]) -> None:
     """Шапка бланка из снимка заявки (HTML редактора) вместо списка полей.
 
@@ -652,12 +669,29 @@ def _add_blank_header_html(document: object, context: Dict[str, object]) -> None
     остаются только начертания, кегль заголовка, выравнивание и переносы строк."""
     # Подстановка значений ЗДЕСЬ, в HTML-шапке: значения экранируются, чтобы
     # свободный текст заявки не ломал разметку (ранее порядок был обратный).
-    rendered = render_blank_text(
-        str(context.get("blank_header_html") or ""), context, escape=True
-    )
+    # {qr} помечаем служебным маркером ДО подстановки и с допуском пробелов
+    # ({ qr } — так же, как принимает регекс остальных плейсхолдеров).
+    rendered = _QR_PLACEHOLDER_RE.sub(_QR_TOKEN, str(context.get("blank_header_html") or ""))
+    rendered = render_blank_text(rendered, context, escape=True)
     for chunk in _PRINT_BLOCK_RE.split(rendered):
-        if chunk.strip():
-            _add_stage_text(document.add_paragraph(), chunk)
+        parts = chunk.split(_QR_TOKEN)
+        # Части с маркером QR (нечётные индексы) текстом не считаются, а сами
+        # теги HTML не текст (проверка та же, что у подвала — _html_has_text):
+        # иначе абзац с одним {qr} без QR-ссылки остался бы пустой строкой.
+        has_text = any(
+            _html_has_text(part) for index, part in enumerate(parts) if index % 2 == 0
+        )
+        has_qr = len(parts) > 1 and bool(str(context.get("qr_url") or "").strip())
+        # Пустой абзац не заводим: без QR-ссылки {qr} не должен оставлять на
+        # бланке лишнюю строку (как в подвале, где проверяет _html_has_text).
+        if not has_text and not has_qr:
+            continue
+        paragraph = document.add_paragraph()
+        for index, part in enumerate(parts):
+            if index:
+                _add_qr_inline(paragraph, context)
+            if part.strip():
+                _add_stage_text(paragraph, part)
 
 
 def _add_blank_header(document: object, context: Dict[str, object]) -> None:
@@ -686,6 +720,11 @@ def _add_blank_header(document: object, context: Dict[str, object]) -> None:
             paragraph.add_run(str(context.get(key) or "").strip())
     qr_url = str(context.get("qr_url") or "").strip()
     if not qr_url:
+        return
+    # В шапке плейсхолдер {qr} — QR печатается на своём месте (см.
+    # _add_blank_header_html). Дублировать его отдельным блоком нельзя: он
+    # ломал вёрстку шапки, поэтому при плейсхолдере отдельный блок не добавляем.
+    if _QR_PLACEHOLDER_RE.search(str(context.get("blank_header_html") or "")):
         return
     picture = document.add_paragraph()
     picture.alignment = WD_ALIGN_PARAGRAPH.RIGHT
@@ -734,6 +773,15 @@ def _step_marks(step: Dict[str, object]) -> List[str]:
 # Колонки таблицы шагов (мм). Полезная ширина A4 при полях 20/15 — 175 мм.
 STEP_TABLE_WIDTHS_MM = (10.0, 85.0, 45.0, 35.0)
 STEP_TABLE_HEADERS = ("№", "Содержание шага", "Ответственные", "Отметка")
+# Кегль таблицы шагов на пункт меньше основного текста: бланк должен укладываться
+# в одну страницу (решение человека 2026-10-12).
+STEP_TABLE_PT = BLANK_FONT_PT - 1
+# Плейсхолдер QR в бланке: {qr} печатается картинкой В потоке текста, иначе QR
+# выносился отдельным блоком и ломал вёрстку шапки (жалоба человека 2026-10-12).
+QR_PLACEHOLDER = "{qr}"
+_QR_TOKEN = "\u241eQR\u241e"
+# Регекс допускает пробелы внутри плейсхолдера ({ qr }) - как остальные.
+_QR_PLACEHOLDER_RE = re.compile(r"\{\s*qr\s*\}")
 
 
 def _cell_paragraph(cell: object, *, bold: bool = False, center: bool = False, first: bool = True):
@@ -769,6 +817,42 @@ def _row_flag(row: object, tag: str) -> None:
     tr_pr.append(element)
 
 
+def _table_compact(table: object) -> None:
+    """Плотная вёрстка таблицы шагов: единый кегль и минимальные поля ячеек.
+
+    Сжатие нужно, чтобы типовой бланк укладывался в одну страницу (решение
+    человека 2026-10-12): кегль на пункт меньше основного текста бланка, поля
+    ячеек — 1 мм вместо умолчания Word (~2 мм слева и справа)."""
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+    from docx.shared import Pt
+
+    for row in table.rows:
+        for cell in row.cells:
+            for paragraph in cell.paragraphs:
+                for run in paragraph.runs:
+                    # Заголовок внутри текста шага (h1–h3) печатается своим
+                    # кеглем (_HEADING_PT) — его не трогаем, ужимаем только
+                    # обычный текст, у которого размера нет.
+                    if run.font.size is None:
+                        run.font.size = Pt(STEP_TABLE_PT)
+    # Поля ячеек таблицы: w:tblCellMar (стар/право/низ/лево) в двадцатых пункта.
+    # Порядок элементов w:tblPr задан схемой CT_TblPrBase (ECMA-376), поэтому
+    # tblCellMar вставляем ПЕРЕД w:tblLook, иначе Word считает файл битым.
+    tbl_pr = table._tbl.tblPr
+    cell_mar = tbl_pr.find(qn("w:tblCellMar"))
+    if cell_mar is None:
+        cell_mar = OxmlElement("w:tblCellMar")
+        tbl_pr.insert_element_before(cell_mar, "w:tblLook", "w:tblCaption", "w:tblDescription")
+    for tag in ("w:top", "w:left", "w:bottom", "w:right"):
+        element = cell_mar.find(qn(tag))
+        if element is None:
+            element = OxmlElement(tag)
+            cell_mar.append(element)
+        element.set(qn("w:w"), "57")  # 1 мм
+        element.set(qn("w:type"), "dxa")
+
+
 def _add_steps(document: object, context: Dict[str, object]) -> None:
     """Шаги маршрута — таблицей: №, содержание, ответственные, отметка.
 
@@ -794,6 +878,11 @@ def _add_steps(document: object, context: Dict[str, object]) -> None:
     except KeyError:
         # Стиля нет в минимальном шаблоне — печатаем без явной рамки.
         pass
+    # Фиксированная раскладка: без неё Word/LibreOffice подгоняет столбцы под
+    # содержимое и колонка «№» оказывается такой же широкой, как содержание.
+    table.autofit = False
+    for index, width_mm in enumerate(STEP_TABLE_WIDTHS_MM):
+        table.columns[index].width = Mm(width_mm)
     header = table.rows[0]
     _row_flag(header, "tblHeader")  # повтор заголовков на новой странице
     for index, (cell, title) in enumerate(zip(header.cells, STEP_TABLE_HEADERS)):
@@ -837,7 +926,8 @@ def _add_steps(document: object, context: Dict[str, object]) -> None:
         # Столбец «Отметка»: статус и дата выполнения либо место под росчерк.
         marks_cell = _cell_paragraph(cells[3], bold=True)
         marks_cell.runs[0].text = ", ".join(_step_marks(step))
-    # Отбивка перед подвалом (пустой абзац не «схлопывается» в LibreOffice).
+    # Плотная вёрстка всего стола (кегль и поля ячеек) — после сборки строк.
+    _table_compact(table)
     document.add_paragraph()
 
 

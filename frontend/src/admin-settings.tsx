@@ -1130,12 +1130,19 @@ function PlaceholderButtons(props: {
   target: string;
   // Цели нет (например, строк подвала ещё не заведено) — кнопки выключены.
   disabled?: boolean;
+  // Дополнительные плейсхолдеры только для своей цели: {qr} печатается
+  // картинкой и имеет смысл исключительно в шапке бланка.
+  additional?: readonly string[];
 }) {
-  const { onInsert, target, disabled } = props;
+  const { onInsert, target, disabled, additional } = props;
+  const tokens =
+    additional && additional.length > 0
+      ? [...BLANK_PLACEHOLDERS, ...additional]
+      : BLANK_PLACEHOLDERS;
   return (
     <div className="sed-toolbar sed-mt-8">
       <span className="sed-sub">Плейсхолдеры:</span>
-      {BLANK_PLACEHOLDERS.map((token) => (
+      {tokens.map((token) => (
         <button
           key={token}
           type="button"
@@ -1659,7 +1666,7 @@ function BlanksEditor() {
             insert={headerInsert}
             onChange={(html) => setForm({ ...form, header_html: html })}
           />
-          <PlaceholderButtons target="шапку" onInsert={insertHeaderToken} />
+          <PlaceholderButtons target="шапку" onInsert={insertHeaderToken} additional={["{qr}"]} />
         </div>
 
         {/* Подвал бланка (footer_lines): список строк печати после шагов. Строки

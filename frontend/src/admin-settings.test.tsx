@@ -1060,7 +1060,25 @@ describe("AdminSettings", () => {
     );
   });
 
-  // Пустой подвал: кнопки вставки плейсхолдера в подвал выключены и рядом есть
+  // Плейсхолдер {qr} печатается картинкой в шапке, поэтому кнопка есть только
+  // у шапки: в подвале её предлагать нельзя (там {qr} остался бы текстом).
+  it("плейсхолдер {qr} предлагается только для шапки", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Бланки" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Бланки" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Править бланк uvol_base" }));
+
+    const qrButton = await screen.findByRole("button", { name: "Вставить {qr} в шапку" });
+    expect(qrButton).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Вставить {qr} в подвал" })).toBeNull();
+
+    fireEvent.click(qrButton);
+    await waitFor(() =>
+      expect(screen.getByText(/Заявка на увольнение \{fio\}\{qr\}/)).toBeInTheDocument(),
+    );
+  });
   // объяснение; после добавления строки кнопки включаются.
   it("пустой подвал: кнопки плейсхолдеров неактивны с объяснением", async () => {
     vi.mocked(getSettings).mockResolvedValue(settings);
@@ -1119,6 +1137,25 @@ describe("AdminSettings", () => {
     // текстом — ровно как в печати.
     expect(within(sheet).getByText("Подвал")).toBeInTheDocument();
     expect(within(sheet).getByText("Подпись: {manager}")).toBeInTheDocument();
+  });
+
+  // Плейсхолдер {qr} в макете шапки показан подписью [QR-код]: печать вставит
+  // на его месте картинку. В подвале {qr} остаётся текстом — как в печати.
+  it("предпросмотр печати: {qr} в шапке — подпись [QR-код], в подвале — текст", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Бланки" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Бланки" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Править бланк uvol_base" }));
+    fireEvent.click(screen.getByRole("button", { name: "Вставить {qr} в шапку" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Предпросмотр «как в печати»" }));
+
+    const sheet = await screen.findByLabelText("Предпросмотр печати бланка");
+    expect(within(sheet).getByText(/Заявка на увольнение \{fio\}\[QR-код\]/)).toBeInTheDocument();
+    // В подвале подстановки нет — печать там {qr} не разворачивает.
+    expect(within(sheet).queryByText(/Подпись: \{manager\}\{qr\}/)).toBeNull();
   });
 
   // Пустые шапка, подвал и состав: макет говорит, что напечатает сервер, и не
