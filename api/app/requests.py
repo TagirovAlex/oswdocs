@@ -21,7 +21,13 @@ from pydantic import BaseModel, Field, model_validator
 
 from .audit import AuditEvent, audit_log
 from .config import Settings, get_settings
-from .deps import CurrentUser, SedAdminUser, _is_sed_admin, get_current_user
+from .deps import (
+    CurrentUser,
+    is_privileged,
+    SedAdminUser,
+    _is_sed_admin,
+    get_current_user,
+)
 from .docs import request_url
 from .employees import get_ad_reader
 from .employee_sync import (
@@ -549,11 +555,13 @@ def _utcnow() -> datetime:
 
 
 def _is_hr(user: CurrentUser) -> bool:
-    """Обрезка ПДн по роли для карточки/истории: ОК, руководители ОК, админы.
+    """Обрезка ПДн по роли для карточки/истории: по общему правилу проекта.
 
     Это НЕ гейт доступа (функции проверяются по блокам прав, см. require_block),
-    а правило видимости ПДн — поэтому роль здесь остаётся."""
-    return user.role in ("hr", "hr_admin", "admin")
+    а правило видимости ПДн — поэтому роль здесь остаётся. Состав ролей берём
+    из deps.is_privileged (ОК, руководители ОК, администраторы и администраторы
+    СЭД), чтобы маскировка ПДн не расходилась между эндпоинтами."""
+    return is_privileged(user)
 
 
 # Гейты ведения заявки (создание/подача/отзыв/повтор шага/правка шагов) — одна
@@ -2118,7 +2126,12 @@ def _public_view(
     (employee_key/emp_*) — производные от ПДн (табельный номер), поэтому только
     привилегированным.
     """
-    privileged = user.role in ("hr", "hr_admin", "admin")
+    # Привилегированные — по общему правилу проекта (deps.is_privileged):
+    # ОК, руководители ОК, администраторы и администраторы СЭД. Список ролей
+    # здесь продублирован не был, из-за чего у администратора СЭД ФИО заявки и
+    # табельный номер маскировались как «Сотрудник № …» (жалоба человека
+    # 2026-10-12), хотя в справочнике сотрудников и на печати бланка он их видит.
+    privileged = is_privileged(user)
     reader = ad_reader if ad_reader is not None else _resolve_dependency(get_ad_reader)
     # Карта предприятий нужна только привилегированным (остальным enterprise_name
     # не отдается) — при непривилегированном запросе БД настроек не трогаем.

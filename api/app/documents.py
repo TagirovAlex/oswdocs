@@ -21,6 +21,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import sessionmaker
 
+from .ad_groups_cache import GroupsCacheStore, get_groups_cache_store
 from .audit import AuditEvent, audit_log
 from .config import Settings, get_settings
 from .deps import CurrentUser, get_current_user
@@ -430,6 +431,64 @@ def _fill_step_fio(context: dict, routing_store: object | None) -> None:
             step["fio"] = names[0]
 
 
+def _fill_step_group_members(context: dict, resolve: object | None) -> None:
+    """Подставить состав группы AD для групповых шагов (список ФИО).
+
+    Групповой шаг — владелец группа AD (SED_STEP_*), людей-исполнителей нет.
+    На бланке печаталось только служебное имя группы, и сотруднику было не к кому
+    обращаться (решение человека 2026-10-12), поэтому под ответственными печатаем
+    состав: по строке на сотрудника.
+
+    resolve(group) -> список ФИО (в documents._group_members_resolver: кэш состава
+    групп в БД — его наполняет регламент и кнопка синка; живого чтения AD в печати
+    нет, чтобы синхронный запрос печати не зависел от LDAP-таймаутов). Состав не
+    получили (кэш недоступен, группа не синкана) — печатается имя группы как
+    раньше, печать не падает."""
+    if resolve is None:
+        return
+    for step in context.get("steps") or []:
+        group = str(step.get("owner_group") or "").strip()
+        # Только групповые шаги: у шага с людьми-исполнителями свой состав.
+        if not group or step.get("assignees") or step.get("assignee"):
+            continue
+        try:
+            names = [
+                str(name).strip() for name in (resolve(group) or []) if str(name).strip()
+            ]
+        except Exception:
+            names = []
+        if names:
+            step["group_member_names"] = names
+
+
+def _group_members_resolver(cache: GroupsCacheStore | None) -> object | None:
+    """Резолвер состава группы AD для печати: только кэш состава в БД.
+
+    Кэш наполняет регламент и кнопка синка в настройках (api/app/ad_groups_cache.py).
+    В печати НЕТ живого чтения AD: запрос печати синхронный, а LDAP-таймаут
+    сделал бы его непредсказуемо долгим. Группы, которой нет в кэше, печатаются
+    как раньше — только именем группы (состав можно досинхронизировать вручную).
+
+    Только чтение. Всё fail-soft: недоступность кэша не должна ронять печать."""
+    if cache is None:
+        return None
+
+    def resolve(group: str) -> list[str]:
+        try:
+            synced, members = cache.load(group)
+        except Exception:
+            return []
+        if not synced:
+            return []
+        names = [
+            str(getattr(member, "display_name", "") or getattr(member, "sam", "") or "").strip()
+            for member in members
+        ]
+        return [name for name in names if name]
+
+    return resolve
+
+
 @router.post("/requests/{request_id}/print")
 def print_bypass(
     request_id: str,
@@ -438,6 +497,7 @@ def print_bypass(
     store: RequestsStore = Depends(get_requests_store),
     settings_store: DbSettingsStore = Depends(get_settings_store),
     employee_store: object | None = Depends(get_employee_sync_store),
+    groups_cache: GroupsCacheStore | None = Depends(get_groups_cache_store),
 ) -> dict:
     """Печать бланка (ОК/админ): печатная форма ТЕКУЩЕГО состояния заявки.
 
@@ -465,6 +525,9 @@ def print_bypass(
         )
     # ФИО ответственных этапов подставляем из зеркала AD (в строку «Ответственный»).
     _fill_step_fio(context, _routing_store_or_none())
+    # Групповые шаги: под ответственными печатаем состав группы AD, иначе на
+    # листе только служебное имя группы и непонятно, к кому обращаться.
+    _fill_step_group_members(context, _group_members_resolver(groups_cache))
     # Кадровые плейсхолдеры ({date}/{dismissal_date}/{manager}) — из локальных
     # зеркал, только чтение; зеркало недоступно — пусто, печать не падает.
     _fill_hr_placeholders(context, request, _routing_store_or_none(), employee_store)

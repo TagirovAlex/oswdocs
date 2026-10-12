@@ -324,6 +324,10 @@ def build_bypass_context(request: object) -> Dict[str, object]:
                 "assignees": _step_logins(step),
                 "assignee": getattr(step, "assignee", None) or "",
                 "fio": "",
+                # Имя группы AD, если шаг групповой: под ним печатается состав
+                # группы (documents._fill_step_group_members) — по строке на
+                # сотрудника, иначе на бланке только служебное имя группы.
+                "owner_group": "" if _step_logins(step) else step.owner_group,
                 # ФИО ответственных по логинам: подставляет documents.py
                 # (в бланке колонка «Ответственный» — по строке на ответственного).
                 "assignee_names": [],
@@ -722,17 +726,31 @@ def _add_blank_header(document: object, context: Dict[str, object]) -> None:
 
 
 def _step_responsible(step: Dict[str, object]) -> List[str]:
-    """Ответственные шага на бланке — список имён (в строку «Ответственный: …»).
+    """Ответственные шага на бланке — список имён (в столбец «Ответственные»).
 
     ФИО всех персональных исполнителей снимка (assignee_names — их подставляет
-    documents._fill_step_fio по логинам), через запятую. Прежнее одиночное
-    fio — как есть. Пустой снимок (групповой этап) — группа AD печатается как
-    есть, на бумаге её пишут от руки."""
+    documents._fill_step_fio по логинам), по одному в строке: так подписывать
+    удобнее. Прежнее одиночное fio — как есть.
+
+    Групповой шаг (исполнителей-людей нет, владелец — группа AD): печатаем имя
+    группы, затем СПИСОК сотрудников группы (group_member_names — живой состав
+    подставляет documents._fill_step_group_members): иначе сотруднику не к кому
+    обращаться, на бланке было только служебное имя группы вроде SED_STEP_HR.
+    Состав не получили (AD недоступен, группа не найдена) — печатается имя группы
+    как раньше, печать не падает."""
     names = [
         str(name).strip() for name in (step.get("assignee_names") or []) if str(name).strip()
     ]
     if names:
         return names
+    members = [
+        str(name).strip()
+        for name in (step.get("group_member_names") or [])
+        if str(name).strip()
+    ]
+    if members:
+        group = str(step.get("owner") or "").strip()
+        return ([group] if group else []) + members
     single = str(step.get("fio") or "").strip()
     return [single or str(step.get("owner") or "").strip()]
 

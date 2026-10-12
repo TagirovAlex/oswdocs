@@ -647,6 +647,27 @@ def test_can_act_false_for_stranger(
     assert all(s.can_act is False for s in view.steps)
 
 
+def test_sed_admin_sees_request_pdn(
+    client, hr, requests_store, test_settings_override, route_override, settings_store
+):
+    """Администратор СЭД (sed_admin) видит ФИО и табельный номер заявки.
+
+    Раньше роли были перечислены инлайн без sed_admin, и в списке заявок вместо
+    ФИО показывалась маска «Сотрудник № …», хотя в справочнике сотрудников и на
+    печати бланка администратор СЭД ФИО видит (жалоба человека 2026-10-12)."""
+    rid = _create_and_submit(client, hr)
+    request = requests_store.get(rid)
+    assert request.fio, "в тесте заявка должна быть с ФИО"
+    view = _public_view(request, CurrentUser(sam="admin.sed", groups=[], role="sed_admin"))
+    assert view.fio == request.fio
+    assert view.tab_num == request.tab_num
+    # Постороннему (владельцу шага) ФИО заявителя по-прежнему не отдаётся.
+    masked = _public_view(
+        request, CurrentUser(sam="user.postoronny", groups=[], role="owner")
+    )
+    assert masked.fio is None
+
+
 def test_can_act_false_on_approved_step(
     client, hr, buh_owner, test_settings_override, route_override, settings_store
 ):

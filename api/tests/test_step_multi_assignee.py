@@ -23,10 +23,15 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from app.ad_groups_cache import CachedMember, InMemoryGroupsCacheStore  # noqa: E402
 from app.audit import audit_log  # noqa: E402
 from app.config import Settings, get_settings  # noqa: E402
 from app.deps import CurrentUser  # noqa: E402
-from app.documents import _fill_step_fio  # noqa: E402
+from app.documents import (  # noqa: E402
+    _fill_step_fio,
+    _fill_step_group_members,
+    _group_members_resolver,
+)
 from app.docs import build_blank_document, build_bypass_context  # noqa: E402
 from app.employees import get_ad_reader  # noqa: E402
 from app.main import app  # noqa: E402
@@ -859,7 +864,9 @@ def test_print_single_assignee_has_one_name(
 def test_print_group_step_shows_group_name(
     client, requests_store, routing_store, settings_override, route_override, ad_reader
 ):
-    """Шаг без персональных исполнителей печатает владельца-группу как есть."""
+    """Шаг без персональных исполнителей печатает владельца-группу как есть.
+
+    Состав группы не подставился (кэш пуст) — печатается только имя группы."""
     rid = _ready_request(client, BLANK_SEQ_ID, _hr())
     context = _print_context(requests_store, routing_store, rid)
     context["steps"][0].update(
@@ -867,6 +874,88 @@ def test_print_group_step_shows_group_name(
     )
     blob = build_blank_document(dict(context, qr_url=""))
     assert _responsible_names(blob) == [STEP_GROUP]
+
+
+def test_fill_step_group_members_puts_roster_under_group():
+    """Групповой шаг: под именем группы печатается состав группы (ФИО по строке).
+
+    Иначе сотруднику не к кому обращаться (решение человека 2026-10-12)."""
+    context = {"steps": [{"owner_group": STEP_GROUP, "owner": STEP_GROUP}]}
+    _fill_step_group_members(context, lambda group: ["Иванов И.И.", "Петров П.П."])
+    assert context["steps"][0]["group_member_names"] == ["Иванов И.И.", "Петров П.П."]
+
+
+def test_fill_step_group_members_skips_steps_with_people():
+    """Шаг с людьми-исполнителями состав группы не получает (свой ответственный)."""
+    context = {
+        "steps": [
+            {"owner_group": STEP_GROUP, "owner": STEP_GROUP, "assignees": ["ivanov"]},
+            {"owner_group": STEP_GROUP, "owner": STEP_GROUP, "assignee": "ivanov"},
+        ]
+    }
+    calls = []
+
+    def resolve(group):
+        calls.append(group)
+        return ["Иванов И.И."]
+
+    _fill_step_group_members(context, resolve)
+    assert calls == []
+    assert "group_member_names" not in context["steps"][0]
+    assert "group_member_names" not in context["steps"][1]
+
+
+def test_fill_step_group_members_fails_soft():
+    """Состав не получили — печать не падает, шаг без списка (имя группы как раньше)."""
+    context = {"steps": [{"owner_group": STEP_GROUP, "owner": STEP_GROUP}]}
+
+    def broken(group):
+        raise RuntimeError("AD недоступен")
+
+    _fill_step_group_members(context, broken)
+    assert "group_member_names" not in context["steps"][0]
+    # Без резолвера вовсе — тоже без списка.
+    _fill_step_group_members(context, None)
+    assert "group_member_names" not in context["steps"][0]
+
+
+def test_group_members_resolver_reads_cache_only():
+    """Резолвер состава для печати берёт кэш групп; нессинканная группа — пусто.
+
+    Живого чтения AD в печати нет: запрос печати синхронный, LDAP-таймаут сделал
+    бы его непредсказуемо долгим."""
+    cache = InMemoryGroupsCacheStore()
+    cache.save(STEP_GROUP, [CachedMember(group_name=STEP_GROUP, sam="ivanov",
+                                          display_name="Иванов Иван Иванович")])
+    resolve = _group_members_resolver(cache)
+    assert resolve(STEP_GROUP) == ["Иванов Иван Иванович"]
+    # Группы, которой нет в кэше, — пусто, печать не падает.
+    assert resolve("SED_STEP_UNKNOWN") == []
+
+
+def test_print_group_step_shows_group_roster(
+    client, requests_store, routing_store, settings_override, route_override, ad_reader
+):
+    """На бланке группового шага: имя группы, затем состав — по строке на ФИО."""
+    rid = _ready_request(client, BLANK_SEQ_ID, _hr())
+    context = _print_context(requests_store, routing_store, rid)
+    context["steps"][0].update(
+        assignees=[],
+        assignee="",
+        assignee_names=[],
+        fio="",
+        owner=STEP_GROUP,
+        owner_group=STEP_GROUP,
+    )
+    _fill_step_group_members(
+        context, lambda group: ["Иванов Иван Иванович", "Петров Пётр Петрович"]
+    )
+    blob = build_blank_document(dict(context, qr_url=""))
+    assert _responsible_names(blob) == [
+        STEP_GROUP,
+        "Иванов Иван Иванович",
+        "Петров Пётр Петрович",
+    ]
 
 
 def test_print_context_reads_user_card_once_per_login(
