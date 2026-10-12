@@ -1247,14 +1247,15 @@ describe("RequestCard", () => {
       expect(screen.getByRole("button", { name: "Скорректировать маршрут" })).toBeInTheDocument(),
     );
     fireEvent.click(screen.getByRole("button", { name: "Скорректировать маршрут" }));
-    // Открытый редактор подставил текущий ожидающий шаг (первый блок).
-    expect(within(screen.getByLabelText("Правка маршрута")).getByLabelText("Группа блока 1, шаг 1"))
-      .toHaveValue("SED_STEP_BUH");
+    // Открытый редактор подставил текущий ожидающий шаг. Шаг 1 блока — отказавший
+    // (он виден с действиями «вернуть/убрать» и в PATCH не попадает), поэтому
+    // селект группы стоит на шаге 2.
+    const editor = screen.getByLabelText("Правка маршрута");
+    expect(within(editor).getByRole("button", { name: "Вернуть в маршрут 1.1" })).toBeInTheDocument();
+    expect(within(editor).getByLabelText("Группа блока 1, шаг 2")).toHaveValue("SED_STEP_BUH");
 
     // Добавляем шаг-группу из справочника и сохраняем.
-    const addSelect = within(screen.getByLabelText("Правка маршрута")).getByLabelText(
-      "Группа для блока 1",
-    );
+    const addSelect = within(editor).getByLabelText("Группа для блока 1");
     fireEvent.change(addSelect, { target: { value: "SED_STEP_HR" } });
     fireEvent.change(screen.getByLabelText("Причина правки маршрута"), {
       target: { value: "Вымышленная причина правки" },
@@ -1275,7 +1276,8 @@ describe("RequestCard", () => {
           },
         ],
         "Вымышленная причина правки",
-        // Отказанных шагов в этой заявке нет — оба списка пустая.
+        // Отказавший шаг показан в редакторе, но решение по нему не принято —
+        // оба списка пустые, и в маршрут он не попадает.
         { reopen: [], drop: [] },
       ),
     );
@@ -1476,7 +1478,7 @@ describe("RequestCard", () => {
           resolver: "by_group",
           owner_name: "Сидорова Анна Сергеевна",
           can_act: false,
-          status: "отклонён",
+          status: "отклонен",
           expires_at: "2026-10-05T10:00:00+00:00",
         },
         {

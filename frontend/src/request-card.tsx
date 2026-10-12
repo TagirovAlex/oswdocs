@@ -219,11 +219,20 @@ function canOperateRequest(blocks: readonly string[]): boolean {
   return hasBlock(blocks, "request_create");
 }
 
+// Статусы шага — ровно те строки, что отдаёт API (api/app/requests.py, STEP_*).
+// Сравнивать статусы литералами в разных местах опасно: «отклонен» через Е и
+// «отклонён» через ё — разные строки, и отказавший шаг молча выпадал из правки
+// маршрута (жалоба человека 2026-10-12 — «после возврата не могу сменить
+// согласующего», ничего не появлялось).
+const STEP_PENDING = "ожидает";
+const STEP_REFUSED = "отклонен";
+const STEP_RETURNED = "возвращен";
+
 // Шаги, по которым заявка ушла инициатору на доработку (отказ/возврат). Их
 // наличие — признак, что заявка ждёт решения инициатора: статус заявки
 // «Отклонено» в системе не используется (отказ переводит её в «На доработке»).
 function REWORKED_STEPS(steps: RequestStep[]): RequestStep[] {
-  return steps.filter((s) => s.status === "отклонен" || s.status === "возвращен");
+  return steps.filter((s) => s.status === STEP_REFUSED || s.status === STEP_RETURNED);
 }
 
 // Порядковый номер ключа черновика (React-ключи строк маршрута).
@@ -250,8 +259,8 @@ function routeDraftFromSteps(steps: RequestStep[], knownGroups: string[]): Route
   for (const step of steps) {
     // В правку входят ожидающие и отказавшие: судьбу отказавшего решает ОК
     // («вернуть в маршрут» либо «убрать»). Согласованные и просроченные — нет.
-    const refused = step.status === "отклонён" || step.status === "возвращен";
-    if (step.status !== "ожидает" && !refused) continue;
+    const refused = step.status === STEP_REFUSED || step.status === STEP_RETURNED;
+    if (step.status !== STEP_PENDING && !refused) continue;
     const blockIndex = Math.floor(step.order / 1000);
     const mode = Math.floor((step.order % 1000) / 100) === 1 ? "parallel" : "sequential";
     let block = byKey.get(blockIndex);
