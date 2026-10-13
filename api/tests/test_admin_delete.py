@@ -11,6 +11,14 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from app.attachments import (  # noqa: E402
+    AttachmentsUnavailable,
+    AttachmentRecord,
+    InMemoryAttachmentsStore,
+    InMemoryFilesStore,
+    get_attachments_store,
+    get_files_store,
+)
 from app.audit import audit_log  # noqa: E402
 from app.config import Settings, get_settings  # noqa: E402
 from app.main import app  # noqa: E402
@@ -20,7 +28,7 @@ from app.requests import (  # noqa: E402
     get_route_settings,
     reset_state_for_tests,
 )
-from app.requests_store import get_requests_store  # noqa: E402
+from app.requests_store import RequestsUnavailable, get_requests_store  # noqa: E402
 
 TEST_ALLOWED = "SED_HR,SED_ADMINS"
 TEST_ADMINS = "SED_ADMINS"
@@ -68,6 +76,22 @@ def clean_state(requests_store):
     yield
     reset_state_for_tests()
     audit_log.clear_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def attachments_store():
+    store = InMemoryAttachmentsStore()
+    app.dependency_overrides[get_attachments_store] = lambda: store
+    yield store
+    app.dependency_overrides.pop(get_attachments_store, None)
+
+
+@pytest.fixture(autouse=True)
+def files_store():
+    store = InMemoryFilesStore()
+    app.dependency_overrides[get_files_store] = lambda: store
+    yield store
+    app.dependency_overrides.pop(get_files_store, None)
 
 
 def _create(client, headers, **kw) -> dict:
@@ -156,3 +180,88 @@ def test_request_code_not_reused_after_delete(
     assert client.delete(f"/requests/{first}", headers=admin_headers).status_code == 200
     second = _create(client, hr_headers, steps=[{"owner_group": "SED_STEP_BUH"}])["id"]
     assert second != first
+
+
+def _attach(attachments_store, files_store, request_id: str, name: str) -> str:
+    """Вложение с настоящим содержимым: файл в files_store + мета в attachments."""
+    path = files_store.save(request_id, name, "Вымышленный скан".encode("utf-8"))
+    attachments_store.create(
+        AttachmentRecord(request_id=request_id, file_path=path, file_name=name)
+    )
+    return path
+
+
+def test_delete_removes_attachment_files(
+    client, hr_headers, admin_headers, attachments_store, files_store
+):
+    """Удаление заявки снимает и файлы вложений, а не только мета-строки.
+
+    Без этого файлы копились в FILES_DIR вечно: мета исчезала каскадом, пути
+    терялись, и на тестовом стенде оставались осиротевшие сканы."""
+    rid = _create(client, hr_headers, steps=[{"owner_group": "SED_STEP_BUH"}])["id"]
+    path = _attach(attachments_store, files_store, rid, "scan.docx")
+    other = _create(client, hr_headers, steps=[{"owner_group": "SED_STEP_BUH"}])["id"]
+    other_path = _attach(attachments_store, files_store, other, "other.docx")
+    assert files_store._files
+
+    assert client.delete(f"/requests/{rid}", headers=admin_headers).status_code == 200
+    assert path not in files_store._files, "файл удалённой заявки остался на диске"
+    assert other_path in files_store._files, "чужой файл трогать нельзя"
+
+
+def test_delete_survives_file_error(
+    client, hr_headers, admin_headers, attachments_store, files_store, monkeypatch
+):
+    """Ошибка удаления файла не ломает удаление заявки.
+
+    Заявка к этому моменту уже удалена из БД: 5xx означал бы, что клиент
+    повторит удаление и получит 404 вместо успеха."""
+    rid = _create(client, hr_headers, steps=[{"owner_group": "SED_STEP_BUH"}])["id"]
+    _attach(attachments_store, files_store, rid, "scan.docx")
+
+    def boom(_path: str) -> None:
+        raise OSError("Вымышленная ошибка удаления файла")
+
+    monkeypatch.setattr(files_store, "delete", boom)
+    assert client.delete(f"/requests/{rid}", headers=admin_headers).status_code == 200
+    assert client.get(f"/requests/{rid}", headers=admin_headers).status_code == 404
+
+
+def test_delete_survives_unavailable_attachment_meta(
+    client, hr_headers, admin_headers, files_store, monkeypatch
+):
+    """Недоступная мета вложений не мешает удалить заявку.
+
+    Хранилище вложений — отдельная граница: её отказ не должен превращать
+    удаление заявки в 503, файлы в таком случае просто осиротеют."""
+    rid = _create(client, hr_headers, steps=[{"owner_group": "SED_STEP_BUH"}])["id"]
+
+    def unavailable(_self, _request_id: str):
+        raise AttachmentsUnavailable("Вымышленная недоступность хранилища вложений")
+
+    monkeypatch.setattr(
+        InMemoryAttachmentsStore, "list_by_request", unavailable, raising=True
+    )
+    assert client.delete(f"/requests/{rid}", headers=admin_headers).status_code == 200
+    assert client.get(f"/requests/{rid}", headers=admin_headers).status_code == 404
+
+
+def test_failed_db_delete_keeps_files(
+    client, hr_headers, admin_headers, requests_store, attachments_store,
+    files_store, monkeypatch
+):
+    """Сбой БД при удалении — файлы остаются: заявка жива, терять нечего.
+
+    Это и есть порядок «собрать пути → удалить из БД → снять файлы»: файлы
+    снимаются только после успешного удаления заявки, поэтому недоступность
+    хранилища не превращается в потерю данных."""
+    rid = _create(client, hr_headers, steps=[{"owner_group": "SED_STEP_BUH"}])["id"]
+    path = _attach(attachments_store, files_store, rid, "scan.docx")
+
+    def down(_request_id: str) -> None:
+        raise RequestsUnavailable("Вымышленная недоступность хранилища заявок")
+
+    monkeypatch.setattr(requests_store, "delete", down)
+    assert client.delete(f"/requests/{rid}", headers=admin_headers).status_code == 503
+    assert path in files_store._files, "файл снесли, хотя заявка осталась"
+    assert client.get(f"/requests/{rid}", headers=admin_headers).status_code == 200

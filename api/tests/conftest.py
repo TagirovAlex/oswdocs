@@ -20,6 +20,12 @@ if str(API_DIR) not in sys.path:
 
 import app.audit as audit_module  # noqa: E402
 from app.ad_groups_cache import InMemoryGroupsCacheStore, get_groups_cache_store  # noqa: E402
+from app.attachments import (  # noqa: E402
+    InMemoryAttachmentsStore,
+    InMemoryFilesStore,
+    get_attachments_store,
+    get_files_store,
+)
 from app.audit import audit_log  # noqa: E402
 from app.config import get_settings  # noqa: E402
 from app.employee_sync import InMemoryEmployeeSyncStore, get_employee_sync_store  # noqa: E402
@@ -288,6 +294,11 @@ def offline_boundaries(monkeypatch):
     app.dependency_overrides[get_permissions_store] = (
         lambda: InMemoryPermissionsStore(offline_permission_catalog())
     )
+    # Вложения и файлы: DELETE /requests/{id} доходит до этих границ (снимает
+    # файлы вложений). Без оверрайда тест с удалением заявки ушёл бы в боевую
+    # фабрику — DbAttachmentsStore с живым DATABASE_URL из .env.
+    app.dependency_overrides[get_attachments_store] = lambda: InMemoryAttachmentsStore()
+    app.dependency_overrides[get_files_store] = lambda: InMemoryFilesStore()
     # Персистентный аудит (INSERT в audit_log) — best-effort, но офлайн Postgres
     # нет: отключаем БД-хранилище, журнал остаётся in-memory (контракт прежний).
     monkeypatch.setattr(audit_module, "_get_db_store", lambda: None)

@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Literal
@@ -80,6 +81,8 @@ from .settings_routes import (
 )
 
 router = APIRouter(tags=["requests"])
+
+_LOGGER = logging.getLogger(__name__)
 
 # --- Статусы заявки (строки как в README п.1) ---
 DRAFT = "Черновик"
@@ -3506,6 +3509,59 @@ def get_request(
     return _public_view(request, user)
 
 
+def _request_attachment_files(request_id: str) -> list[str]:
+    """Пути файлов вложений заявки — собрать ДО удаления самой заявки.
+
+    Мета вложений сносится каскадом ON DELETE CASCADE вместе с заявкой, после
+    удаления пути уже неоткуда взять. Импорт локальный: attachments.py
+    импортирует _get_request_or_404 из этого модуля (циклический импорт).
+    Недоступная мета — пустой список: заявка удалится, файлы осиротеют (как
+    было до этой правки), но удаление не упадёт. Ветка молча не проходит:
+    недоступность границы пишется в лог, иначе осиротевшие файлы снова
+    обнаружатся случайно (как на стенде)."""
+    from .attachments import AttachmentsUnavailable, get_attachments_store
+
+    try:
+        records = _resolve_dependency(
+            get_attachments_store, get_settings()
+        ).list_by_request(request_id)
+    except AttachmentsUnavailable:
+        _LOGGER.warning(
+            "мета вложений %s недоступна — файлы заявки останутся на диске", request_id
+        )
+        return []
+    return [record.file_path for record in records if record.file_path]
+
+
+def _delete_files_best_effort(paths: list[str]) -> None:
+    """Снять файлы заявки с диска, не ломая уже сделанное удаление.
+
+    Вызывается ПОСЛЕ удаления заявки из БД: тогда сбой БД не приводит к потере
+    файлов (заявка на месте — и файлы на месте), а сбой удаления файла оставляет
+    осиротевший файл, то же поведение, что было до правки.
+
+    Обёрнуто целиком, включая получение хранилища: любая ошибка здесь уже не
+    может откатить удаление, и 5xx клиент принял бы за «заявка на месте».
+    Порядок «файл → мета» в DELETE /attachments/{id} здесь не повторяется
+    сознательно: там мета сносится сразу следом, здесь — каскадом с заявкой."""
+    if not paths:
+        return
+    from .attachments import get_files_store
+
+    try:
+        files_store = _resolve_dependency(get_files_store, get_settings())
+    except Exception:
+        _LOGGER.exception("не удалось получить хранилище файлов — снятие отложено")
+        return
+    for path in paths:
+        try:
+            files_store.delete(path)
+        except Exception:
+            # Заявка уже удалена — ошибка файла не должна превращать успешное
+            # удаление в 5xx (клиент решит, что заявка на месте, и повторит).
+            _LOGGER.warning("файл %s не удалён", path, exc_info=True)
+
+
 @router.delete("/requests/{request_id}")
 def delete_request(
     request_id: str,
@@ -3514,16 +3570,20 @@ def delete_request(
     store: RequestsStore = Depends(get_requests_store),
 ) -> dict:
     """Удалить заявку (блок «Удаление заявки»; для тестового периода).
-    Удаление необратимо."""
+
+    Удаление необратимо. Вместе с заявкой уходят её история, комментарии и
+    файлы вложений (файлы — best-effort, после успешного удаления из БД)."""
     settings.ensure_read_only()
     require_block(user, BLOCK_REQUEST_DELETE, "Удаление заявок — только админ")
     try:
         _get_request_or_404(store, request_id)
+        file_paths = _request_attachment_files(request_id)
         store.delete(request_id)
     except RequestsUnavailable as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
+    _delete_files_best_effort(file_paths)
     _audit(user.sam, "request.delete", request_id)
     return {"deleted": request_id}
 
