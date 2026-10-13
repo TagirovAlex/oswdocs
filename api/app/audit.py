@@ -1,8 +1,10 @@
 # Append-only журнал аудита (волна A2): память процесса + INSERT в audit_log.
-# Контракт: события только добавляются (append), обновления и удаления
-# запрещены — так же и в таблице audit_log (волна A1, только INSERT, триггер
-# audit_log_no_update_delete). Запись в БД — best-effort: любой сбой БД не
-# роняет запрос, журнал в памяти пополняется всегда (офлайн-тесты без Postgres).
+# Контракт: события только добавляются (append), обновления запрещены — так же и
+# в таблице audit_log (волна A1, триггер audit_log_no_update_delete). Исключение
+# одно: DELETE разрешён для истории уже удалённой заявки — тестовый стенд,
+# решение человека 2026-10-12 (миграция 0021, purge_request_history/Db
+# delete). Запись в БД — best-effort: любой сбой БД не роняет запрос, журнал в
+# памяти пополняется всегда (офлайн-тесты без Postgres).
 
 from __future__ import annotations
 
@@ -12,6 +14,13 @@ from datetime import datetime, timezone
 from pydantic import BaseModel, Field
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
+
+# Сущности, которыми пишется история одной заявки: в entity_id у них бизнес-номер
+# заявки. Этот список — эталон для зачистки следа удалённой заявки: триггер в БД
+# (миграция 0021) и удаление в requests_store.py должны знать ровно тот же набор,
+# иначе след заявки молча перестанет вычищаться, а вручную дочистить его уже
+# не даст триггер.
+REQUEST_HISTORY_ENTITIES = ("request", "document", "attachment")
 
 
 class AuditEvent(BaseModel):
@@ -29,10 +38,11 @@ class AuditEvent(BaseModel):
 
 
 class DbAuditStore:
-    """Персистентное хранилище аудита: только INSERT в audit_log (append-only).
+    """Персистентное хранилище аудита: в этот класс — только INSERT в audit_log.
 
     Схема таблицы — миграция 0001 (id BIGSERIAL, at, actor, action, entity,
-    entity_id, details JSONB); UPDATE/DELETE запрещены триггером и на уровне БД.
+    entity_id, details JSONB); UPDATE запрещён триггером, DELETE — кроме следа
+    уже удалённой заявки (миграция 0021, правило в шапке этого файла).
     Ошибки БД не пробрасываются наружу: аудит — best-effort, сбой журнала не
     должен ронять запрос приложения."""
 
@@ -79,7 +89,10 @@ class DbAuditStore:
 
 
 class AuditLogger:
-    """Только добавление событий. Методов изменения/удаления нет специально."""
+    """Только добавление событий; изменить или удалить отдельное событие нельзя.
+
+    Единственное исключение — purge_request_history: зачистка следа заявки,
+    которой больше нет (тестовый стенд, решение человека 2026-10-12)."""
 
     def __init__(self) -> None:
         self._events: list[AuditEvent] = []
@@ -93,6 +106,21 @@ class AuditLogger:
     def all(self) -> list[AuditEvent]:
         """Снимок журнала (только чтение, для проверок и тестов)."""
         return list(self._events)
+
+    def purge_request_history(self, entity_id: str) -> int:
+        """Убрать из памяти события истории одной заявки (тестовый стенд).
+
+        В БД историю удалённой заявки чистит DbRequestsStore.delete — там это
+        DELETE в audit_log, разрешённый триггером. Здесь только список процесса:
+        офлайн-хранилище заявок читает историю именно из него, и без зачистки
+        удалённая заявка продолжала бы отдавать свой журнал."""
+        before = len(self._events)
+        self._events = [
+            e
+            for e in self._events
+            if not (e.entity in REQUEST_HISTORY_ENTITIES and e.entity_id == entity_id)
+        ]
+        return before - len(self._events)
 
     def clear_for_tests(self) -> None:
         """Сброс журнала. Только для изоляции pytest; в прод-коде не вызывать."""

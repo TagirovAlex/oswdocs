@@ -14,7 +14,8 @@ description: Use when running negative tests, security and rate-limit checks, au
   снимает неоднозначность), просрочка TTL (`approval_ttl_days`), лимиты скана
   (`scan_retention_days/scan_max_mb`), rate-limit логина.
 - «Нет записи в 1С/AD, нет delete»: вызовов записи нет, `AD_WRITE_ENABLED=false` не тронут,
-  `audit_log` полный (append-only, без UPDATE/DELETE). Автосвязка и подтверждение связок пишут
+  `audit_log` полный (append-only: UPDATE запрещён всем, DELETE — только для истории уже
+  удалённой заявки, миграция 0021). Автосвязка и подтверждение связок пишут
   ТОЛЬКО в локальную БД (`link_1c_ad`, `users`, `employee_base_map`, `employees`,
   `link_discrepancies`) — проверять журналом/снапшотом БД, не обращениями к AD/1С.
 - Кадровые данные: уволенные (`dismissal_date <= сегодня`) не выдаются в поиске и не участвуют

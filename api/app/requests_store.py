@@ -15,6 +15,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import sessionmaker
 
+from .audit import REQUEST_HISTORY_ENTITIES, audit_log
 from .config import Settings, get_settings
 
 if TYPE_CHECKING:
@@ -172,7 +173,7 @@ _REQ_ID_PREFIX = "REQ-"
 
 
 def req_number_to_id(number: int) -> str:
-    """Число -> 'REQ-XXXX' (формат контракта, next_id по MAX числовой части)."""
+    """Число -> 'REQ-XXXX' (формат контракта; номер выдаёт последовательность)."""
     return f"{_REQ_ID_PREFIX}{number:04d}"
 
 
@@ -281,9 +282,12 @@ class InMemoryRequestsStore:
         self._requests[request.id] = request
 
     def delete(self, request_id: str) -> None:
-        """Удалить заявку; отсутствующей нет — исключение (на роутере до
-        удаления идёт _get_request_or_404, поэтому сюда попадают только живые)."""
+        """Удалить заявку вместе с её историей и комментариями; отсутствующей нет —
+        исключение (на роутере до удаления идёт _get_request_or_404, поэтому сюда
+        попадают только живые). Зачистка — как в DbRequestsStore.delete."""
         del self._requests[request_id]
+        self._comments.pop(request_id, None)
+        audit_log.purge_request_history(request_id)
 
     def next_id(self) -> str:
         """Номер по внутреннему счетчику (как в прежней offline-заглушке)."""
@@ -442,12 +446,25 @@ class DbRequestsStore:
         WHERE code = :code
         """
     )
-    _NEXT_CODE_SQL = text(
+    # Номер заявки — из последовательности (миграция 0021), а не MAX(code)+1:
+    # по живым заявкам счётчик откатывался на REQ-0001 после очистки списка,
+    # и новый REQ-0001 наследовал журнал аудита старой удалённой заявки.
+    _NEXT_CODE_SQL = text("SELECT nextval('request_code_seq')")
+    # Зачистка истории удалённой заявки (тестовый стенд, решение человека
+    # 2026-10-12). Идёт ПОСЛЕ удаления строки заявки в той же транзакции:
+    # триггер audit_log пропускает DELETE только для номера, которого уже нет
+    # в dismissal_requests. Комментарии (request_comments) без FK — тоже.
+    _DELETE_HISTORY_SQL = text(
+        # Кавычки обязательны: без них это идентификаторы (столбцы), которых в
+        # audit_log нет, и Postgres отвечает UndefinedColumn.
+        f"""
+        DELETE FROM audit_log
+        WHERE entity IN ({", ".join(f"'{e}'" for e in REQUEST_HISTORY_ENTITIES)})
+          AND entity_id = :code
         """
-        SELECT COALESCE(MAX(SUBSTRING(code, 5)::integer), 0)
-        FROM dismissal_requests
-        WHERE code ~ '^REQ-[0-9]+$'
-        """
+    )
+    _DELETE_COMMENTS_SQL = text(
+        "DELETE FROM request_comments WHERE request_id = :code"
     )
 
     _STEP_COLUMNS = (
@@ -747,29 +764,42 @@ class DbRequestsStore:
     def delete(self, request_id: str) -> None:
         """Удалить заявку по бизнес-номеру (code), как ищет get().
 
-        Шаги и документы заявки удаляются каскадом ON DELETE CASCADE.
+        Шаги, документы и вложения удаляются каскадом ON DELETE CASCADE.
+        История заявки и её комментарии чистятся здесь же: FK на них нет, а
+        без этого номер удалённой заявки оставался бы виден в журнале (тестовый
+        стенд, решение человека 2026-10-12).
+        Известное ограничение (поведение прежнее): файлы вложений и собранных
+        документов в FILES_DIR остаются — удаляются только мета-строки.
         Отсутствующей заявки нет — исключение RequestsUnavailable (как update)."""
         try:
             with self._session_factory() as session:
                 result = session.execute(
                     self._DELETE_REQUEST_BY_CODE, {"code": request_id}
                 )
-                session.commit()
                 if result.rowcount == 0:
+                    # Заявки нет — историю не трогаем (она может быть живой).
                     raise RequestsUnavailable(
                         f"Заявка {request_id} не найдена в хранилище"
                     )
+                # Порядок важен: сначала строка заявки, потом её след — иначе
+                # триггер audit_log увидит живую заявку и запретит DELETE.
+                session.execute(self._DELETE_HISTORY_SQL, {"code": request_id})
+                session.execute(self._DELETE_COMMENTS_SQL, {"code": request_id})
+                session.commit()
         except SQLAlchemyError as exc:
             raise RequestsUnavailable(f"Хранилище заявок недоступно: {exc}") from exc
 
     def next_id(self) -> str:
-        """Номер REQ-XXXX по MAX(числовая часть code) + 1 (контракт B1)."""
+        """Номер REQ-XXXX из последовательности request_code_seq (миграция 0021).
+
+        Номера не переиспользуются: последовательность не откатывается при
+        удалении заявок, в отличие от прежнего MAX(code) + 1."""
         try:
             with self._session_factory() as session:
-                max_number = session.execute(self._NEXT_CODE_SQL).scalar() or 0
+                number = session.execute(self._NEXT_CODE_SQL).scalar()
         except SQLAlchemyError as exc:
             raise RequestsUnavailable(f"Хранилище заявок недоступно: {exc}") from exc
-        return req_number_to_id(max_number + 1)
+        return req_number_to_id(int(number or 0))
 
     def get_doc_types(self) -> list[dict]:
         """Виды документов (таблица doc_types, порядок sort_order/code)."""

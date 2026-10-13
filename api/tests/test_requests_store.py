@@ -13,7 +13,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from app.audit import audit_log  # noqa: E402
+from app.audit import AuditEvent, audit_log  # noqa: E402
 from app.config import Settings, get_settings  # noqa: E402
 from app.main import app  # noqa: E402
 from app.requests import (  # noqa: E402
@@ -41,6 +41,7 @@ from app.requests_store import (  # noqa: E402
     DbRequestsStore,
     InMemoryRequestsStore,
     REQUEST_STATUS_TO_CODE,
+    RequestsUnavailable,
     ROUTE_ORIGIN_TO_CODE,
     STEP_STATUS_TO_CODE,
     get_requests_store,
@@ -320,7 +321,7 @@ def test_unknown_mapping_raises():
 
 
 def test_req_id_number_conversion():
-    """Бизнес-номер REQ-XXXX <-> число (для next_id по MAX числовой части)."""
+    """Бизнес-номер REQ-XXXX <-> число (номер выдаёт последовательность)."""
     assert req_number_to_id(1) == "REQ-0001"
     assert req_number_to_id(42) == "REQ-0042"
     assert req_id_to_number("REQ-0001") == 1
@@ -337,3 +338,102 @@ def test_db_store_implements_protocol():
     store = DbRequestsStore("postgresql://localhost:1/sed")
     for method in ("create", "get", "list_all", "update", "next_id"):
         assert callable(getattr(store, method))
+
+
+# --- DbRequestsStore: номера заявок и зачистка истории (миграция 0021) ---
+
+
+class FakeResult:
+    """Ответ execute: scalar() и rowcount."""
+
+    def __init__(self, scalar=None, rowcount=0) -> None:
+        self._scalar = scalar
+        self.rowcount = rowcount
+
+    def scalar(self):
+        return self._scalar
+
+
+class FakeSession:
+    """Сессия-заглушка: пишет выполненные SQL, отдаёт заготовленные ответы."""
+
+    def __init__(self, results: list[FakeResult] | None = None) -> None:
+        self._results = list(results or [])
+        self.calls: list[str] = []
+        self.commits = 0
+
+    def __enter__(self) -> "FakeSession":
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        return False
+
+    def execute(self, statement, params=None) -> FakeResult:
+        self.calls.append(str(statement))
+        return self._results.pop(0) if self._results else FakeResult()
+
+    def commit(self) -> None:
+        self.commits += 1
+
+
+def _db_store(session: FakeSession) -> DbRequestsStore:
+    """DbRequestsStore с подменённой сессией (движок не создаётся)."""
+    store = object.__new__(DbRequestsStore)
+    store._engine = None
+    store._session_factory = lambda: session
+    return store
+
+
+def test_next_id_takes_number_from_sequence():
+    """Номер выдаёт последовательность request_code_seq, а не MAX по таблице.
+
+    Иначе после очистки списка заявок нумерация откатывалась на REQ-0001 и
+    новая заявка наследовала журнал аудита удалённой (миграция 0021)."""
+    session = FakeSession([FakeResult(scalar=42)])
+    assert _db_store(session).next_id() == "REQ-0042"
+    assert "nextval('request_code_seq')" in session.calls[0]
+    assert "dismissal_requests" not in session.calls[0]
+
+
+def test_delete_purges_history_and_comments_after_request():
+    """Удаление заявки чистит её след: журнал аудита и комментарии.
+
+    Порядок обязателен: сначала строка заявки, потом её история — триггер
+    audit_log пропускает DELETE только для номера, которого уже нет в
+    dismissal_requests."""
+    session = FakeSession([FakeResult(rowcount=1)])
+    _db_store(session).delete("REQ-0007")
+    joined = "\n".join(session.calls)
+    assert joined.index("DELETE FROM dismissal_requests") < joined.index(
+        "DELETE FROM audit_log"
+    )
+    assert joined.index("DELETE FROM audit_log") < joined.index(
+        "DELETE FROM request_comments"
+    )
+    assert "entity IN ('request', 'document', 'attachment')" in joined
+    assert session.commits == 1, "удаление заявки и её следа — одна транзакция"
+
+
+def test_delete_missing_request_does_not_purge():
+    """Нет заявки — след не трогаем: исключение, чистки и коммита нет."""
+    session = FakeSession([FakeResult(rowcount=0)])
+    with pytest.raises(RequestsUnavailable):
+        _db_store(session).delete("REQ-0007")
+    assert not any("DELETE FROM audit_log" in sql for sql in session.calls)
+    assert session.commits == 0
+
+
+def test_inmemory_delete_purges_history_and_comments():
+    """Офлайн-хранилище ведёт себя так же: история удалённой заявки пуста."""
+    store = InMemoryRequestsStore()
+    store.create(_make_request("REQ-0001"))
+    store.add_comment("REQ-0001", "ok.vymyshlennaya", "Вымышленный комментарий")
+    audit_log.append(AuditEvent(actor="ok.vymyshlennaya", action="request.create",
+                                entity="request", entity_id="REQ-0001"))
+    audit_log.append(AuditEvent(actor="adm.sed", action="settings.update",
+                                entity="settings", entity_id="approval_ttl_days"))
+    store.delete("REQ-0001")
+    assert store.get_history("request", "REQ-0001") == []
+    assert store.list_comments("REQ-0001") == []
+    # Чужая запись журнала на месте — чистится только история заявки.
+    assert any(e.action == "settings.update" for e in audit_log.all())

@@ -5,7 +5,7 @@
 ## Обзор
 - `api/` — FastAPI (Python 3.12), `app/` — код, `tests/` — pytest, `requirements.txt`.
 - `frontend/` — React SPA (Vite): `src/` — код, `public/` — статика, `dist/` — сборка.
-- `db/alembic/versions/` — миграции БД (0001..0017).
+- `db/alembic/versions/` — миграции БД (0001..0021).
 - `proxy/` — nginx. `deploy/` — компоуз/деплой. `samples/` — DESIGN.md + макет.
 - `script_local/`, `script_remote/` — инструментарий разработчика (gitignored).
 - `PLAN.md` — план/статус; `TEMPLATES.md` — бланки/этапы и печать; `task/` — исторические спеки (gitignored).
@@ -200,7 +200,13 @@
   0020 справочник прав доступа (perm_blocks — 13 блоков функций, perm_templates —
   5 шаблонов с protected, perm_template_blocks — состав «шаблон → блок» переносом
   текущих прав один в один, perm_template_groups — группы AD шаблона, переносятся
-  из ключей settings ролевых групп; access_groups остаётся ключом входа).
+  из ключей settings ролевых групп; access_groups остаётся ключом входа),
+  0021 последовательность номеров заявок request_code_seq (номера не откатываются
+  после очистки списка заявок и не переиспользуются; сид выше максимума по живым
+  заявкам, журналу аудита и комментариям) и сужение правила триггера
+  audit_log_no_update_delete: UPDATE запрещён всем, DELETE — только для следа
+  заявки, которой уже нет в dismissal_requests (удаление заявки чистит её историю
+  и комментарии).
   Планируется (волна F3): админка прав — вкладка «Доступ и роли» на блоках и шаблонах
    (бэкенд прав — `permissions.py` + `/settings/permissions`, волна F2, сделано).
 

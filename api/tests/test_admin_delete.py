@@ -113,3 +113,46 @@ def test_delete_missing_request_404(client, admin_headers):
     """Несуществующей заявки нет — 404."""
     response = client.delete("/requests/REQ-9999", headers=admin_headers)
     assert response.status_code == 404
+
+
+def test_delete_clears_request_history_and_comments(
+    client, hr_headers, admin_headers, requests_store
+):
+    """Удаление заявки уносит её историю и комментарии.
+
+    Раньше след оставался в журнале навсегда (FK нет, append-only), и после
+    очистки списка заявок новая REQ-0001 показывала историю удалённой. Здесь
+    проверяется поведение офлайн-хранилища; путь Postgres (та же зачистка в
+    DbRequestsStore.delete) — в test_requests_store.py."""
+    rid = _create(client, hr_headers, steps=[{"owner_group": "SED_STEP_BUH"}])["id"]
+    comment = client.post(
+        f"/requests/{rid}/comments",
+        json={"body": "Вымышленный комментарий к заявке"},
+        headers=hr_headers,
+    )
+    assert comment.status_code == 200, comment.text
+    assert client.get(f"/requests/{rid}/history", headers=admin_headers).json()
+    assert client.get(f"/requests/{rid}/comments", headers=admin_headers).json()
+
+    assert client.delete(f"/requests/{rid}", headers=admin_headers).status_code == 200
+    left = [
+        e
+        for e in audit_log.all()
+        if e.entity_id == rid and e.action != "request.delete"
+    ]
+    assert left == [], "история удалённой заявки осталась в журнале"
+    assert not requests_store.list_comments(rid)
+
+
+def test_request_code_not_reused_after_delete(
+    client, hr_headers, admin_headers, requests_store
+):
+    """Номер удалённой заявки не выдаётся снова.
+
+    Офлайн-хранилище считало монотонно и раньше; контракт зафиксирован, чтобы
+    правка счётчика в боевом DbRequestsStore (миграция 0021, nextval) не
+    нарушила его — проверка боевого пути в test_requests_store.py."""
+    first = _create(client, hr_headers, steps=[{"owner_group": "SED_STEP_BUH"}])["id"]
+    assert client.delete(f"/requests/{first}", headers=admin_headers).status_code == 200
+    second = _create(client, hr_headers, steps=[{"owner_group": "SED_STEP_BUH"}])["id"]
+    assert second != first

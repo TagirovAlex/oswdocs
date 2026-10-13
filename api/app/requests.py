@@ -19,7 +19,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, model_validator
 
-from .audit import AuditEvent, audit_log
+from .audit import REQUEST_HISTORY_ENTITIES, AuditEvent, audit_log
 from .config import Settings, get_settings
 from .deps import (
     CurrentUser,
@@ -4185,7 +4185,7 @@ def get_history(
                 status_code=status.HTTP_403_FORBIDDEN, detail="Нет доступа к заявке"
             )
         events: list[dict] = []
-        for entity in ("request", "document", "attachment"):
+        for entity in REQUEST_HISTORY_ENTITIES:
             events.extend(store.get_history(entity, request.id))
     except RequestsUnavailable as exc:
         raise HTTPException(

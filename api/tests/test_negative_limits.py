@@ -167,12 +167,38 @@ def test_login_rate_limit_success_resets():
 
 
 def test_audit_append_only_no_update_delete():
-    """Журнал только пополняется: нет update/delete/remove/purge в коде и классе."""
-    for forbidden in ("update", "delete", "remove", "purge", "clear"):
+    """Журнал пополняется; единственная чистка — история удалённой заявки.
+
+    Решение человека 2026-10-12 (тестовый стенд): удаление заявки стирает и её
+    историю, поэтому purge_request_history в классе ЕСТЬ. Всё прочее по-прежнему
+    запрещено — ни правки, ни удаление по одному событию (append-only)."""
+    for forbidden in ("update", "delete", "remove", "clear"):
         assert not hasattr(AuditLogger, forbidden), forbidden
+    # Чистка разрешена ровно одна и только по номеру заявки: любая другая
+    # чистка журнала (purge_all, truncate, reset) — снова дыра в контракте.
+    purges = [name for name in dir(AuditLogger) if name.startswith("purge")]
+    assert purges == ["purge_request_history"], purges
     src = (Path(__file__).resolve().parents[1] / "app" / "audit.py").read_text(encoding="utf-8")
-    for forbidden in ("def update", "def delete", "def remove", "def purge"):
+    for forbidden in ("def update", "def delete", "def remove", "def truncate",
+                      "def reset"):
         assert forbidden not in src, forbidden
+    assert src.count("def purge") == 1, "в audit.py должна быть одна чистка"
+    audit_log.clear_for_tests()
+    # Чистка трогает только историю одной заявки (все три сущности, которыми
+    # пишется её история), чужие записи и чужая заявка остаются.
+    audit_log.append(AuditEvent(actor="t", action="x", entity="request",
+                                entity_id="REQ-0001"))
+    audit_log.append(AuditEvent(actor="t", action="y", entity="attachment",
+                                entity_id="REQ-0001"))
+    audit_log.append(AuditEvent(actor="t", action="w", entity="request",
+                                entity_id="REQ-0002"))
+    audit_log.append(AuditEvent(actor="t", action="z", entity="user", entity_id="t"))
+    assert audit_log.purge_request_history("REQ-0001") == 2
+    assert {(e.entity, e.entity_id, e.action) for e in audit_log.all()} == {
+        ("request", "REQ-0002", "w"),
+        ("user", "t", "z"),
+    }
+    assert audit_log.purge_request_history("REQ-0001") == 0, "повторная чистка — ноль"
     audit_log.clear_for_tests()
     audit_log.append(AuditEvent(actor="t", action="x", entity="e", entity_id="1"))
     assert len(audit_log.all()) == 1
