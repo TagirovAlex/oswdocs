@@ -143,7 +143,8 @@ export interface RequestRow {
   // Текущий согласующий: исполнитель ПЕРВОГО ожидающего шага (can_act здесь не
   // участвует — это про отметку, а не про подпись): ФИО, иначе группа, иначе прочерк.
   ownerName: string;
-  // Дата создания заявки (ISO-дата, как у соседнего «Срок») или прочерк.
+  // Дата создания и срок шага (сырой ISO — по ним сортировка, показываются через
+  // formatDate в зоне показа) или пустая строка.
   createdAt: string;
   dueDate: string;
   department: string;
@@ -336,7 +337,7 @@ export interface RoutingCatalogs {
 }
 
 // Ключ сортировки списка заявок (клик по заголовку колонки переключает знак).
-export type RequestSortKey = "id" | "status" | "dueDate";
+export type RequestSortKey = "id" | "status" | "dueDate" | "createdAt";
 
 export interface RequestSort {
   key: RequestSortKey;
@@ -1245,10 +1246,12 @@ export function toRequestRow(request: RequestOut): RequestRow {
     status: request.status,
     step: stepOwnerLabel(current),
     ownerName,
-    // Формат как у соседней колонки «Срок» (ISO-дата): в одной таблице
-    // даты должны читаться одинаково.
-    createdAt: request.created_at ? request.created_at.slice(0, 10) : "—",
-    dueDate: expires ? expires.slice(0, 10) : "—",
+    // Обе даты — сырой ISO: по ним сортировка, а показываются через
+    // formatDate в зоне показа (см. date-format.ts). Срез ISO-строки здесь
+    // означал бы дату по UTC — для шага, созданного вечером, список и
+    // карточка показали бы разные дни.
+    createdAt: request.created_at ?? "",
+    dueDate: expires ?? "",
     department: request.department,
     position: request.position,
     steps: request.steps,

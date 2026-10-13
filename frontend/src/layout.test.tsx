@@ -4,6 +4,7 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SedLayout } from "./layout";
+import { setDisplayTimezone } from "./date-format";
 import { ThemeProvider } from "./theme";
 import { getEnterprises, getFolders, getRequests } from "./requests-client";
 import { toRequestRow } from "./requests-client";
@@ -120,6 +121,9 @@ beforeEach(() => {
   vi.mocked(getFolders).mockReset();
   vi.mocked(getRequests).mockReset();
   vi.mocked(getEnterprises).mockResolvedValue(enterprises);
+  // Зона показа — состояние модуля: сбрасываем, иначе тест с явной зоной
+  // утечёт в остальные тесты файла.
+  setDisplayTimezone(null);
 });
 
 describe("SedLayout", () => {
@@ -549,9 +553,30 @@ describe("SedLayout", () => {
     await waitFor(() => expect(visibleIds()).toEqual(["REQ-0001", "REQ-0002"]));
   });
 
+  // Сортировка по «Дата» — по дате СОЗДАНИЯ, а не по рег. номеру и не по сроку.
+  it("сортировка по «Дата» — по дате создания", async () => {
+    vi.mocked(getFolders).mockResolvedValue(folders);
+    const ранняя = requestWith("Громов Игорь Олегович", "На согласовании", "REQ-0009");
+    ранняя.created_at = "2026-09-01T08:00:00+00:00";
+    const поздняя = requestWith("Сидорова Анна Сергеевна", "На согласовании", "REQ-0002");
+    поздняя.created_at = "2026-10-01T08:00:00+00:00";
+    vi.mocked(getRequests).mockResolvedValue([поздняя, ранняя]);
+
+    renderWithTheme("hr");
+    await waitFor(() => expect(screen.getByText("REQ-0009")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Сортировать по «Дата»" }));
+    // REQ-0009 — сентябрь, REQ-0002 — октябрь → возрастание по дате создания.
+    await waitFor(() => expect(visibleIds()).toEqual(["REQ-0009", "REQ-0002"]));
+    fireEvent.click(screen.getByRole("button", { name: "Сортировать по «Дата»" }));
+    await waitFor(() => expect(visibleIds()).toEqual(["REQ-0002", "REQ-0009"]));
+  });
+
   // Колонка «Дата» — дата СОЗДАНИЯ заявки, рядом с рег. номером (как в макете).
   // «Срок» при этом остаётся дедлайном шага: путать их нельзя.
   it("колонка «Дата» показывает дату создания, «Срок» — дедлайн шага", async () => {
+    // Зона показа фиксирована явно: иначе проверка зависела бы от зоны машины,
+    // на которой гоняют тесты.
+    setDisplayTimezone("Europe/Moscow");
     vi.mocked(getFolders).mockResolvedValue(folders);
     vi.mocked(getRequests).mockResolvedValue([
       requestWith("Громов Игорь Олегович", "На согласовании", "REQ-0001"),
@@ -563,11 +588,11 @@ describe("SedLayout", () => {
     const headers = screen.getAllByRole("columnheader").map((th) => th.textContent ?? "");
     expect(headers[1]).toBe("Дата");  // сразу за рег. номером (№ с маркером сортировки)
     expect(headers[headers.length - 1]).toBe("Срок");
-    // По ячейкам строки: created_at = 2026-10-01, срок шага = 2026-10-05.
+    // По ячейкам строки: created_at = 2026-10-01T09:30Z, срок шага = 2026-10-05.
     // Проверка по индексу, а не getByText: иначе дата нашлась бы где угодно.
     const cells = firstRowCells();
-    expect(cells[1]).toBe("2026-10-01");
-    expect(cells[cells.length - 1]).toBe("2026-10-05");
+    expect(cells[1]).toBe("01.10.2026");  // дата создания в зоне показа
+    expect(cells[cells.length - 1]).toBe("05.10.2026");  // срок — тоже в зоне показа
   });
 
   it("без даты создания в строке прочерк", async () => {

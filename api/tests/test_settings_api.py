@@ -110,6 +110,7 @@ CONTRACT_VALUES = {
     "schedule_hr_dismissals_sync": None,
     "hr_dismissals_synced_at": None,
     "blank_autopick": None,
+    "timezone": None,
 }
 
 # Контент-часть контракта: только ключи CONTENT_KEYS (для GET/PUT /settings/content).
@@ -170,6 +171,7 @@ UPDATED_VALUES = {
     "schedule_hr_dismissals_sync": None,
     "hr_dismissals_synced_at": None,
     "blank_autopick": None,
+    "timezone": None,
 }
 
 
@@ -919,3 +921,39 @@ def test_blank_autopick_off_by_default(monkeypatch):
     from app.requests import _blank_autopick_enabled
 
     assert _blank_autopick_enabled() is False
+
+
+def test_settings_put_persists_timezone(client, admin_headers, mock_store):
+    """Часовой пояс показа дат — настройка админа, сохраняется как есть."""
+    response = client.put(
+        "/settings", json={**UPDATED_VALUES, "timezone": "Europe/Kaliningrad"},
+        headers=admin_headers,
+    )
+    assert response.status_code == 200, response.text
+    assert json.loads(mock_store.get("timezone")) == "Europe/Kaliningrad"
+    assert response.json()["timezone"] == "Europe/Kaliningrad"
+
+
+def test_settings_reject_unknown_timezone(client, admin_headers, mock_store):
+    """Несуществующая зона — 422, а не молчаливое отсутствие дат в интерфейсе."""
+    response = client.put(
+        "/settings", json={**UPDATED_VALUES, "timezone": "Марс/Средний"},
+        headers=admin_headers,
+    )
+    assert response.status_code == 422, response.text
+    assert mock_store.get("timezone") is None, "мусор в настройки не попал"
+
+
+def test_timezone_blank_clears_key(client, admin_headers, mock_store):
+    """Пустая строка — «зона не задана»: ключ снимается, и даты в интерфейсе
+    показываются в часовом поясе контейнеров (TZ в .env), а не в зоне
+    браузера пользователя."""
+    client.put("/settings", json={**UPDATED_VALUES, "timezone": "Europe/Moscow"},
+               headers=admin_headers)
+    response = client.put(
+        "/settings", json={**UPDATED_VALUES, "timezone": "  "}, headers=admin_headers
+    )
+    assert response.status_code == 200, response.text
+    assert json.loads(mock_store.get("timezone") or "null") is None, (
+        "пустая зона должна снимать ключ"
+    )

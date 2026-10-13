@@ -5,14 +5,15 @@
 ## Обзор
 - `api/` — FastAPI (Python 3.12), `app/` — код, `tests/` — pytest, `requirements.txt`.
 - `frontend/` — React SPA (Vite): `src/` — код, `public/` — статика, `dist/` — сборка.
-- `db/alembic/versions/` — миграции БД (0001..0021).
+- `db/alembic/versions/` — миграции БД (0001..0022).
 - `proxy/` — nginx. `deploy/` — компоуз/деплой. `samples/` — DESIGN.md + макет.
 - `script_local/`, `script_remote/` — инструментарий разработчика (gitignored).
 - `PLAN.md` — план/статус; `TEMPLATES.md` — бланки/этапы и печать; `task/` — исторические спеки (gitignored).
 
 ## API (api/app/)
 - `main.py` — точка входа, подключение роутеров.
-- `auth.py` — доменный вход/сессия (LDAPS), `/auth/login`, `/auth/me`.
+- `auth.py` — доменный вход/сессия (LDAPS), `/auth/login`, `/auth/me` (роль, блоки прав и часовой пояс показа дат — из
+  `settings.timezone`, иначе TZ контейнера).
 - `deps.py` — зависимости, текущий пользователь; права — блоки функций из `permissions.py`
   (`require_block`), роль (`owner/hr/hr_admin/admin/sed_admin`) — производная от совпавших шаблонов
   для /auth/me (`_detect_role`).
@@ -92,8 +93,9 @@
   `GET/PUT /settings/routing/blanks/{id}/steps` и шаги справочника
   `GET/POST/PUT/DELETE /settings/routing/step-catalog` (блок `settings_blanks`; `/settings` и виды
   документов — `settings_infra`, `/settings/content` — `settings_content`, `/enterprises` и
-  `/step-groups` — `request_create`); ключ `blank_autopick`
-  в `INFRA_KEYS`. Вкладка «Доступ и роли»: `GET /settings/permissions` (блоки, шаблоны, состав и
+  `/step-groups` — `request_create`); ключи `blank_autopick` и `timezone`
+  в `INFRA_KEYS` (часовой пояс показа дат правится на вкладке «Инфра»). Вкладка
+  «Доступ и роли»: `GET /settings/permissions` (блоки, шаблоны, состав и
   группы одним ответом), `PUT /settings/permissions/templates/{code}` (состав шаблона целиком,
   аудит `permissions.update`, 409 при снятии у себя блока `settings_infra`),
   `GET /settings/permissions/groups` (перечень групп из кэша `ad_group_members` + дата синка).
@@ -206,7 +208,11 @@
   заявкам, журналу аудита и комментариям) и сужение правила триггера
   audit_log_no_update_delete: UPDATE запрещён всем, DELETE — только для следа
   заявки, которой уже нет в dismissal_requests (удаление заявки чистит её историю
-  и комментарии).
+  и комментарии),
+  0022 настройка часового пояса показа дат (`settings.timezone`, сид
+  `Europe/Moscow`): зону отдаёт `/auth/me`, приводит к ней показ в интерфейсе
+  (`frontend/src/date-format.ts`), хранимое остаётся в UTC; часовой пояс
+  контейнеров — переменная `TZ` в compose/.env.
   Планируется (волна F3): админка прав — вкладка «Доступ и роли» на блоках и шаблонах
    (бэкенд прав — `permissions.py` + `/settings/permissions`, волна F2, сделано).
 

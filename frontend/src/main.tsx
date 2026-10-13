@@ -5,6 +5,7 @@ import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { clearToken, getToken, logout, me } from "./auth-client";
 import type { AuthUser } from "./auth-client";
+import { setDisplayTimezone } from "./date-format";
 import { SedLayout } from "./layout";
 import { LoginScreen } from "./login-screen";
 import { ThemeProvider } from "./theme";
@@ -96,6 +97,9 @@ function App() {
   // ?view= (без шапки).
   const route = parseView();
   const blocks = auth.blocks ?? [];
+  // Зона показа дат — из /auth/me, до отрисовки любого окна: иначе первый кадр
+  // показал бы даты в зоне браузера и «прыгнул» бы на своей зоне.
+  setDisplayTimezone(auth.timezone);
   if (route.view === "request") {
     return <RequestWindow requestId={route.id} role={auth.role} blocks={blocks} />;
   }

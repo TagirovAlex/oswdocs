@@ -6,6 +6,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AdminSettings } from "./admin-settings";
+import { setDisplayTimezone } from "./date-format";
 import { ApiHttpError } from "./auth-client";
 import type { BlankStepRow, StepCatalogRow } from "./requests-client";
 import {
@@ -100,6 +101,7 @@ const settings: SettingsData = {
   smtp_port: 587,
   smtp_from: "sed@example.com",
   smtp_from_name: "СЭД — увольнения",
+  timezone: "Europe/Moscow",
   smtp_user: "",
   smtp_password: null,
   require_comment: true,
@@ -136,6 +138,7 @@ const contentOnly: SettingsData = {
   smtp_port: null,
   smtp_from: null,
   smtp_from_name: null,
+  timezone: null,
   smtp_user: null,
   smtp_password: null,
   require_comment: true,
@@ -321,6 +324,9 @@ const permissionGroups: PermissionGroupsData = {
 };
 
 beforeEach(() => {
+  // Зона показа — состояние модуля: сбрасываем, иначе заданная в одном тесте
+  // зона утекла бы в остальные тесты файла.
+  setDisplayTimezone(null);
   vi.mocked(getSettings).mockReset();
   vi.mocked(saveSettings).mockReset();
   vi.mocked(getSettingsContent).mockReset();
@@ -906,6 +912,10 @@ describe("AdminSettings", () => {
     vi.mocked(downloadBackup).mockResolvedValue(undefined);
     vi.mocked(deleteBackup).mockResolvedValue({ ok: true });
 
+    // Зона показа фиксирована ДО рендера: setDisplayTimezone не вызывает
+    // перерисовку, и поставленная после render() зона в уже нарисованные
+    // даты не попала бы. Иначе проверка зависела бы от зоны машины.
+    setDisplayTimezone("Europe/Moscow");
     render(<AdminSettings role="admin" />);
     await waitFor(() => expect(screen.getByRole("button", { name: "Архивация" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Архивация" }));
@@ -915,15 +925,8 @@ describe("AdminSettings", () => {
     expect(screen.getByText("5.0 МБ")).toBeInTheDocument();
     expect(screen.getByText("0.5 КБ")).toBeInTheDocument();
 
-    // Дата и время бэкапа (ru-RU, часы:минуты) — по локальному времени браузера.
-    const expectedWhen = new Date("2026-10-01T12:00:00+00:00").toLocaleString("ru-RU", {
-      day: "2-digit",
-      month: "2-digit",
-      year: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-    expect(screen.getAllByText(expectedWhen).length).toBe(2);
+    // Дата и время бэкапа (ru-RU, часы:минуты) в зоне показа (зона задана выше, до рендера).
+    expect(screen.getAllByText("01.10.2026, 15:00").length).toBe(2);
     // Время есть — значит показывается не одна только дата.
     expect(screen.queryByText("2026-10-01")).not.toBeInTheDocument();
 

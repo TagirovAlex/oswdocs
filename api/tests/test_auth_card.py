@@ -311,7 +311,7 @@ def test_auth_me_role_from_db_groups(client, admin_headers, b1_mocks, group_stor
     trimmed = client.get("/auth/me", headers=admin_headers)
     assert trimmed.status_code == 200
     assert trimmed.json()["role"] == "owner"
-    assert set(trimmed.json()) == {"sam", "groups", "role", "blocks"}
+    assert set(trimmed.json()) == {"sam", "groups", "role", "blocks", "timezone"}
 
 
 def test_auth_me_role_env_fallback_without_db_key(client, admin_headers, hr_admin_headers, b1_mocks, group_store):
@@ -344,9 +344,48 @@ def test_auth_me_alias_matrix(client, hr_headers, owner_headers, nogroup_headers
     assert "fio" in full.json()
     trimmed = client.get("/auth/me", headers=owner_headers)
     assert trimmed.status_code == 200
-    assert set(trimmed.json()) == {"sam", "groups", "role", "blocks"}
+    assert set(trimmed.json()) == {"sam", "groups", "role", "blocks", "timezone"}
     denied = client.get("/auth/me", headers=nogroup_headers)
     assert denied.status_code == 403
+
+
+def test_auth_me_timezone_from_settings(client, hr_headers, owner_headers, b1_mocks):
+    """Часовой пояс показа дат отдаётся обеим карточкам из настройки.
+
+    Им интерфейс приводит все даты к одной зоне, поэтому владельцу зона нужна
+    не меньше, чем ОК (владелец получает урезанную карточку)."""
+    from app.settings_routes import get_settings_store
+
+    class Store:
+        """Граница настроек: отдаёт заданный часовой пояс."""
+
+        def get(self, _key: str) -> str:
+            return '"Europe/Kaliningrad"'
+
+    app.dependency_overrides[get_settings_store] = lambda: Store()
+    try:
+        for headers in (hr_headers, owner_headers):
+            body = client.get("/auth/me", headers=headers).json()
+            assert body["timezone"] == "Europe/Kaliningrad"
+    finally:
+        app.dependency_overrides.pop(get_settings_store, None)
+
+
+def test_auth_me_timezone_falls_back_to_env(client, hr_headers, b1_mocks, monkeypatch):
+    """Настройки недоступны — отдаётся TZ контейнера, а не зона браузера."""
+    from app.settings_routes import SettingsUnavailable, get_settings_store
+
+    class BrokenStore:
+        def get(self, _key: str) -> str:
+            raise SettingsUnavailable("Вымышленная недоступность настроек")
+
+    app.dependency_overrides[get_settings_store] = lambda: BrokenStore()
+    monkeypatch.setenv("TZ", "Europe/Samara")
+    try:
+        body = client.get("/auth/me", headers=hr_headers).json()
+        assert body["timezone"] == "Europe/Samara"
+    finally:
+        app.dependency_overrides.pop(get_settings_store, None)
 
 
 def test_auth_me_hr_admin_full(client, hr_admin_headers, b1_mocks):

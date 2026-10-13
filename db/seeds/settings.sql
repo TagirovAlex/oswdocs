@@ -13,6 +13,14 @@ INSERT INTO settings (key, value) VALUES
   ('session_ttl_minutes', '600')
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
 
+-- Часовой пояс показа дат в интерфейсе (IANA). Должен совпадать с TZ
+-- контейнеров в .env — от него зависят имена бэкапов и метки времени в логах.
+-- Именно DO NOTHING, а не DO UPDATE как у соседей: это значение правит
+-- админ, и пересид не должен молча затирать его выбор на стенде.
+INSERT INTO settings (key, value) VALUES
+  ('timezone', '"Europe/Moscow"')
+ON CONFLICT (key) DO NOTHING;
+
 -- Доменные группы доступа (подтверждены ИТ, заведены в OSWDOCS; проверка memberOf при логине).
 INSERT INTO settings (key, value) VALUES
   ('allowed_ad_groups', '["SED_HR", "SED_ADMINS", "SED_STEP_EXEC"]')

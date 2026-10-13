@@ -5,6 +5,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { ChangeEvent } from "react";
 import { hasBlock, me } from "./auth-client";
+import { formatDate, formatDateTime } from "./date-format";
 import {
   addComment,
   base64ToBlob,
@@ -70,12 +71,10 @@ function stepOwnerCell(step: RequestStep): string {
   return step.owner_group || "—";
 }
 
-// Дата записи истории: локализованная; при битой строке — как пришла.
-// Переиспользуется и для даты создания в шапке карточки — формат тот же
-// (ru-RU, локаль браузера), различаются только подписи в интерфейсе.
+// Дата записи истории и дата создания заявки в шапке: локализованная и в зоне
+// показа (settings.timezone), при битой строке — как пришла.
 function historyWhen(at: string): string {
-  const d = new Date(at);
-  return isNaN(d.getTime()) ? at : d.toLocaleString("ru-RU");
+  return formatDateTime(at);
 }
 
 // События истории, обычному сотруднику ничего не говорящие: пропуск уведомления
@@ -1446,7 +1445,7 @@ export function RequestCard(props: RequestCardProps) {
                         {/* Фолбэки обязательны: одна битая запись не должна ронять
                             всю карточку (раньше .slice по undefined давал пустой экран). */}
                         {att.file_name ?? "Файл"} · {att.size_bytes ?? "—"} Б ·{" "}
-                        {(att.uploaded_at ?? "").slice(0, 10) || "—"} ·{" "}
+                        {formatDate(att.uploaded_at) || "—"} ·{" "}
                         <a
                           href={url}
                           onClick={(e) => {
@@ -1661,7 +1660,7 @@ export function RequestCard(props: RequestCardProps) {
                           <td>{stepDutyCell(step)}</td>
                           <td>{stepExecutorsNode(step)}</td>
                           <td>{step.status}</td>
-                          <td>{step.expires_at.slice(0, 10)}</td>
+                          <td>{formatDate(step.expires_at)}</td>
                           {/* Отметки ответственных (шаг с несколькими
                               ответственными) — под комментарием шага. */}
                           <td>

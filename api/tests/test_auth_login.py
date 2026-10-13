@@ -155,6 +155,9 @@ def test_login_ok_200(client, mock_auth_service):
     # входа остался бы без блоков до перезагрузки страницы.
     assert "blocks" in body["user"]
     assert isinstance(body["user"]["blocks"], list)
+    # Часовой пояс — тоже сразу в ответе входа: после входа интерфейс
+    # применяет его сам, иначе даты до перезагрузки шли бы по зоне браузера.
+    assert "timezone" in body["user"]
 
 
 def test_login_wrong_password_401(client, mock_auth_service):
@@ -248,12 +251,12 @@ def test_auth_me_hr_full(client, hr_headers, test_settings_override):
 
 
 def test_auth_me_owner_trimmed_no_pdn(client, owner_headers, test_settings_override):
-    """Владелец: /auth/me урезанная — только sam/groups/role/blocks, без ПДн."""
+    """Владелец: /auth/me урезанная — sam/groups/role/blocks/timezone, без ПДн."""
     response = client.get("/auth/me", headers=owner_headers)
     assert response.status_code == 200
     body = response.json()
     assert body["role"] == "owner"
-    assert set(body) == {"sam", "groups", "role", "blocks"}
+    assert set(body) == {"sam", "groups", "role", "blocks", "timezone"}
     for forbidden in ("fio", "mail", "department", "title"):
         assert forbidden not in body
 

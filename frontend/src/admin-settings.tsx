@@ -65,6 +65,7 @@ import type {
 } from "./settings-client";
 import { BlankPreview } from "./blank-preview";
 import { hasBlock } from "./auth-client";
+import { formatDateTime, formatDateTimeHM } from "./date-format";
 import {
   RichTextEditor,
   richTextAppend,
@@ -652,7 +653,7 @@ function PermissionsEditor() {
             <h4>Выбрать группы</h4>
             <div className="sed-note">
               Список — из кэша состава групп AD{groupsSyncedAt
-                ? `, последняя синхронизация ${new Date(groupsSyncedAt).toLocaleString("ru-RU")}`
+                ? `, последняя синхронизация ${formatDateTime(groupsSyncedAt)}`
                 : ", синхронизация ещё не выполнялась"}
               . Поиск ниже ищет по кэшу. Если группы в списке нет, введите её
               ТОЧНОЕ имя и нажмите «Найти в AD»: система проверит группу в
@@ -2522,18 +2523,11 @@ function formatBackupSize(sizeBytes: number): string {
   return `${(sizeBytes / (1024 * 1024)).toFixed(1)} МБ`;
 }
 
-// Формат даты и времени бэкапа: «ДД.ММ.ГГГГ ЧЧ:ММ» по ru-RU (часы:минуты,
-// чтобы совпадало с {ts} в имени файла). Дата без времени — только дата.
+// Формат даты и времени бэкапа: «ДД.ММ.ГГГГ ЧЧ:ММ» — чтобы часы:минуты
+// совпадали с {ts} в имени файла. Форматирование в зоне показа — в
+// date-format.ts (единственное место, где выбирается зона).
 function formatBackupDate(iso: string): string {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return iso.slice(0, 10);
-  return date.toLocaleString("ru-RU", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  return formatDateTimeHM(iso);
 }
 
 // Вкладка «Архивация» (только админ): настройки бэкапов (место хранения,
@@ -2767,6 +2761,7 @@ export function AdminSettings(props: AdminSettingsProps) {
   const [smtpPort, setSmtpPort] = useState<number | null>(null);
   const [smtpFrom, setSmtpFrom] = useState<string | null>(null);
   const [smtpFromName, setSmtpFromName] = useState<string | null>(null);
+  const [timezone, setTimezone] = useState<string | null>(null);
   const [smtpUser, setSmtpUser] = useState<string | null>(null);
   // Пароль релея в форме: поле всегда пустое; smtpPasswordSet — признак «задан».
   const [smtpPassword, setSmtpPassword] = useState<string>("");
@@ -2816,6 +2811,7 @@ export function AdminSettings(props: AdminSettingsProps) {
           setSmtpPort(full.smtp_port);
           setSmtpFrom(full.smtp_from);
           setSmtpFromName(full.smtp_from_name);
+          setTimezone(full.timezone);
           setSmtpUser(full.smtp_user ?? "");
           // Пароль из API не приходит (маска/null): поле пустое, только признак.
           setSmtpPassword("");
@@ -2891,6 +2887,7 @@ export function AdminSettings(props: AdminSettingsProps) {
           smtp_port: smtpPort,
           smtp_from: smtpFrom,
           smtp_from_name: smtpFromName,
+          timezone,
           smtp_user: smtpUser ?? "",
           // Пустое значение — сервер сохранит текущий пароль (не перезапишет).
           smtp_password: smtpPassword,
@@ -3138,6 +3135,27 @@ export function AdminSettings(props: AdminSettingsProps) {
               onChange={(e) => setSmtpPassword(e.target.value)}
             />
           </label>
+          <fieldset className="sed-mt-8">
+            <legend>Часовой пояс</legend>
+            <label className="sed-field">
+              Часовой пояс показа дат (timezone, IANA)
+              <input
+                aria-label="Часовой пояс показа дат"
+                type="text"
+                placeholder="Europe/Moscow"
+                value={timezone ?? ""}
+                onChange={(e) => setTimezone(e.target.value)}
+              />
+            </label>
+            <div className="sed-note">
+              Им приводятся все даты и время в интерфейсе: список заявок, карточка,
+              история, вложения. Хранимое остаётся в UTC — меняется только показ.
+              Зона должна совпадать с переменной TZ контейнеров в .env (от неё
+              зависят имена бэкапов и метки времени в логах). Пусто — даты
+              показываются в часовом поясе контейнеров (TZ), а если он не
+              задан, в зоне браузера. Неизвестное имя сервер не примет (422).
+            </div>
+          </fieldset>
         </fieldset>
       )}
 
@@ -3411,7 +3429,7 @@ export function AdminSettings(props: AdminSettingsProps) {
           </div>
           <div className="sed-note">
             {onecSyncedAt
-              ? `Последняя синхронизация предприятий: ${new Date(onecSyncedAt).toLocaleString("ru-RU")}`
+              ? `Последняя синхронизация предприятий: ${formatDateTime(onecSyncedAt)}`
               : "Синхронизация предприятий ещё не выполнялась"}
           </div>
           {syncStatus && <div role="status">{syncStatus}</div>}

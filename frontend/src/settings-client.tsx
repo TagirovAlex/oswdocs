@@ -106,6 +106,9 @@ export interface SettingsData {
   smtp_from: string | null;
   // Имя отправителя писем (smtp_from_name) — видимая часть From; пусто — только адрес.
   smtp_from_name: string | null;
+  // Часовой пояс показа дат (IANA, например Europe/Moscow); null — не задан,
+  // тогда даты показываются в часовом поясе контейнеров (TZ в .env).
+  timezone: string | null;
   // Логин SMTP-релея (smtp_user; пусто — без авторизации).
   smtp_user: string | null;
   // Пароль SMTP-релея (smtp_password): в GET — null либо маска «задан»;

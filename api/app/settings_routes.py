@@ -14,6 +14,7 @@ import os
 import re
 from collections.abc import Mapping, Sequence
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -115,6 +116,7 @@ INFRA_KEYS: tuple[str, ...] = (
     "schedule_hr_dismissals_sync",
     "hr_dismissals_synced_at",
     "blank_autopick",
+    "timezone",
 )
 
 # SETTINGS_KEYS: полный набор (контент + инфра). Поля onec_enterprises_synced_at,
@@ -792,6 +794,35 @@ class SettingsPayload(BaseModel):
             "бланк выбирает человек"
         ),
     )
+    timezone: str | None = Field(
+        default=None,
+        description=(
+            "Часовой пояс показа дат (IANA, например Europe/Moscow): им приводятся "
+            "все даты и время в интерфейсе. Часовой пояс контейнеров задаётся "
+            "переменной TZ в .env — значения должны совпадать"
+        ),
+    )
+
+    @field_validator("timezone")
+    @classmethod
+    def _valid_timezone(cls, value: str | None) -> str | None:
+        """Имя пояса должно быть настоящим IANA-зоной (ZoneInfo его знает).
+
+        Иначе в интерфейсе молча уехали бы даты: Intl для неизвестной зоны
+        падает, и даты просто не показались бы. Пустая строка — не задана."""
+        if value is None:
+            return None
+        name = value.strip()
+        if not name:
+            return None
+        try:
+            ZoneInfo(name)
+        except Exception as exc:
+            raise ValueError(
+                f"Неизвестный часовой пояс: {name!r} (ожидается IANA-зона, "
+                f"например Europe/Moscow)"
+            ) from exc
+        return name
 
 
 class ContentSettingsPayload(BaseModel):

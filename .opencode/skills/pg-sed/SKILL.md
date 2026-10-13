@@ -23,7 +23,8 @@ Postgres 17 (`postgres:17-trixie`), миграции — Alembic (вверх/в�
   `require_comment_override`; FK на `approval_stages` и `UNIQUE (blank_id, stage_id)` сняты
   вместе с колонками), 0018 справочник `step_catalog` и единая печать, 0019 числовой код
   вида документа, 0020 справочник блоков/шаблонов прав доступа, 0021 последовательность
-  `request_code_seq` + сужение правила триггера `audit_log_no_update_delete`.
+  `request_code_seq` + сужение правила триггера `audit_log_no_update_delete`, 0022 настройка
+  часового пояса показа дат (`settings.timezone`, сид `Europe/Moscow`).
 - Откат миграции 0016 ничего не восстанавливает (значения и нерабочие), 0014 при downgrade не
   возвращает прежнее содержимое бланков — состав собирает человек заново; откат 0017 возвращает
   `stage_id` NOT NULL и потому удаляет все текущие шаги бланка (у них `NULL stage_id`) —
@@ -40,8 +41,10 @@ Postgres 17 (`postgres:17-trixie`), миграции — Alembic (вверх/в�
 - Поиск людей — индексы `pg_trgm` на ФИО/`sam`, чувствительность к `ё` учесть в нормализации на стороне API.
 - Файлы (сканы, DOCX/PDF) в БД не хранить — только мета + путь в volume.
 - Сиды `settings` по умолчанию: группы, `sed_ou`, `approval_ttl_days`, `position_escalation`,
-  `blank_autopick='off'` (легаси `position_to_category`/`templates`/`doc_templates`/`position_sets`
+  `blank_autopick='off'`, `timezone='Europe/Moscow'` (легаси `position_to_category`/`templates`/`doc_templates`/`position_sets`
   из `settings` удалены миграциями 0014/0016 — не возвращать).
+- `timezone` — часовой пояс ПОКАЗА дат: его отдаёт `/auth/me`, приводит к нему показ
+  (хранимое остаётся в UTC), правит админ; часовой пояс контейнеров — `TZ` в env.
 - Дефолтов в коде нет: расписания регламентов (`schedule_*_sync`) и метки (`*_synced_at`) —
   ключи settings, читаются `read_setting_value`, пишутся синхронизациями/админом.
 - Бэкап: `pg_dump` в `/srv/sed/backups` (путь — в настройках окружения, не в коде).

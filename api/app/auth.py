@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import os
 import secrets
 from dataclasses import dataclass
 from typing import Callable, Protocol
@@ -37,6 +38,15 @@ from .ad_reader import (
 from .audit import AuditEvent, audit_log
 from .config import Settings, get_settings
 from .deps import CurrentUser, _detect_role, get_current_user, is_privileged
+# settings_routes тянет .deps, но не .auth (там импорт ленивый) — цикла нет.
+# Импорт модульный именно ради Depends(get_settings_store): так офлайн-граница
+# подменяется в тестах через dependency_overrides (см. conftest offline_boundaries).
+from .settings_routes import (
+    DbSettingsStore,
+    SettingsUnavailable,
+    get_settings_store,
+    read_setting_value,
+)
 
 router = APIRouter(tags=["auth"])
 
@@ -431,6 +441,7 @@ def login(
     service: AuthService = Depends(get_auth_service),
     settings: Settings = Depends(get_settings),
     limiter: LoginRateLimiter = Depends(get_login_limiter),
+    settings_store: DbSettingsStore | None = Depends(get_settings_store),
 ) -> dict:
     """Вход по доменной учетке: 200 {token, user} | 401 | 429 (rate-limit) | 503."""
     ip = request.client.host if request.client is not None else ""
@@ -454,27 +465,55 @@ def login(
     # Блоки прав — сразу в ответе входа, как в /auth/me. Без этого интерфейс
     # после входа остался бы с пустым списком блоков (схлопывание до уровня
     # владельца) до перезагрузки страницы, которая заново спросила бы /auth/me.
+    # Там же и часовой пояс показа дат: после входа интерфейс применяет его
+    # сразу, иначе даты до перезагрузки шли бы по зоне браузера — ровно то,
+    # от чего эта настройка и защищает.
     return {
         "token": result.token,
-        "user": {**result.user.model_dump(), "blocks": _user_blocks(result.user, settings)},
+        "user": {
+            **result.user.model_dump(),
+            "blocks": _user_blocks(result.user, settings),
+            "timezone": _display_timezone(settings_store),
+        },
     }
+
+
+def _display_timezone(store: DbSettingsStore | None) -> str:
+    """Часовой пояс показа дат из настроек (timezone), иначе TZ окружения.
+
+    Настройку правит админ; TZ в .env — часовой пояс контейнеров (имена
+    бэкапов, метки времени в логах). Значения должны совпадать, но одно
+    подставляет второе: если настройки недоступны или TZ не задана, интерфейс
+    всё равно получает зону, а не уезжает в зону браузера."""
+    if store is not None:
+        try:
+            raw = read_setting_value(store, "timezone")
+            if isinstance(raw, str) and raw.strip():
+                return raw.strip()
+        except SettingsUnavailable:
+            pass  # настройки недоступны — берём зону контейнера
+    return os.environ.get("TZ", "").strip()
 
 
 @router.get("/auth/me")
 def auth_me(
     user: CurrentUser = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
+    settings_store: DbSettingsStore | None = Depends(get_settings_store),
 ) -> dict:
     """Текущий пользователь: ОК/админам — полная карточка, владельцам — без ПДн (как /me).
 
     Роль оставлена прежней (обрезка ПДн идёт по ней), рядом отдаётся список
     блоков прав из справочника — по ним интерфейс решает, что видно и что можно
-    нажать."""
+    нажать. Часовой пояс (timezone, настройка админа) отдаётся обеим карточкам:
+    им интерфейс приводит все даты к одной зоне, поэтому обрезка ПДн его не
+    касается."""
     settings.ensure_read_only()
     audit_log.append(
         AuditEvent(actor=user.sam, action="me.read", entity="user", entity_id=user.sam)
     )
     blocks = _user_blocks(user, settings)
+    timezone = _display_timezone(settings_store)
     if is_privileged(user):
         return {
             "sam": user.sam,
@@ -485,6 +524,13 @@ def auth_me(
             "groups": user.groups,
             "role": user.role,
             "blocks": blocks,
+            "timezone": timezone,
         }
     # Урезанная: без ФИО/подразделения/должности/почты (ПДн не светят владельцам).
-    return {"sam": user.sam, "groups": user.groups, "role": user.role, "blocks": blocks}
+    return {
+        "sam": user.sam,
+        "groups": user.groups,
+        "role": user.role,
+        "blocks": blocks,
+        "timezone": timezone,
+    }

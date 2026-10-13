@@ -25,6 +25,7 @@ import type {
 } from "./requests-client";
 import type { Role } from "./api-mock";
 import { hasBlock } from "./auth-client";
+import { formatDate } from "./date-format";
 import { useTheme } from "./theme";
 import { AdminSettings } from "./admin-settings";
 import { Directory } from "./directory";
@@ -165,6 +166,7 @@ function RefreshIcon() {
 const SORTABLE_COLUMNS: { label: string; key: RequestSortKey }[] = [
   { label: "№", key: "id" },
   { label: "Статус", key: "status" },
+  { label: "Дата", key: "createdAt" },
   { label: "Срок", key: "dueDate" },
 ];
 
@@ -323,8 +325,9 @@ export function SedLayout(props: SedLayoutProps) {
   // Заголовок таблицы зависит от роли (владельцу — без колонок ПДн и без
   // текущего согласующего).
   // «Дата» — дата СОЗДАНИЯ заявки, вторым столбцом сразу после рег. номера:
-  // её читают первыми, до данных сотрудника. «Срок» — дедлайн текущего
-  // шага, это другая дата. Формат даты в списке — ISO, общий для обеих.
+  // её читают первыми, до данных сотрудника. «Срок» — дедлайн текущего шага,
+  // это другая дата. Обе приводятся к зоне показа (settings.timezone) и
+  // показываются в одном формате.
   const columns = useMemo(() => {
     if (role === "owner") return ["№", "Дата", "Сотрудник (маска)", "Шаг", "Срок"];
     return ["№", "Дата", "Сотрудник", "Предприятие", "Статус", "Текущий согласующий", "Шаг", "Срок"];
@@ -509,7 +512,7 @@ export function SedLayout(props: SedLayoutProps) {
                     <td>
                       <span className="sed-regnum">{row.id}</span>
                     </td>
-                    <td>{row.createdAt}</td>
+                    <td>{formatDate(row.createdAt) || "—"}</td>
                     <td>{row.fio}</td>
                     {role !== "owner" && (
                       <>
@@ -519,7 +522,7 @@ export function SedLayout(props: SedLayoutProps) {
                       </>
                     )}
                     <td>{row.step}</td>
-                    <td>{row.dueDate}</td>
+                    <td>{formatDate(row.dueDate) || "—"}</td>
                   </tr>
                 );
               })}

@@ -10,6 +10,7 @@
 // (docs.blank_placeholders): известное значение — текстом, неизвестное (ФИО,
 // должность, предприятие, руководитель — их в справочнике бланков нет)
 // остаётся текстом, как и на настоящем бланке.
+import { formatDate } from "./date-format";
 import { richTextHtmlToLines, richTextLinesToHtml, richTextToPlain } from "./rich-text";
 
 // Шаг бланка в макете: то, что печать берёт из состава (снимок заявки).
@@ -67,14 +68,14 @@ interface PreviewLine {
 // шагов и сегодняшняя дата ({date} на бланке — дата печати, её поставит сервер,
 // но формат тот же). Остальные значения знает только заявка — их на клиенте нет,
 // поэтому в макете остаются плейсхолдеры.
+// Дата берётся в зоне показа (settings.timezone), как её потом поставит сервер
+// печати: иначе у сотрудника в другой зоне предпросмотр разошёлся бы с
+// напечатанным бланком около полуночи.
 function previewValues(blankName: string, stepCount: number): Record<string, string> {
-  const now = new Date();
-  const day = String(now.getDate()).padStart(2, "0");
-  const month = String(now.getMonth() + 1).padStart(2, "0");
   return {
     blank_name: blankName,
     steps: `количество шагов: ${stepCount}`,
-    date: `${day}.${month}.${now.getFullYear()}`,
+    date: formatDate(new Date().toISOString()),
   };
 }
 

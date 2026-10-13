@@ -183,7 +183,10 @@ export function EmployeeCardView(props: EmployeeCardViewProps) {
             <legend className="sed-panel__legend">Должность</legend>
             <FieldRow label="1С" value={card.position ?? "—"} />
             <FieldRow label="AD" value={adInfo?.title ?? "—"} />
-            {/* Даты из 1С: приём и увольнение (для ОК/руководителя ОК). */}
+            {/* Даты из 1С: приём и увольнение (для ОК/руководителя ОК). Это даты БЕЗ
+                времени (колонки DATE), поэтому зону показа к ним не применяем и
+                режем строку: formatDate счёл бы их полуночью UTC и увел бы на
+                день назад. */}
             <FieldRow label="Дата приёма" value={card.hire_date ? card.hire_date.slice(0, 10) : ""} />
             <FieldRow label="Дата увольнения" value={card.dismissal_date ? card.dismissal_date.slice(0, 10) : ""} />
           </fieldset>
