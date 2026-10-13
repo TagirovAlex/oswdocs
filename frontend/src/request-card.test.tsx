@@ -85,6 +85,7 @@ function requestWith(
     position: "Слесарь",
     fio,
     created_by: "petrov.pp",
+    created_at: "2026-10-01T09:30:00+00:00",
     steps: steps ?? [
       {
         order: 1,
@@ -194,6 +195,28 @@ beforeEach(() => {
 });
 
 describe("RequestCard", () => {
+  // Дата создания в шапке карточки — рядом с рег. номером.
+  it("в шапке карточки есть номер и дата создания", async () => {
+    vi.mocked(getRequest).mockResolvedValue(requestWith("Громов Игорь Олегович", "На согласовании"));
+
+    renderCard();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Печать" })).toBeInTheDocument());
+    const heading = screen.getByRole("heading", { level: 3 });
+    expect(heading.textContent).toContain("REQ-0001");
+    expect(heading.textContent).toContain("создана");
+  });
+
+  it("без даты создания шапка остаётся с одним номером", async () => {
+    const безДаты = requestWith("Громов Игорь Олегович", "На согласовании");
+    безДаты.created_at = null;
+    vi.mocked(getRequest).mockResolvedValue(безДаты);
+
+    renderCard();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Печать" })).toBeInTheDocument());
+    const heading = screen.getByRole("heading", { level: 3 });
+    expect(heading.textContent).toBe("Карточка заявки REQ-0001");
+  });
+
   // Печать бегунка (вариант 1): PDF base64 в ответе, версий нет — статус
   // «Бегунок сгенерирован», запрос с requestId.
   it("печать генерирует бегунок и показывает статус без версии", async () => {

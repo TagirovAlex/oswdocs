@@ -473,6 +473,9 @@ class RequestOut(BaseModel):
         default=None,
         description="Автор заявки (sAMAccountName) — только привилегированным",
     )
+    created_at: datetime | None = Field(
+        default=None, description="Дата создания заявки (UTC)"
+    )
     steps: list[StepOut]
 
 
@@ -549,6 +552,10 @@ class _Request(BaseModel):
     blank_version: int | None = None
     blank_header_html: str | None = None
     blank_footer_lines: list[str] = Field(default_factory=list)
+    # Дата создания заявки (dismissal_requests.created_at, NOT NULL с 0001).
+    # Показывается в карточке и в списке. None бывает только на офлайн-пути и
+    # при ответе API, который поле ещё не отдавал.
+    created_at: datetime | None = None
 
 
 # --- Офлайн-хранилище (тесты/локаль без БД); на стенде эндпоинты получают
@@ -2317,6 +2324,7 @@ def _public_view(
         blank_footer_lines=list(request.blank_footer_lines or []),
         escalation_hours=request.escalation_hours,
         created_by=request.created_by if privileged else None,
+        created_at=request.created_at,
         steps=steps,
     )
 
@@ -3300,6 +3308,7 @@ def create_request(
             doc_type_code=body.doc_type_code,
             escalation_hours=route.position_escalation.get(body.position),
             created_by=user.sam,
+            created_at=now,
             steps=steps,
             profile_id=auto["profile_id"] if auto else None,
             service_id=auto["service_id"] if auto else None,

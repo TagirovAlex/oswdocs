@@ -53,6 +53,7 @@ function requestWith(
     position: "Слесарь",
     fio,
     created_by: "petrov.pp",
+    created_at: "2026-10-01T09:30:00+00:00",
     steps: steps ?? [
       {
         order: 1,
@@ -90,6 +91,13 @@ function visibleIds(): (string | null)[] {
     .getAllByRole("row")
     .slice(1)
     .map((row) => within(row).getAllByRole("cell")[0]?.textContent ?? null);
+}
+
+// Ячейки первой строки таблицы по индексу (0 — «№», 1 — «Дата», последний — «Срок»).
+function firstRowCells(): (string | null)[] {
+  const table = screen.getByLabelText("Заявки");
+  const row = within(table).getAllByRole("row")[1];
+  return within(row).getAllByRole("cell").map((c) => c.textContent);
 }
 
 // Обёртка с темой для рендера каркаса. Блоки прав по умолчанию — из раскладки
@@ -539,6 +547,38 @@ describe("SedLayout", () => {
     fireEvent.click(screen.getByRole("button", { name: "Сортировать по «Срок»" }));
     // REQ-0001 — срок 2026-10-05, REQ-0002 — 2026-10-09 → возрастание по сроку.
     await waitFor(() => expect(visibleIds()).toEqual(["REQ-0001", "REQ-0002"]));
+  });
+
+  // Колонка «Дата» — дата СОЗДАНИЯ заявки, рядом с рег. номером (как в макете).
+  // «Срок» при этом остаётся дедлайном шага: путать их нельзя.
+  it("колонка «Дата» показывает дату создания, «Срок» — дедлайн шага", async () => {
+    vi.mocked(getFolders).mockResolvedValue(folders);
+    vi.mocked(getRequests).mockResolvedValue([
+      requestWith("Громов Игорь Олегович", "На согласовании", "REQ-0001"),
+    ]);
+
+    renderWithTheme("hr");
+    await waitFor(() => expect(screen.getByText("REQ-0001")).toBeInTheDocument());
+
+    const headers = screen.getAllByRole("columnheader").map((th) => th.textContent ?? "");
+    expect(headers[1]).toBe("Дата");  // сразу за рег. номером (№ с маркером сортировки)
+    expect(headers[headers.length - 1]).toBe("Срок");
+    // По ячейкам строки: created_at = 2026-10-01, срок шага = 2026-10-05.
+    // Проверка по индексу, а не getByText: иначе дата нашлась бы где угодно.
+    const cells = firstRowCells();
+    expect(cells[1]).toBe("2026-10-01");
+    expect(cells[cells.length - 1]).toBe("2026-10-05");
+  });
+
+  it("без даты создания в строке прочерк", async () => {
+    vi.mocked(getFolders).mockResolvedValue(folders);
+    const безДаты = requestWith("Громов Игорь Олегович", "На согласовании");
+    безДаты.created_at = null;
+    vi.mocked(getRequests).mockResolvedValue([безДаты]);
+
+    renderWithTheme("hr");
+    await waitFor(() => expect(screen.getByText("REQ-0001")).toBeInTheDocument());
+    expect(firstRowCells()[1]).toBe("—");
   });
 
   // Оповещение из окна-попа об удалении/создании заявки (localStorage storage):

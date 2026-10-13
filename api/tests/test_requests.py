@@ -1045,6 +1045,26 @@ def _employee_row(tab_num: str, sam: str | None, base_code: str = EMP_BASE) -> d
     }
 
 
+def test_created_at_in_list_and_card(
+    client, hr, test_settings_override, route_override, settings_store
+):
+    """Дата создания заявки отдаётся и в списке, и в карточке.
+
+    В списке это колонка «Дата» (рядом с рег. номером), в карточке — подпись
+    в шапке. Отличать надо от срока шага (expires_at), это разные даты."""
+    created = _create(client, hr)
+    assert created.status_code == 201
+    body = created.json()
+    assert body["created_at"], "у только что созданной заявки есть дата создания"
+
+    in_list = client.get("/requests", headers=hr).json()
+    assert in_list, "список не пуст"
+    assert in_list[0]["created_at"] == body["created_at"], "в списке та же дата"
+
+    card = client.get(f"/requests/{body['id']}", headers=hr).json()
+    assert card["created_at"] == body["created_at"], "в карточке та же дата"
+
+
 def test_employee_key_resolved_in_list_for_hr(
     client, hr, test_settings_override, route_override, settings_store
 ):

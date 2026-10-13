@@ -378,7 +378,8 @@ class DbRequestsStore:
         "subject, content, doc_type_code, "
         "profile_id, service_id, service_name, "
         "blank_id, blank_name, blank_version, "
-        "blank_header_html, blank_footer_lines"
+        "blank_header_html, blank_footer_lines, "
+        "created_at"
     )
 
     _SELECT_REQUESTS = text(
@@ -649,6 +650,7 @@ class DbRequestsStore:
             content=row.content,
             doc_type_code=row.doc_type_code,
             created_by=row.initiated_by_hr,
+            created_at=getattr(row, "created_at", None),
             profile_id=row.profile_id,
             service_id=row.service_id,
             service_name=row.service_name,
@@ -692,7 +694,11 @@ class DbRequestsStore:
                         "base_code": None,
                         "tab_num": request.tab_num,
                         "created_by": request.created_by,
-                        "created_at": now,
+                        # Дату создания берём из заявки: create_request уже
+                        # посчитал её (из неё же считаются сроки шагов), иначе
+                        # ответ POST и последующее чтение из БД разошлись бы
+                        # на микросекунды.
+                        "created_at": request.created_at or now,
                         "updated_at": now,
                     }
                 )

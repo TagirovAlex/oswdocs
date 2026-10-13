@@ -71,6 +71,8 @@ function stepOwnerCell(step: RequestStep): string {
 }
 
 // Дата записи истории: локализованная; при битой строке — как пришла.
+// Переиспользуется и для даты создания в шапке карточки — формат тот же
+// (ru-RU, локаль браузера), различаются только подписи в интерфейсе.
 function historyWhen(at: string): string {
   const d = new Date(at);
   return isNaN(d.getTime()) ? at : d.toLocaleString("ru-RU");
@@ -1348,7 +1350,13 @@ export function RequestCard(props: RequestCardProps) {
 
   return (
     <section aria-label="Карточка заявки">
-      <h3>Карточка заявки {requestId}</h3>
+      {/* Номер и дата создания: в шапке карточки их видно сразу, без скролла.
+          Даты нет только когда API её не отдал (старая версия) или на
+          офлайн-данных. */}
+      <h3>
+        Карточка заявки {requestId}
+        {card?.created_at ? ` · создана ${historyWhen(card.created_at)}` : ""}
+      </h3>
       {/* Вкладки образца: лист рассмотрения, история либо (роль sed_admin)
           полная история — только вид. */}
       <nav className="sed-tabs sed-tabs--inner" aria-label="Вкладки карточки">

@@ -119,6 +119,8 @@ export interface RequestOut {
   escalation_hours?: number | null;
   // Автор заявки (sAMAccountName) — только привилегированным, иначе null.
   created_by?: string | null;
+  // Дата создания заявки (UTC, ISO). Показывается в карточке и в списке.
+  created_at?: string | null;
   // Тема, содержание и вид документа (таблица doc_types) — правятся админом СЭД.
   subject?: string | null;
   content?: string | null;
@@ -141,6 +143,8 @@ export interface RequestRow {
   // Текущий согласующий: исполнитель ПЕРВОГО ожидающего шага (can_act здесь не
   // участвует — это про отметку, а не про подпись): ФИО, иначе группа, иначе прочерк.
   ownerName: string;
+  // Дата создания заявки (ISO-дата, как у соседнего «Срок») или прочерк.
+  createdAt: string;
   dueDate: string;
   department: string;
   position: string;
@@ -1241,6 +1245,9 @@ export function toRequestRow(request: RequestOut): RequestRow {
     status: request.status,
     step: stepOwnerLabel(current),
     ownerName,
+    // Формат как у соседней колонки «Срок» (ISO-дата): в одной таблице
+    // даты должны читаться одинаково.
+    createdAt: request.created_at ? request.created_at.slice(0, 10) : "—",
     dueDate: expires ? expires.slice(0, 10) : "—",
     department: request.department,
     position: request.position,
