@@ -199,10 +199,14 @@ def main() -> None:
     )
     from .requests_store import DbRequestsStore
     from .settings_routes import DbSettingsStore, SettingsUnavailable, read_setting_value
+    from .timezone import refresh_timezone_from_settings
 
     settings = get_settings()
     try:
         settings_store = DbSettingsStore(settings.DATABASE_URL)
+        # Зона системы — до любой работы с датами (почта, расписания, сроки):
+        # worker не ходит в /auth/me и без этого остался бы на TZ контейнера.
+        refresh_timezone_from_settings(settings_store)
         smtp_from = resolve_smtp_from(
             read_setting_value(settings_store, "smtp_from"), settings.SMTP_FROM
         )

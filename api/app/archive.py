@@ -35,6 +35,7 @@ from .settings_routes import (
     get_settings_store,
     read_setting_value,
 )
+from .timezone import current_timezone
 
 router = APIRouter(tags=["архивация"])
 
@@ -120,9 +121,9 @@ def dump_database(database_url: str, target: Path, moment: datetime | None = Non
                 )
                 tables = [row[0] for row in cursor.fetchall()]
             with open(target, "w", encoding="utf-8", newline="") as out:
-                # Метка в заголовке — в локальном времени контейнера (TZ),
-                # как и имя файла, чтобы дата бэкапа совпадала с хостом.
-                local = moment.astimezone()
+                # Метка в заголовке дампа — в зоне системы (settings.timezone),
+                # как и {ts} в имени файла: заголовок и имя не должны расходиться.
+                local = moment.astimezone(current_timezone())
                 out.write("-- SED backup %s\n" % local.isoformat())
                 with connection.cursor() as cursor:
                     for table in tables:
@@ -210,11 +211,11 @@ def create_backup(
     except OSError as exc:
         raise ArchiveUnavailable("Каталог бэкапов недоступен: %s" % exc) from exc
     # Только имя файла (basename): шаблон не должен уводить за пределы каталога.
-    # Метка {ts} — в локальном времени контейнера (TZ), чтобы имя файла
-    # совпадало с локальной датой хоста (бэкапы в MSK, а не в UTC).
+    # Метка {ts} — в зоне системы (settings.timezone, иначе TZ контейнера), а не
+    # по зоне сервера: имя бэкапа и дата в админке показывали бы разное время.
     name = Path(
         _name_template(store).replace(
-            "{ts}", moment.astimezone().strftime("%Y%m%d_%H%M%S")
+            "{ts}", moment.astimezone(current_timezone()).strftime("%Y%m%d_%H%M%S")
         )
     ).name
     target = backup_dir / name
@@ -230,8 +231,11 @@ def create_backup(
 
 
 def list_backups(backup_dir: Path) -> list[dict]:
-    """Список бэкапов каталога: имя, размер (байт), дата (mtime, локальное
-    время контейнера — как имя файла, чтобы совпадало с локальной датой).
+    """Список бэкапов каталога: имя, размер (байт), дата (mtime).
+
+    mtime приводится к зоне системы (settings.timezone) — тем же, что и {ts} в
+    имени файла, поэтому строка списка и имя не показывают разное время. В БД
+    лежит mtime сервера; зона меняет только показ.
 
     Файлами бэкапов считаются все регулярные файлы каталога (каталог выделен
     настройкой archive_backup_dir под хранение бэкапов)."""
@@ -246,7 +250,9 @@ def list_backups(backup_dir: Path) -> list[dict]:
             {
                 "name": path.name,
                 "size": stat.st_size,
-                "date": datetime.fromtimestamp(stat.st_mtime).astimezone().isoformat(),
+                "date": datetime.fromtimestamp(stat.st_mtime)
+                .astimezone(current_timezone())
+                .isoformat(),
             }
         )
     items.sort(key=lambda item: item["name"])

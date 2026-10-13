@@ -10,14 +10,13 @@ from __future__ import annotations
 
 import base64
 import json
-import os
 from datetime import datetime, timedelta, timezone, tzinfo
-from zoneinfo import ZoneInfo
 
 import httpx
 
 from .onec_client import build_entity_url, parse_collection
 from .settings_routes import read_setting_value
+from .timezone import current_timezone
 
 
 class OnecSyncUnavailable(Exception):
@@ -105,15 +104,10 @@ def _weekly_due(moment: datetime, last: datetime | None) -> bool:
 
 
 def _schedule_tz() -> tzinfo:
-    """Часовой пояс расписаний: TZ из env (compose: Europe/Moscow), иначе
-    локальный системный, иначе UTC. Значение — только чтение, не настройка."""
-    name = (os.environ.get("TZ") or "").strip()
-    if name:
-        try:
-            return ZoneInfo(name)
-        except Exception:
-            pass  # неизвестное имя TZ — системная локальная зона
-    return datetime.now().astimezone().tzinfo or timezone.utc
+    """Часовой пояс расписаний — зона системы (settings.timezone, иначе TZ
+    контейнера, иначе UTC). Раньше брался только TZ из env, и смена зоны в
+    настройках двигала бы расписание синхронизаций, но не «сейчас» в письмах."""
+    return current_timezone()
 
 
 def due_schedule(schedule, last_raw: str | None, now: datetime | None = None) -> bool:
@@ -124,8 +118,9 @@ def due_schedule(schedule, last_raw: str | None, now: datetime | None = None) ->
     или невалидно (интервал <1 ч, битое daily_time, неизвестный режим) — прежнее
     поведение: раз в 7 дней от last_raw (не «пора всегда», иначе worker гонял бы
     операцию каждый проход). Битое last — «пора» (True).
-    daily_time — время ЛОКАЛЬНОЕ (_schedule_tz, на стенде Europe/Moscow): «06:00»
-    = 06:00 МСК, а не 06:00 UTC (иначе регламент уезжал на +3 часа).
+    daily_time — время в зоне СИСТЕМЫ (_schedule_tz: settings.timezone, иначе TZ
+    контейнера; на стенде Europe/Moscow): «06:00» = 06:00 МСК, а не 06:00 UTC
+    (иначе регламент уезжал на +3 часа).
     now — инжектируемые часы для детерминированных тестов (UTC), иначе текущие.
     """
     moment = now or datetime.now(timezone.utc)
@@ -154,7 +149,7 @@ def due_schedule(schedule, last_raw: str | None, now: datetime | None = None) ->
         try:
             hours, minutes = str(schedule.get("daily_time") or "").split(":", 1)
             tz = _schedule_tz()
-            day = moment.astimezone(tz)  # календарный день — локальный (МСК)
+            day = moment.astimezone(tz)  # календарный день — в зоне системы (МСК)
             when = datetime(
                 day.year, day.month, day.day,
                 int(hours), int(minutes), tzinfo=tz,

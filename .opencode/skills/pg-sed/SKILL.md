@@ -43,8 +43,13 @@ Postgres 17 (`postgres:17-trixie`), миграции — Alembic (вверх/в�
 - Сиды `settings` по умолчанию: группы, `sed_ou`, `approval_ttl_days`, `position_escalation`,
   `blank_autopick='off'`, `timezone='Europe/Moscow'` (легаси `position_to_category`/`templates`/`doc_templates`/`position_sets`
   из `settings` удалены миграциями 0014/0016 — не возвращать).
-- `timezone` — часовой пояс ПОКАЗА дат: его отдаёт `/auth/me`, приводит к нему показ
-  (хранимое остаётся в UTC), правит админ; часовой пояс контейнеров — `TZ` в env.
+- `timezone` — часовая зона СИСТЕМЫ (одна на всё, `api/app/timezone.py`): её отдаёт
+  `/auth/me` (обеим карточкам; хранимое остаётся в UTC), она уходит в соединения
+  Postgres (`set_config` на выдаче из пула — на `connect` SET откатывался бы вместе
+  с транзакцией), в письма/бланки, дату печати, «сегодня» в SQL и в Python,
+  расписания и имена бэкапов; правит админ. Часовой пояс контейнеров — `TZ` в env:
+  менять `settings.timezone` без смены `TZ` в `.env` нельзя — OS-уровень (метки
+  времени в логах, `date` в контейнере) останется в старой зоне.
 - Дефолтов в коде нет: расписания регламентов (`schedule_*_sync`) и метки (`*_synced_at`) —
   ключи settings, читаются `read_setting_value`, пишутся синхронизациями/админом.
 - Бэкап: `pg_dump` в `/srv/sed/backups` (путь — в настройках окружения, не в коде).

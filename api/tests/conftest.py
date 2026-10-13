@@ -19,6 +19,7 @@ if str(API_DIR) not in sys.path:
     sys.path.insert(0, str(API_DIR))
 
 import app.audit as audit_module  # noqa: E402
+import app.timezone as timezone_module  # noqa: E402
 from app.ad_groups_cache import InMemoryGroupsCacheStore, get_groups_cache_store  # noqa: E402
 from app.attachments import (  # noqa: E402
     InMemoryAttachmentsStore,
@@ -302,7 +303,16 @@ def offline_boundaries(monkeypatch):
     # Персистентный аудит (INSERT в audit_log) — best-effort, но офлайн Postgres
     # нет: отключаем БД-хранилище, журнал остаётся in-memory (контракт прежний).
     monkeypatch.setattr(audit_module, "_get_db_store", lambda: None)
+    # Зона системы (settings.timezone) — состояние модуля: тест, задавший её,
+    # не должен влиять на следующие.
+    timezone_module.reset_timezone_for_tests()
+    # Чтение зоны из БД на старте процесса (main/worker) офлайн недоступно —
+    # глохнём на попытке подключиться к несуществующему Postgres.
+    monkeypatch.setattr(
+        timezone_module, "refresh_timezone_from_settings", lambda *_a, **_k: None
+    )
     yield
+    timezone_module.reset_timezone_for_tests()
     for factory in OFFLINE_BOUNDARIES:
         app.dependency_overrides.pop(factory, None)
 

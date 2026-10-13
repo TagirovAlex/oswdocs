@@ -15,7 +15,6 @@
 
 from __future__ import annotations
 
-import os
 import secrets
 from dataclasses import dataclass
 from typing import Callable, Protocol
@@ -47,6 +46,7 @@ from .settings_routes import (
     get_settings_store,
     read_setting_value,
 )
+from .timezone import current_timezone_name
 
 router = APIRouter(tags=["auth"])
 
@@ -479,20 +479,18 @@ def login(
 
 
 def _display_timezone(store: DbSettingsStore | None) -> str:
-    """Часовой пояс показа дат из настроек (timezone), иначе TZ окружения.
+    """Часовой пояс показа дат для интерфейса (из settings.timezone).
 
-    Настройку правит админ; TZ в .env — часовой пояс контейнеров (имена
-    бэкапов, метки времени в логах). Значения должны совпадать, но одно
-    подставляет второе: если настройки недоступны или TZ не задана, интерфейс
-    всё равно получает зону, а не уезжает в зону браузера."""
+    Чтение ключа попутно переключает зону системы (timezone.remember_timezone) —
+    так письма, печать, расписания и сессии БД идут по той же зоне, что и
+    интерфейс. Настройки недоступны — остаётся зона контейнера (TZ), а не зона
+    браузера пользователя."""
     if store is not None:
         try:
-            raw = read_setting_value(store, "timezone")
-            if isinstance(raw, str) and raw.strip():
-                return raw.strip()
+            read_setting_value(store, "timezone")
         except SettingsUnavailable:
-            pass  # настройки недоступны — берём зону контейнера
-    return os.environ.get("TZ", "").strip()
+            pass  # настройки недоступны — зона контейнера
+    return current_timezone_name()
 
 
 @router.get("/auth/me")

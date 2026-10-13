@@ -201,8 +201,17 @@ def _from_stored(raw: str | None) -> object:
 def read_setting_value(store: DbSettingsStore, key: str) -> object:
     """Типизированное значение ключа настроек для прикладных модулей
     (бланки/письма/worker): паттерн ключ -> сид-строка -> значение.
-    Ключа нет в БД — None; падение БД — SettingsUnavailable (503)."""
-    return _from_stored(store.get(key))
+    Ключа нет в БД — None; падение БД — SettingsUnavailable (503).
+
+    Чтение timezone попутно переключает зону системы (timezone.remember_timezone):
+    так приложение узнаёт настройку при первом же обращении к настройкам, без
+    отдельного чтения в каждом модуле."""
+    value = _from_stored(store.get(key))
+    if key == "timezone":
+        from .timezone import remember_timezone
+
+        remember_timezone(value)
+    return value
 
 
 def _groups_with_names(raw: object) -> list[dict[str, str]]:
@@ -986,6 +995,12 @@ def update_settings(
             )
         stored = {key: _to_stored(value) for key, value in updates.items()}
         store.set_many(stored)
+        # Зона системы меняется сразу, а не при следующем /auth/me: фоновые
+        # процессы и уже открытые соединения не должны работать по старой зоне.
+        if "timezone" in updates:
+            from .timezone import remember_timezone
+
+            remember_timezone(updates["timezone"])
         values = _settings_dict(store, settings)
     except SettingsUnavailable as exc:
         raise HTTPException(

@@ -21,6 +21,7 @@ from sqlalchemy.orm import sessionmaker
 
 from .config import Settings, get_settings
 from .settings_routes import read_setting_value
+from .timezone import current_timezone
 
 # Размер страницы выгрузки сотрудников (лимит одной OData-выдачи), как в ad_sync.
 LIST_PAGE = 500
@@ -58,9 +59,18 @@ def _dismissed(row: dict, today: date | None = None) -> bool:
     if not raw:
         return False
     try:
-        return date.fromisoformat(raw[:10]) <= (today or date.today())
+        return date.fromisoformat(raw[:10]) <= (today or _today())
     except ValueError:  # битая дата — считаем работающим, лучше показать лишнее
         return False
+
+
+def _today() -> date:
+    """«Сегодня» в зоне системы (settings.timezone).
+
+    Той же зоной считает CURRENT_DATE в SQL (слушатель в app/timezone.py), поэтому
+    увольнение «сегодня» не разойдётся между поиском по справочнику и выборкой
+    в базе около полуночи."""
+    return datetime.now(current_timezone()).date()
 
 
 def _norm_people(values: list[str] | None) -> list[str]:
@@ -192,7 +202,7 @@ class InMemoryEmployeeSyncStore:
         self, enterprise: str, q: str, limit: int, offset: int = 0
     ) -> list[dict]:
         needle = (q or "").strip().lower()
-        today = date.today()
+        today = _today()
         hits = []
         for row in self._rows.values():
             if row["enterprise"] != enterprise:

@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+
 from fastapi import Depends, FastAPI
 
 from . import archive as archive_routes  # блок F: закладка «Архивация» (бэкапы)
@@ -14,11 +16,41 @@ from . import employees as employees_routes
 from . import link as link_routes
 from . import requests as requests_routes
 from . import settings_routes as settings_routes
+# Импорт включает слушатель SQLAlchemy, который задаёт часовую зону соединениям
+# БД из настройки timezone (app/timezone.py). Модуль нужно импортировать до первого
+# соединения с БД — регистрация роутеров ниже этого момента ещё не начата.
+from . import timezone as _app_timezone  # noqa: F401
 from .audit import AuditEvent, audit_log
 from .config import Settings, get_settings
 from .deps import CurrentUser, get_current_user, is_privileged
 
-app = FastAPI(title="SED API", version="0.1.0")
+
+def _load_system_timezone() -> None:
+    """Зона системы на старте процесса (settings.timezone, иначе TZ).
+
+    Читаем явно, а не по первому /auth/me: фоновые вещи (worker-проходы, почта)
+    считают время раньше, чем придёт первый запрос. Ошибка не поднимает процесс —
+    остаётся зона контейнера, как и до настройки."""
+    try:
+        from .settings_routes import get_settings_store
+
+        # Через модуль, а не прямой импорт: офлайн-тесты глушат именно
+        # timezone.refresh_timezone_from_settings (БД нет — читать зону нечем).
+        _app_timezone.refresh_timezone_from_settings(get_settings_store(get_settings()))
+    except Exception:
+        pass
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    """Старт приложения (lifespan): зона системы читается до первого запроса."""
+    _load_system_timezone()
+    yield
+
+
+app = FastAPI(title="SED API", version="0.1.0", lifespan=_lifespan)
+
+
 app.include_router(archive_routes.router)  # блок F: /api/archive*
 app.include_router(auth_routes.router)
 app.include_router(employees_routes.router)

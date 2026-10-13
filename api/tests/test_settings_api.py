@@ -426,6 +426,29 @@ def test_settings_put_explicit_null_stored(client, admin_headers, mock_store):
     assert mock_store._data["smtp_from"] == "null"
 
 
+def test_settings_put_timezone_switches_system_zone(
+    client, admin_headers, mock_store, monkeypatch
+):
+    """Смена зоны админом подхватывается сразу, без перезапуска процесса.
+
+    PUT /settings пишет ключ и переключает зону системы (remember_timezone):
+    письма, печать, расписания и соединения БД не должны дожидаться рестарта.
+    TZ убираем, чтобы «сняли ключ» означало ровно «зона не задана», а не зону
+    машины, на которой случайно запущен прогон."""
+    from app import timezone as tz
+
+    monkeypatch.delenv("TZ", raising=False)
+    response = client.put("/settings", json={"timezone": "Europe/Kaliningrad"}, headers=admin_headers)
+    assert response.status_code == 200, response.text
+    assert response.json()["timezone"] == "Europe/Kaliningrad"
+    assert tz.current_timezone_name() == "Europe/Kaliningrad"
+    # Сняли ключ (null) — снова зона контейнера (TZ): админская зона не залипает.
+    response = client.put("/settings", json={"timezone": None}, headers=admin_headers)
+    assert response.status_code == 200, response.text
+    assert response.json()["timezone"] is None
+    assert tz.current_timezone_name() == ""
+
+
 def test_settings_smtp_from_name_saved_and_not_masked(client, admin_headers, mock_store):
     """Имя отправителя (smtp_from_name) — обычный ключ инфраструктуры.
 

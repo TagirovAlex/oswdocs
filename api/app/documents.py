@@ -46,6 +46,7 @@ from .settings_routes import (
     get_settings_store,
     read_setting_value,
 )
+from .timezone import current_timezone
 
 router = APIRouter(tags=["документы"])
 
@@ -377,9 +378,9 @@ def _fill_hr_placeholders(
     {dismissal_date} — дата увольнения из кадровых данных сотрудника
     (миграция 0009), {manager} — ФИО руководителя из зеркала AD users. Всё только
     на чтение; зеркало недоступно или данных нет — плейсхолдер пустой."""
-    from datetime import date as _date
-
-    context["date"] = _date.today()
+    # Дата печати — «сегодня» в зоне системы (settings.timezone), а не по зоне
+    # сервера: около полуночи печать и предпросмотр в интерфейсе разошлись бы.
+    context["date"] = datetime.now(current_timezone()).date()
     employee = _employee_row(
         employee_store,
         str(getattr(request, "enterprise", "") or ""),

@@ -27,6 +27,8 @@ from html import unescape
 from pathlib import Path
 from typing import Dict, List, Protocol
 
+from .timezone import current_timezone
+
 # Логгер модуля: сбои генерации бегунка пишем в журнал (см. generate_bypass).
 _LOGGER = logging.getLogger(__name__)
 
@@ -250,19 +252,28 @@ class BypassResult:
 
 
 def _step_done_text(value: object) -> str:
-    """Дата отметки шага строкой ДД.ММ.ГГГГ ЧЧ:ММ (пусто — шаг не отмечен).
+    """Дата отметки шага в тексте листа (дд.мм.гггг чч:мм — бланк и письмо).
 
-    Принимаем и datetime модели шага, и строку (уже отформатированную дату) —
-    контекст собирается из «птичьего» объекта запроса, как и весь остальной."""
+    В хранилище время в UTC, а сотрудник читает бланк в зоне компании
+    (settings.timezone): приводим к ней, иначе печать и письмо отличались бы от
+    того, что он видит в карточке. Значение без зоны (строка из старых данных)
+    показываем как есть — молча сдвигать метку нельзя."""
     if value is None:
         return ""
+    stamp = "%d.%m.%Y %H:%M"
+
+    def _fmt(moment: datetime) -> str:
+        if moment.tzinfo is None:
+            return moment.strftime(stamp)
+        return moment.astimezone(current_timezone()).strftime(stamp)
+
     if isinstance(value, datetime):
-        return value.strftime("%d.%m.%Y %H:%M")
+        return _fmt(value)
     text = str(value).strip()
     if not text:
         return ""
     try:
-        return datetime.fromisoformat(text).strftime("%d.%m.%Y %H:%M")
+        return _fmt(datetime.fromisoformat(text))
     except ValueError:
         return text[:16].replace("T", " ")
 

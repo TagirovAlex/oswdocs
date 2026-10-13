@@ -12,8 +12,9 @@
 
 ## API (api/app/)
 - `main.py` — точка входа, подключение роутеров.
-- `auth.py` — доменный вход/сессия (LDAPS), `/auth/login`, `/auth/me` (роль, блоки прав и часовой пояс показа дат — из
-  `settings.timezone`, иначе TZ контейнера).
+- `auth.py` — доменный вход/сессия (LDAPS), `/auth/login`, `/auth/me` (роль, блоки прав и часовая
+  зона системы — из `settings.timezone`, иначе TZ контейнера; неизвестная/пустая зона в ключе
+  отдаётся как «не задана» — сырое значение настройки наружу не уходит).
 - `deps.py` — зависимости, текущий пользователь; права — блоки функций из `permissions.py`
   (`require_block`), роль (`owner/hr/hr_admin/admin/sed_admin`) — производная от совпавших шаблонов
   для /auth/me (`_detect_role`).
@@ -48,6 +49,13 @@
   подтверждение связи при импорте `POST /requests/route/link-employee` (`_link_state`,
   `_ad_candidates`, `_missing_ad_card_detail`).
 - `requests_store.py` — хранилище заявок (InMemory/Db), в т.ч. employees/документы-хелперы.
+- `timezone.py` — часовой пояс системы: зона из `settings.timezone` (иначе `TZ`), соединениям
+  Postgres ставится на каждой выдаче из пула (`set_config`, обработчик SQLAlchemy `checkout`),
+  а вычисления идут через `current_timezone()` (письма/бланки `docs.py`, дата печати
+  `documents.py`, «сегодня» в `employee_sync.py`, расписания `onec_sync.py`, бэкапы
+  `archive.py`). Зона читается на старте процесса, при чтении ключа и после его записи.
+  Показ в интерфейсе — `frontend/src/date-format.ts`, зону получает из `/auth/me`.
+  Хранимое везде UTC.
 - `employee_sync.py` — локальный справочник `employees` (миграции 0004/0009): постраничный
   синк 1С+AD, `ref_key`/`dismissal_date`/`hr_synced_at`, проход по регистру кадровых данных
   (`sync_hr_dismissals` — даты увольнения, `list_hr_dismissals` постранично), `mark_linked`
@@ -209,10 +217,12 @@
   audit_log_no_update_delete: UPDATE запрещён всем, DELETE — только для следа
   заявки, которой уже нет в dismissal_requests (удаление заявки чистит её историю
   и комментарии),
-  0022 настройка часового пояса показа дат (`settings.timezone`, сид
-  `Europe/Moscow`): зону отдаёт `/auth/me`, приводит к ней показ в интерфейсе
-  (`frontend/src/date-format.ts`), хранимое остаётся в UTC; часовой пояс
-  контейнеров — переменная `TZ` в compose/.env.
+   0022 настройка часового пояса показа дат (`settings.timezone`, сид
+   `Europe/Moscow`): зону отдаёт `/auth/me`, приводит к ней показ в интерфейсе
+   (`frontend/src/date-format.ts`), хранимое остаётся в UTC; часовой пояс
+   контейнеров — переменная `TZ` в compose/.env. Докрут 2026-10-13
+   (`app/timezone.py`): та же зона — одна на всю систему (соединения Postgres,
+   письма/бланки, дата печати, «сегодня», расписания, имена бэкапов).
   Планируется (волна F3): админка прав — вкладка «Доступ и роли» на блоках и шаблонах
    (бэкенд прав — `permissions.py` + `/settings/permissions`, волна F2, сделано).
 
