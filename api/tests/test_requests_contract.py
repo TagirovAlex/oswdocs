@@ -276,16 +276,24 @@ def test_create_request_without_fio_422(client, hr_headers, settings_override, r
     assert client.post("/requests", json=body, headers=hr_headers).status_code == 422
 
 
-def test_fio_hidden_from_owner(client, hr_headers, owner_headers, settings_override, route_override):
-    """Владельцу шага fio не отдается (ПДн), но заявка в его списке есть."""
+def test_fio_and_department_visible_to_owner(
+    client, hr_headers, owner_headers, settings_override, route_override
+):
+    """Владельцу шага видны ФИО и служба заявки, табельный номер — нет (ПДн).
+
+    Решение человека 2026-10-14: без ФИО и службы согласующий не понимает, о
+    ком заявка. Таб.№/предприятие/ключ сотрудника остаются только привилегированным."""
     rid = _create(client, hr_headers).json()["id"]
     assert client.post(f"/requests/{rid}/submit", headers=hr_headers).status_code == 200
     listing = client.get("/requests", headers=owner_headers)
     assert listing.status_code == 200
     mine = [r for r in listing.json() if r["id"] == rid]
     assert len(mine) == 1
-    assert mine[0]["fio"] is None
+    assert mine[0]["fio"]
+    assert mine[0]["department"]
     assert mine[0]["tab_num"] is None
+    assert mine[0]["enterprise"] is None
+    assert mine[0]["employee_key"] is None
 
 
 # --- enterprise_name: название предприятия из settings.enterprises (§3 handoff 3.2) ---

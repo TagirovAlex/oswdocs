@@ -97,7 +97,8 @@ export interface RequestStep {
   assignee_count?: number;
 }
 
-// Заявка из API (RequestOut). fio у владельца — null (ПДн режет сервер).
+// Заявка из API (RequestOut). fio приходит всем (решение человека 2026-10-14),
+// остальные ПДн заявки (tab_num/enterprise/employee_key) сервер режет по ролям.
 export interface RequestOut {
   id: string;
   status: string;
@@ -1225,7 +1226,8 @@ function stepOwnerLabel(step: RequestStep | undefined): string {
 
 // Маппинг RequestOut → строка таблицы: шаг — первый ожидающий, срок — его expires_at.
 // Предприятие — названием (enterprise_name), при отсутствии — кодом, иначе прочерк.
-// ПДн: у владельца fio=null → маска «Сотрудник № {id}».
+// ПДн: ФИО сотрудника и служба приходят всем (решение человека 2026-10-14) —
+// маска «Сотрудник № {id}» остаётся на случай, когда ФИО в заявке пусто.
 export function toRequestRow(request: RequestOut): RequestRow {
   const pending = request.steps.find((s) => s.status === "ожидает");
   const current = pending ?? request.steps[0];

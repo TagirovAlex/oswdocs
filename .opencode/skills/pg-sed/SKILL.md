@@ -24,7 +24,10 @@ Postgres 17 (`postgres:17-trixie`), миграции — Alembic (вверх/в�
   вместе с колонками), 0018 справочник `step_catalog` и единая печать, 0019 числовой код
   вида документа, 0020 справочник блоков/шаблонов прав доступа, 0021 последовательность
   `request_code_seq` + сужение правила триггера `audit_log_no_update_delete`, 0022 настройка
-  часового пояса показа дат (`settings.timezone`, сид `Europe/Moscow`).
+  часового пояса показа дат (`settings.timezone`, сид `Europe/Moscow`), 0023 справочник
+  заместителей (`substitutes`: principal_sam/deputy_sam/valid_from/valid_to NULL на
+  бессрочное/notify/note/created_by, UNIQUE(principal_sam, deputy_sam)) и 14-й блок прав
+  `settings_substitutes` с выдачей `sed_admin`/`admin`.
 - Откат миграции 0016 ничего не восстанавливает (значения и нерабочие), 0014 при downgrade не
   возвращает прежнее содержимое бланков — состав собирает человек заново; откат 0017 возвращает
   `stage_id` NOT NULL и потому удаляет все текущие шаги бланка (у них `NULL stage_id`) —

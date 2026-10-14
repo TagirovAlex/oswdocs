@@ -581,7 +581,8 @@ def test_roster_member_sees_request_after_store_reload(
     """owner_kind восстановлен из справочника: участник реестра видит заявку.
 
     Карточка после перечитывания (owner_kind сброшен, как в Postgres): участник
-    состава этапа получает 200 и can_act, ПДн (tab_num/fio) остаются обрезанными."""
+    состава этапа получает 200 и can_act. ФИО и служба заявки видны всем (решение
+    человека 2026-10-14), табельный номер и предприятие — нет."""
     routing_store.profile_steps = _steps([STAGE_HR_ROW, STAGE_BUH_ROW])
     routing_store.rosters = {
         STAGE_HR: [{"sam": ROSTER_SAM, "position_title": "Инспектор", "active": True}]
@@ -597,8 +598,10 @@ def test_roster_member_sees_request_after_store_reload(
     assert card.status_code == 200, card.text
     body = card.json()
     assert body["steps"][0]["can_act"] is True
-    # Видимость реестрного участника не шире владельца шага: ПДн обрезаны.
-    assert body["tab_num"] is None and body["fio"] is None
+    # Видимость реестрного участника не шире владельца шага: табельный номер
+    # и предприятие обрезаны, ФИО и служба видны (решение человека 2026-10-14).
+    assert body["tab_num"] is None and body["enterprise"] is None
+    assert body["fio"] and body["department"]
     assert [item["id"] for item in client.get("/requests", headers=member).json()] == [rid]
 
     outsider = _headers_for(OUTSIDER_SAM, ["SED_STEP_OTHER"])

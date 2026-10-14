@@ -1479,20 +1479,15 @@ export function RequestCard(props: RequestCardProps) {
             </div>
             <div className="sed-panel">
               <b>Инициатор и решение</b>
-              {/* ПДн: владельцу fio/tab_num не приходят — маска «Сотрудник № id».
-                  Полная карточка — у кого есть блок request_create (ОК и
-                  администраторы), у остальных маска: видимость ПДн не расширяется.
-                  Класс .sed-meta — метаданные (контракт теста), .sed-block — отступ. */}
+              {/* ПДн: ФИО и служба заявки приходят ВСЕМ — решение человека
+                  2026-10-14, без них согласующий не видит, о ком заявка. Таб.№
+                  и предприятие бэкенд непривилегированным не отдаёт (там null),
+                  поэтому дополнительной проверки по блоку не нужно. Класс .sed-meta
+                  — метаданные (контракт теста), .sed-block — отступ. */}
               <div className="sed-block sed-meta">
-                {hasBlock(blocks, "request_create") ? (
-                  <>
-                    {employeeCell(card.fio ?? `Сотрудник № ${card.id}`)}
-                    {card.tab_num ? ` · Таб.№ ${card.tab_num}` : ""} · {card.department} · {card.position}
-                    {card.enterprise ? ` · ${card.enterprise_name ?? card.enterprise}` : ""}
-                  </>
-                ) : (
-                  <>Сотрудник № {card.id}</>
-                )}
+                {employeeCell(card.fio ?? `Сотрудник № ${card.id}`)}
+                {card.tab_num ? ` · Таб.№ ${card.tab_num}` : ""} · {card.department} · {card.position}
+                {card.enterprise ? ` · ${card.enterprise_name ?? card.enterprise}` : ""}
               </div>
               {/* Отметка своего шага — строго по can_act от бэкенда. */}
               {actStep && (

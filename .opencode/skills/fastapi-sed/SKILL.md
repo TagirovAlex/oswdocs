@@ -15,12 +15,18 @@ description: Use when editing FastAPI, SQLAlchemy, LDAP bind, 1C OData in SED. T
   (`ad_sync`), дубли ФИО в 1С разводятся по должности/службе из регистра кадровых данных,
   остальное — расхождения и подтверждение (`link_1c_ad`, `link_1c_ad/discrepancies/confirm`,
   `requests/route/link-employee`). Увольнение определяет 1С (`dismissal_date`), не AD.
-- Ролевая обрезка ответов: ОК — полная карточка, владелец шага — только свои задачи без ПДн (без отпуска), остальные — 403/пусто.
+- Ролевая обрезка ответов: ОК — полная карточка, владелец шага — только свои задачи без ПДн (без отпуска), остальные — 403/пусто. `fio`/`department` заявки — исключение, видны всем (решение человека 2026-10-14).
 - Минимальный дифф: править только нужный эндпоинт, контракты без согласования не менять.
 
 ## Ключевые модули
 
 - `auth.py` — LDAPS bind, проверка `memberOf` из настроек, пароли не хранить.
+- `substitutes.py`/`substitute_store.py` — справочник заместителей (миграция 0023):
+  `GET/POST/PUT/DELETE /settings/substitutes` под блоком `settings_substitutes`, аудит
+  `substitutes.create/update/delete` без логинов и ФИО; `list_active(on)` отдаёт записи,
+  действующие в интервале дат. Замещение применяется в `requests.py` (`_DeputyResolver`) —
+  это НЕ подмена адресата: шаг остаётся у оригинала, отметка пишется от логина заместителя,
+  гейт `step_decide` замещение не обходит.
 - `employees.py` — `GET /employees?enterprise&q` (локальная таблица, `page`/`page_size`/`total`,
   уволенные отсекаются), `POST /employees/sync`, `POST /employees/hr-sync` (проход по регистру
   кадровых данных), `GET /employees/card`.

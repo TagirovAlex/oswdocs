@@ -34,7 +34,7 @@ const folders: Folder[] = [
   { id: "mine", title: "Мои задачи", count: 1 },
 ];
 
-// Заявка из GET /api/requests (RequestOut; для владельца fio=null).
+// Заявка из GET /api/requests (RequestOut; fio приходит всем — решение человека 2026-10-14).
 // Шаг по умолчанию — групповой, can_act=false (кнопок согласования нет).
 // owner_name бэкенд резолвит из assignee, поэтому у группового шага его нет —
 // подпись шага строится по названию группы.
@@ -150,14 +150,15 @@ describe("SedLayout", () => {
     expect(screen.getByText(/Громов Игорь/)).toBeInTheDocument();
   });
 
-  // Владелец видит маски вместо ФИО (API отдаёт fio=null).
-  it("владелец видит маски вместо ФИО", async () => {
+  // ФИО заявки владельцу видно (решение человека 2026-10-14); маска «Сотрудник № …»
+  // остаётся только на заявках, где ФИО пустое.
+  it("владелец видит ФИО заявки", async () => {
     vi.mocked(getFolders).mockResolvedValue([{ id: "mine", title: "Мои задачи", count: 1 }]);
-    vi.mocked(getRequests).mockResolvedValue([requestWith(null, "На согласовании")]);
+    vi.mocked(getRequests).mockResolvedValue([requestWith("Громов Игорь", "На согласовании")]);
 
     renderWithTheme("owner");
-    await waitFor(() => expect(screen.getByText("Сотрудник № REQ-0001")).toBeInTheDocument());
-    expect(screen.queryByText(/Громов/)).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText(/Громов Игорь/)).toBeInTheDocument());
+    expect(screen.queryByText(/Сотрудник №/)).not.toBeInTheDocument();
   });
 
   // Папка «Завершённые» фильтрует по статусу на клиенте.
@@ -497,7 +498,8 @@ describe("SedLayout", () => {
     expect(screen.queryByText(/petrov\.pp/)).not.toBeInTheDocument();
   });
 
-  // У сотрудника (роль owner) колонки текущего согласующего нет.
+  // У сотрудника (роль owner) колонки текущего согласующего нет. ФИО у такой
+    // заявки пустое — строка подписывается маской «Сотрудник № …».
   it("у сотрудника колонки «Текущий согласующий» нет", async () => {
     vi.mocked(getFolders).mockResolvedValue([{ id: "mine", title: "Мои задачи", count: 1 }]);
     vi.mocked(getRequests).mockResolvedValue([

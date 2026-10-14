@@ -16,6 +16,7 @@ from . import employees as employees_routes
 from . import link as link_routes
 from . import requests as requests_routes
 from . import settings_routes as settings_routes
+from . import substitutes as substitutes_routes  # справочник заместителей (/settings/substitutes)
 # Импорт включает слушатель SQLAlchemy, который задаёт часовую зону соединениям
 # БД из настройки timezone (app/timezone.py). Модуль нужно импортировать до первого
 # соединения с БД — регистрация роутеров ниже этого момента ещё не начата.
@@ -59,6 +60,7 @@ app.include_router(requests_routes.router)
 app.include_router(settings_routes.router)
 app.include_router(documents_routes.router)
 app.include_router(attachments_routes.router)
+app.include_router(substitutes_routes.router)  # справочник заместителей
 
 
 @app.get("/health")

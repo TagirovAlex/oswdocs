@@ -596,6 +596,105 @@ export async function addPermissionGroup(name: string): Promise<PermissionGroup>
   });
 }
 
+// ---------------------------------------------------------------------------
+// Справочник заместителей — GET/POST/PUT/DELETE /api/settings/substitutes.
+// Право на все запросы — блок settings_substitutes (справочник админский).
+// ---------------------------------------------------------------------------
+
+// Запись справочника заместителей: кому замещают (principal_sam) и кто
+// замещает (deputy_sam) — логины AD (sAMAccountName). Даты срока — без
+// времени (ISO YYYY-MM-DD), как hire_date/dismissal_date из 1С: на показе их
+// режут строкой, formatDate из date-format.ts такую дату увел бы на день
+// (осторожно в date-format.ts). Пустой valid_to — «действует, пока не отменят».
+export interface Substitute {
+  id: number;
+  principal_sam: string;
+  deputy_sam: string;
+  valid_from: string;
+  valid_to: string | null;
+  // Слать письма заместителю при назначении шагов оригиналу.
+  notify: boolean;
+  note: string;
+  created_by: string;
+  created_at: string;
+  updated_at: string | null;
+}
+
+// Тело POST/PUT /api/settings/substitutes (те же поля у создания и правки).
+export interface SubstituteInput {
+  principal_sam: string;
+  deputy_sam: string;
+  valid_from: string;
+  valid_to: string | null;
+  notify: boolean;
+  note: string;
+}
+
+// Запрос к /api/settings/substitutes с Bearer-токеном (блок прав
+// settings_substitutes). Ответ 204 приравниваем к пустому объекту — как в
+// requestDocType.
+async function requestSubstitute<T>(
+  path: string,
+  method: "GET" | "POST" | "PUT" | "DELETE",
+  data?: SubstituteInput,
+): Promise<T> {
+  const token = getToken();
+  if (!token) {
+    throw new ApiHttpError(401, "Нет токена");
+  }
+  const init: RequestInit = { method, headers: { Authorization: `Bearer ${token}` } };
+  if (data !== undefined) {
+    init.headers = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
+    init.body = JSON.stringify(data);
+  }
+  let res: Response;
+  try {
+    res = await fetch(path, init);
+  } catch {
+    throw new Error("Сервис недоступен");
+  }
+  if (res.status === 401) throw new ApiHttpError(401, "Сессия истекла");
+  if (res.status === 403) throw new ApiHttpError(403, "Справочник заместителей — не по вашим правам");
+  if (res.status === 404) throw new ApiHttpError(404, "Запись заместителя не найдена");
+  if (res.status === 409) throw new ApiHttpError(409, "Такая пара «сотрудник и заместитель» уже заведена");
+  if (res.status === 422) throw new ApiHttpError(422, "Неверные данные заместителя");
+  if (res.status === 503) throw new ApiHttpError(503, "Справочник заместителей недоступен");
+  if (!res.ok) throw new ApiHttpError(res.status, "Ошибка операции со справочником заместителей");
+  if (res.status === 204) return {} as T;
+  return (await res.json()) as T;
+}
+
+// GET /api/settings/substitutes: справочник заместителей целиком (все записи,
+// независимо от срока). Список приходит МАССИВОМ — как все прочие списки API
+// (бланки, права доступа, бэкапы), обёртка `{items: …}` здесь не применяется.
+// Ошибки: 401 — сессия истекла, 403 — нет блока прав settings_substitutes,
+// 503 — хранилище недоступно.
+export async function getSubstitutes(): Promise<Substitute[]> {
+  const res = await requestSubstitute<Substitute[]>("/api/settings/substitutes", "GET");
+  // Не массив (например, объект с items) — пустой список, а не молчаливая пустота
+  // в таблице: так расхождение формы ответа покажется сразу.
+  return Array.isArray(res) ? res : [];
+}
+
+// POST /api/settings/substitutes: создать запись «сотрудник → заместитель».
+// Ошибки: 409 — дубль пары, 422 — пустые логины, заместитель равен сотруднику
+// или «действует по» раньше «действует с».
+export async function createSubstitute(data: SubstituteInput): Promise<Substitute> {
+  return requestSubstitute<Substitute>("/api/settings/substitutes", "POST", data);
+}
+
+// PUT /api/settings/substitutes/{id}: изменить запись (те же поля, что и при
+// создании). Ошибки: 404 — записи нет, 409 — дубль пары, 422 — значения неверны.
+export async function updateSubstitute(id: number, data: SubstituteInput): Promise<Substitute> {
+  return requestSubstitute<Substitute>(`/api/settings/substitutes/${id}`, "PUT", data);
+}
+
+// DELETE /api/settings/substitutes/{id}: удалить запись (ответ 200 с
+// {id, deleted}; ошибка 404 — записи уже нет).
+export async function deleteSubstitute(id: number): Promise<Record<string, unknown>> {
+  return requestSubstitute<Record<string, unknown>>(`/api/settings/substitutes/${id}`, "DELETE");
+}
+
 // Файлы-шаблоны .docx (doc_templates[].file) больше не используются: по решению
 // человека документ печати собирается из данных бланка из справочника. Поэтому
 // ключи настроек doc_templates/position_sets и методы загрузки/скачивания/замены/

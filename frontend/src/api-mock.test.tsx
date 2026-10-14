@@ -21,8 +21,9 @@ describe("mockApi", () => {
     await expect(mockApi.getSettings("hr_admin")).rejects.toBeInstanceOf(MockForbidden);
   });
 
-  // Владелец получает урезанную карточку без ПДн.
-  it("урезанная карточка владельцу не содержит ПДн", async () => {
+  // Владелец получает урезанную карточку: ФИО заявки видно (решение человека
+  // 2026-10-14), табельный номер, почта и руководитель — нет.
+  it("урезанная карточка владельцу не содержит ПДн кроме ФИО", async () => {
     const card = await mockApi.getEmployee("REQ-001", "owner");
     expect(card.kind).toBe("brief");
     // Полных полей нет даже в ключах объекта.
@@ -31,7 +32,7 @@ describe("mockApi", () => {
     expect(card).not.toHaveProperty("mail");
     expect(card).not.toHaveProperty("manager");
     if (card.kind === "brief") {
-      expect(card.employeeLabel).toContain("Сотрудник №");
+      expect(card.employeeLabel).toContain("Петров");
     }
   });
 

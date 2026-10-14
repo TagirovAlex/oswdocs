@@ -32,6 +32,10 @@ import {
   getPermissions,
   getSettings,
   getSettingsContent,
+  getSubstitutes,
+  createSubstitute,
+  updateSubstitute,
+  deleteSubstitute,
   listBackups,
   runBackup,
   saveArchiveSettings,
@@ -46,6 +50,7 @@ import type {
   PermissionCatalog,
   PermissionGroupsData,
   SettingsData,
+  Substitute,
 } from "./settings-client";
 import type { Role } from "./api-mock";
 
@@ -66,6 +71,10 @@ vi.mock("./settings-client", () => ({
   getPermissions: vi.fn(),
   savePermissionTemplate: vi.fn(),
   getPermissionGroups: vi.fn(),
+  getSubstitutes: vi.fn(),
+  createSubstitute: vi.fn(),
+  updateSubstitute: vi.fn(),
+  deleteSubstitute: vi.fn(),
 }));
 
 // Мок клиента заявок: нужны только методы справочника бланков, шагов и виды
@@ -323,6 +332,23 @@ const permissionGroups: PermissionGroupsData = {
   synced_at: "2026-10-11T06:00:00+00:00",
 };
 
+// Справочник заместителей по умолчанию (GET /api/settings/substitutes): одна
+// бессрочная запись — логины и ФИО вымышленные.
+const substitutes: Substitute[] = [
+  {
+    id: 1,
+    principal_sam: "petrov.pp",
+    deputy_sam: "sidorova.aa",
+    valid_from: "2026-10-01",
+    valid_to: null,
+    notify: true,
+    note: "На время отпуска",
+    created_by: "admin",
+    created_at: "2026-10-01T08:00:00+00:00",
+    updated_at: null,
+  },
+];
+
 beforeEach(() => {
   // Зона показа — состояние модуля: сбрасываем, иначе заданная в одном тесте
   // зона утекла бы в остальные тесты файла.
@@ -355,6 +381,10 @@ beforeEach(() => {
   vi.mocked(createStepCatalog).mockReset();
   vi.mocked(updateStepCatalog).mockReset();
   vi.mocked(deleteStepCatalog).mockReset();
+  vi.mocked(getSubstitutes).mockReset();
+  vi.mocked(createSubstitute).mockReset();
+  vi.mocked(updateSubstitute).mockReset();
+  vi.mocked(deleteSubstitute).mockReset();
   // Виды документов (doc_types) — пустой справочник по умолчанию.
   vi.mocked(getDocTypes).mockResolvedValue([
     { code: "uvol", name: "Увольнение", is_active: true, sort_order: 1 },
@@ -369,6 +399,9 @@ beforeEach(() => {
   // Справочник прав и перечень групп AD из кэша — по умолчанию нормальные.
   vi.mocked(getPermissions).mockResolvedValue(permissionCatalog);
   vi.mocked(getPermissionGroups).mockResolvedValue(permissionGroups);
+  // Справочник заместителей по умолчанию — одна запись (тесты без заместителей
+  // переопределяют getSubstitutes пустым списком).
+  vi.mocked(getSubstitutes).mockResolvedValue(substitutes);
 });
 
 describe("AdminSettings", () => {
@@ -1545,6 +1578,153 @@ describe("AdminSettings", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Письма" })).toBeInTheDocument());
     expect(screen.queryByRole("button", { name: "Шаги" })).not.toBeInTheDocument();
     expect(getStepCatalog).not.toHaveBeenCalled();
+  });
+
+  // --- Справочник заместителей (вкладка «Заместители», блок settings_substitutes) --
+
+  // Вкладка открывается и показывает записи: сотрудник, заместитель, срок,
+  // флаг писем и комментарий; общей кнопки «Сохранить» на ней нет.
+  it("вкладка «Заместители»: список записей без общей кнопки «Сохранить»", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Заместители" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Заместители" }));
+
+    const table = await screen.findByRole("table", { name: "Заместители" });
+    expect(within(table).getByText("petrov.pp")).toBeInTheDocument();
+    expect(within(table).getByText("sidorova.aa")).toBeInTheDocument();
+    expect(within(table).getByText("2026-10-01")).toBeInTheDocument();
+    expect(within(table).getByText("бессрочно")).toBeInTheDocument();
+    expect(within(table).getByText("На время отпуска")).toBeInTheDocument();
+    expect(getSubstitutes).toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Сохранить" })).not.toBeInTheDocument();
+  });
+
+  // Вкладка «Заместители» недоступна руководителю ОК (свой блок прав).
+  it("вкладка «Заместители» недоступна руководителю ОК", async () => {
+    vi.mocked(getSettingsContent).mockResolvedValue(contentOnly);
+
+    render(<AdminSettings role="hr_admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Письма" })).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Заместители" })).not.toBeInTheDocument();
+    expect(getSubstitutes).not.toHaveBeenCalled();
+  });
+
+  // Создание записи: логины выбираются поиском в AD, срок вводится датами,
+  // пустой «по» уходит как null; письма по умолчанию включены.
+  it("создание записи заместителя уходит в createSubstitute", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+    // Поиск в AD отдаёт РАЗНЫХ людей на разные запросы: оба поля заполняются
+    // одним кандидатом, такая запись сервер бы отверг (заместитель = сотрудник).
+    vi.mocked(searchAd).mockImplementation(async (query: string) =>
+      query === "Сидорова" ? [{ ...adCandidate, sam: "sidorova.aa", display_name: "Сидорова" }] : [adCandidate],
+    );
+    vi.mocked(createSubstitute).mockImplementation(async (data) => ({
+      ...data,
+      id: 2,
+      created_by: "admin",
+      created_at: "2026-10-14T08:00:00+00:00",
+      updated_at: null,
+    }));
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Заместители" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Заместители" }));
+    await waitFor(() => expect(screen.getByLabelText("Поиск сотрудника: сотрудник")).toBeInTheDocument());
+
+    // Сотрудник и заместитель — двумя поисками AD (по кнопке на каждое поле).
+    const findButtons = screen.getAllByRole("button", { name: "Найти сотрудников" });
+    fireEvent.change(screen.getByLabelText("Поиск сотрудника: сотрудник"), {
+      target: { value: "Петров" },
+    });
+    fireEvent.click(findButtons[0]);
+    await waitFor(() => expect(searchAd).toHaveBeenCalledWith("Петров"));
+    fireEvent.click(screen.getByRole("button", { name: "Выбрать petrov.pp в поле «Сотрудник»" }));
+
+    fireEvent.change(screen.getByLabelText("Поиск сотрудника: заместитель"), {
+      target: { value: "Сидорова" },
+    });
+    fireEvent.click(findButtons[1]);
+    await waitFor(() => expect(searchAd).toHaveBeenCalledWith("Сидорова"));
+    fireEvent.click(screen.getByRole("button", { name: "Выбрать sidorova.aa в поле «Заместитель»" }));
+
+    fireEvent.change(screen.getByLabelText("Заместитель действует с"), { target: { value: "2026-11-01" } });
+    fireEvent.change(screen.getByLabelText("Комментарий к записи заместителя"), {
+      target: { value: "Отпуск" },
+    });
+    fireEvent.click(screen.getByText("Создать запись"));
+
+    await waitFor(() => expect(createSubstitute).toHaveBeenCalled());
+    expect(createSubstitute).toHaveBeenCalledWith({
+      principal_sam: "petrov.pp",
+      deputy_sam: "sidorova.aa",
+      valid_from: "2026-11-01",
+      valid_to: null,
+      notify: true,
+      note: "Отпуск",
+    });
+    await waitFor(() =>
+      expect(screen.getByRole("status")).toHaveTextContent("Запись о заместителе создана"),
+    );
+  });
+
+  // Пустые логины, пустая дата «с» и «по» раньше «с» — понятное сообщение,
+  // запрос не уходит.
+  it("карточка заместителя проверяет логины и срок до отправки", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Заместители" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Заместители" }));
+    await waitFor(() => expect(screen.getByLabelText("Поиск сотрудника: сотрудник")).toBeInTheDocument());
+
+    // Не выбраны логины — первая проверка.
+    fireEvent.click(screen.getByText("Создать запись"));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Выберите сотрудника и его заместителя");
+
+    // Выбираем оба логина поиском в AD.
+    const findButtons = screen.getAllByRole("button", { name: "Найти сотрудников" });
+    fireEvent.change(screen.getByLabelText("Поиск сотрудника: сотрудник"), { target: { value: "Петров" } });
+    fireEvent.click(findButtons[0]);
+    fireEvent.change(screen.getByLabelText("Поиск сотрудника: заместитель"), { target: { value: "Сидорова" } });
+    fireEvent.click(findButtons[1]);
+    fireEvent.click(await screen.findByRole("button", { name: "Выбрать petrov.pp в поле «Сотрудник»" }));
+    fireEvent.click(screen.getByRole("button", { name: "Выбрать petrov.pp в поле «Заместитель»" }));
+
+    // Без даты «с» — вторая проверка.
+    fireEvent.click(screen.getByText("Создать запись"));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Укажите дату, с которой заместитель действует",
+    );
+
+    // «По» раньше «с» — третья проверка.
+    fireEvent.change(screen.getByLabelText("Заместитель действует с"), { target: { value: "2026-11-10" } });
+    fireEvent.change(screen.getByLabelText("Заместитель действует по"), { target: { value: "2026-11-01" } });
+    fireEvent.click(screen.getByText("Создать запись"));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Дата «действует по» раньше даты «действует с»",
+    );
+    expect(createSubstitute).not.toHaveBeenCalled();
+  });
+
+  // Удаление записи — с подтверждением; без согласия запрос не уходит.
+  it("удаление записи заместителя спрашивает подтверждение", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Заместители" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Заместители" }));
+
+    fireEvent.click(await screen.findByRole("button", { name: "Удалить запись petrov.pp — sidorova.aa" }));
+    expect(confirmSpy).toHaveBeenCalled();
+    expect(deleteSubstitute).not.toHaveBeenCalled();
+
+    confirmSpy.mockReturnValue(true);
+    fireEvent.click(screen.getByRole("button", { name: "Удалить запись petrov.pp — sidorova.aa" }));
+    await waitFor(() => expect(deleteSubstitute).toHaveBeenCalledWith(1));
+    confirmSpy.mockRestore();
   });
 
   // Создание шага справочника: код, название, согласующие через поиск AD,

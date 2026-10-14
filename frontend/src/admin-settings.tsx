@@ -30,8 +30,10 @@ import type {
 } from "./requests-client";
 import {
   createDocType,
+  createSubstitute,
   deleteBackup,
   deleteDocType,
+  deleteSubstitute,
   downloadBackup,
   getArchiveSettings,
   getPermissionGroups,
@@ -39,6 +41,7 @@ import {
   getPermissions,
   getSettings,
   getSettingsContent,
+  getSubstitutes,
   listBackups,
   runBackup,
   saveArchiveSettings,
@@ -48,6 +51,7 @@ import {
   syncAdGroups,
   syncEnterprises,
   updateDocType,
+  updateSubstitute,
 } from "./settings-client";
 import type {
   ArchiveSettingsData,
@@ -62,6 +66,7 @@ import type {
   SettingsMailTemplate,
   SettingsOnecBase,
   StepGroupRef,
+  Substitute,
 } from "./settings-client";
 import { BlankPreview } from "./blank-preview";
 import { hasBlock } from "./auth-client";
@@ -95,13 +100,15 @@ const CONTENT_TABS = ["Процесс", "Справочники", "Письма"
 const PERMISSIONS_TAB = "Права доступа" as const;
 // Порядок вкладок полного доступа. Кто какую видит — по блокам (см. AdminSettings):
 // инфраструктурные вкладки (Инфра/Регламенты/Доступ и роли/Архивация) — блок
-// settings_infra, бланки и справочник шагов — settings_blanks.
+// settings_infra, бланки и справочник шагов — settings_blanks, справочник
+// заместителей — settings_substitutes.
 const ALL_TABS = [
   "Процесс",
   "Справочники",
   "Письма",
   "Бланки",
   "Шаги",
+  "Заместители",
   "Инфра",
   "Регламенты",
   "Доступ и роли",
@@ -118,6 +125,7 @@ const TAB_BLOCK: Record<SettingsTab, string | null> = {
   "Письма": "settings_content",
   "Бланки": "settings_blanks",
   "Шаги": "settings_blanks",
+  "Заместители": "settings_substitutes",
   "Инфра": "settings_infra",
   "Регламенты": "settings_infra",
   "Доступ и роли": "settings_infra",
@@ -2516,6 +2524,366 @@ function StepsCatalogEditor() {
   );
 }
 
+// Карточка записи справочника заместителей (вкладка «Заместители»): кому
+// замещают и кто замещает (логины AD), срок действия датами и флаж писем.
+interface SubstituteForm {
+  // null — новая запись; число — правка существующей.
+  id: number | null;
+  principal_sam: string;
+  deputy_sam: string;
+  valid_from: string;
+  // Пустая строка — «действует, пока не отменят» (в API это valid_to = null).
+  valid_to: string;
+  notify: boolean;
+  note: string;
+}
+
+// Пустая карточка новой записи; сроки и логины — только из справочника/AD.
+const EMPTY_SUBSTITUTE_FORM: SubstituteForm = {
+  id: null,
+  principal_sam: "",
+  deputy_sam: "",
+  valid_from: "",
+  valid_to: "",
+  // Письма заместителю по умолчанию шлём (решение человека 2026-10-14).
+  notify: true,
+  note: "",
+};
+
+// Поле выбора сотрудника для карточки заместителей: логин AD берётся поиском
+// в AD (только чтение), ФИО подсказывает результат поиска. Собственное
+// состояние поиска внутри — в карточке таких полей два.
+function AdPersonPicker(props: {
+  // Подпись поля карточки («Сотрудник», «Заместитель»).
+  label: string;
+  // Выбранный логин AD (пусто — ещё не выбран).
+  value: string;
+  onChange: (sam: string) => void;
+}) {
+  const [query, setQuery] = useState<string>("");
+  const [hits, setHits] = useState<AdCandidate[]>([]);
+  const [adError, setAdError] = useState<string>("");
+
+  // Подсказки сотрудников по ФИО (GET /api/ad/search, только чтение AD).
+  function search(): void {
+    const q = query.trim();
+    if (q === "") {
+      setHits([]);
+      setAdError("");
+      return;
+    }
+    searchAd(q)
+      .then((items) => {
+        setHits(items);
+        setAdError("");
+      })
+      .catch((e: unknown) => setAdError(e instanceof Error ? e.message : "Ошибка поиска сотрудников в AD"));
+  }
+
+  const hit = hits.find((c) => c.sam === props.value);
+
+  return (
+    <div className="sed-mt-8">
+      <div className="sed-sub">{props.label} (логин AD):</div>
+      <div className="sed-editor-row sed-editor-row--center">
+        <span>
+          {props.value === ""
+            ? "не выбран"
+            : `${props.value}${hit && hit.display_name ? ` — ${hit.display_name}` : ""}`}
+        </span>
+        {props.value !== "" && (
+          <button
+            type="button"
+            className="sed-btn sed-btn--ghost"
+            aria-label={`Очистить поле «${props.label}»`}
+            onClick={() => props.onChange("")}
+          >
+            Очистить
+          </button>
+        )}
+      </div>
+      {props.value === "" && (
+        <div className="sed-note">Выберите сотрудника поиском в AD — без него запись не сохранится.</div>
+      )}
+      <div className="sed-editor-row sed-editor-row--center sed-mt-8">
+        <input
+          aria-label={`Поиск сотрудника: ${props.label.toLowerCase()}`}
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
+        <button type="button" className="sed-btn sed-btn--ghost" onClick={search}>
+          Найти сотрудников
+        </button>
+      </div>
+      {adError && <div role="alert">{adError}</div>}
+      {hits.length > 0 && (
+        <ul className="sed-list">
+          {hits.map((cand) => (
+            <li key={cand.sam}>
+              <button
+                type="button"
+                className="sed-btn sed-btn--ghost"
+                aria-label={`Выбрать ${cand.sam} в поле «${props.label}»`}
+                onClick={() => props.onChange(cand.sam)}
+              >
+                {cand.display_name || cand.sam} ({cand.sam})
+                {cand.title ? ` — ${cand.title}` : ""}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+// Вкладка «Заместители» (блок прав settings_substitutes): справочник
+// «сотрудник → его заместитель». Заместитель ставит отметку за оригинала, если
+// у него есть блок «Отметки по шагам»; при notify заместителю уходит копия
+// письма о назначении. Записи правятся своими CRUD-запросами, поэтому общей
+// кнопки «Сохранить» на вкладке нет (как на «Бланках» и «Шагах»).
+function SubstitutesEditor() {
+  const [items, setItems] = useState<Substitute[]>([]);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [loadError, setLoadError] = useState<string>("");
+  const [error, setError] = useState<string>("");
+  const [saved, setSaved] = useState<string>("");
+  const [busy, setBusy] = useState<boolean>(false);
+  const [form, setForm] = useState<SubstituteForm>(EMPTY_SUBSTITUTE_FORM);
+
+  // Список записей после любой правки (срок и флаг писем — как в ответе сервера).
+  function loadList(): void {
+    setLoadError("");
+    getSubstitutes()
+      .then((data) => setItems(data))
+      .catch((e: unknown) =>
+        setLoadError(e instanceof Error ? e.message : "Ошибка загрузки справочника заместителей"),
+      )
+      .finally(() => setLoading(false));
+  }
+
+  useEffect(loadList, []);
+
+  // Создание/правка записи. Проверяем на клиенте только очевидное (не выбраны
+  // логины, нет даты «с», «по» раньше «с»); дубль пары и прочее отвергает сервер.
+  async function handleSaveForm(): Promise<void> {
+    const principal = form.principal_sam.trim();
+    const deputy = form.deputy_sam.trim();
+    if (principal === "" || deputy === "") {
+      setError("Выберите сотрудника и его заместителя");
+      return;
+    }
+    if (form.valid_from === "") {
+      setError("Укажите дату, с которой заместитель действует");
+      return;
+    }
+    // Даты — ISO YYYY-MM-DD, поэтому сравнение строк равно сравнению дат.
+    const validTo = form.valid_to === "" ? null : form.valid_to;
+    if (validTo !== null && validTo < form.valid_from) {
+      setError("Дата «действует по» раньше даты «действует с»");
+      return;
+    }
+    setError("");
+    setSaved("");
+    setBusy(true);
+    const payload = {
+      principal_sam: principal,
+      deputy_sam: deputy,
+      valid_from: form.valid_from,
+      valid_to: validTo,
+      notify: form.notify,
+      note: form.note.trim(),
+    };
+    try {
+      if (form.id === null) {
+        await createSubstitute(payload);
+        setSaved("Запись о заместителе создана");
+        setForm(EMPTY_SUBSTITUTE_FORM);
+      } else {
+        await updateSubstitute(form.id, payload);
+        setSaved("Запись о заместителе сохранена");
+      }
+      loadList();
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Ошибка сохранения записи о заместителе");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Удаление записи с подтверждением; правящаяся запись сбрасывается в карточку.
+  async function handleDelete(item: Substitute): Promise<void> {
+    if (!window.confirm(`Удалить запись «${item.principal_sam} → ${item.deputy_sam}»?`)) return;
+    setError("");
+    setSaved("");
+    setBusy(true);
+    try {
+      await deleteSubstitute(item.id);
+      setSaved("Запись о заместителе удалена");
+      if (form.id === item.id) setForm(EMPTY_SUBSTITUTE_FORM);
+      loadList();
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Ошибка удаления записи о заместителе");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const editing = form.id !== null;
+
+  return (
+    <fieldset>
+      <legend>Заместители</legend>
+      <div className="sed-note">
+        Запись разрешает заместителю ставить отметки по шагам за сотрудника, которому
+        шаг назначен (нужен свой блок «Отметки по шагам»). Шаг остаётся назначенным
+        сотруднику, в истории и аудите — ФИО заместителя.
+      </div>
+      {loading && <div className="sed-note">Загрузка заместителей…</div>}
+      {loadError && <div role="alert">Заместители: {loadError}</div>}
+      {!loading && !loadError && items.length === 0 && <div className="sed-note">Заместителей нет</div>}
+      {items.length > 0 && (
+        <table className="sed-table" aria-label="Заместители">
+          <thead>
+            <tr>
+              <th scope="col">Сотрудник</th>
+              <th scope="col">Заместитель</th>
+              <th scope="col">Действует с</th>
+              <th scope="col">Действует по</th>
+              <th scope="col">Письма</th>
+              <th scope="col">Комментарий</th>
+              <th scope="col">Действия</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((item) => (
+              <tr key={item.id} className={item.id === form.id ? "sed-table__row--active" : undefined}>
+                <td>{item.principal_sam}</td>
+                <td>{item.deputy_sam}</td>
+                {/* Даты срока приходят без времени (ISO YYYY-MM-DD) — показываем
+                    как есть: formatDate из date-format.ts такую дату увел бы на день. */}
+                <td>{item.valid_from}</td>
+                <td>{item.valid_to ?? "бессрочно"}</td>
+                <td>{item.notify ? "да" : "нет"}</td>
+                <td>{item.note}</td>
+                <td>
+                  <div className="sed-toolbar sed-mt-0">
+                    <button
+                      type="button"
+                      className="sed-btn sed-btn--ghost"
+                      aria-label={`Править запись ${item.principal_sam} — ${item.deputy_sam}`}
+                      onClick={() =>
+                        setForm({
+                          id: item.id,
+                          principal_sam: item.principal_sam,
+                          deputy_sam: item.deputy_sam,
+                          valid_from: item.valid_from,
+                          valid_to: item.valid_to ?? "",
+                          notify: item.notify,
+                          note: item.note,
+                        })
+                      }
+                    >
+                      Править
+                    </button>
+                    <button
+                      type="button"
+                      className="sed-btn sed-btn--ghost"
+                      aria-label={`Удалить запись ${item.principal_sam} — ${item.deputy_sam}`}
+                      onClick={() => void handleDelete(item)}
+                      disabled={busy}
+                    >
+                      Удалить
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      {/* Карточка записи: создание или правка выбранной. */}
+      <div className="sed-editor-card">
+        <div className="sed-blockcard__head">
+          <span className="sed-blockcard__title">
+            {editing ? `Правка записи: ${form.principal_sam} → ${form.deputy_sam}` : "Новая запись"}
+          </span>
+          <span className="sed-blockcard__spacer" />
+          {editing && (
+            <button
+              type="button"
+              className="sed-btn sed-btn--ghost"
+              onClick={() => setForm(EMPTY_SUBSTITUTE_FORM)}
+            >
+              Отменить правку
+            </button>
+          )}
+        </div>
+
+        <AdPersonPicker
+          label="Сотрудник"
+          value={form.principal_sam}
+          onChange={(sam) => setForm({ ...form, principal_sam: sam })}
+        />
+        <AdPersonPicker
+          label="Заместитель"
+          value={form.deputy_sam}
+          onChange={(sam) => setForm({ ...form, deputy_sam: sam })}
+        />
+
+        <div className="sed-editor-row">
+          <label className="sed-field">
+            Действует с
+            <input
+              type="date"
+              aria-label="Заместитель действует с"
+              value={form.valid_from}
+              onChange={(e) => setForm({ ...form, valid_from: e.target.value })}
+            />
+          </label>
+          <label className="sed-field">
+            Действует по
+            <input
+              type="date"
+              aria-label="Заместитель действует по"
+              value={form.valid_to}
+              onChange={(e) => setForm({ ...form, valid_to: e.target.value })}
+            />
+            <div className="sed-note">Пусто — действует, пока не отменят запись.</div>
+          </label>
+          <label className="sed-field">
+            <input
+              type="checkbox"
+              aria-label="Слать письма заместителю"
+              checked={form.notify}
+              onChange={(e) => setForm({ ...form, notify: e.target.checked })}
+            />
+            Слать письма заместителю (по умолчанию да)
+          </label>
+        </div>
+
+        <label className="sed-field">
+          Комментарий
+          <input
+            aria-label="Комментарий к записи заместителя"
+            value={form.note}
+            onChange={(e) => setForm({ ...form, note: e.target.value })}
+          />
+        </label>
+
+        <div className="sed-toolbar sed-mt-8">
+          <button type="button" className="sed-btn" onClick={handleSaveForm} disabled={busy}>
+            {editing ? "Сохранить запись" : "Создать запись"}
+          </button>
+        </div>
+      </div>
+      {error && <div role="alert">{error}</div>}
+      {saved && <div role="status">{saved}</div>}
+    </fieldset>
+  );
+}
+
 // Формат размера бэкапа: в мегабайтах «X.X МБ» (1 знак после запятой);
 // меньше 1 КБ — в килобайтах («X.X КБ»).
 function formatBackupSize(sizeBytes: number): string {
@@ -3046,6 +3414,11 @@ export function AdminSettings(props: AdminSettingsProps) {
       {/* Справочник шагов для бланков — только админ (как «Бланки»). */}
       {activeTab === "Шаги" && isAdmin && <StepsCatalogEditor />}
 
+      {/* Справочник заместителей — по своему блоку прав settings_substitutes
+          (видимость вкладки уже отфильтрована по блоку, поэтому isAdmin не
+          проверяем). Записи сохраняются своими CRUD-запросами. */}
+      {activeTab === "Заместители" && <SubstitutesEditor />}
+
       {activeTab === "Инфра" && isAdmin && (
         <fieldset>
           <legend>Инфра (сессия, сканы, SMTP)</legend>
@@ -3478,9 +3851,13 @@ export function AdminSettings(props: AdminSettingsProps) {
       {activeTab === "Архивация" && isAdmin && <ArchiveTab />}
 
       {/* Общий «Сохранить» — не для вкладок с собственным сохранением:
-          «Архивация» (PUT /api/archive), «Бланки» и «Шаги» (свои CRUD-запросы),
-          «Права доступа» (PUT состава шаблона внутри раздела). */}
-      {activeTab !== "Архивация" && activeTab !== "Бланки" && activeTab !== "Шаги" && activeTab !== PERMISSIONS_TAB && (
+          «Архивация» (PUT /api/archive), «Бланки», «Шаги» и «Заместители»
+          (свои CRUD-запросы), «Права доступа» (PUT состава шаблона внутри раздела). */}
+      {activeTab !== "Архивация" &&
+        activeTab !== "Бланки" &&
+        activeTab !== "Шаги" &&
+        activeTab !== "Заместители" &&
+        activeTab !== PERMISSIONS_TAB && (
         <div className="sed-toolbar sed-mt-12">
           <button type="button" className="sed-btn" onClick={handleSave} disabled={busy}>
             {busy ? "Сохранение…" : "Сохранить"}

@@ -41,6 +41,7 @@ export const MOCK_ROLE_BLOCKS: Record<Role, string[]> = {
     "settings_content",
     "settings_infra",
     "settings_blanks",
+    "settings_substitutes",
     "archive_backups",
   ],
   owner: ["requests_list", "request_card", "step_decide"],
@@ -77,7 +78,8 @@ export interface RequestFilters {
 // Строка таблицы заявок (без ПДн в явном виде для владельца).
 export interface RequestRow {
   id: string;
-  // Подпись сотрудника: ФИО для ОК/админа, маска для владельца.
+  // Подпись сотрудника: ФИО заявки — всем; маска «Сотрудник № …» в списке
+  // подставляется, только если ФИО пустое (заявка подана без ФИО).
   employeeLabel: string;
   enterprise: string;
   status: string;
@@ -102,11 +104,12 @@ export interface EmployeeFull {
   manager: string;
 }
 
-// Урезанная карточка для владельца (без ПДн: нет ФИО, таб.№, почты, руководителя).
+// Урезанная карточка для владельца: ФИО заявки видно (решение человека
+// 2026-10-14), предприятие обезличено, таб.№/почты/руководителя нет.
 export interface EmployeeBrief {
   kind: "brief";
   requestId: string;
-  // Обезличенная подпись вместо ФИО.
+  // ФИО заявки; маска «Сотрудник № …» — только если ФИО пустое.
   employeeLabel: string;
   enterprise: string;
   status: string;
@@ -127,17 +130,19 @@ const MOCK_FOLDERS: Folder[] = [
 ];
 
 // Вымышленные строки заявок (ФИО вымышлены).
-// Владелец получает только свои две строки с маской вместо ФИО.
+// Владелец получает только свои две строки (см. MOCK_OWNER_ROWS ниже).
 const MOCK_ROWS: RequestRow[] = [
   { id: "REQ-001", employeeLabel: "Петров Пётр Петрович", enterprise: "Завод «Север»", status: "На согласовании", step: "Бухгалтерия", dueDate: "2026-10-05" },
   { id: "REQ-002", employeeLabel: "Сидорова Анна Сергеевна", enterprise: "Завод «Север»", status: "На согласовании", step: "Безопасность", dueDate: "2026-10-06" },
   { id: "REQ-003", employeeLabel: "Козлов Дмитрий Андреевич", enterprise: "Филиал «Восток»", status: "На доработке", step: "ОК", dueDate: "2026-10-03" },
 ];
 
-// Маскированные строки для владельца (уже обезличены в моке).
+// Строки заявок владельца: ФИО заявки видно всем (решение человека 2026-10-14 —
+// без ФИО и службы согласующий не понимает, о ком заявка), предприятие и
+// табельный номер — только привилегированным, поэтому здесь оно обезличено.
 const MOCK_OWNER_ROWS: RequestRow[] = [
-  { id: "REQ-001", employeeLabel: "Сотрудник № 101", enterprise: "Завод «Север»", status: "На согласовании", step: "Бухгалтерия", dueDate: "2026-10-05" },
-  { id: "REQ-002", employeeLabel: "Сотрудник № 102", enterprise: "Завод «Север»", status: "На согласовании", step: "Безопасность", dueDate: "2026-10-06" },
+  { id: "REQ-001", employeeLabel: "Петров Пётр Петрович", enterprise: "—", status: "На согласовании", step: "Бухгалтерия", dueDate: "2026-10-05" },
+  { id: "REQ-002", employeeLabel: "Сидорова Анна Сергеевна", enterprise: "—", status: "На согласовании", step: "Безопасность", dueDate: "2026-10-06" },
 ];
 
 // Вымышленная полная карточка (только ОК/админ).
@@ -199,14 +204,13 @@ export const mockApi = {
     return MOCK_FOLDERS;
   },
 
-  // Таблица заявок с учётом фильтров. Владелец — только свои, обезличенные.
+  // Таблица заявок с учётом фильтров. Владелец — только свои.
   async getRequests(folder: FolderId, filters: RequestFilters, role: Role): Promise<RequestRow[]> {
     await delay();
     if (role === "guest") throw new MockForbidden("Гостю список недоступен");
     const base = role === "owner" ? MOCK_OWNER_ROWS : MOCK_ROWS;
     void folder;
     return base.filter((row) => {
-      // Поиск по подписи и предприятию (для владельца подпись — маска).
       if (filters.query && !row.employeeLabel.toLowerCase().includes(filters.query.toLowerCase())) return false;
       if (filters.enterprise && row.enterprise !== filters.enterprise) return false;
       if (filters.status && row.status !== filters.status) return false;

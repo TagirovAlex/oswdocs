@@ -41,10 +41,15 @@ from app.permissions import (  # noqa: E402
 )
 from app.routing_store import get_routing_store  # noqa: E402
 from app.settings_routes import get_settings_store, resolve_role_groups  # noqa: E402
+from app.substitute_store import (  # noqa: E402
+    InMemorySubstituteStore,
+    get_substitute_store,
+)
 
 # --- Справочник прав для офлайн-прогонов ---
-# Тестовые данные повторяют состояние после миграции 0020: 13 блоков, 5 шаблонов
-# и состав «шаблон → блок» один в один (перенос текущих прав). Группы шаблонов
+# Тестовые данные повторяют состояние после миграции 0023: 14 блоков, 5 шаблонов
+# и состав «шаблон → блок» один в один (перенос текущих прав + блок
+# settings_substitutes шаблонам sed_admin/admin). Группы шаблонов
 # НЕ зашиты: они берутся из ролевых групп настроек (env + ключи settings) —
 # ровно те, что миграция переносила в perm_template_groups, поэтому офлайн-гейты
 # ведут себя как на стенде. Пустой справочник = «прав нет» (fail-closed).
@@ -63,6 +68,7 @@ TEST_ADMIN_BLOCKS = TEST_HR_ADMIN_BLOCKS + (
     "settings_infra",
     "settings_blanks",
     "archive_backups",
+    "settings_substitutes",
 )
 TEST_SED_ADMIN_BLOCKS = TEST_ADMIN_BLOCKS + ("sed_admin_panel",)
 TEST_OWNER_BLOCKS = ("requests_list", "request_card", "step_decide")
@@ -92,6 +98,7 @@ def offline_permission_catalog() -> PermissionCatalog:
                 "settings_blanks",
                 "archive_backups",
                 "sed_admin_panel",
+                "settings_substitutes",
             )
         )
     )
@@ -266,7 +273,9 @@ class OfflineRoutingStore:
 # (get_routing_store) — по той же причине: подбор маршрута auto и состав этапа
 # читаются при создании заявки и выдаче карточки. Справочник прав
 # (get_permissions_store) — третье такое же хранилище: без подмен гейты по
-# блокам читали бы perm_* из несуществующей БД.
+# блокам читали бы perm_* из несуществующей БД. Справочник заместителей
+# (get_substitute_store) — четвёртое: его читает резолвер замещения в карточке
+# и отметке по шагу, а CRUD справочника (/settings/substitutes) идёт через него же.
 OFFLINE_BOUNDARIES = (
     get_settings_store,
     get_ad_reader,
@@ -274,6 +283,7 @@ OFFLINE_BOUNDARIES = (
     get_groups_cache_store,
     get_routing_store,
     get_permissions_store,
+    get_substitute_store,
 )
 
 
@@ -281,8 +291,8 @@ OFFLINE_BOUNDARIES = (
 def offline_boundaries(monkeypatch):
     """Подменить живые границы офлайн-прогонов: настройки — пусто, AD — None,
     локальный справочник — пустой (фолбэк поиска на живой 1С), справочники
-    маршрута — пустые, справочник прав — зеркало миграции 0020 (группы шаблонов
-    из действующих ролевых групп настроек).
+    маршрута — пустые, справочник прав — зеркало миграции 0023 (группы шаблонов
+    из действующих ролевых групп настроек), справочник заместителей — пустой.
 
     Тесты со своими override'ами перебивают эти значения своими (override ставится
     после autouse-фикстуры); для юнит-тестов ветки боевого кода без подмен —
@@ -295,6 +305,11 @@ def offline_boundaries(monkeypatch):
     app.dependency_overrides[get_permissions_store] = (
         lambda: InMemoryPermissionsStore(offline_permission_catalog())
     )
+    # Справочник заместителей — ОДИН экземпляр на тест (в отличие от пустых
+    # заглушек выше): запись, созданная POST, должна быть видна следующему
+    # GET/PUT/DELETE, а резолвер замещения — тому же запросу карточки.
+    substitute_store = InMemorySubstituteStore()
+    app.dependency_overrides[get_substitute_store] = lambda: substitute_store
     # Вложения и файлы: DELETE /requests/{id} доходит до этих границ (снимает
     # файлы вложений). Без оверрайда тест с удалением заявки ушёл бы в боевую
     # фабрику — DbAttachmentsStore с живым DATABASE_URL из .env.

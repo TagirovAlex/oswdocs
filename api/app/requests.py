@@ -53,6 +53,7 @@ from .mailer import (
     enqueue_event,
     get_mail_queue,
     recipient_mail,
+    step_logins,
     step_owner_mails,
 )
 from .requests_store import (
@@ -79,6 +80,8 @@ from .settings_routes import (
     get_settings_store,
     read_setting_value,
 )
+from .substitute_store import DbSubstituteStore, get_substitute_store
+from .timezone import current_timezone
 
 router = APIRouter(tags=["requests"])
 
@@ -814,6 +817,17 @@ def _routing_store_or_none() -> DbRoutingStore | None:
         return None
 
 
+def _substitute_store_or_none() -> DbSubstituteStore | None:
+    """Хранилище справочника заместителей: подмена зависимости в тестах, иначе боевое.
+
+    Получить не удалось (нет БД/настроек) — None: замещение тогда просто не
+    действует (fail-soft, как справочники маршрута в _routing_store_or_none)."""
+    try:
+        return _resolve_dependency(get_substitute_store, get_settings())
+    except Exception:
+        return None
+
+
 def _profile_id(profile: dict | None) -> int:
     """id профиля из строки справочника (0 — профиля нет)."""
     return _int_or_none((profile or {}).get("id")) or 0
@@ -881,6 +895,85 @@ class _RosterResolver:
         if not wanted:
             return False
         return any(item.casefold() == wanted for item in self.sams(step.stage_id))
+
+
+class _DeputyResolver:
+    """Действующие записи замещения (справочник substitutes) с кэшем на вызов ответа.
+
+    ОДИН SELECT list_active(today) на вызов ответа, дальше — только разбор снимка:
+    замещение проверяется для каждого шага (владелец, видимость, письма), а
+    справочник меняет администратор. «Сегодня» — в часовой зоне системы
+    (app/timezone.py), как в employee_sync: иначе около полуночи запись уже
+    считалась бы истёкшей (или ещё не начавшейся).
+    Хранилище недоступно — пусто (fail-soft: решение по такому шагу отклоняется
+    как чужое, карточка не падает, письмо заместителю просто не уходит)."""
+
+    def __init__(self, store: DbSubstituteStore | None) -> None:
+        self._store = store
+        self._loaded = False
+        # заместитель → множество оригиналов, которых он замещает
+        self._principals: dict[str, set[str]] = {}
+        # оригинал → заместители, которым шлём копию письма: ключи приведены к
+        # нижнему регистру (сравнение), значения — логины как в справочнике
+        # (AD ищет учётку по sAMAccountName, регистр из справочника не искажаем)
+        self._deputies: dict[str, dict[str, str]] = {}
+
+    def _load(self) -> None:
+        """Прочитать справочник один раз за вызов ответа (кэш)."""
+        if self._loaded:
+            return
+        self._loaded = True
+        if self._store is None:
+            return
+        try:
+            rows = self._store.list_active(datetime.now(current_timezone()).date())
+        except Exception:
+            return
+        for row in rows or []:
+            principal = str(getattr(row, "principal_sam", "") or "").strip().casefold()
+            deputy = str(getattr(row, "deputy_sam", "") or "").strip().casefold()
+            if not principal or not deputy:
+                continue
+            self._principals.setdefault(deputy, set()).add(principal)
+            if bool(getattr(row, "notify", False)):
+                self._deputies.setdefault(principal, {}).setdefault(
+                    deputy, str(getattr(row, "deputy_sam", "") or "").strip()
+                )
+
+    def covers(self, deputy_sam: str, principal_sam: str) -> bool:
+        """Замещает ли заместитель оригинала прямо сейчас.
+
+        Логины сравниваются без учёта регистра и пробелов, как в _RosterResolver.owns
+        (справочник заместителей заводится вручную)."""
+        deputy = str(deputy_sam or "").strip().casefold()
+        principal = str(principal_sam or "").strip().casefold()
+        if not deputy or not principal:
+            return False
+        self._load()
+        return principal in self._principals.get(deputy, set())
+
+    def notify_deputies(self, principal_sam: str) -> list[str]:
+        """Заместители оригинала, которым положена копия письма «назначена».
+
+        Логины — как в справочнике (см. _deputies), порядок стабильный."""
+        principal = str(principal_sam or "").strip().casefold()
+        if not principal:
+            return []
+        self._load()
+        return sorted(self._deputies.get(principal, {}).values())
+
+
+def _step_deputy_owned(
+    step: _Step, deputy: _DeputyResolver | None, sam: str
+) -> bool:
+    """Замещает ли этот сотрудник кого-то из ответственных снимка шага.
+
+    Только персональные ответственные шага (assignees, иначе одиночный assignee):
+    замещение персональное — ни группа-владелец, ни состав этапа замещением не
+    закрываются (решение человека 2026-10-14)."""
+    if deputy is None:
+        return False
+    return any(deputy.covers(sam, principal) for principal in step_logins(step))
 
 
 def _stage_owner_kinds(store: DbRoutingStore | None) -> dict[int, str]:
@@ -1841,19 +1934,29 @@ def _already_approved(step: _Step, sam: str) -> bool:
     return bool(item) and str(item.get("decision") or "") == "approve"
 
 
-def _closes_on_approve(step: _Step) -> bool:
+def _closes_on_approve(step: _Step, deputy: _DeputyResolver) -> bool:
     """Закрывает ли новая отметка согласия шаг.
 
     Режим parallel («кто-то один») — закрывает любая отметка. Режим sequential
     (и пустой режим у шага, выданного до миграции) — закрывают все
     ответственные из снимка; снимка нет (групповой шаг, действует owner_group) —
-    отметка закрывает шаг, как до разделения режимов."""
+    отметка закрывает шаг, как до разделения режимов. Отметка заместителя
+    засчитывается и за оригинала (deputy): шаг не должен ждать того, чей голос
+    уже подан за него, — в approvals при этом остаётся логин заместителя
+    (решение человека 2026-10-14)."""
     if step.approval_mode == STEP_APPROVAL_PARALLEL:
         return True
     if not step.assignees:
         return True
     approved = _approved_sams(step)
-    return all(str(sam).strip().casefold() in approved for sam in step.assignees)
+    for sam in step.assignees:
+        wanted = str(sam).strip().casefold()
+        if wanted in approved:
+            continue
+        if deputy is not None and any(deputy.covers(voter, wanted) for voter in approved):
+            continue
+        return False
+    return True
 
 
 def _clear_approvals(step: _Step) -> None:
@@ -1863,31 +1966,45 @@ def _clear_approvals(step: _Step) -> None:
 
 
 def _owns_step(
-    step: _Step, user: CurrentUser, roster: _RosterResolver | None = None
+    step: _Step,
+    user: CurrentUser,
+    roster: _RosterResolver | None = None,
+    deputy: _DeputyResolver | None = None,
 ) -> bool:
     """Владелец шага по действующим правилам: любой из ответственных снимка
     (assignees, миграция 0013), иначе персональный assignee — только он (sam
     сравнивается ровно как раньше, регистр НЕ нормализуется — ослабление
     сравнения расширило бы доступ), иначе любой из группы-владельца шага, иначе
-    участник состава этапа (owner_kind = stage_roster, состав — из справочника)."""
+    участник состава этапа (owner_kind = stage_roster, состав — из справочника).
+
+    Сверху — действующее замещение: заместитель сотрудника из снимка шага
+    владельцем шага считается и ставит отметку от своего логина (решение
+    человека 2026-10-14; отдельного признака «за кого» не заводим — в approvals
+    и аудите ФИО заместителя)."""
     if step.assignees:
-        return any(user.sam == item for item in step.assignees)
-    if step.assignee:
-        return user.sam == step.assignee
-    if step.owner_group and step.owner_group in user.groups:
-        return True
-    return roster is not None and roster.owns(step, user.sam)
+        owned = any(user.sam == item for item in step.assignees)
+    elif step.assignee:
+        owned = user.sam == step.assignee
+    elif step.owner_group and step.owner_group in user.groups:
+        owned = True
+    else:
+        owned = roster is not None and roster.owns(step, user.sam)
+    return owned or _step_deputy_owned(step, deputy, user.sam)
 
 
 def _check_step_owner(
-    step: _Step, user: CurrentUser, roster: _RosterResolver | None = None
+    step: _Step,
+    user: CurrentUser,
+    roster: _RosterResolver | None = None,
+    deputy: _DeputyResolver | None = None,
 ) -> None:
     """Отметку ставит владелец: персональный assignee — только он, иначе любой из группы
-    или участник состава этапа.
+    или участник состава этапа; заместитель ответственного снимка — тоже.
 
     Правило вынесено в _owns_step (его же использует can_act), тексты 403 и коды
-    ответов прежние."""
-    if _owns_step(step, user, roster):
+    ответов прежние: отказ заместителю ничем не выдаёт замещение (тот же текст,
+    что и постороннему)."""
+    if _owns_step(step, user, roster, deputy):
         return
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
@@ -1919,6 +2036,7 @@ def _can_act(
     pending_orders: set[int],
     now: datetime,
     roster: _RosterResolver | None = None,
+    deputy: _DeputyResolver | None = None,
 ) -> bool:
     """Может ли пользователь поставить отметку по шагу прямо сейчас.
 
@@ -1935,7 +2053,7 @@ def _can_act(
         return False
     if step.expires_at <= now:
         return False
-    if not _owns_step(step, user, roster):
+    if not _owns_step(step, user, roster, deputy):
         return False
     return not _already_approved(step, user.sam)
 
@@ -2185,6 +2303,7 @@ def _public_view(
     routing_store: DbRoutingStore | None = None,
     profile_names: dict[int, str] | None = None,
     stage_kinds: dict[int, str] | None = None,
+    deputy: _DeputyResolver | None = None,
 ) -> RequestOut:
     """Ролевая обрезка: ОК/админы — всё, владелец — без tab_num (ПДн).
 
@@ -2204,10 +2323,15 @@ def _public_view(
     здесь. Нужна для шагов, перечитанных из Postgres: owner_kind в БД не
     хранится (см. _restore_step_owner_kinds).
 
-    ПДн по ролям: enterprise_name (как enterprise/tab_num/fio) — только
-    привилегированным, остальным None; owner_name (ФИО согласующего/наименование
-    группы) и owner_duty (должность персонального исполнителя) — всем
-    авторизованным, сотруднику полезно видеть, кто согласует;
+    deputy — резолвер действующих заместителей: без него строится здесь же
+    (справочник читается один раз на вызов), список заявок передаёт общий. Нужен
+    для can_act: у заместителя ответственного снимка кнопки отметки есть.
+
+    ПДн по ролям: enterprise_name, enterprise и tab_num — только
+    привилегированным, остальным None; fio и department — всем (решение человека
+    2026-10-14: без ФИО и службы согласующий не видит, о ком заявка); owner_name
+    (ФИО согласующего/наименование группы) и owner_duty (должность персонального
+    исполнителя) — всем авторизованным, сотруднику полезно видеть, кто согласует;
     assignee, created_by и done_by — это sAMAccountName, поэтому скрываются всем,
     кроме привилегированных (assignee владельцу шага остаётся — это его собственный
     логин); по той же причине из assignees непривилегированному отдаётся только
@@ -2236,6 +2360,8 @@ def _public_view(
     # Справочники маршрута: состояние маршрута — не ПДн, поэтому резолвим для всех.
     route_store = routing_store if routing_store is not None else _routing_store_or_none()
     roster = _RosterResolver(route_store)
+    # Замещение: один SELECT действующих записей на вызов ответа (кэш резолвера).
+    deputy_resolver = deputy if deputy is not None else _DeputyResolver(_substitute_store_or_none())
     # owner_kind шага в БД не хранится — восстанавливаем из справочника, иначе
     # право по реестру этапа (assignee в ответе, can_act) не проверялось бы.
     _restore_step_owner_kinds(
@@ -2269,7 +2395,7 @@ def _public_view(
                 done_by=s.done_by if privileged else None,
                 done_at=s.done_at.isoformat() if s.done_at else None,
                 comment=s.comment,
-                can_act=_can_act(request, s, user, pending_orders, now, roster),
+                can_act=_can_act(request, s, user, pending_orders, now, roster, deputy_resolver),
                 stage_title=s.stage_title,
                 stage_code=s.stage_code,
                 assignees=(
@@ -2309,7 +2435,10 @@ def _public_view(
         enterprise_name=names.get(request.enterprise) if privileged else None,
         employee_key=(employee_keys or {}).get(request.id) if privileged else None,
         tab_num=request.tab_num if privileged else None,
-        fio=request.fio if privileged else None,
+        # ФИО и служба заявки — всем (решение человека 2026-10-14): без них
+        # согласующий не понимает, к кому относится заявка. Табельный номер,
+        # предприятие и ключ сотрудника остаются только привилегированным.
+        fio=request.fio,
         department=request.department,
         position=request.position,
         category=request.category,
@@ -2407,7 +2536,12 @@ def _history_raw_details(event: dict) -> dict[str, object] | None:
     return {"detail": raw}
 
 
-def _is_step_viewer(step: _Step, user: CurrentUser, roster: _RosterResolver | None = None) -> bool:
+def _is_step_viewer(
+    step: _Step,
+    user: CurrentUser,
+    roster: _RosterResolver | None = None,
+    deputy: _DeputyResolver | None = None,
+) -> bool:
     """Видит ли пользователь шаг заявки (только чтение карточки/списка).
 
     Группа-владелец шага, любой ответственный из снимка (assignees, миграция
@@ -2416,27 +2550,35 @@ def _is_step_viewer(step: _Step, user: CurrentUser, roster: _RosterResolver | No
     (право поставить отметку): здесь персональный исполнитель НЕ отменяет
     видимость по группе — правила чтения прежние, добавлены только реестрный
     случай и снимок ответственных (кто может согласовать, тот видит карточку,
-    даже если справочники недоступны)."""
+    даже если справочники недоступны). Действующее замещение ответственного
+    снимка шага тоже даёт видимость: иначе заместитель не откроет карточку,
+    в которой ему показывают кнопки отметки."""
     if step.owner_group and step.owner_group in user.groups:
         return True
     if step.assignees and user.sam in step.assignees:
         return True
     if step.assignee and step.assignee == user.sam:
         return True
-    return roster is not None and roster.owns(step, user.sam)
+    if roster is not None and roster.owns(step, user.sam):
+        return True
+    return _step_deputy_owned(step, deputy, user.sam)
 
 
 def _is_participant(
-    request: _Request, user: CurrentUser, roster: _RosterResolver | None = None
+    request: _Request,
+    user: CurrentUser,
+    roster: _RosterResolver | None = None,
+    deputy: _DeputyResolver | None = None,
 ) -> bool:
     """Участник заявки: ОК/админ/администратор СЭД, инициатор или владелец шага.
 
     Минимальная проверка доступа к карточке (комментарии/история) по образцу
     _can_view в documents.py, плюс инициатор заявки (создатель видит свою карточку
     даже без шагов-владельцев). Участник состава этапа (owner_kind = stage_roster)
-    — тоже участник: реестр назначает ему этап, как группе-владельцу. Резолвер не
-    передан — он строится здесь же (owner_kind шага восстанавливается из
-    справочника, см. _restore_step_owner_kinds)."""
+    — тоже участник: реестр назначает ему этап, как группе-владельцу. Резолверы
+    не переданы — они строятся здесь же (owner_kind шага восстанавливается из
+    справочника, см. _restore_step_owner_kinds; замещение — по справочнику
+    заместителей, fail-soft)."""
     if user.role in ("hr", "hr_admin", "admin", "sed_admin"):
         return True
     if request.created_by == user.sam:
@@ -2445,7 +2587,8 @@ def _is_participant(
         store = _routing_store_or_none()
         _restore_step_owner_kinds(request, _stage_owner_kinds(store))
         roster = _RosterResolver(store)
-    return any(_is_step_viewer(step, user, roster) for step in request.steps)
+    deputy_resolver = deputy if deputy is not None else _DeputyResolver(_substitute_store_or_none())
+    return any(_is_step_viewer(step, user, roster, deputy_resolver) for step in request.steps)
 
 
 def _previous_block_steps(request: _Request, order: int) -> list[_Step]:
@@ -2518,6 +2661,31 @@ def _notify_skip(request: _Request, event: str, reason: str) -> None:
     _audit("system", "notify.skip", request.id, f"{event} {reason}")
 
 
+def _deputy_assigned_mails(
+    steps: list[_Step],
+    ad_reader: object | None,
+    deputy: _DeputyResolver | None = None,
+) -> list[str]:
+    """Копия письма «назначена» заместителям оригиналов этих шагов (notify = TRUE).
+
+    Только персональные ответственные снимка шага (assignees/assignee): замещение
+    персональное, группу-заместителя не существует. Адрес — из AD, как у владельцев
+    шага. Справочник недоступен/ошибка — пустой список (fail-soft: письма
+    владельцам уходят как обычно). Шаблон письма прежний (EVENT_ASSIGNED) —
+    заместитель получает такое же уведомление, каким видит его оригинал.
+    Резолвер передаётся вызывающим, чтобы на одну отметку не читать справочник
+    заместителей несколько раз."""
+    resolver = deputy if deputy is not None else _DeputyResolver(_substitute_store_or_none())
+    mails: list[str] = []
+    for step in steps:
+        for principal in step_logins(step):
+            for sam in resolver.notify_deputies(principal):
+                mail = recipient_mail(ad_reader, sam)
+                if mail and mail not in mails:
+                    mails.append(mail)
+    return mails
+
+
 def _notify_assigned(
     request: _Request,
     queue: MailQueue,
@@ -2526,6 +2694,7 @@ def _notify_assigned(
     settings: Settings,
     steps: list[_Step] | None = None,
     comment: str = "",
+    deputy: _DeputyResolver | None = None,
 ) -> None:
     """Письмо «назначена» владельцам шагов (W3a): подача, переход этапа,
     возврат на предыдущий блок, повтор просроченного шага.
@@ -2534,7 +2703,10 @@ def _notify_assigned(
     заданные шаги. Получатели — mail из AD (только чтение): у персонального шага
     один адресат, у группового — все активные участники группы (очередь
     mail_queue хранит по одному письму на строку, поэтому рассылка разворачивается
-    здесь). Шаблон — из mail_templates/settings. comment — причина возврата
+    здесь). Плюс заместители оригиналов шагов, у которых в записи замещения
+    включены письма (notify): адресат, уже получивший письмо как владелец,
+    второго не получает (дедупликация по адресу). Шаблон — из
+    mail_templates/settings. comment — причина возврата
     ({{ comment }}, при переоткрытии блока), без неё пустая строка. Любой сбой
     (офлайн без AD/БД, нет шаблона) не роняет решение по заявке: пропуск
     пишется в аудит (notify.skip).
@@ -2548,6 +2720,10 @@ def _notify_assigned(
     except Exception as exc:
         _notify_skip(request, EVENT_ASSIGNED, f"resolve_error={type(exc).__name__}")
         return
+    # Копия заместителям оригиналов: только тех, кому письмо ещё не уходило.
+    for mail in _deputy_assigned_mails(targets, ad_reader, deputy):
+        if mail not in recipients:
+            recipients.append(mail)
     if not recipients:
         _notify_skip(request, EVENT_ASSIGNED, "no_recipients")
         return
@@ -3337,10 +3513,12 @@ def list_requests(
     settings: Settings = Depends(get_settings),
     store: RequestsStore = Depends(get_requests_store),
 ) -> list[RequestOut]:
-    """Список: ОК/админы — все, владелец — только свои шаги (урезанные без ПДн).
+    """Список: ОК/админы — все, владелец — только свои шаги.
 
     Право на функцию — блок «Просмотр списка заявок»; уточнение «только свои»
-    остаётся в обрезке ниже (роль/участие)."""
+    остаётся в обрезке ниже (роль/участие). ПДн в списке: ФИО и служба заявки видны
+    всем (решение человека 2026-10-14), табельный номер, предприятие и ключ
+    сотрудника — только привилегированным."""
     settings.ensure_read_only()
     require_block(user, BLOCK_REQUESTS_LIST, "Список заявок недоступен")
     try:
@@ -3363,6 +3541,8 @@ def list_requests(
     # читается один раз (иначе на каждую заявку), а реестр кэшируется на вызов.
     stage_kinds = _stage_owner_kinds(routing_store)
     roster = _RosterResolver(routing_store)
+    # Справочник заместителей — один раз на выборку (иначе на каждую заявку).
+    deputy = _DeputyResolver(_substitute_store_or_none())
     for item in requests:
         _restore_step_owner_kinds(item, stage_kinds)
     # Ключи карточек сотрудников (ссылки на карточку): пакетно по всей выборке,
@@ -3382,12 +3562,13 @@ def list_requests(
                 routing_store=routing_store,
                 profile_names=profile_names,
                 stage_kinds=stage_kinds,
+                deputy=deputy,
             )
             for r in requests
         ]
     mine = [
         r for r in requests
-        if any(_is_step_viewer(s, user, roster) for s in r.steps)
+        if any(_is_step_viewer(s, user, roster, deputy) for s in r.steps)
     ]
     return [
         _public_view(
@@ -3402,6 +3583,7 @@ def list_requests(
             routing_store=routing_store,
             profile_names=profile_names,
             stage_kinds=stage_kinds,
+            deputy=deputy,
         )
         for r in mine
     ]
@@ -3440,6 +3622,7 @@ def list_folders(
     routing_store = _routing_store_or_none()
     roster = _RosterResolver(routing_store)
     stage_kinds = _stage_owner_kinds(routing_store)
+    deputy = _DeputyResolver(_substitute_store_or_none())
     for item in requests:
         _restore_step_owner_kinds(item, stage_kinds)
     folders: list[FolderOut] = []
@@ -3479,7 +3662,7 @@ def list_folders(
             title="Мои задачи",
             count=sum(
                 1 for r in requests
-                if any(_is_step_viewer(s, user, roster) for s in r.steps)
+                if any(_is_step_viewer(s, user, roster, deputy) for s in r.steps)
             ),
         )
     )
@@ -3505,17 +3688,18 @@ def get_request(
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
+    deputy = _DeputyResolver(_substitute_store_or_none())
     if not _is_hr(user):
         routing_store = _routing_store_or_none()
         # owner_kind шага в БД не хранится — без восстановления из справочника
         # участник состава этапа не считался бы владельцем шага (403).
         _restore_step_owner_kinds(request, _stage_owner_kinds(routing_store))
         if not any(
-            _is_step_viewer(s, user, _RosterResolver(routing_store))
+            _is_step_viewer(s, user, _RosterResolver(routing_store), deputy)
             for s in request.steps
         ):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Нет доступа к заявке")
-    return _public_view(request, user)
+    return _public_view(request, user, deputy=deputy)
 
 
 def _request_attachment_files(request_id: str) -> list[str]:
@@ -3672,10 +3856,14 @@ def submit_request(
         request.id,
         ("reopened=" + ",".join(str(order) for order in reopened)) if reopened else "",
     )
-    _notify_assigned(request, mail_queue, settings_store, ad_reader, settings)
+    # Один резолвер замещения на вызов ответа: и письма, и карточка.
+    deputy = _DeputyResolver(_substitute_store_or_none())
+    _notify_assigned(
+        request, mail_queue, settings_store, ad_reader, settings, deputy=deputy
+    )
     # Ридер AD передан зависимостью; при ad_reader=None (AD недоступен) _public_view
     # резолвит его повторно (fail-soft) — без ФИО согласующего, но ответ 200.
-    return _public_view(request, user, ad_reader=ad_reader)
+    return _public_view(request, user, ad_reader=ad_reader, deputy=deputy)
 
 
 @router.post("/requests/{request_id}/withdraw", response_model=RequestOut)
@@ -3809,6 +3997,10 @@ def decide_step(
     step.approve_partial). Отказ и возврат действуют сразу от любого
     ответственного — они не требуют согласия остальных.
 
+    Заместитель сотрудника из снимка шага (справочник заместителей) отмечает шаг
+    так же, как сам ответственный; отметка пишется от его логина — отдельного
+    признака «за кого» не заводим (решение человека 2026-10-14).
+
     Уведомление «назначена»: при согласии — новые ожидающие шаги следующего
     блока (без дублей внутри параллельного блока), при возврате — владельцы
     переоткрытого предыдущего блока, а при отказе и если возвращать некуда —
@@ -3825,6 +4017,8 @@ def decide_step(
     # stage_roster, кэш на вызов) и owner_kind шага, которого в request_steps нет.
     routing_store = _routing_store_or_none()
     roster = _RosterResolver(routing_store)
+    # Справочник заместителей для этого решения: один SELECT действующих записей.
+    deputy = _DeputyResolver(_substitute_store_or_none())
     try:
         request = _get_request_or_404(store, request_id)
         _restore_step_owner_kinds(request, _stage_owner_kinds(routing_store))
@@ -3835,7 +4029,7 @@ def decide_step(
             raise HTTPException(status_code=404, detail="Шаг не найден")
         if step.status != STEP_PENDING:
             raise HTTPException(status_code=409, detail="Шаг уже закрыт")
-        _check_step_owner(step, user, roster)
+        _check_step_owner(step, user, roster, deputy)
         if body.decision == "approve" and _already_approved(step, user.sam):
             raise HTTPException(status_code=409, detail="Вы уже согласовали этот шаг")
         now = _utcnow()
@@ -3858,7 +4052,7 @@ def decide_step(
         _check_comment(step, body.decision, body.comment)
         _record_approval(step, user.sam, body.decision, now, body.comment)
         if body.decision == "approve":
-            if not _closes_on_approve(step):
+            if not _closes_on_approve(step, deputy):
                 # Отметка учтена, но шаг ждёт остальных ответственных: заявка не
                 # двигается, done_by/done_at шага не заполняются, письмо
                 # «назначена» не уходит (шаг не перешёл дальше).
@@ -3951,7 +4145,8 @@ def decide_step(
             ]
             if fresh:
                 _notify_assigned(
-                    request, mail_queue, settings_store, ad_reader, settings, steps=fresh
+                    request, mail_queue, settings_store, ad_reader, settings,
+                    steps=fresh, deputy=deputy,
                 )
     elif body.decision in ("return", "reject"):
         # Причина решения — в письме ({{ comment }}): её набрали в этом действии,
@@ -3966,6 +4161,7 @@ def decide_step(
                 settings,
                 steps=reopened,
                 comment=decision_comment,
+                deputy=deputy,
             )
         else:
             _notify_author_returned(
@@ -3976,7 +4172,7 @@ def decide_step(
                 settings,
                 comment=decision_comment,
             )
-    return _public_view(request, user)
+    return _public_view(request, user, deputy=deputy)
 
 
 @router.post("/requests/{request_id}/steps/{order}/reissue", response_model=RequestOut)

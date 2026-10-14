@@ -65,7 +65,7 @@ function sessionUser(sam: string): AuthUser {
   return { sam, groups: ["SED_HR"], role: "hr" };
 }
 
-// Заявка из GET /api/requests (RequestOut; для владельца fio=null).
+// Заявка из GET /api/requests (RequestOut; fio приходит всем — решение человека 2026-10-14).
 // Шаг по умолчанию — групповой, can_act=false (кнопок согласования нет).
 // owner_name бэкенд резолвит из assignee, поэтому у группового шага его нет —
 // подпись шага строится по названию группы.
@@ -96,6 +96,19 @@ function requestWith(
         expires_at: "2026-10-05T10:00:00+00:00",
       },
     ],
+  };
+}
+
+// Ответ бэкенда для непривилегированного: ФИО и служба есть (решение человека
+// 2026-10-14), а табельный номер, предприятие и ключ сотрудника вырезаны гейтом.
+function requestWithoutPdn(fio: string | null, status: string): RequestOut {
+  const request = requestWith(fio, status);
+  return {
+    ...request,
+    enterprise: undefined,
+    enterprise_name: undefined,
+    tab_num: undefined,
+    employee_key: undefined,
   };
 }
 
@@ -302,18 +315,22 @@ describe("RequestCard", () => {
     );
   });
 
-  // Обрезка ПДн по блоку request_create: у кого его нет — маска «Сотрудник № id».
-  it("без блока request_create карточка остаётся урезанной", async () => {
-    vi.mocked(getRequest).mockResolvedValue(requestWith("Громов Игорь Олегович", "На согласовании"));
+  // ФИО и служба заявки видны ВСЕМ (решение человека 2026-10-14): без них
+  // согласующему непонятно, о ком заявка. Табельный номер и предприятие режет
+  // БЭКЕНД (непривилегированному они не приходят вовсе) — здесь это отражено
+  // подготовленным ответом без них.
+  it("без блока request_create видны ФИО и служба, таб.№ скрыт", async () => {
+    vi.mocked(getRequest).mockResolvedValue(
+      requestWithoutPdn("Громов Игорь Олегович", "На согласовании"),
+    );
 
-    // Роль ОК, но блока создания заявки нет — ПДн не показываем.
     renderCard("REQ-0001", "hr", ["requests_list", "request_card"]);
-    await waitFor(() => expect(screen.getByText("Сотрудник № REQ-0001")).toBeInTheDocument());
-    expect(screen.queryByText(/Громов Игорь/)).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText(/Громов Игорь/)).toBeInTheDocument());
+    expect(screen.getByText(/Цех № 1/)).toBeInTheDocument();
     expect(screen.queryByText(/Таб\.№/)).not.toBeInTheDocument();
   });
 
-  it("с блоком request_create карточка остаётся полной", async () => {
+  it("с блоком request_create виден и табельный номер", async () => {
     vi.mocked(getRequest).mockResolvedValue(requestWith("Громов Игорь Олегович", "На согласовании"));
 
     renderCard("REQ-0001", "owner", MOCK_ROLE_BLOCKS.hr);

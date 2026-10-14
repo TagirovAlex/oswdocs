@@ -12,7 +12,8 @@
 //   LOGIN_OWNER     PASS_OWNER   учетка роли owner (SED_STEP_EXEC / группа шага)
 //
 // Покрытие (README п.1 «Поиск/доступ»): видимость вкладок, создание заявки,
-// настройки (admin-only), карточка заявки владельцу без ПДн (маска).
+// настройки (admin-only), карточка заявки владельцу без ПДн, кроме ФИО и службы
+// заявки (решение человека 2026-10-14 — без них согласующий не видит, о ком заявка).
 import { test, expect, Page } from "@playwright/test";
 
 const BASE_URL = process.env.SED_BASE_URL ?? "https://sed.company.local";
@@ -40,7 +41,8 @@ const ROLE_LABELS: Record<RoleName, string> = {
   owner: "Владелец",
 };
 
-// Заголовки колонок таблицы (layout.tsx, columns): владельцу — маска без ПДн.
+// Заголовки колонок таблицы (layout.tsx, columns): владельцу — без предприятия/
+// статуса и без текущего согласующего; «Сотрудник» у всех один (ФИО видно всем).
 // «Дата» — дата создания заявки, «Срок» — дедлайн шага (разные даты).
 const COLUMNS_FULL = [
   "№",
@@ -52,7 +54,7 @@ const COLUMNS_FULL = [
   "Шаг",
   "Срок",
 ];
-const COLUMNS_OWNER = ["№", "Дата", "Сотрудник (маска)", "Шаг", "Срок"];
+const COLUMNS_OWNER = ["№", "Дата", "Сотрудник", "Шаг", "Срок"];
 
 // Учетка роли из env (пустые значения — тест пропускается).
 function creds(role: RoleName): { login: string; pass: string } {
@@ -185,7 +187,7 @@ test.describe("Матрица ролей README п.1", () => {
     expect(await apiStatus(page, "/api/settings")).toBe(403);
   });
 
-  test("owner: только Заявки, карточка без ПДн (маска), настройки — 403", async ({ page }) => {
+  test("owner: только Заявки, карточка без ПДн (кроме ФИО и службы), настройки — 403", async ({ page }) => {
     skipIfNoCreds("owner");
     await loginAs(page, "owner");
     await expectTabs(page, "owner");
@@ -194,22 +196,24 @@ test.describe("Матрица ролей README п.1", () => {
     expect(await apiStatus(page, "/api/settings")).toBe(403);
     expect(await apiStatus(page, "/api/enterprises")).toBe(403);
 
-    // Таблица владельца: колонка-маска, без предприятия/статуса (layout.tsx).
+    // Таблица владельца: без колонок предприятия/статуса (layout.tsx).
     await page.locator('table[aria-label="Заявки"]').waitFor();
     expect(await tableColumns(page)).toEqual(COLUMNS_OWNER);
 
-    // Карточка заявки: API не отдает ПДн владельцу — fio/tab_num/enterprise = null.
+    // Карточка заявки: ФИО и служба видны ВСЕМ (решение человека 2026-10-14 —
+    // без них согласующий не понимает, о ком заявка), табельный номер и
+    // предприятие владельцу по-прежнему не отдаются.
     const { status, rows } = await apiRequests(page);
     expect(status).toBe(200);
     for (const row of rows) {
-      expect(row.fio).toBeNull();
       expect(row.tab_num).toBeNull();
       expect(row.enterprise).toBeNull();
       expect(row.id).not.toBeNull();
     }
-    // В таблице вместо ФИО — маска «Сотрудник № …» (requests-client.tsx).
-    if (rows.length > 0) {
-      await page.getByText(new RegExp(`Сотрудник № ${rows[0].id}`)).waitFor();
+    // В таблице видно ФИО заявки; маска «Сотрудник № …» — только на заявках
+    // без ФИО (requests-client.tsx).
+    if (rows.length > 0 && rows[0].fio) {
+      await page.getByText(new RegExp(rows[0].fio)).first().waitFor();
     }
   });
 });

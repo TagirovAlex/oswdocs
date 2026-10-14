@@ -61,6 +61,7 @@ BLOCK_SETTINGS_INFRA = "settings_infra"
 BLOCK_SETTINGS_BLANKS = "settings_blanks"
 BLOCK_ARCHIVE_BACKUPS = "archive_backups"
 BLOCK_SED_ADMIN_PANEL = "sed_admin_panel"
+BLOCK_SETTINGS_SUBSTITUTES = "settings_substitutes"
 
 # Шаблон «владелец шага»: по устройству без групп AD (владение шагом — от
 # назначения шага), поэтому его блоки положены любому аутентифицированному.

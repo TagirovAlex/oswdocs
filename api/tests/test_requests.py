@@ -778,11 +778,16 @@ def test_sed_admin_sees_request_pdn(
     view = _public_view(request, CurrentUser(sam="admin.sed", groups=[], role="sed_admin"))
     assert view.fio == request.fio
     assert view.tab_num == request.tab_num
-    # Постороннему (владельцу шага) ФИО заявителя по-прежнему не отдаётся.
+    # Постороннему (владельцу шага) ФИО заявителя видно с 2026-10-14 (решение
+    # человека: без ФИО и службы согласующий не понимает, о ком заявка), а
+    # табельный номер и предприятие — по-прежнему нет.
     masked = _public_view(
         request, CurrentUser(sam="user.postoronny", groups=[], role="owner")
     )
-    assert masked.fio is None
+    assert masked.fio == request.fio
+    assert masked.department == request.department
+    assert masked.tab_num is None
+    assert masked.enterprise is None
 
 
 def test_can_act_false_on_approved_step(

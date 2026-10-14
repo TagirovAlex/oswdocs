@@ -5,7 +5,7 @@
 ## Обзор
 - `api/` — FastAPI (Python 3.12), `app/` — код, `tests/` — pytest, `requirements.txt`.
 - `frontend/` — React SPA (Vite): `src/` — код, `public/` — статика, `dist/` — сборка.
-- `db/alembic/versions/` — миграции БД (0001..0022).
+- `db/alembic/versions/` — миграции БД (0001..0023).
 - `proxy/` — nginx. `deploy/` — компоуз/деплой. `samples/` — DESIGN.md + макет.
 - `script_local/`, `script_remote/` — инструментарий разработчика: доступ к стенду, выкладка
   и диагностика (gitignored; состав и назначение каждого скрипта — в `README.md` внутри папок).
@@ -124,6 +124,15 @@
   (`blank_placeholders`/`render_blank_text`, значения экранируются, неизвестные остаются текстом),
   QR и конвертация в PDF (`generate_bypass`, LibreOffice); переменные — см. `TEMPLATES.md`.
 - `archive.py` — бэкапы (ручной, расписание, настройки, список, скачать/удалить).
+- `substitutes.py` / `substitute_store.py` — справочник заместителей (миграция 0023,
+  таблица `substitutes`): CRUD `GET/POST/PUT/DELETE /settings/substitutes` (блок прав
+  `settings_substitutes`, аудит `substitutes.create/update/delete` без логинов и ФИО),
+  хранилище `DbSubstituteStore`/`InMemorySubstituteStore` + `SubstitutesUnavailable`;
+  действующие записи на дату — `list_active(on)` (`valid_from <= on AND (valid_to IS NULL
+  OR valid_to >= on)`). Замещение применяется в `requests.py`: `_DeputyResolver` (кэш на
+  вызов ответа) в `_owns_step`/`_can_act`/`_is_step_viewer`/`_is_participant` и в письме
+  «назначена» (`_deputy_assigned_mails`, флаг `notify`, дедупликация по адресу). Отметка
+  заместителя пишется от его логина, отдельного признака «за кого» нет.
 - `audit.py` — журнал аудита (память + INSERT в БД).
 - `mailer.py` — письма (шаблоны, SMTP/файловая очередь); адресаты шага — все ответственные из
   снимка `assignees`, кто ещё не отметился (`step_marked_sams`).
@@ -158,12 +167,18 @@
   для заявки на доработке;
   у шага видны все ответственные и прогресс отметок по режиму шага.
 - `admin-settings.tsx` — настройки (вкладки: процесс/справочники/письма — контент; инфра/регламенты/
-  доступ/архивация/бланки/шаги — только admin; легаси-вкладка «Шаблоны» удалена) и вкладка «Бланки»
+  доступ/архивация/бланки/шаги — только admin; **заместители** — по блоку `settings_substitutes`) и вкладка «Бланки»
   (только admin): карточка бланка (шапка `header_html`, подвал `footer_lines`) + собственные шаги
   бланка — название/текст, вид исполнителя (`executor_kind`), согласующие/группа AD/руководитель,
   режим шага (`parallel`/`sequential`), флаги `optional`/`require_comment`; «Взять из справочника»
   копирует шаг из `step_catalog` в состав бланка. Вкладка «Шаги» (только admin) — редактор
   справочника шагов (`step_catalog`): код/название/текст/исполнитель/режим/флаги/активность.
+  Вкладка «Заместители» (блок `settings_substitutes`) — `SubstitutesEditor`: справочник
+  «сотрудник → заместитель» (сотрудники и заместители выбираются поиском в AD),
+  интервал действия датами (`<input type="date">`, пустая конечная — бессрочно),
+  флажок «слать письма заместителю», комментарий; клиент — `settings-client.tsx`
+  (`getSubstitutes`/`createSubstitute`/`updateSubstitute`/`deleteSubstitute`, список —
+  массивом).
 - `rich-text.tsx` — визуальный редактор текста шага и шапки бланка на TipTap
   (`@tiptap/react` + `@tiptap/starter-kit`); HTML уходит в `title`/`stage_lines` шага и
   `blank_header_html` и доходит до печати.
@@ -223,7 +238,8 @@
   0019 коды видов документов числовые (doc_types.code = num::text; перенос ссылок
   dismissal_requests.doc_type_code и blanks.doc_type_code, синхронизация doc_types_num_seq;
   название вида живёт в doc_types.name, в печати и справочниках показывается оно),
-  0020 справочник прав доступа (perm_blocks — 13 блоков функций, perm_templates —
+  0020 справочник прав доступа (perm_blocks — 13 блоков функций плюс 14-й
+  `settings_substitutes` из миграции 0023, perm_templates —
   5 шаблонов с protected, perm_template_blocks — состав «шаблон → блок» переносом
   текущих прав один в один, perm_template_groups — группы AD шаблона, переносятся
   из ключей settings ролевых групп; access_groups остаётся ключом входа),
@@ -238,7 +254,12 @@
    (`frontend/src/date-format.ts`), хранимое остаётся в UTC; часовой пояс
    контейнеров — переменная `TZ` в compose/.env. Докрут 2026-10-13
    (`app/timezone.py`): та же зона — одна на всю систему (соединения Postgres,
-   письма/бланки, дата печати, «сегодня», расписания, имена бэкапов).
+   письма/бланки, дата печати, «сегодня», расписания, имена бэкапов),
+   0023 справочник заместителей (`substitutes`: principal_sam/deputy_sam/valid_from/
+   valid_to/notify/note/created_by/created_at/updated_at, UNIQUE(principal_sam, deputy_sam),
+   индексы по обоим логинам) и 14-й блок прав `settings_substitutes`
+   («Настройки: заместители», sort_order 140) с выдачей шаблонам `sed_admin` и `admin`.
+   Вниз: строки блока из perm_template_blocks/perm_blocks и DROP TABLE substitutes.
   Планируется (волна F3): админка прав — вкладка «Доступ и роли» на блоках и шаблонах
    (бэкенд прав — `permissions.py` + `/settings/permissions`, волна F2, сделано).
 
