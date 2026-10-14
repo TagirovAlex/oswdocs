@@ -1,6 +1,6 @@
 ﻿# Бланки, этапы и письма СЭД: как устроено и что уходит в печать
 
-Обновлено: 2026-10-11. Источник истины — код (`api/app/requests.py`, `api/app/routing.py`,
+Обновлено: 2026-10-14. Источник истины — код (`api/app/requests.py`, `api/app/routing.py`,
 `api/app/routing_store.py`, `api/app/settings_routes.py`, `api/app/documents.py`, `api/app/docs.py`,
 `api/app/mailer.py`) и миграции `db/alembic/versions/0012_blank_directory.py`,
 `0013_multi_assignee_steps.py`, `0014_blank_steps_own.py`, `0015_step_optional.py`,

@@ -1,9 +1,9 @@
 # Негативные тесты C1-ядро (волна C, скилл qa-sed): 403, чужие ресурсы,
 # дубли ФИО без автосклейки, просрочка TTL (410 + повтор), полнота audit_log,
 # запрет записи в 1С/AD. Только моки, живых LDAP/HTTP нет; все ПДн вымышлены.
-# Прогон локально: pytest api/tests/test_negative_core.py -q (venv ./temp/.venv).
-# Прогон на стенде (ВМ): пометка «на ВМ» — живой bind/OData, сессии 15–20 мин,
-# TLS/HSTS, compose up (см. ./temp/OFFLINE_GAPS.md, deploy/ЧЕК-ЛИСТ_ИТ.md).
+# Прогон локально: pytest api/tests/test_negative_core.py -q (venv script_local/.venv).
+# Прогон на стенде (ВМ): пометка «на ВМ» — живой bind/OData, сессии (TTL в env),
+# TLS/HSTS, compose up (см. deploy/ЧЕК-ЛИСТ_ИТ.md).
 # conftest.py не правим: фикстуры client/hr/admin/owner/nogroup/noauth — оттуда,
 # подмены настроек/клиента/ридера/маршрута — локально здесь с возвратом.
 

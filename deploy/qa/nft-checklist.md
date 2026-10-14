@@ -87,3 +87,20 @@
       clickjacking/сниффинга MIME).
 - [ ] Лимиты сканов в settings (`scan_max_mb`, `scan_retention_days`) заданы,
       пустые/отсутствующие ключи не позволяют загрузить файл (409).
+
+## 8. Файрвол хоста (nftables) — применено на стенде
+
+- [x] На ВМ применён ruleset nftables: таблица `inet filter`, цепочка `input` с
+      политикой `drop`; разрешены `lo`, `established,related` и порты `22`, `80`, `443`.
+      Внешние порты БД/API наружу не открыты.
+- [x] Docker-таблицы не трогаются (иначе compose перестаёт видеть published-порты);
+      persist — `/etc/nftables.conf` + `systemctl enable nftables.service`.
+- Откат: восстановить прошлый `nft list ruleset` (снимок правил) и отключить
+  `nftables.service`. Перед правкой файрвола — снять снимок текущих правил.
+- Повторная проверка после любых изменений:
+  ```bash
+  nft list ruleset | head -40
+  systemctl is-enabled nftables
+  ss -ltnp | grep -E ':(22|80|443|5432|6379|8000)\b'
+  ```
+  Порты `5432`, `6379`, `8000` в списке слушающих быть не должны.

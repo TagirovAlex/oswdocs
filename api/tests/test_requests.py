@@ -2042,7 +2042,7 @@ def test_finish_notifies_author_closed(
     ]
 
 
-# --- Отзыв заявки: /withdraw и его синоним /cancel (issue_report п.1) ---
+# --- Отзыв заявки: /withdraw и его синоним /cancel ---
 
 
 def test_cancel_endpoint_sets_revoked_not_done(
@@ -2109,7 +2109,7 @@ def test_withdrawn_request_counted_in_done_folder(
     assert [r["id"] for r in client.get("/requests", headers=hr).json()] == [rid]
 
 
-# --- Отказ по шагу: заявка инициатору на доработку (issue_report п.6/п.7) ---
+# --- Отказ по шагу: заявка инициатору на доработку ---
 
 
 def test_reject_goes_to_rework_and_keeps_request(
