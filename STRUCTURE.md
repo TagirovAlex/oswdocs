@@ -48,7 +48,9 @@
   предпросмотр
   `POST /requests/route/preview` (бланк/профиль/этапы/исполнители/`notice`/`link_state`/`link_candidate`),
   подтверждение связи при импорте `POST /requests/route/link-employee` (`_link_state`,
-  `_ad_candidates`, `_missing_ad_card_detail`).
+  `_ad_candidates`, `_missing_ad_card_detail`). Замещение ответственных — `_DeputyResolver`
+  в `_owns_step`/`_can_act`/`_is_step_viewer`/`_is_participant` (подробно — в
+  `substitutes.py` ниже): действует на каждом шаге, включая групповой.
 - `requests_store.py` — хранилище заявок (InMemory/Db), в т.ч. employees/документы-хелперы.
 - `timezone.py` — часовой пояс системы: зона из `settings.timezone` (иначе `TZ`), соединениям
   Postgres ставится на каждой выдаче из пула (`set_config`, обработчик SQLAlchemy `checkout`),
@@ -131,7 +133,14 @@
   действующие записи на дату — `list_active(on)` (`valid_from <= on AND (valid_to IS NULL
   OR valid_to >= on)`). Замещение применяется в `requests.py`: `_DeputyResolver` (кэш на
   вызов ответа) в `_owns_step`/`_can_act`/`_is_step_viewer`/`_is_participant` и в письме
-  «назначена» (`_deputy_assigned_mails`, флаг `notify`, дедупликация по адресу). Отметка
+  «назначена» (`_deputy_assigned_mails`, флаг `notify`, дедупликация по адресу). Замещение
+  действует на каждом шаге, включая ГРУППОВОЙ (оба режима шага): `_step_deputy_owned` →
+  `_DeputyResolver.covers_member_of`/`_group_sams` по составу группы-владельца из кэша
+  `ad_group_members` (один `load` на группу за вызов ответа; кэш недоступен или
+  не синхронизирован — пусто, fail-soft), в письме — `notify_deputies_of_group`.
+  Бланк и вложения доступны заместителю так же, как замещаемому: `documents._can_view`
+  и `attachments._can_access` зовут тот же `requests._is_step_viewer` с резолвером; сама
+  печать (`POST /requests/{id}/print`) остаётся за блоком `print_blank`. Отметка
   заместителя пишется от его логина, отдельного признака «за кого» нет.
 - `audit.py` — журнал аудита (память + INSERT в БД).
 - `mailer.py` — письма (шаблоны, SMTP/файловая очередь); адресаты шага — все ответственные из
@@ -259,6 +268,10 @@
    valid_to/notify/note/created_by/created_at/updated_at, UNIQUE(principal_sam, deputy_sam),
    индексы по обоим логинам) и 14-й блок прав `settings_substitutes`
    («Настройки: заместители», sort_order 140) с выдачей шаблонам `sed_admin` и `admin`.
+   Новых таблиц под групповой шаг нет: состав группы-владельца берётся из кэша
+   `ad_group_members` (`_DeputyResolver.covers_member_of`/`_group_sams`, fail-soft);
+   доступ заместителя к бланку и вложениям — через `documents._can_view`/
+   `attachments._can_access` (общий `_is_step_viewer`), печать — за блоком `print_blank`.
    Вниз: строки блока из perm_template_blocks/perm_blocks и DROP TABLE substitutes.
   Планируется (волна F3): админка прав — вкладка «Доступ и роли» на блоках и шаблонах
    (бэкенд прав — `permissions.py` + `/settings/permissions`, волна F2, сделано).

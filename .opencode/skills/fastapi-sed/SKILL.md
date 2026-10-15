@@ -26,7 +26,13 @@ description: Use when editing FastAPI, SQLAlchemy, LDAP bind, 1C OData in SED. T
   `substitutes.create/update/delete` без логинов и ФИО; `list_active(on)` отдаёт записи,
   действующие в интервале дат. Замещение применяется в `requests.py` (`_DeputyResolver`) —
   это НЕ подмена адресата: шаг остаётся у оригинала, отметка пишется от логина заместителя,
-  гейт `step_decide` замещение не обходит.
+  гейт `step_decide` замещение не обходит. Действует на каждом шаге, включая ГРУППОВОЙ
+  (оба режима): `_step_deputy_owned` → `_DeputyResolver.covers_member_of`/`_group_sams` по
+  составу группы-владельца из кэша `ad_group_members` (один `load` на группу за вызов
+  ответа; кэш недоступен/не синхронизирован — пусто, fail-soft), письмо «назначена»
+  дополняется `notify_deputies_of_group`. `documents._can_view` и `attachments._can_access`
+  зовут тот же `requests._is_step_viewer` с резолвером — бланк и вложения заместителю
+  доступны так же, как замещаемому; печать остаётся за блоком `print_blank`.
 - `employees.py` — `GET /employees?enterprise&q` (локальная таблица, `page`/`page_size`/`total`,
   уволенные отсекаются), `POST /employees/sync`, `POST /employees/hr-sync` (проход по регистру
   кадровых данных), `GET /employees/card`.

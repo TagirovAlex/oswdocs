@@ -9,15 +9,21 @@
 #   • срок записи значения не имеет, пока он действует: истёкшая и ещё не
 #     начавшаяся записи не действуют, valid_to = NULL действует всегда
 #     («начальная дата без конечной — действует, пока не отменят»);
-#   • замещение персональное: групповой шаг и состав этапа (stage_roster) им не
-#     закрываются;
-#   • посторонний (не заместитель) по-прежнему получает 403;
+#   • замещение действует на каждом шаге и в обоих режимах шага (parallel/
+#     sequential), включая ГРУППОВОЙ шаг: состав группы-владельца берётся из
+#     кэша ad_group_members, кэш недоступен или пуст — замещение на таком шаге
+#     не проверяется (fail-soft, шаг остаётся закрытым для заместителя);
+#   • бланк (документы заявки) и вложения заместителю доступны так же, как
+#     замещаемому, а сама ПЕЧАТЬ остаётся за блоком «Печать бланка» — её
+#     замещение не даёт;
+#   • посторонний (не заместитель, не участник группы) по-прежнему получает 403;
 #   • копия письма «назначена» уходит заместителю при notify=true и не уходит
 #     при notify=false.
 #
 # Офлайн-прогон без Postgres: справочник заместителей — InMemorySubstituteStore
-# (conftest, OFFLINE_BOUNDARIES), заявки и справочники маршрута — in-memory
-# заглушки (как в test_step_multi_assignee.py), письма — файловая очередь.
+# (conftest, OFFLINE_BOUNDARIES), состав групп AD — InMemoryGroupsCacheStore,
+# заявки и справочники маршрута — in-memory заглушки (как в
+# test_step_multi_assignee.py), письма — файловая очередь.
 # Все логины, группы и ФИО вымышленные.
 
 from __future__ import annotations
@@ -33,9 +39,25 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from app.ad_groups_cache import (  # noqa: E402
+    CachedMember,
+    InMemoryGroupsCacheStore,
+    get_groups_cache_store,
+)
+from app.attachments import (  # noqa: E402
+    AttachmentRecord,
+    InMemoryAttachmentsStore,
+    get_attachments_store,
+)
 from app.audit import audit_log  # noqa: E402
 from app.config import Settings, get_settings  # noqa: E402
 from app.deps import CurrentUser  # noqa: E402
+from app.docs import BypassResult  # noqa: E402
+from app.documents import (  # noqa: E402
+    DocumentRecord,
+    InMemoryDocumentsStore,
+    get_documents_store,
+)
 from app.employees import get_ad_reader  # noqa: E402
 from app.main import app  # noqa: E402
 from app.mailer import EVENT_ASSIGNED, FileMailQueue, get_mail_queue  # noqa: E402
@@ -48,6 +70,7 @@ from app.permissions import (  # noqa: E402
 )
 from app.requests import (  # noqa: E402
     AGREED,
+    REWORK,
     RouteSettings,
     _public_view,
     get_memory_requests_store,
@@ -71,6 +94,9 @@ DEPUTY = "zameshchitel.vymyshlennyy"
 OUTSIDER = "postoronniy.vymyshlennyy"
 # Второй ответственный шага режима sequential (сценарии частичного согласия).
 SECOND = "vtoroy.otvetstvennyy"
+# Не ответственный ни одного шага в тестах, но участник группы-владельца —
+# сценарий «замещение не должно доходить до персонального шага через owner_group».
+THIRD = "tretij.vgroupe.otvetstvennyy"
 # Логин увольняемого из тела заявки: по нему подбор маршрута auto ищет карточку
 # сотрудника в справочнике (без неё маршрут не соберётся).
 EMPLOYEE = "uvolnyaemyy.vymyshlennyy"
@@ -86,6 +112,9 @@ FAKE_SERVICE = "Служба вымышленного учета"
 FAKE_POSITION = "Вымышленная должность"
 FAKE_TAB = "В-0001"
 FAKE_FIO = "Вымышленный Увольняемый Полный"
+# Содержимое вымышленного PDF бегунка (документы заявки) и имя вымышленного скана.
+FAKE_PDF = b"%PDF-1.4 fake-bypass"
+FAKE_SCAN_NAME = "заявление.pdf"
 
 MAIL_TEMPLATES_SEED = json.dumps(
     [
@@ -245,6 +274,13 @@ class BrokenSubstituteStore:
         raise RuntimeError("вымышленная недоступность справочника заместителей")
 
 
+class BrokenGroupsCacheStore:
+    """Кэш состава групп AD, который падает на чтении (ошибка БД)."""
+
+    def load(self, group: str):
+        raise RuntimeError("вымышленная недоступность кэша состава групп")
+
+
 class MemSettingsStore:
     """Настройки в памяти; значения — строками в сид-формате (JSONB)."""
 
@@ -375,6 +411,33 @@ def substitutes():
 
 
 @pytest.fixture
+def groups_cache():
+    """Кэш состава групп AD через зависимость (состав задаёт тест)."""
+    store = InMemoryGroupsCacheStore()
+    app.dependency_overrides[get_groups_cache_store] = lambda: store
+    yield store
+    app.dependency_overrides.pop(get_groups_cache_store, None)
+
+
+@pytest.fixture
+def attachments_store():
+    """Хранилище мета вложений в памяти (записи заводит тест)."""
+    store = InMemoryAttachmentsStore()
+    app.dependency_overrides[get_attachments_store] = lambda: store
+    yield store
+    app.dependency_overrides.pop(get_attachments_store, None)
+
+
+@pytest.fixture
+def documents_store():
+    """Хранилище документов заявки в памяти (версии заводит тест)."""
+    store = InMemoryDocumentsStore()
+    app.dependency_overrides[get_documents_store] = lambda: store
+    yield store
+    app.dependency_overrides.pop(get_documents_store, None)
+
+
+@pytest.fixture
 def perms_without_decide():
     """Справочник прав, где у владельца шага НЕТ блока step_decide.
 
@@ -403,6 +466,44 @@ def perms_without_decide():
                 title="Владелец шага",
                 sort_order=50,
                 blocks=("requests_list", "request_card"),
+            ),
+        ),
+    )
+    store = InMemoryPermissionsStore(catalog)
+    app.dependency_overrides[get_permissions_store] = lambda: store
+    yield store
+    app.dependency_overrides.pop(get_permissions_store, None)
+
+
+@pytest.fixture
+def deputy_with_print_block():
+    """Справочник прав, где у группы ЗАМЕСТИТЕЛЯ есть блок print_blank.
+
+    Печать бланка замещением не даётся — её выдаёт администратор блоком функций,
+    поэтому в этом справочнике шаблон с печатью выдан именно группе заместителя,
+    а шаблон владельца шага остаётся прежним."""
+    hr_blocks = (
+        "requests_list", "request_card", "request_create",
+        "step_decide", "print_blank", "employee_directory",
+    )
+    deputy_blocks = ("requests_list", "request_card", "step_decide", "print_blank")
+    catalog = PermissionCatalog(
+        blocks=tuple(
+            PermissionBlock(code=code, title=code, sort_order=10 * (index + 1))
+            for index, code in enumerate(hr_blocks)
+        ),
+        templates=(
+            PermissionTemplate(
+                code="hr", title="Сотрудник ОК", sort_order=40,
+                blocks=hr_blocks, groups=(TEST_HR,),
+            ),
+            PermissionTemplate(
+                code="print_owner", title="Согласующий с печатью", sort_order=45,
+                blocks=deputy_blocks, groups=(DEPUTY_GROUP,),
+            ),
+            PermissionTemplate(
+                code="owner", title="Владелец шага", sort_order=50,
+                blocks=("requests_list", "request_card", "step_decide"),
             ),
         ),
     )
@@ -510,17 +611,18 @@ def _roster_request(client) -> str:
     return rid
 
 
-def _two_responsible_request(client, requests_store) -> str:
-    """Заявка с шагом режима sequential на двоих ответственных (оригинал + второй).
+def _two_responsible_request(client, requests_store, mode: str = "sequential") -> str:
+    """Заявка с шагом на двоих ответственных (оригинал + второй) в режиме mode.
 
     Несколько ответственных — из снимка шага (миграция 0013): ручной маршрут
     (`blocks/steps`) назначает шагу одного персонального исполнителя, поэтому
     список ответственных дописывается в снимок напрямую — так же он выглядит
-    после выдачи заявки по бланку с двумя согласующими."""
+    после выдачи заявки по бланку с двумя согласующими. Режим шага приходит
+    снимком же (parallel — «кто-то один», sequential — «все»)."""
     rid = _personal_request(client)
     request = requests_store.get(rid)
     request.steps[0].assignees = [PRINCIPAL, SECOND]
-    request.steps[0].approval_mode = "sequential"
+    request.steps[0].approval_mode = mode
     requests_store.update(request)
     return rid
 
@@ -536,6 +638,20 @@ def _group_step_request(client) -> str:
     rid = created.json()["id"]
     assert client.post(f"/requests/{rid}/submit", headers=_hr()).status_code == 200
     return rid
+
+
+def _fill_group_roster(groups_cache, group: str, sams: list[str]) -> None:
+    """Положить состав группы-владельца шага в кэш ad_group_members.
+
+    Ровно так его наполняет синк состава групп на стенде; резолвер замещения
+    берёт участников группового шага только отсюда (живого AD в тестах нет)."""
+    groups_cache.save(
+        group,
+        [
+            CachedMember(group_name=group, sam=sam, display_name="Вымышленный Участник Группы")
+            for sam in sams
+        ],
+    )
 
 
 def _decide(client, rid: str, headers: dict, **body):
@@ -697,19 +813,154 @@ def test_substitute_store_down_is_fail_soft(client, requests_store, substitutes)
 
 
 # ---------------------------------------------------------------------------
-# Замещение персональное: группа и состав этапа им не закрываются
+# Групповой шаг: замещение действует по составу группы-владельца (кэш ad_group_members)
 # ---------------------------------------------------------------------------
 
 
 def test_group_step_is_not_covered_by_substitute(client, requests_store, substitutes):
-    """Групповой шаг (owner_group) персональным не является: замещение не даёт
-    права отметить его, даже если заместитель замещает участника этой группы."""
+    """Групповой шаг замещением закрывается, но состав группы-владельца нужно знать.
+
+    Состав берётся из кэша ad_group_members; он пуст (группа не синкалась) — тогда
+    замещение на групповом шаге не проверяется и отметка заместителя запрещена
+    (fail-soft резолвера, как у состава этапа). Сама запись замещения без состава
+    группы ничего не даёт — см. тест с заполненным кэшем ниже."""
     _add_substitute(substitutes)
     rid = _group_step_request(client)
+    assert _can_act(requests_store, rid, DEPUTY, [DEPUTY_GROUP]) is False
     assert _decide(client, rid, _deputy()).status_code == 403
     assert requests_store.get(rid).steps[0].approvals == []
     # Участник группы-владельца (оригинал записи замещения) отмечает как обычно.
     assert _decide(client, rid, _principal()).status_code == 200
+
+
+def test_deputy_of_group_member_approves_group_step(
+    client, requests_store, substitutes, groups_cache
+):
+    """Заместитель УЧАСТНИКА группы-владельца отмечает групповой шаг за него.
+
+    Состав группы в кэше есть, поэтому замещение действует и на групповом шаге
+    (решение человека 2026-10-14): карточка заместителю открыта (can_act=True),
+    в approvals — его логин."""
+    _add_substitute(substitutes)
+    _fill_group_roster(groups_cache, PRINCIPAL_GROUP, [PRINCIPAL, SECOND])
+    rid = _group_step_request(client)
+    card = client.get(f"/requests/{rid}", headers=_deputy())
+    assert card.status_code == 200, card.text
+    assert card.json()["steps"][0]["can_act"] is True
+    response = _decide(client, rid, _deputy())
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == AGREED
+    assert body["steps"][0]["status"] == "согласован"
+    assert [item["sam"] for item in body["steps"][0]["approvals"]] == [DEPUTY]
+    stored = requests_store.get(rid)
+    assert stored.steps[0].done_by == DEPUTY
+    # Шаг закрыт — повторно заместитель его не отметит.
+    assert _can_act(requests_store, rid, DEPUTY, [DEPUTY_GROUP]) is False
+
+
+def test_deputy_of_group_member_rejects_group_step(
+    client, requests_store, substitutes, groups_cache
+):
+    """На групповом шаге заместитель участника группы может и отказать за него."""
+    _add_substitute(substitutes)
+    _fill_group_roster(groups_cache, PRINCIPAL_GROUP, [PRINCIPAL])
+    rid = _group_step_request(client)
+    response = _decide(
+        client, rid, _deputy(), decision="reject", comment="Вымышленная причина отказа"
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["steps"][0]["status"] == "отклонен"
+    assert body["status"] == REWORK
+    approvals = requests_store.get(rid).steps[0].approvals
+    assert [item["sam"] for item in approvals] == [DEPUTY]
+    assert approvals[0]["decision"] == "reject"
+
+
+def test_outsider_cannot_decide_group_step_with_filled_roster(
+    client, requests_store, substitutes, groups_cache
+):
+    """Посторонний групповой шаг не отмечает даже при заполненном составе группы."""
+    _add_substitute(substitutes)
+    _fill_group_roster(groups_cache, PRINCIPAL_GROUP, [PRINCIPAL, SECOND])
+    rid = _group_step_request(client)
+    assert _can_act(requests_store, rid, OUTSIDER, [OUTSIDER_GROUP]) is False
+    denied = _decide(client, rid, _outsider())
+    assert denied.status_code == 403, denied.text
+    assert denied.json()["detail"] == "Нет доступа: шаг чужой группы"
+    assert requests_store.get(rid).steps[0].approvals == []
+
+
+def test_deputy_of_non_member_cannot_decide_group_step(
+    client, requests_store, substitutes, groups_cache
+):
+    """Заместитель того, кто НЕ входит в группу-владельца, шаг не отметит: 403.
+
+    Запись замещения ведёт к логину сотрудника, а ответственна группа — владеть
+    шагом заместитель может только за участника именно этой группы."""
+    _add_substitute(substitutes, principal=SECOND, deputy=DEPUTY)
+    _fill_group_roster(groups_cache, PRINCIPAL_GROUP, [PRINCIPAL])
+    rid = _group_step_request(client)
+    assert _can_act(requests_store, rid, DEPUTY, [DEPUTY_GROUP]) is False
+    assert _decide(client, rid, _deputy()).status_code == 403
+    assert requests_store.get(rid).steps[0].approvals == []
+
+
+def test_group_name_must_match_cache_exactly(
+    client, requests_store, substitutes, groups_cache
+):
+    """Имя группы-владельца шага и группы в кэше `ad_group_members` должно совпадать
+    ТОЧНО (регистр учитывается): при несовпадении замещение на групповом шаге не
+    проверяется и шаг остаётся закрытым для заместителя.
+
+    Направление сбойное — права не расширяются; расхождение возможно, если группу
+    в справочнике шага и в синхронизации AD назвали по-разному (PLAN.md,
+    «Принятые следствия»)."""
+    _add_substitute(substitutes)
+    _fill_group_roster(groups_cache, PRINCIPAL_GROUP.lower(), [PRINCIPAL])
+    rid = _group_step_request(client)
+    assert _can_act(requests_store, rid, DEPUTY, [DEPUTY_GROUP]) is False
+    assert _decide(client, rid, _deputy()).status_code == 403
+
+
+def test_personal_step_is_not_covered_through_owner_group(
+    client, requests_store, substitutes, groups_cache
+):
+    """Персональный шаг замещением через `owner_group` не закрывается.
+
+    У шага с ответственными `owner_group` лежит логин исполнителя (см.
+    `_build_steps`), поэтому одноимённая группа в кэше не должна превращать
+    персональный шаг в групповой: без гарда заместитель получил бы право на шаг,
+    персонально назначенный другому, а его голос не был бы засчитан никому —
+    шаг завис бы в «ожидает» с аудитом `step.approve_partial`."""
+    # Запись замещения ведёт к THIRD, которого среди ответственных шага нет;
+    # в кэше группа названа как логин исполнителя (PRINCIPAL) и включает THIRD.
+    _add_substitute(substitutes, principal=THIRD, deputy=DEPUTY)
+    _fill_group_roster(groups_cache, PRINCIPAL, [THIRD])
+    rid = _two_responsible_request(client, requests_store)
+    assert requests_store.get(rid).steps[0].owner_group == PRINCIPAL
+    assert _can_act(requests_store, rid, DEPUTY, [DEPUTY_GROUP]) is False
+    assert _decide(client, rid, _deputy()).status_code == 403
+    assert requests_store.get(rid).steps[0].approvals == []
+
+
+def test_group_step_stays_closed_for_deputy_when_group_cache_down(
+    client, requests_store, substitutes
+):
+    """Кэш состава групп недоступен — групповой шаг заместителю закрыт (fail-soft).
+
+    Не 500 и не обход правила: резолвер считает состав пустым, поэтому отметка
+    за чужого (неизвестного) участника группы не проходит."""
+    app.dependency_overrides[get_groups_cache_store] = lambda: BrokenGroupsCacheStore()
+    try:
+        _add_substitute(substitutes)
+        rid = _group_step_request(client)
+        assert _can_act(requests_store, rid, DEPUTY, [DEPUTY_GROUP]) is False
+        assert _decide(client, rid, _deputy()).status_code == 403
+        assert requests_store.get(rid).steps[0].approvals == []
+    finally:
+        app.dependency_overrides.pop(get_groups_cache_store, None)
 
 
 def test_stage_roster_step_is_covered_by_snapshot_substitute(
@@ -719,8 +970,8 @@ def test_stage_roster_step_is_covered_by_snapshot_substitute(
 
     Состав реестра кладётся в снимок ответственных шага (assignees), поэтому
     участник реестра — такой же персональный ответственный, как и в шаге
-    «люди»: его заместитель отмечает шаг за него. Не закрывает замещение только
-    ГРУППОВОЙ шаг — там ответственных нет вовсе (см. тест выше)."""
+    «люди»: его заместитель отмечает шаг за него (состав этапа резолвер замещения
+    не читает — ответственным он уже стал по снимку)."""
     routing_store.rosters = {
         STAGE_ROSTER: [{"sam": PRINCIPAL, "position_title": None, "active": True}]
     }
@@ -814,6 +1065,59 @@ def test_deputy_cannot_mark_same_step_twice(client, requests_store, substitutes)
 
 
 # ---------------------------------------------------------------------------
+# Режим шага: замещение работает и при parallel, и при sequential
+# ---------------------------------------------------------------------------
+
+
+def test_deputy_vote_closes_parallel_step(client, requests_store, substitutes):
+    """Режим parallel («кто-то один»): отметка заместителя закрывает шаг сразу.
+
+    Второй ответственный не отмечал, но параллельный шаг закрывает любая отметка;
+    в approvals — логин заместителя, прогресс виден как 1 из 2."""
+    _add_substitute(substitutes)
+    rid = _two_responsible_request(client, requests_store, mode="parallel")
+    response = _decide(client, rid, _deputy())
+    assert response.status_code == 200, response.text
+    body = response.json()
+    step = body["steps"][0]
+    assert step["approval_mode"] == "parallel"
+    assert step["status"] == "согласован"
+    assert body["status"] == AGREED
+    assert step["assignee_count"] == 2 and step["approved_count"] == 1
+    assert [item["sam"] for item in step["approvals"]] == [DEPUTY]
+    assert requests_store.get(rid).steps[0].done_by == DEPUTY
+    # Шаг закрыт — отметка второго ответственного больше не принимается (409).
+    late = _decide(client, rid, _headers_for(SECOND, [SECOND_GROUP]))
+    assert late.status_code == 409
+    assert late.json()["detail"] == "Отметки — только в статусе На согласовании"
+
+
+def test_deputy_of_last_responsible_closes_sequential_step(
+    client, requests_store, substitutes
+):
+    """Режим sequential: голос заместителя засчитывается оригиналу и закрывает шаг.
+
+    Оригинал отметился сам, оставалась одна неотмеченная — отметка заместителя
+    именно этого ответственного закрывает шаг (иначе шаг ждал бы вечно того,
+    чей голос уже подан за него)."""
+    _add_substitute(substitutes, principal=SECOND, deputy=DEPUTY)
+    rid = _two_responsible_request(client, requests_store, mode="sequential")
+    assert _decide(client, rid, _principal()).status_code == 200
+    stored = requests_store.get(rid)
+    assert stored.steps[0].status == "ожидает"
+    assert [item["sam"] for item in stored.steps[0].approvals] == [PRINCIPAL]
+    response = _decide(client, rid, _deputy())
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == AGREED
+    assert body["steps"][0]["status"] == "согласован"
+    assert body["steps"][0]["approved_count"] == 2
+    stored = requests_store.get(rid)
+    assert [item["sam"] for item in stored.steps[0].approvals] == [PRINCIPAL, DEPUTY]
+    assert stored.steps[0].done_by == DEPUTY
+
+
+# ---------------------------------------------------------------------------
 # Письмо «назначена»: копия заместителю по флагу notify записи
 # ---------------------------------------------------------------------------
 
@@ -878,10 +1182,184 @@ def test_owner_mail_sent_when_store_unavailable(
     assert _sent(mail_queue) == [("%s@example.local" % PRINCIPAL, EVENT_ASSIGNED)]
 
 
+def test_deputy_of_group_member_receives_assigned_mail(
+    client, substitutes, mail_queue, settings_store, ad_reader, groups_cache
+):
+    """Копия письма «назначена» уходит и заместителю участника группы-владельца.
+
+    На групповом шаге оригиналом записи считается каждый участник группы, а её
+    состав резолвер берёт из кэша ad_group_members (тест его наполняет)."""
+    _add_substitute(substitutes, principal=PRINCIPAL, deputy=DEPUTY, notify=True)
+    _fill_group_roster(groups_cache, PRINCIPAL_GROUP, [PRINCIPAL])
+    _group_step_request(client)
+    assert _sent(mail_queue) == [("%s@example.local" % DEPUTY, EVENT_ASSIGNED)]
+
+
 def test_no_deputy_mail_for_group_step(
     client, substitutes, mail_queue, settings_store, ad_reader
 ):
-    """Групповой шаг персональных ответственных не имеет — замещение писем не даёт."""
+    """Групповой шаг без состава группы в кэше — копия заместителю не уходит.
+
+    Состав группы не синкался — резолвер не знает участников, оригиналов записи
+    замещения у шага нет, и письмо не ставится (fail-soft рассылки: пропуск у
+    заместителя не должен ронять уведомление владельцам шага)."""
     _add_substitute(substitutes, principal=PRINCIPAL, deputy=DEPUTY, notify=True)
     _group_step_request(client)
     assert _sent(mail_queue) == []
+
+
+# ---------------------------------------------------------------------------
+# Бланк и вложения заместителю: видимость замещаемого, печать — по блоку прав
+# ---------------------------------------------------------------------------
+
+
+def test_deputy_reads_documents_and_pdf_of_principal(
+    client, substitutes, documents_store, tmp_path
+):
+    """Заместитель ответственного читает документы заявки и качает PDF версии.
+
+    Бланк заместителю доступен так же, как замещаемому (решение человека
+    2026-10-14): проверка та же, что у карточки заявки."""
+    _add_substitute(substitutes)
+    rid = _personal_request(client)
+    pdf = tmp_path / "bypass.pdf"
+    pdf.write_bytes(FAKE_PDF)
+    documents_store.create(
+        DocumentRecord(
+            request_id=rid, version="v1", pdf_path=str(pdf), created_by=HR_SAM
+        )
+    )
+    listing = client.get(f"/documents/{rid}", headers=_deputy())
+    assert listing.status_code == 200, listing.text
+    assert [item["version"] for item in listing.json()] == ["v1"]
+    download = client.get(f"/documents/{rid}/pdf?version=v1", headers=_deputy())
+    assert download.status_code == 200, download.text
+    assert download.content == FAKE_PDF
+    assert download.headers["content-type"] == "application/pdf"
+
+
+def test_outsider_denied_documents_and_pdf(
+    client, substitutes, documents_store, tmp_path
+):
+    """Постороннему документы заявки по-прежнему недоступны: 403 на оба вызова."""
+    _add_substitute(substitutes)
+    rid = _personal_request(client)
+    pdf = tmp_path / "bypass.pdf"
+    pdf.write_bytes(FAKE_PDF)
+    documents_store.create(
+        DocumentRecord(
+            request_id=rid, version="v1", pdf_path=str(pdf), created_by=HR_SAM
+        )
+    )
+    denied = client.get(f"/documents/{rid}", headers=_outsider())
+    assert denied.status_code == 403
+    assert denied.json()["detail"] == "Нет доступа к документам заявки"
+    denied_pdf = client.get(f"/documents/{rid}/pdf?version=v1", headers=_outsider())
+    assert denied_pdf.status_code == 403
+    assert denied_pdf.json()["detail"] == "Нет доступа к документам заявки"
+
+
+def test_deputy_reads_attachments_of_principal(client, substitutes, attachments_store):
+    """Заместитель ответственного читает вложения заявки — как замещаемый."""
+    _add_substitute(substitutes)
+    rid = _personal_request(client)
+    attachments_store.create(
+        AttachmentRecord(
+            request_id=rid,
+            file_path="/inmemory/attachments/scan.pdf",
+            file_name=FAKE_SCAN_NAME,
+            mime="application/pdf",
+            size_bytes=len(FAKE_PDF),
+            uploaded_by=HR_SAM,
+        )
+    )
+    response = client.get(f"/requests/{rid}/attachments", headers=_deputy())
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert [item["file_name"] for item in body] == [FAKE_SCAN_NAME]
+    assert body[0]["uploaded_by"] == HR_SAM
+    assert "file_path" not in body[0]
+
+
+def test_attachments_stay_closed_for_other_responsible_of_step(
+    client, requests_store, substitutes, attachments_store
+):
+    """Второй ответственный шага (не заместитель) к вложениям НЕ допускается.
+
+    Правило вложений осталось прежним («группа-владелец или персональный
+    исполнитель») и расширено ТОЛЬКО замещением: подмена на общий
+    `_is_step_viewer` открыла бы вложения и загрузку скана участникам снимка
+    `assignees` и состава этапа сверх решения человека (AGENTS.md §4)."""
+    rid = _two_responsible_request(client, requests_store)
+    attachments_store.create(
+        AttachmentRecord(
+            request_id=rid,
+            file_path="/inmemory/attachments/scan.pdf",
+            file_name=FAKE_SCAN_NAME,
+            mime="application/pdf",
+            size_bytes=len(FAKE_PDF),
+            uploaded_by=HR_SAM,
+        )
+    )
+    # Ответственный снимка, у которого нет ни группы-владельца, ни замещения.
+    response = client.get(
+        f"/requests/{rid}/attachments", headers=_headers_for(SECOND, [SECOND_GROUP])
+    )
+    assert response.status_code == 403, response.text
+
+
+def test_outsider_denied_attachments(client, substitutes, attachments_store):
+    """Посторонний вложения заявки не читает: 403, даже если вложение есть."""
+    _add_substitute(substitutes)
+    rid = _personal_request(client)
+    attachments_store.create(
+        AttachmentRecord(
+            request_id=rid,
+            file_path="/inmemory/attachments/scan.pdf",
+            file_name=FAKE_SCAN_NAME,
+            mime="application/pdf",
+            size_bytes=len(FAKE_PDF),
+            uploaded_by=HR_SAM,
+        )
+    )
+    denied = client.get(f"/requests/{rid}/attachments", headers=_outsider())
+    assert denied.status_code == 403
+    assert denied.json()["detail"] == "Нет доступа к вложениям заявки"
+
+
+def test_deputy_without_print_block_cannot_print(client, substitutes):
+    """Печать бланка — не замещение: без блока «Печать бланка» заместитель — 403.
+
+    Замещение даёт видимость и право отметки, а блок функций выдаёт администратор;
+    поэтому заместитель видит документы, но печать ему по-прежнему закрыта."""
+    _add_substitute(substitutes)
+    rid = _personal_request(client)
+    denied = client.post(f"/requests/{rid}/print", headers=_deputy())
+    assert denied.status_code == 403, denied.text
+    assert denied.json()["detail"] == "Печать бегунка — только разрешенной группе"
+
+
+def test_deputy_with_print_block_prints_blank(
+    client, substitutes, settings_store, deputy_with_print_block,
+    monkeypatch, tmp_path,
+):
+    """С блоком «Печать бланка» заместитель печатает — замещение + блок функций."""
+    _add_substitute(substitutes)
+    rid = _personal_request(client)
+    pdf = tmp_path / "bypass.pdf"
+    docx = tmp_path / "bypass.docx"
+
+    def fake(**kw):
+        # Каждый вызов «генерирует» файлы заново: печать удаляет временные файлы.
+        pdf.write_bytes(FAKE_PDF)
+        docx.write_bytes(b"docx")
+        return BypassResult(
+            generated=True, docx_path=str(docx), pdf_path=str(pdf), qr_payload="x"
+        )
+
+    monkeypatch.setattr("app.documents.generate_bypass", fake)
+    response = client.post(f"/requests/{rid}/print", headers=_deputy())
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["generated"] is True
+    assert base64.b64decode(body["pdf_b64"]) == FAKE_PDF

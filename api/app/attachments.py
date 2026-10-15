@@ -25,7 +25,11 @@ from sqlalchemy.orm import sessionmaker
 from .audit import AuditEvent, audit_log
 from .config import Settings, get_settings
 from .deps import CurrentUser, get_current_user
-from .requests import _get_request_or_404
+from .requests import (
+    _deputy_resolver_or_none,
+    _get_request_or_404,
+    _step_deputy_owned,
+)
 from .requests_store import RequestsStore, RequestsUnavailable, get_requests_store
 from .settings_routes import (
     DbSettingsStore,
@@ -371,12 +375,24 @@ def get_attachments_store(
 # ---------------------------------------------------------------------------
 
 def _can_access(request: object, user: CurrentUser) -> bool:
-    """Доступ к вложениям заявки: ОК/руководители ОК/админы или владелец одного из шагов."""
+    """Доступ к вложениям заявки: ОК/руководители ОК/админы, владелец одного из шагов
+    или ЗАМЕСТИТЕЛЬ ответственного (решение человека 2026-10-14: вложения
+    заместителю доступны так же, как замещаемому).
+
+    Правило прежнее — группа-владелец шага или персональный исполнитель — плюс
+    замещение (`requests._step_deputy_owned`: персональные ответственные и
+    участники группы-владельца группового шага). Общий `_is_step_viewer` здесь
+    НЕ используется намеренно: он шире (учитывает весь снимок `assignees` и состав
+    этапа), а здесь гейт ещё и на ЗАГРУЗКУ скана — расширять видимость ПДн и право
+    записи сверх решения человека нельзя (AGENTS.md §4)."""
     if user.role in ("hr", "hr_admin", "admin"):
         return True
+    deputy = _deputy_resolver_or_none()
     return any(
-        s.owner_group in user.groups or (s.assignee and s.assignee == user.sam)
-        for s in request.steps
+        step.owner_group in user.groups
+        or (step.assignee and step.assignee == user.sam)
+        or _step_deputy_owned(step, deputy, user.sam)
+        for step in request.steps
     )
 
 

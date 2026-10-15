@@ -20,6 +20,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, model_validator
 
+from .ad_groups_cache import GroupsCacheStore, get_groups_cache_store
 from .audit import REQUEST_HISTORY_ENTITIES, AuditEvent, audit_log
 from .config import Settings, get_settings
 from .deps import (
@@ -828,6 +829,23 @@ def _substitute_store_or_none() -> DbSubstituteStore | None:
         return None
 
 
+def _groups_cache_or_none() -> GroupsCacheStore | None:
+    """Кэш состава групп AD: подмена зависимости в тестах, иначе боевое.
+
+    Нужен замещению на ГРУППОВОМ шаге — запись замещения ведёт к логину
+    сотрудника, а ответственен шаг группой. Получить не удалось — None: тогда на
+    групповом шаге замещение не проверяется (fail-soft)."""
+    try:
+        return _resolve_dependency(get_groups_cache_store, get_settings())
+    except Exception:
+        return None
+
+
+def _deputy_resolver_or_none() -> _DeputyResolver:
+    """Резолвер замещения для вызова ответа, где он не передан явно."""
+    return _DeputyResolver(_substitute_store_or_none(), _groups_cache_or_none())
+
+
 def _profile_id(profile: dict | None) -> int:
     """id профиля из строки справочника (0 — профиля нет)."""
     return _int_or_none((profile or {}).get("id")) or 0
@@ -905,12 +923,19 @@ class _DeputyResolver:
     справочник меняет администратор. «Сегодня» — в часовой зоне системы
     (app/timezone.py), как в employee_sync: иначе около полуночи запись уже
     считалась бы истёкшей (или ещё не начавшейся).
+    Для ГРУППОВОГО шага нужен состав группы-владельца: берётся из кэша
+    ad_group_members (groups_cache), один load на группу за вызов ответа.
     Хранилище недоступно — пусто (fail-soft: решение по такому шагу отклоняется
     как чужое, карточка не падает, письмо заместителю просто не уходит)."""
 
-    def __init__(self, store: DbSubstituteStore | None) -> None:
+    def __init__(
+        self, store: DbSubstituteStore | None, groups_cache: GroupsCacheStore | None = None
+    ) -> None:
         self._store = store
+        self._groups_cache = groups_cache
         self._loaded = False
+        # составы групп, прочитанные за этот вызов ответа: группа → логины
+        self._group_members: dict[str, set[str]] = {}
         # заместитель → множество оригиналов, которых он замещает
         self._principals: dict[str, set[str]] = {}
         # оригинал → заместители, которым шлём копию письма: ключи приведены к
@@ -962,18 +987,87 @@ class _DeputyResolver:
         self._load()
         return sorted(self._deputies.get(principal, {}).values())
 
+    def _group_sams(self, group: str) -> set[str]:
+        """Активные логины состава группы-владельца (кэш ad_group_members).
+
+        Один load на группу за вызов ответа: состав нужен для каждого группового
+        шага, а группа AD в заявке повторяется. Не синхронизирована, кэш
+        недоступен или пуст — пустое множество (fail-soft: замещение на таком
+        шаге просто не проверяется, как и сам состав группы у _RosterResolver)."""
+        key = str(group or "").strip()
+        if not key:
+            return set()
+        if key not in self._group_members:
+            members: set[str] = set()
+            if self._groups_cache is not None:
+                try:
+                    synced, rows = self._groups_cache.load(key)
+                except Exception:
+                    synced, rows = False, []
+                if synced:
+                    members = {
+                        str(getattr(row, "sam", "") or "").strip().casefold()
+                        for row in rows or []
+                        if str(getattr(row, "sam", "") or "").strip()
+                    }
+            self._group_members[key] = members
+        return self._group_members[key]
+
+    def covers_member_of(self, deputy_sam: str, group: str) -> bool:
+        """Замещает ли заместитель кого-то из участников группы-владельца шага.
+
+        Нужен групповому шагу: ответственна группа AD, а запись замещения ведёт
+        к логину сотрудника, а не к группе (решение человека 2026-10-14 —
+        замещение действует на каждом шаге, включая групповой)."""
+        deputy = str(deputy_sam or "").strip().casefold()
+        if not deputy:
+            return False
+        self._load()
+        principals = self._principals.get(deputy)
+        if not principals:
+            return False
+        return bool(principals & self._group_sams(group))
+
+    def notify_deputies_of_group(self, group: str) -> list[str]:
+        """Заместители участников группы, которым положена копия письма.
+
+        Только записи с `notify` — тот же флаг, что и на персональных шагах."""
+        self._load()
+        members = self._group_sams(group)
+        if not members:
+            return []
+        logins: set[str] = set()
+        for principal in members:
+            logins.update(self._deputies.get(principal, {}).values())
+        return sorted(logins)
+
 
 def _step_deputy_owned(
     step: _Step, deputy: _DeputyResolver | None, sam: str
 ) -> bool:
-    """Замещает ли этот сотрудник кого-то из ответственных снимка шага.
+    """Замещает ли этот сотрудник кого-то из ответственных шага.
 
-    Только персональные ответственные шага (assignees, иначе одиночный assignee):
-    замещение персональное — ни группа-владелец, ни состав этапа замещением не
-    закрываются (решение человека 2026-10-14)."""
+    Персональные ответственные снимка (assignees, иначе одиночный assignee) и
+    ГРУППОВОЙ шаг: если сотрудник — участник группы-владельца, его заместитель
+    отмечает шаг за него (решение человека 2026-10-14 — замещение действует на
+    каждом шаге, оба режима шага, включая групповой). Состав группы берётся из
+    кэша `ad_group_members` (живого AD в проверке прав нет), кэш недоступен —
+    пусто (fail-soft, как и для остальных справочников здесь).
+
+    Групповая ветка — ТОЛЬКО для шага без персональных ответственных. У шага с
+    ответственными `owner_group` лежит логин исполнителя (см. `_build_steps`),
+    и без гарда замещение через «группу» расширило бы права на чужой
+    персональный шаг, а голос заместителя не был бы засчитан ни одному
+    ответственному — шаг остался бы висеть. Плюс гард убирает холостые выборки
+    состава групп на каждом персональном шаге."""
     if deputy is None:
         return False
-    return any(deputy.covers(sam, principal) for principal in step_logins(step))
+    if any(deputy.covers(sam, principal) for principal in step_logins(step)):
+        return True
+    if step.assignees or step.assignee:
+        return False
+    group = str(getattr(step, "owner_group", "") or "").strip()
+    return bool(group) and deputy.covers_member_of(sam, group)
 
 
 def _stage_owner_kinds(store: DbRoutingStore | None) -> dict[int, str]:
@@ -2361,7 +2455,7 @@ def _public_view(
     route_store = routing_store if routing_store is not None else _routing_store_or_none()
     roster = _RosterResolver(route_store)
     # Замещение: один SELECT действующих записей на вызов ответа (кэш резолвера).
-    deputy_resolver = deputy if deputy is not None else _DeputyResolver(_substitute_store_or_none())
+    deputy_resolver = deputy if deputy is not None else _deputy_resolver_or_none()
     # owner_kind шага в БД не хранится — восстанавливаем из справочника, иначе
     # право по реестру этапа (assignee в ответе, can_act) не проверялось бы.
     _restore_step_owner_kinds(
@@ -2587,7 +2681,7 @@ def _is_participant(
         store = _routing_store_or_none()
         _restore_step_owner_kinds(request, _stage_owner_kinds(store))
         roster = _RosterResolver(store)
-    deputy_resolver = deputy if deputy is not None else _DeputyResolver(_substitute_store_or_none())
+    deputy_resolver = deputy if deputy is not None else _deputy_resolver_or_none()
     return any(_is_step_viewer(step, user, roster, deputy_resolver) for step in request.steps)
 
 
@@ -2666,23 +2760,31 @@ def _deputy_assigned_mails(
     ad_reader: object | None,
     deputy: _DeputyResolver | None = None,
 ) -> list[str]:
-    """Копия письма «назначена» заместителям оригиналов этих шагов (notify = TRUE).
+    """Копия письма «назначена» заместителям ответственных этих шагов (notify = TRUE).
 
-    Только персональные ответственные снимка шага (assignees/assignee): замещение
-    персональное, группу-заместителя не существует. Адрес — из AD, как у владельцев
-    шага. Справочник недоступен/ошибка — пустой список (fail-soft: письма
-    владельцам уходят как обычно). Шаблон письма прежний (EVENT_ASSIGNED) —
-    заместитель получает такое же уведомление, каким видит его оригинал.
-    Резолвер передаётся вызывающим, чтобы на одну отметку не читать справочник
-    заместителей несколько раз."""
-    resolver = deputy if deputy is not None else _DeputyResolver(_substitute_store_or_none())
+    Персональные ответственные снимка (assignees/assignee) и ГРУППОВОЙ шаг — там
+    оригиналом считается каждый участник группы-владельца, заместителю каждого
+    письмо уходит (решение человека 2026-10-14: замещение на каждом шаге).
+    Адрес — из AD, как у владельцев шага. Справочник/кэш состава групп
+    недоступны или ошибка — пустой список (fail-soft: письма владельцам уходят
+    как обычно). Шаблон письма прежний (EVENT_ASSIGNED) — заместитель получает
+    такое же уведомление, каким видит его оригинал. Резолвер передаётся
+    вызывающим, чтобы на одну отметку не читать справочник несколько раз."""
+    resolver = deputy if deputy is not None else _deputy_resolver_or_none()
     mails: list[str] = []
     for step in steps:
+        # Сначала ответственные шага (они письма получают своим ходом рассылки),
+        # потом их заместители — по той же записи с флагом notify.
+        deputies: list[str] = []
         for principal in step_logins(step):
-            for sam in resolver.notify_deputies(principal):
-                mail = recipient_mail(ad_reader, sam)
-                if mail and mail not in mails:
-                    mails.append(mail)
+            deputies.extend(resolver.notify_deputies(principal))
+        group = str(getattr(step, "owner_group", "") or "").strip()
+        if group:
+            deputies.extend(resolver.notify_deputies_of_group(group))
+        for sam in deputies:
+            mail = recipient_mail(ad_reader, sam)
+            if mail and mail not in mails:
+                mails.append(mail)
     return mails
 
 
@@ -3542,7 +3644,7 @@ def list_requests(
     stage_kinds = _stage_owner_kinds(routing_store)
     roster = _RosterResolver(routing_store)
     # Справочник заместителей — один раз на выборку (иначе на каждую заявку).
-    deputy = _DeputyResolver(_substitute_store_or_none())
+    deputy = _deputy_resolver_or_none()
     for item in requests:
         _restore_step_owner_kinds(item, stage_kinds)
     # Ключи карточек сотрудников (ссылки на карточку): пакетно по всей выборке,
@@ -3622,7 +3724,7 @@ def list_folders(
     routing_store = _routing_store_or_none()
     roster = _RosterResolver(routing_store)
     stage_kinds = _stage_owner_kinds(routing_store)
-    deputy = _DeputyResolver(_substitute_store_or_none())
+    deputy = _deputy_resolver_or_none()
     for item in requests:
         _restore_step_owner_kinds(item, stage_kinds)
     folders: list[FolderOut] = []
@@ -3688,7 +3790,7 @@ def get_request(
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
-    deputy = _DeputyResolver(_substitute_store_or_none())
+    deputy = _deputy_resolver_or_none()
     if not _is_hr(user):
         routing_store = _routing_store_or_none()
         # owner_kind шага в БД не хранится — без восстановления из справочника
@@ -3857,7 +3959,7 @@ def submit_request(
         ("reopened=" + ",".join(str(order) for order in reopened)) if reopened else "",
     )
     # Один резолвер замещения на вызов ответа: и письма, и карточка.
-    deputy = _DeputyResolver(_substitute_store_or_none())
+    deputy = _deputy_resolver_or_none()
     _notify_assigned(
         request, mail_queue, settings_store, ad_reader, settings, deputy=deputy
     )
@@ -4018,7 +4120,7 @@ def decide_step(
     routing_store = _routing_store_or_none()
     roster = _RosterResolver(routing_store)
     # Справочник заместителей для этого решения: один SELECT действующих записей.
-    deputy = _DeputyResolver(_substitute_store_or_none())
+    deputy = _deputy_resolver_or_none()
     try:
         request = _get_request_or_404(store, request_id)
         _restore_step_owner_kinds(request, _stage_owner_kinds(routing_store))

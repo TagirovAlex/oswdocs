@@ -31,6 +31,7 @@ from .docs import (
     generate_bypass,
 )
 from .requests import (
+    _deputy_resolver_or_none,
     _get_request_or_404,
     _is_step_viewer,
     _restore_step_owner_kinds,
@@ -296,21 +297,24 @@ def _can_view(
     """Доступ к документам: ОК/руководители ОК/админы или владелец одного из шагов заявки.
 
     Правило шага то же, что у карточки заявки (requests._is_step_viewer):
-    группа-владелец, персональный исполнитель либо участник состава этапа
-    (owner_kind = stage_roster). Резолвер состава не передан — строится здесь
-    же, вместе с восстановлением owner_kind шага из справочника (в request_steps
-    такой колонки нет, см. requests._restore_step_owner_kinds).
-    ЗАМЕЩЕНИЕ ЗДЕСЬ НЕ УЧТЕНО намеренно: заместитель видит карточку и может отметить
-    шаг за оригинала, но бланк (и вложения) ему не полагаются — печать остаётся
-    функцией владельца шага и привилегированных (зафиксировано в PLAN.md
-    «Принятые следствия» волны 2026-10-14)."""
+    группа-владелец, персональный исполнитель, участник состава этапа
+    (owner_kind = stage_roster) И заместитель ответственного (решение человека
+    2026-10-14: бланк заместителю доступен так же, как замещаемому). Резолверы не
+    переданы — строятся здесь же, вместе с восстановлением owner_kind шага из
+    справочника (в request_steps такой колонки нет, см.
+    requests._restore_step_owner_kinds).
+
+    Сама ПЕЧАТЬ остаётся за блоком прав «Печать бланка» (requests.print →
+    require_block): замещение даёт видимость и право отметки, а не блок функций —
+    его выдаёт администратор."""
     if user.role in ("hr", "hr_admin", "admin"):
         return True
     if roster is None:
         routing_store = _routing_store_or_none()
         _restore_step_owner_kinds(request, _stage_owner_kinds(routing_store))
         roster = _RosterResolver(routing_store)
-    return any(_is_step_viewer(step, user, roster) for step in request.steps)
+    deputy = _deputy_resolver_or_none()
+    return any(_is_step_viewer(step, user, roster, deputy) for step in request.steps)
 
 
 def _enterprise_name(settings_store: DbSettingsStore, code: object) -> str:
