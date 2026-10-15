@@ -1,6 +1,6 @@
 ﻿# Структура проекта СЭД (для RAG, поддерживать актуальной)
 
-Обновлено: 2026-10-14. Обновлять при добавлении/переносе модулей.
+Обновлено: 2026-10-15. Обновлять при добавлении/переносе модулей.
 
 ## Обзор
 - `api/` — FastAPI (Python 3.12), `app/` — код, `tests/` — pytest, `requirements.txt`.
@@ -63,6 +63,9 @@
   синк 1С+AD, `ref_key`/`dismissal_date`/`hr_synced_at`, проход по регистру кадровых данных
   (`sync_hr_dismissals` — даты увольнения, `list_hr_dismissals` постранично), `mark_linked`
   (подтверждение связи сразу помечает строку), `dismissed_keys` (пропуск уволенных),
+  `search_linked` (подбор заместителя: строки с непустым `ad_sam`, совпадение по `fio`
+  ИЛИ `ad_sam` без регистра, увольненные пропускаются, `limit`/`offset` и `total` тем же
+  фильтром; источник `GET /substitutes/candidates`),
   `maybe_sync_employees_weekly` / `maybe_sync_hr_daily` (регламенты).
 - `employees.py` — поиск сотрудников (локальная таблица; фолбэк на живой 1С только до первого
   синка), `GET /employees` (пагинация page/page_size/total, уволенные отсекаются по
@@ -127,9 +130,23 @@
   QR и конвертация в PDF (`generate_bypass`, LibreOffice); переменные — см. `TEMPLATES.md`.
 - `archive.py` — бэкапы (ручной, расписание, настройки, список, скачать/удалить).
 - `substitutes.py` / `substitute_store.py` — справочник заместителей (миграция 0023,
-  таблица `substitutes`): CRUD `GET/POST/PUT/DELETE /settings/substitutes` (блок прав
-  `settings_substitutes`, аудит `substitutes.create/update/delete` без логинов и ФИО),
-  хранилище `DbSubstituteStore`/`InMemorySubstituteStore` + `SubstitutesUnavailable`;
+  таблица `substitutes`): админский CRUD `GET/POST/PUT/DELETE /settings/substitutes`
+  (блок прав `settings_substitutes`, аудит `substitutes.create/update/delete` без логинов
+  и ФИО) и ЛИЧНЫЙ контур без блоков прав — `GET/POST /substitutes/my`,
+  `PUT/DELETE /substitutes/my/{id}` (`substitutes.py:_my_sam`/`_is_my_record`/
+  `_own_record`/`_reject_self_deputy`): сотрудник правит только свои записи, гейт
+  принадлежности — **404** наравне с отсутствующей записью (не 403/409, иначе по коду
+  ответа видно, что запись существует), `principal_sam` в теле личной ручки не
+  принимается (422) — он всегда из сессии, «заместитель = сам сотрудник» — 422;
+  подбор заместителя `GET /substitutes/candidates?q=&page=&page_size=` из ЛОКАЛЬНОГО
+  справочника `employees` (`employee_sync.search_linked(q, limit, offset) -> (строки,
+  total)` — строки с непустым `ad_sam`, совпадение по `fio` ИЛИ `ad_sam` без регистра,
+  увольненные пропускаются, порядок по ФИО), отдаёт `{items, total, page, page_size}`,
+  в элементе `sam`/`fio`/`department`/`position`, себя самого исключает, `q` короче
+  2 символов — 422 (`_CANDIDATES_MIN_QUERY`/`_ERR_QUERY_SHORT`), аудита нет
+  (решение человека 2026-10-15: ФИО сотрудников видны всем вошедшим в объёме подбора;
+  `/api/ad/search` под блоком `employee_directory` остался как был). Хранилище `DbSubstituteStore`/
+  `InMemorySubstituteStore` + `SubstitutesUnavailable`;
   действующие записи на дату — `list_active(on)` (`valid_from <= on AND (valid_to IS NULL
   OR valid_to >= on)`). Замещение применяется в `requests.py`: `_DeputyResolver` (кэш на
   вызов ответа) в `_owns_step`/`_can_act`/`_is_step_viewer`/`_is_participant` и в письме
@@ -156,8 +173,19 @@
 ## Frontend (frontend/src/)
 - `main.tsx` — точка входа, роутинг `?view=`.
 - `layout.tsx` — скелет: шапка (вкладки+тема+логотип), дерево папок, фильтры, таблица заявок.
+  Вкладки по блокам прав (`visibleTabs`): «Заявки» и **«Заместители» — всем вошедшим
+  без блоков прав, сразу после «Заявки»** (личный раздел сотрудника, решение человека
+  2026-10-15), дальше «Справочник» (`employee_directory`), «Сопоставление» (`link_match`),
+  «Настройки» (`settings_content`/`settings_infra`). В `<nav aria-label="Вкладки">`
+  кроме вкладок рендерятся кнопка темы и «Выйти» — счётчик кнопок QA это учитывает.
 - `auth-client.tsx` — токен/вход; `requests-client.tsx` — клиент заявок/сотрудников/документов/истории.
-- `settings-client.tsx` — клиент настроек, doc-types, архив.
+- `settings-client.tsx` — клиент настроек, doc-types, архив; справочник заместителей
+  админский (`getSubstitutes`/`createSubstitute`/`updateSubstitute`/`deleteSubstitute`),
+  личный (`getMySubstitutes`/`createMySubstitute`/`updateMySubstitute`/`deleteMySubstitute` —
+  `/api/substitutes/my`, тело `MySubstituteInput` без `principal_sam`) и подбор
+  (`searchSubstituteCandidates` — `/api/substitutes/candidates?q=&page=&page_size=`,
+  ответ `{items, total, page, page_size}`; тип `SubstituteCandidate` переэкспортируется
+  из `substitutes-shared.ts`).
 - `date-format.ts` — единственное место форматирования дат: зону системы получает из
   `/auth/me` и приводит к ней вывод; даты 1С без времени (`hire_date`/`dismissal_date`)
   режутся строкой, чтобы не уезжал день.
@@ -176,22 +204,38 @@
   для заявки на доработке;
   у шага видны все ответственные и прогресс отметок по режиму шага.
 - `admin-settings.tsx` — настройки (вкладки: процесс/справочники/письма — контент; инфра/регламенты/
-  доступ/архивация/бланки/шаги — только admin; **заместители** — по блоку `settings_substitutes`) и вкладка «Бланки»
+  доступ/архивация/бланки/шаги — только admin; **заместители** — управление ВСЕМ
+  справочником по блоку `settings_substitutes`; личные записи сотрудника заводятся в
+  верхней вкладке «Заместители», см. `substitutes.tsx`) и вкладка «Бланки»
   (только admin): карточка бланка (шапка `header_html`, подвал `footer_lines`) + собственные шаги
   бланка — название/текст, вид исполнителя (`executor_kind`), согласующие/группа AD/руководитель,
   режим шага (`parallel`/`sequential`), флаги `optional`/`require_comment`; «Взять из справочника»
   копирует шаг из `step_catalog` в состав бланка. Вкладка «Шаги» (только admin) — редактор
   справочника шагов (`step_catalog`): код/название/текст/исполнитель/режим/флаги/активность.
-  Вкладка «Заместители» (блок `settings_substitutes`) — `SubstitutesEditor`: справочник
+  Вкладка «Заместители» (блок `settings_substitutes`, админский контур справочника) —
+  `SubstitutesEditor`: весь справочник
   «сотрудник → заместитель» (сотрудники и заместители выбираются поиском в AD),
   интервал действия датами (`<input type="date">`, пустая конечная — бессрочно),
   флажок «слать письма заместителю», комментарий; клиент — `settings-client.tsx`
   (`getSubstitutes`/`createSubstitute`/`updateSubstitute`/`deleteSubstitute`, список —
-  массивом).
+  массивом). Это вторая точка входа в справочник: личные записи сотрудника заводятся
+  в верхней вкладке «Заместители» (`substitutes.tsx`), админ правит здесь все.
 - `rich-text.tsx` — визуальный редактор текста шага и шапки бланка на TipTap
   (`@tiptap/react` + `@tiptap/starter-kit`); HTML уходит в `title`/`stage_lines` шага и
   `blank_header_html` и доходит до печати.
 - `directory.tsx` — справочник сотрудников (поиск, пагинация, автосопоставление).
+- `substitutes.tsx` / `substitutes.test.tsx` — личный раздел «Заместители» верхней
+  вкладки: список своих записей «я → мой заместитель» (`GET/POST/PUT/DELETE
+  /api/substitutes/my` через `settings-client.tsx`), форма, **модалка подбора
+  заместителя** (`DeputySearchModal`: поиск с debounce 300 мс по
+  `GET /api/substitutes/candidates` — своя ручка, а не `/api/ad/search`, закрытый
+  блоком `employee_directory`), срок (`<input type="date">`, пустая конечная —
+  бессрочно), флажок «слать письма заместителю», комментарий.
+- `substitutes-shared.ts` — общий модуль обоих разделов «Заместители» (личный и
+  админский): показ срока записи (`isoDateOnly`/`todayIso`/`isActiveToday`/
+  `substitutePeriodLabel`) и тип кандидата `SubstituteCandidate`. Даты срока приходят
+  БЕЗ времени (ISO `YYYY-MM-DD`), их режут срезом строки — `formatDate` такую дату
+  увел бы на день; сама зона берётся из `date-format.ts`.
 - `employee-card-view.tsx` — карточка сотрудника (1С + AD: подразделение, должность,
   руководитель, даты приёма/увольнения); открывается по ФИО из справочника и формы.
 - `attachment-view.tsx` — просмотр и загрузка вложений (лимиты `scan_max_mb`/

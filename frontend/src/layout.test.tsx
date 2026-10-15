@@ -283,6 +283,29 @@ describe("SedLayout", () => {
     expect(screen.queryByText("Настройки")).not.toBeInTheDocument();
   });
 
+  // «Заместители» — личный раздел сотрудника (решение человека 2026-10-15):
+  // блоков прав у него нет, поэтому вкладка идёт сразу после «Заявки» и видна
+  // сотруднику даже без единого блока. Остальные вкладки без блоков не видны.
+  it("вкладка «Заместители» — сразу после «Заявки» и видна без блоков прав", async () => {
+    vi.mocked(getFolders).mockResolvedValue([{ id: "mine", title: "Мои задачи", count: 0 }]);
+    vi.mocked(getRequests).mockResolvedValue([]);
+    renderWithTheme("owner", undefined, []);
+    const nav = screen.getByRole("navigation", { name: "Вкладки" });
+    // Подписи вкладок в порядке показа (без служебной кнопки темы — она без текста).
+    const names = within(nav)
+      .getAllByRole("button")
+      .map((b) => b.textContent ?? "")
+      .filter((text) => text !== "");
+    expect(names).toEqual(["Заявки", "Заместители", "Выйти"]);
+
+    // Раздел открывается и показывает форму своих записей с подбором заместителя
+    // модалкой (клиент настроек в этом файле не мок — без токена он отдаёт
+    // отказ, но сам блок отрисован).
+    fireEvent.click(screen.getByRole("button", { name: "Заместители" }));
+    expect(await screen.findByRole("heading", { name: "Мои заместители" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Выбрать заместителя" })).toBeInTheDocument();
+  });
+
   // Вкладка «Настройки» открывается и по одному блоку settings_infra
   // (контентные вкладки видны при settings_content, остальные — при settings_infra).
   it("«Настройки» видна по блоку settings_infra без settings_content", () => {

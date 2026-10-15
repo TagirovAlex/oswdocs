@@ -30,11 +30,14 @@ import { useTheme } from "./theme";
 import { AdminSettings } from "./admin-settings";
 import { Directory } from "./directory";
 import { LinkMatch } from "./link-match";
+import { Substitutes } from "./substitutes";
 import { createUrl, openPopup, requestUrl } from "./windows";
 
 // Вкладки скелета. «Создание» убрана: создание заявки — кнопка «Создать
 // заявку» (окно ?view=create), приватный маршрут создания сохранён.
-const TABS = ["Заявки", "Справочник", "Сопоставление", "Настройки"] as const;
+// «Заместители» — личный раздел сотрудника (решение человека 2026-10-15):
+// записи «я → мой заместитель», блоков прав у вкладки нет.
+const TABS = ["Заявки", "Заместители", "Справочник", "Сопоставление", "Настройки"] as const;
 type Tab = (typeof TABS)[number];
 
 // Иконки вкладок-модулей и кнопки темы — инлайн-SVG (currentColor,
@@ -68,6 +71,15 @@ function TabIcon(props: { tab: Tab }) {
         <rect x="3" y="4.5" width="7.5" height="6" rx="1.5" />
         <rect x="13.5" y="13.5" width="7.5" height="6" rx="1.5" />
         <path d="M10.5 7.5h2.2a2 2 0 0 1 2 2v4" />
+      </svg>
+    );
+  }
+  if (tab === "Заместители") {
+    return (
+      <svg {...common}>
+        <circle cx="9" cy="8" r="3" />
+        <path d="M3.5 19.5a5.5 5.5 0 0 1 11 0" />
+        <path d="M16.5 6.5h4M18.5 4.5v4" />
       </svg>
     );
   }
@@ -209,9 +221,11 @@ export function SedLayout(props: SedLayoutProps) {
   // Видимые вкладки по блокам прав из /auth/me (коды — как в справочнике прав,
   // см. PLAN.md «МОДЕЛЬ ПРАВ ДОСТУПА»): справочник — employee_directory,
   // сопоставление 1С↔AD — link_match, настройки — settings_content (контентные
-  // вкладки) или settings_infra (остальные).
+  // вкладки) или settings_infra (остальные). «Заместители» — личный раздел
+  // сотрудника (виден и правит только свои записи), блоков прав у него нет —
+  // поэтому он есть всем сразу после «Заявки».
   const visibleTabs = useMemo(() => {
-    const tabs: Tab[] = ["Заявки"];
+    const tabs: Tab[] = ["Заявки", "Заместители"];
     if (hasBlock(blocks, "employee_directory")) {
       tabs.push("Справочник");
     }
@@ -408,6 +422,7 @@ export function SedLayout(props: SedLayoutProps) {
         {/* Контент: справочник/настройки — экраны B4, иначе таблица. */}
         <main className="sed-content">
           {tab === "Справочник" && <Directory blocks={blocks} />}
+          {tab === "Заместители" && <Substitutes />}
           {tab === "Сопоставление" && <LinkMatch blocks={blocks} />}
           {tab === "Настройки" && <AdminSettings role={role} blocks={blocks} />}
           {tab === "Заявки" && (

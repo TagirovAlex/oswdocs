@@ -71,6 +71,8 @@ import type {
 import { BlankPreview } from "./blank-preview";
 import { hasBlock } from "./auth-client";
 import { formatDateTime, formatDateTimeHM } from "./date-format";
+// Общий показ срока записи о заместителе (личный раздел — тот же хелпер).
+import { isoDateOnly } from "./substitutes-shared";
 import {
   RichTextEditor,
   richTextAppend,
@@ -2760,10 +2762,11 @@ function SubstitutesEditor() {
               <tr key={item.id} className={item.id === form.id ? "sed-table__row--active" : undefined}>
                 <td>{item.principal_sam}</td>
                 <td>{item.deputy_sam}</td>
-                {/* Даты срока приходят без времени (ISO YYYY-MM-DD) — показываем
-                    как есть: formatDate из date-format.ts такую дату увел бы на день. */}
-                <td>{item.valid_from}</td>
-                <td>{item.valid_to ?? "бессрочно"}</td>
+                {/* Даты срока приходят без времени (ISO YYYY-MM-DD) — берём
+                    срезом строки общим хелпером: formatDate из date-format.ts
+                    такую дату увел бы на день. */}
+                <td>{isoDateOnly(item.valid_from)}</td>
+                <td>{item.valid_to ? isoDateOnly(item.valid_to) : "бессрочно"}</td>
                 <td>{item.notify ? "да" : "нет"}</td>
                 <td>{item.note}</td>
                 <td>

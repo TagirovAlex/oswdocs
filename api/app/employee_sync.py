@@ -117,6 +117,20 @@ class EmployeeSyncStore(Protocol):
         (те же условия, что в search — для total серверной пагинации)."""
         ...
 
+    def search_linked(self, q: str, limit: int, offset: int) -> tuple[list[dict], int]:
+        """Кандидаты для подбора (подбор заместителя): строки со связанной
+        учёткой AD по подстроке fio ИЛИ ad_sam (без регистра).
+
+        Заместителем может быть только сотрудник, у которого заполнен ad_sam
+        (логин AD), поэтому несвязанные строки в выдаче нет. Совпадение по ФИО
+        или по логину — сотрудника ищут как по одному, так и по другому.
+        Один человек — одна строка выдачи: ключ строки employees составной
+        (enterprise/base_code/tab_num), поэтому на один логин AD строк может
+        быть несколько (две базы, повторный приём) и в подборе человек не должен
+        двоиться. Возврат: (строки страницы, всего строк по фильтру) — счётчик
+        тем же фильтром, что и выборка. Строки: fio/ad_sam/department/position."""
+        ...
+
     def find_by_people(
         self, enterprise: str, sam_list: list[str], tab_list: list[str]
     ) -> list[dict]:
@@ -255,6 +269,48 @@ class InMemoryEmployeeSyncStore:
     def count_matching(self, enterprise: str, q: str) -> int:
         return len(self.search(enterprise, q, len(self._rows)))
 
+    def search_linked(self, q: str, limit: int, offset: int) -> tuple[list[dict], int]:
+        """Кандидаты по ad_sam: те же условия, что у DbEmployeeSyncStore.
+
+        Одна строка на логин (см. дедуп по ad_sam ниже): ключ строки справочника
+        составной, поэтому на одного человека строк может быть несколько, а в
+        подборе заместителя он должен быть один.
+        """
+        needle = (q or "").strip().lower()
+        today = _today()
+        hits = []
+        seen: set[str] = set()
+        # Порядок тот же, что у DISTINCT ON в DbEmployeeSyncStore: первая строка
+        # группы ad_sam — по ФИО, затем предприятие/база/табельный номер.
+        for row in sorted(
+            self._rows.values(),
+            key=lambda item: (
+                item["fio"],
+                item.get("enterprise") or "",
+                item.get("base_code") or "",
+                item.get("tab_num") or "",
+            ),
+        ):
+            ad_sam = (row.get("ad_sam") or "").strip()
+            # Уволенные скрыты — так же, как в поиске справочника.
+            if not ad_sam or _dismissed(row, today):
+                continue
+            if not (needle in row["fio"].lower() or needle in ad_sam.lower()):
+                continue
+            # Логин уже показан — вторая строка того же человека в подбор не идёт.
+            if ad_sam in seen:
+                continue
+            seen.add(ad_sam)
+            hits.append(
+                {
+                    "fio": row["fio"],
+                    "ad_sam": ad_sam,
+                    "department": row.get("department"),
+                    "position": row.get("position"),
+                }
+            )
+        return hits[offset : offset + limit], len(hits)
+
     def find_by_request_key(
         self, enterprise: str, base_code: str, tab_num: str
     ) -> dict | None:
@@ -350,6 +406,48 @@ class DbEmployeeSyncStore:
                OR COALESCE(ad_sam, '') ILIKE '%' || :q || '%')
         """
     )
+    # Подбор заместителя: только строки со связанной учёткой AD — заместителем
+    # может быть лишь тот, у кого есть логин. Совпадение по ФИО ИЛИ логину, без
+    # регистра (ILIKE). Фильтр вынесен отдельно, чтобы выборка и счётчик не
+    # разошлись (как _SEARCH_SQL/_COUNT_MATCHING_SQL).
+    # Уволенные отсекаются тем же условием, что и в поиске справочника
+    # (_WORKING_SQL): заместителем назначают действующего сотрудника.
+    _LINKED_FILTER_SQL = (
+        "WHERE btrim(COALESCE(ad_sam, '')) <> ''\n"
+        "  AND (dismissal_date IS NULL OR dismissal_date > CURRENT_DATE)\n"
+        "  AND (fio ILIKE :like OR ad_sam ILIKE :like)"
+    )
+    # Ключ строки employees составной (enterprise/base_code/tab_num), поэтому на
+    # один логин AD строк может быть несколько (две базы, повторный приём), а
+    # в подборе человек должен быть один: DISTINCT ON (ad_sam) оставляет по
+    # строке на логин. Порядок внутри — ad_sam, fio, enterprise, base_code,
+    # tab_num: без него Postgres взял бы произвольную карточку человека, и
+    # выдача зависела бы от плана запроса. Снаружи выборка упорядочена по ФИО
+    # (как у InMemoryEmployeeSyncStore и как обещает ручка подбора), поэтому
+    # DISTINCT ON смотрит во внутреннюю выборку, а страница — уже по ФИО;
+    # добавка по ad_sam делает порядок страниц строго детерминированным.
+    _SEARCH_LINKED_SQL = text(
+        """
+        SELECT fio, ad_sam, department, position
+        FROM (
+          SELECT DISTINCT ON (ad_sam) fio, ad_sam, department, position
+          FROM employees
+          """
+        + _LINKED_FILTER_SQL
+        + """
+          ORDER BY ad_sam, fio, enterprise, base_code, tab_num
+        ) AS linked
+        ORDER BY fio, ad_sam
+        LIMIT :limit OFFSET :offset
+        """
+    )
+    # Счётчик — по тому же признаку, что и выборка: людей, а не строк.
+    _COUNT_LINKED_SQL = text(
+        """
+        SELECT count(DISTINCT ad_sam) FROM employees
+        """
+        + _LINKED_FILTER_SQL
+    )
     # ref_key — ключ строки для регистра кадровых данных (сопоставление по
     # увольнению). dismissal_date НЕ трогаем: его пишет только проход по
     # регистру (update_dismissals), ежедневный справочник его бы затирал.
@@ -428,6 +526,20 @@ class DbEmployeeSyncStore:
             "ad_status": row.ad_status,
         }
 
+    @staticmethod
+    def _to_candidate(row) -> dict:
+        """Строка БД -> словарь подбора заместителя.
+
+        Минимальный набор: логин, ФИО, подразделение и должность. Табельный
+        номер и предприятие в подборе не нужны, а таб.№ идентифицирует
+        человека (ПДн) — в выдачу подбора он не попадает."""
+        return {
+            "fio": row.fio,
+            "ad_sam": row.ad_sam,
+            "department": row.department,
+            "position": row.position,
+        }
+
     def count(self) -> int:
         try:
             with self._session_factory() as session:
@@ -470,6 +582,25 @@ class DbEmployeeSyncStore:
                 "Справочник сотрудников недоступен: %s" % exc
             ) from exc
         return int(value or 0)
+
+    def search_linked(self, q: str, limit: int, offset: int) -> tuple[list[dict], int]:
+        """Кандидаты по ad_sam: по строке на логин, страница по ФИО, счётчик —
+        тем же фильтром (людей, а не строк)."""
+        like = "%%%s%%" % (q or "").strip()
+        try:
+            with self._session_factory() as session:
+                rows = session.execute(
+                    self._SEARCH_LINKED_SQL,
+                    {"like": like, "limit": limit, "offset": offset},
+                ).all()
+                total = session.execute(
+                    self._COUNT_LINKED_SQL, {"like": like}
+                ).scalar()
+        except SQLAlchemyError as exc:
+            raise EmployeeSyncUnavailable(
+                "Справочник сотрудников недоступен: %s" % exc
+            ) from exc
+        return [self._to_candidate(row) for row in rows], int(total or 0)
 
     def find_by_people(
         self, enterprise: str, sam_list: list[str], tab_list: list[str]

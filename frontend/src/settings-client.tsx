@@ -2,6 +2,11 @@
 // Значения — из settings БД (в коде не хардкодятся); токен — Bearer из localStorage.
 import { ApiHttpError, getToken } from "./auth-client";
 import type { DocType } from "./requests-client";
+import type { SubstituteCandidate } from "./substitutes-shared";
+
+// Тип кандидата в заместители объявлен в общем модуле разделов заместителей
+// (личный раздел и админский справочник), здесь он только переэкспортируется.
+export type { SubstituteCandidate } from "./substitutes-shared";
 
 // Предприятие из настроек (settings.enterprises).
 export interface SettingsEnterprise {
@@ -508,11 +513,12 @@ export interface PermissionTemplateSaved {
   groups: string[];
 }
 
-// Текст отказа из тела FastAPI (detail) либо null (тело не JSON/без detail).
-// Текст 409/422 показываем как есть: отказ «нельзя снять права у себя» или
+// Текст отказа из тела FastAPI (detail) либо null: тела нет, оно не JSON или
+// detail — не строка (422 от валидации приходит списком объектов). Точный текст
+// сервера показываем как есть: отказ «нельзя снять права у себя» или
 // «защищённый шаблон не может остаться без блоков» должен быть виден админу
 // дословно, а не как «ошибка запроса».
-async function readPermissionDetail(res: Response): Promise<string | null> {
+async function readErrorDetail(res: Response): Promise<string | null> {
   try {
     const data = await res.json();
     if (typeof data?.detail === "string" && data.detail !== "") return data.detail;
@@ -543,7 +549,7 @@ async function requestPermissions<T>(path: string, method: "GET" | "PUT" | "POST
     throw new Error("Сервис недоступен");
   }
   if (!res.ok) {
-    const detail = await readPermissionDetail(res);
+    const detail = await readErrorDetail(res);
     switch (res.status) {
       case 401:
         throw new ApiHttpError(401, detail ?? "Сессия истекла");
@@ -630,13 +636,18 @@ export interface SubstituteInput {
   note: string;
 }
 
-// Запрос к /api/settings/substitutes с Bearer-токеном (блок прав
+// Запрос к /api/settings/substitutes, /api/substitutes/my и
+// /api/substitutes/candidates с Bearer-токеном (админский справочник — блок прав
 // settings_substitutes). Ответ 204 приравниваем к пустому объекту — как в
-// requestDocType.
+// requestDocType. Отказы 401/403/404/409/422/503 читаются одинаково для всех
+// разделов; в личном разделе 403 не бывает (блоков прав у него нет), а тексты
+// 422/503 у подбора кандидатов свои (аргумент errTexts). Точный текст отказа из
+// detail показывается как есть, клиентский — только запасной (пустой detail).
 async function requestSubstitute<T>(
   path: string,
   method: "GET" | "POST" | "PUT" | "DELETE",
-  data?: SubstituteInput,
+  data?: SubstituteInput | MySubstituteInput,
+  errTexts?: { e422?: string; e503?: string },
 ): Promise<T> {
   const token = getToken();
   if (!token) {
@@ -654,12 +665,21 @@ async function requestSubstitute<T>(
     throw new Error("Сервис недоступен");
   }
   if (res.status === 401) throw new ApiHttpError(401, "Сессия истекла");
-  if (res.status === 403) throw new ApiHttpError(403, "Справочник заместителей — не по вашим правам");
-  if (res.status === 404) throw new ApiHttpError(404, "Запись заместителя не найдена");
-  if (res.status === 409) throw new ApiHttpError(409, "Такая пара «сотрудник и заместитель» уже заведена");
-  if (res.status === 422) throw new ApiHttpError(422, "Неверные данные заместителя");
-  if (res.status === 503) throw new ApiHttpError(503, "Справочник заместителей недоступен");
-  if (!res.ok) throw new ApiHttpError(res.status, "Ошибка операции со справочником заместителей");
+  if (!res.ok) {
+    // Точную причину отказа из detail показываем сотруднику дословно: сервер
+    // отвечает русскими текстами («Введите не менее трёх символов ФИО или
+    // логина заместителя», «Заместитель не может быть тем же сотрудником»,
+    // «Срок не может заканчиваться раньше, чем начинаться», «При отказе…»).
+    // Свои тексты остаются запасными — на случай пустого detail, тела не JSON
+    // или 422 от валидации (там detail — список, а не строка).
+    const detail = await readErrorDetail(res);
+    if (res.status === 403) throw new ApiHttpError(403, detail ?? "Справочник заместителей — не по вашим правам");
+    if (res.status === 404) throw new ApiHttpError(404, detail ?? "Запись заместителя не найдена");
+    if (res.status === 409) throw new ApiHttpError(409, detail ?? "Такая пара «сотрудник и заместитель» уже заведена");
+    if (res.status === 422) throw new ApiHttpError(422, detail ?? errTexts?.e422 ?? "Неверные данные заместителя");
+    if (res.status === 503) throw new ApiHttpError(503, detail ?? errTexts?.e503 ?? "Справочник заместителей недоступен");
+    throw new ApiHttpError(res.status, detail ?? "Ошибка операции со справочником заместителей");
+  }
   if (res.status === 204) return {} as T;
   return (await res.json()) as T;
 }
@@ -693,6 +713,107 @@ export async function updateSubstitute(id: number, data: SubstituteInput): Promi
 // {id, deleted}; ошибка 404 — записи уже нет).
 export async function deleteSubstitute(id: number): Promise<Record<string, unknown>> {
   return requestSubstitute<Record<string, unknown>>(`/api/settings/substitutes/${id}`, "DELETE");
+}
+
+// ---------------------------------------------------------------------------
+// Личный раздел «Заместители» (/api/substitutes/my) — записи самого сотрудника
+// «я → мой заместитель» (решение человека 2026-10-15). Виден и правится всеми
+// вошедшими без блоков прав, поэтому блока 403 в разделе не бывает, а чужая
+// запись отдаётся как 404 («запись не найдена»). Админский справочник выше не
+// меняется — он остаётся для руководителя, заводящего заместителя через
+// администратора.
+// ---------------------------------------------------------------------------
+
+// Тело POST/PUT /api/substitutes/my: логин заместителя и срок. Сотрудника
+// (principal_sam) в теле нет — сервер берёт его из сессии, поэтому запись
+// всегда остаётся своей.
+export interface MySubstituteInput {
+  deputy_sam: string;
+  valid_from: string;
+  valid_to: string | null;
+  notify: boolean;
+  note: string;
+}
+
+// GET /api/substitutes/my: свои записи «я → мой заместитель», включая истёкшие по
+// сроку. Список приходит МАССИВОМ (обёртка {items} не применяется — как во всех
+// прочих списках API). Ошибки: 401 — сессия истекла, 503 — справочник
+// заместителей недоступен.
+export async function getMySubstitutes(): Promise<Substitute[]> {
+  const res = await requestSubstitute<Substitute[]>("/api/substitutes/my", "GET");
+  return Array.isArray(res) ? res : [];
+}
+
+// POST /api/substitutes/my: добавить себе заместителя. Ошибки: 409 — такая пара
+// уже заведена, 422 — пустой логин, заместитель = сотрудник или «действует по»
+// раньше «действует с».
+export async function createMySubstitute(data: MySubstituteInput): Promise<Substitute> {
+  return requestSubstitute<Substitute>("/api/substitutes/my", "POST", data);
+}
+
+// PUT /api/substitutes/my/{id}: изменить свою запись (те же поля, что и при
+// создании). Ошибки: 404 — записи нет (в том числе чужой), 409 — дубль пары,
+// 422 — значения неверны.
+export async function updateMySubstitute(id: number, data: MySubstituteInput): Promise<Substitute> {
+  return requestSubstitute<Substitute>(`/api/substitutes/my/${id}`, "PUT", data);
+}
+
+// DELETE /api/substitutes/my/{id}: удалить свою запись (ответ 200 с
+// {id, deleted}); ошибка 404 — записи уже нет или она не своя.
+export async function deleteMySubstitute(id: number): Promise<Record<string, unknown>> {
+  return requestSubstitute<Record<string, unknown>>(`/api/substitutes/my/${id}`, "DELETE");
+}
+
+// ---------------------------------------------------------------------------
+// Подбор заместителя для личного раздела — GET /api/substitutes/candidates.
+// Отдельная ручка вместо /api/ad/search: поиск по AD закрыт блоком прав
+// employee_directory, которого у рядового сотрудника нет, а здесь блоков прав
+// нет вовсе (доступно любому вошедшему). Ошибки: 401 — сессия истекла,
+// 422 — в запросе меньше трёх символов, 503 — справочник сотрудников
+// недоступен.
+// ---------------------------------------------------------------------------
+
+// Страница подбора кандидатов в заместители (постраничная выдача подбора).
+export interface SubstituteCandidatePage {
+  // Кандидаты текущей страницы (поиск по ФИО/логину/должности).
+  items: SubstituteCandidate[];
+  // Всего подходящих сотрудников (счётчик, а не длина items).
+  total: number;
+  // Номер страницы, начиная с 1.
+  page: number;
+  // Размер страницы, каким сервер её собрал; клиент свой не задаёт (page_size в
+  // запрос не идёт), поэтому при отсутствии поля — 0 («размер неизвестен»).
+  page_size: number;
+}
+
+// GET /api/substitutes/candidates?q=…&page=…: подбор заместителя по подстроке
+// ФИО или логина (модалка личного раздела). Размер страницы (page_size) клиент
+// НЕ передаёт — пусть возьмёт сервер (дефолт ручки, directory_page_size из
+// settings): продублированный на клиенте размер страницы молча урезал бы подбор
+// при правке только одной стороны, а конец выдачи определяется по total ответа.
+// Список приходит в items внутри объекта страницы — в отличие от прочих списков
+// API, где приходит МАССИВ. Пустой/некорректный items — пустой массив, чтобы
+// расхождение формы ответа показалось пустой выдачей, а не падением разметки.
+export async function searchSubstituteCandidates(
+  q: string,
+  page = 1,
+): Promise<SubstituteCandidatePage> {
+  const query = encodeURIComponent(q);
+  const raw = await requestSubstitute<SubstituteCandidatePage>(
+    `/api/substitutes/candidates?q=${query}&page=${page}`,
+    "GET",
+    undefined,
+    {
+      e422: "Введите не менее трёх символов ФИО или логина заместителя",
+      e503: "Справочник сотрудников недоступен",
+    },
+  );
+  return {
+    items: Array.isArray(raw?.items) ? raw.items : [],
+    total: Number(raw?.total ?? 0),
+    page: Number(raw?.page ?? page),
+    page_size: Number(raw?.page_size ?? 0),
+  };
 }
 
 // Файлы-шаблоны .docx (doc_templates[].file) больше не используются: по решению

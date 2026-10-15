@@ -75,6 +75,17 @@ class SubstituteStore(Protocol):
         """Запись по id либо None (нет в справочнике)."""
         ...  # pragma: no cover
 
+    def list_by_principal(self, principal_sam: str) -> list[Substitute]:
+        """Записи одного сотрудника — личный кабинет /substitutes/my.
+
+        Отбор по principal_sam, а не весь справочник: личный контур показывает
+        только свои записи. Логины сравниваются без учёта регистра — как в роутере
+        личного контура. Порядок — тот же, что у list_all. Индекс
+        substitutes_principal_idx условие с lower(...) не использует (см.
+        комментарий к _LIST_BY_PRINCIPAL), а таблица мала — сканирование дёшево.
+        """
+        ...  # pragma: no cover
+
     def create(
         self,
         principal_sam: str,
@@ -98,13 +109,22 @@ class SubstituteStore(Protocol):
         valid_to: date | None,
         notify: bool,
         note: str,
+        expect_principal: str | None = None,
     ) -> Substitute:
         """Полностью заменить поля записи и поставить updated_at; нет записи —
-        SubstituteNotFound, дубль пары (кроме своей) — SubstitutePairTaken."""
+        SubstituteNotFound, дубль пары (кроме своей) — SubstitutePairTaken.
+
+        expect_principal — защита от гонки в личном контуре: когда передан,
+        запись должна принадлежать этому логину, иначе SubstituteNotFound
+        (проверка принадлежности до UPDATE гонку не закрывает). None — любая
+        запись (админский контур)."""
         ...  # pragma: no cover
 
-    def delete(self, sub_id: int) -> None:
-        """Удалить запись; нет записи — SubstituteNotFound."""
+    def delete(self, sub_id: int, expect_principal: str | None = None) -> None:
+        """Удалить запись; нет записи — SubstituteNotFound.
+
+        expect_principal — как в update: при переданном логине удаляется только
+        запись этого сотрудника, иначе SubstituteNotFound."""
         ...  # pragma: no cover
 
 
@@ -138,6 +158,24 @@ class DbSubstituteStore:
         """
     )
     _BY_ID = text(f"SELECT {_COLUMNS} FROM substitutes WHERE id = :sub_id")
+    # Записи одного сотрудника: точное совпадение логина плюс ветка lower(...)
+    # ради регистронезависимости личного контура (роутер сравнивает логины без
+    # учёта регистра, см. substitutes._is_my_record). Индекс
+    # substitutes_principal_idx (миграция 0023) это условие НЕ использует: OR с
+    # выражением по индексу не обслуживается индексным доступом (ветка с lower()
+    # индексной вообще не имеет), поэтому план — полное сканирование таблицы.
+    # Это осознанно и дёшево: записей заместителей на предприятие единицы-десятки,
+    # а выкручивать регистронезависимость ради индекса означало бы хранить логины
+    # в двух видах.
+    _LIST_BY_PRINCIPAL = text(
+        f"""
+        SELECT {_COLUMNS}
+        FROM substitutes
+        WHERE principal_sam = :principal_sam
+           OR lower(principal_sam) = lower(:principal_sam)
+        ORDER BY principal_sam, deputy_sam, id
+        """
+    )
     _INSERT = text(
         f"""
         INSERT INTO substitutes (principal_sam, deputy_sam, valid_from, valid_to,
@@ -154,10 +192,16 @@ class DbSubstituteStore:
             valid_from = :valid_from, valid_to = :valid_to, notify = :notify,
             note = :note, updated_at = now()
         WHERE id = :sub_id
+          AND (:expect_principal = ''
+               OR lower(principal_sam) = lower(:expect_principal))
         RETURNING {_COLUMNS}
         """
     )
-    _DELETE = text("DELETE FROM substitutes WHERE id = :sub_id")
+    _DELETE = text(
+        "DELETE FROM substitutes WHERE id = :sub_id "
+        "AND (:expect_principal = '' "
+        "OR lower(principal_sam) = lower(:expect_principal))"
+    )
 
     def __init__(self, database_url: str) -> None:
         self._engine = create_engine(database_url, pool_pre_ping=True)
@@ -210,6 +254,15 @@ class DbSubstituteStore:
             row = session.execute(self._BY_ID, {"sub_id": sub_id}).first()
         return self._row_to_record(row) if row is not None else None
 
+    def list_by_principal(self, principal_sam: str) -> list[Substitute]:
+        """Записи одного сотрудника: отбор по логину без учёта регистра (условие
+        запроса _LIST_BY_PRINCIPAL — индекс им не пользуется, таблица мала)."""
+        with self._session() as session:
+            rows = session.execute(
+                self._LIST_BY_PRINCIPAL, {"principal_sam": (principal_sam or "").strip()}
+            ).all()
+        return [self._row_to_record(row) for row in rows]
+
     def create(
         self,
         principal_sam: str,
@@ -255,9 +308,14 @@ class DbSubstituteStore:
         valid_to: date | None,
         notify: bool,
         note: str,
+        expect_principal: str | None = None,
     ) -> Substitute:
         """Полностью заменить поля записи, updated_at = now(); нет записи —
-        SubstituteNotFound (404), дубль пары — SubstitutePairTaken (409)."""
+        SubstituteNotFound (404), дубль пары — SubstitutePairTaken (409).
+
+        expect_principal (None = любая запись, админский контур) добавляет к
+        условию принадлежность записи: чужую запись так не обновить — UPDATE
+        не вернёт строки и будет тот же 404."""
         with self._session() as session:
             try:
                 row = session.execute(
@@ -270,6 +328,7 @@ class DbSubstituteStore:
                         "valid_to": valid_to,
                         "notify": notify,
                         "note": note,
+                        "expect_principal": expect_principal or "",
                     },
                 ).first()
             except IntegrityError as exc:
@@ -281,13 +340,18 @@ class DbSubstituteStore:
             raise SubstituteNotFound("Запись справочника заместителей не найдена")
         return self._row_to_record(row)
 
-    def delete(self, sub_id: int) -> None:
+    def delete(self, sub_id: int, expect_principal: str | None = None) -> None:
         """Удалить запись; отсутствующая — SubstituteNotFound (404).
+
+        expect_principal (None = любая запись) добавляет к условию принадлежность
+        записи: чужую так не удалить.
 
         Внешних ссылок на substitutes нет (миграция 0023), поэтому удаление
         безопасно: история отметок и аудит её не читают."""
         with self._session() as session:
-            result = session.execute(self._DELETE, {"sub_id": sub_id})
+            result = session.execute(
+                self._DELETE, {"sub_id": sub_id, "expect_principal": expect_principal or ""}
+            )
             deleted = bool(result.rowcount)
             session.commit()
         if not deleted:
@@ -324,6 +388,20 @@ class InMemorySubstituteStore:
             if record.principal_sam == principal_sam and record.deputy_sam == deputy_sam:
                 raise SubstitutePairTaken("Такая пара заместителей уже есть в справочнике")
 
+    def _belongs(self, record: Substitute | None, expect_principal: str | None) -> bool:
+        """Запись есть и принадлежит ожидаемому сотруднику (None — любая).
+
+        Тот же контракт, что у условия по expect_principal в SQL DbSubstituteStore:
+        при переданном логине чужая запись для UPDATE/DELETE не подходит."""
+        if record is None:
+            return False
+        if expect_principal is None:
+            return True
+        return (
+            record.principal_sam.strip().casefold()
+            == expect_principal.strip().casefold()
+        )
+
     def list_all(self) -> list[Substitute]:
         return self._sorted(self._records.values())
 
@@ -336,6 +414,15 @@ class InMemorySubstituteStore:
 
     def by_id(self, sub_id: int) -> Substitute | None:
         return self._records.get(sub_id)
+
+    def list_by_principal(self, principal_sam: str) -> list[Substitute]:
+        """Записи одного сотрудника: тот же отбор, что у DbSubstituteStore."""
+        wanted = (principal_sam or "").strip().casefold()
+        return self._sorted(
+            record
+            for record in self._records.values()
+            if record.principal_sam.strip().casefold() == wanted
+        )
 
     def create(
         self,
@@ -374,9 +461,10 @@ class InMemorySubstituteStore:
         valid_to: date | None,
         notify: bool,
         note: str,
+        expect_principal: str | None = None,
     ) -> Substitute:
         current = self._records.get(sub_id)
-        if current is None:
+        if not self._belongs(current, expect_principal):
             raise SubstituteNotFound("Запись справочника заместителей не найдена")
         self._reject_pair(principal_sam, deputy_sam, skip_id=sub_id)
         updated = replace(
@@ -392,9 +480,11 @@ class InMemorySubstituteStore:
         self._records[sub_id] = updated
         return updated
 
-    def delete(self, sub_id: int) -> None:
-        if self._records.pop(sub_id, None) is None:
+    def delete(self, sub_id: int, expect_principal: str | None = None) -> None:
+        record = self._records.get(sub_id)
+        if not self._belongs(record, expect_principal):
             raise SubstituteNotFound("Запись справочника заместителей не найдена")
+        del self._records[sub_id]
 
 
 _db_substitute_store: DbSubstituteStore | None = None

@@ -11,9 +11,11 @@
 //   LOGIN_HR        PASS_HR      учетка роли hr (SED_HR)
 //   LOGIN_OWNER     PASS_OWNER   учетка роли owner (SED_STEP_EXEC / группа шага)
 //
-// Покрытие (README п.1 «Поиск/доступ»): видимость вкладок, создание заявки,
-// настройки (admin-only), карточка заявки владельцу без ПДн, кроме ФИО и службы
-// заявки (решение человека 2026-10-14 — без них согласующий не видит, о ком заявка).
+// Покрытие (README п.1 «Поиск/доступ»): видимость вкладок (в т.ч. личной вкладки
+// «Заместители» у всех ролей), создание заявки, настройки (admin-only), правда и
+// доступность личного справочника заместителей, карточка заявки владельцу без ПДн,
+// кроме ФИО и службы заявки (решение человека 2026-10-14 — без них согласующий
+// не видит, о ком заявка).
 import { test, expect, Page } from "@playwright/test";
 
 const BASE_URL = process.env.SED_BASE_URL ?? "https://sed.company.local";
@@ -27,12 +29,21 @@ const ROLE_CREDS: Record<string, { login?: string; pass?: string }> = {
 
 type RoleName = "admin" | "hr" | "owner";
 
-// Вкладки по ролям (layout.tsx, visibleTabs).
+// Вкладки по ролям — строго как в layout.tsx (`visibleTabs`): «Заявки» и
+// «Заместители» есть у ВСЕХ вошедших без блоков прав («Заместители» — личный
+// раздел сотрудника, решение человека 2026-10-15), дальше вкладки по блокам из
+// /auth/me: «Справочник» — employee_directory, «Сопоставление» — link_match,
+// «Настройки» — settings_content или settings_infra. Отдельной вкладки
+// «Создание» в каркасе нет: создание заявки открывает кнопка «Создать заявку».
 const EXPECTED_TABS: Record<RoleName, string[]> = {
-  admin: ["Заявки", "Создание", "Настройки"],
-  hr: ["Заявки", "Создание"],
-  owner: ["Заявки"],
+  admin: ["Заявки", "Заместители", "Справочник", "Сопоставление", "Настройки"],
+  hr: ["Заявки", "Заместители", "Справочник"],
+  owner: ["Заявки", "Заместители"],
 };
+
+// Кнопки в <nav aria-label="Вкладки"> помимо вкладок: переключатель темы и
+// «Выйти» (layout.tsx). Их счётчик тоже видит — прибавляем к числу вкладок.
+const NAV_EXTRA_BUTTONS = 2;
 
 // Подписи ролей в шапке (layout.tsx, ROLE_LABELS).
 const ROLE_LABELS: Record<RoleName, string> = {
@@ -100,13 +111,21 @@ function tabsNav(page: Page) {
 }
 
 // Проверка состава вкладок против матрицы: нужные есть, лишних нет.
+// Первые кнопки навигации — вкладки и идут в порядке visibleTabs; дальше
+// переключатель темы и «Выйти», поэтому сверяем первые expected.length штук
+// и общий счётчик кнопок в <nav>.
 async function expectTabs(page: Page, role: RoleName): Promise<void> {
   const expected = EXPECTED_TABS[role];
   const buttons = tabsNav(page).getByRole("button");
   for (const name of expected) {
     await buttons.getByText(name, { exact: true }).waitFor();
   }
-  expect(await buttons.count()).toBe(expected.length);
+  const shown: string[] = [];
+  for (let i = 0; i < expected.length; i += 1) {
+    shown.push(((await buttons.nth(i).textContent()) ?? "").trim());
+  }
+  expect(shown).toEqual(expected);
+  expect(await buttons.count()).toBe(expected.length + NAV_EXTRA_BUTTONS);
 }
 
 // Токен сессии из localStorage (ключ sed_token, auth-client.tsx).
@@ -153,41 +172,44 @@ test.describe("Матрица ролей README п.1", () => {
     }
   });
 
-  test("admin: вкладки Заявки/Создание/Настройки, создание и настройки доступны", async ({ page }) => {
+  test("admin: вкладки Заявки/Заместители/Справочник/Сопоставление/Настройки, создание и настройки доступны", async ({ page }) => {
     skipIfNoCreds("admin");
     await loginAs(page, "admin");
     await expectTabs(page, "admin");
 
-    // Создание открывается: мастер из 3 шагов (create-form.tsx).
-    await tabsNav(page).getByRole("button", { name: "Создание" }).click();
-    await page.getByRole("heading", { name: /Создание заявки \(шаг 1 из 3\)/ }).waitFor();
+    // Создание заявки — кнопкой «Создать заявку» на вкладке «Заявки» (окно
+    // ?view=create); отдельной вкладки «Создание» в каркасе нет.
+    await tabsNav(page).getByRole("button", { name: "Заявки" }).click();
+    await page.locator('table[aria-label="Заявки"]').waitFor();
+    await page.getByRole("button", { name: "Создать заявку" }).waitFor();
+    // Таблица: полные колонки (ПДн виден ОК/админу).
+    expect(await tableColumns(page)).toEqual(COLUMNS_FULL);
 
     // Настройки: форма админки открывается, GET /api/settings → 200 (admin-only).
     await tabsNav(page).getByRole("button", { name: "Настройки" }).click();
-    await page.getByRole("heading", { name: /Настройки \(только SED_ADMINS\)/ }).waitFor();
+    await page.locator('section[aria-label="Настройки СЭД"]').waitFor();
     expect(await apiStatus(page, "/api/settings")).toBe(200);
 
-    // Таблица: полные колонки (ПДн виден ОК/админу).
-    await tabsNav(page).getByRole("button", { name: "Заявки" }).click();
-    await page.locator('table[aria-label="Заявки"]').waitFor();
-    expect(await tableColumns(page)).toEqual(COLUMNS_FULL);
+    // Админский справочник заместителей админу доступен (блок settings_substitutes),
+    // личный контур — тоже (это две точки входа в один справочник).
+    expect(await apiStatus(page, "/api/settings/substitutes")).toBe(200);
+    expect(await apiStatus(page, "/api/substitutes/my")).toBe(200);
   });
 
-  test("hr: вкладки Заявки/Создание, создание доступно, настройки — 403", async ({ page }) => {
+  test("hr: вкладки Заявки/Заместители/Справочник, создание доступно, настройки — 403", async ({ page }) => {
     skipIfNoCreds("hr");
     await loginAs(page, "hr");
     await expectTabs(page, "hr");
 
-    // Создание доступно ОК: мастер открывается.
-    await tabsNav(page).getByRole("button", { name: "Создание" }).click();
-    await page.getByRole("heading", { name: /Создание заявки \(шаг 1 из 3\)/ }).waitFor();
+    // Создание доступно ОК: кнопка «Создать заявку» на вкладке «Заявки».
+    await tabsNav(page).getByRole("button", { name: "Заявки" }).click();
+    await page.getByRole("button", { name: "Создать заявку" }).waitFor();
 
     // Настройки: вкладки нет в UI, GET /api/settings → 403 (только админам).
-    await tabsNav(page).getByRole("button", { name: "Заявки" }).click();
     expect(await apiStatus(page, "/api/settings")).toBe(403);
   });
 
-  test("owner: только Заявки, карточка без ПДн (кроме ФИО и службы), настройки — 403", async ({ page }) => {
+  test("owner: только Заявки/Заместители, карточка без ПДн (кроме ФИО и службы), настройки — 403", async ({ page }) => {
     skipIfNoCreds("owner");
     await loginAs(page, "owner");
     await expectTabs(page, "owner");
@@ -196,7 +218,20 @@ test.describe("Матрица ролей README п.1", () => {
     expect(await apiStatus(page, "/api/settings")).toBe(403);
     expect(await apiStatus(page, "/api/enterprises")).toBe(403);
 
+    // Личный раздел «Заместители» виден сотруднику БЕЗ блоков прав (решение
+    // человека 2026-10-15): раздел открывается, личные записи отдаёт 200, а
+    // админский контур справочника (блок settings_substitutes) — 403.
+    await tabsNav(page).getByRole("button", { name: "Заместители" }).click();
+    await page.getByRole("heading", { name: "Мои заместители" }).waitFor();
+    expect(await apiStatus(page, "/api/substitutes/my")).toBe(200);
+    expect(await apiStatus(page, "/api/settings/substitutes")).toBe(403);
+    // Подбор заместителя открыт всем вошедшим (локальный справочник сотрудников),
+    // а поиск в живом AD остался за блоком employee_directory.
+    expect(await apiStatus(page, "/api/substitutes/candidates?q=ив")).toBe(200);
+    expect(await apiStatus(page, "/api/ad/search?q=ив")).toBe(403);
+
     // Таблица владельца: без колонок предприятия/статуса (layout.tsx).
+    await tabsNav(page).getByRole("button", { name: "Заявки" }).click();
     await page.locator('table[aria-label="Заявки"]').waitFor();
     expect(await tableColumns(page)).toEqual(COLUMNS_OWNER);
 
