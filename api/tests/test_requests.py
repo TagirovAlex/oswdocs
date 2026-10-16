@@ -312,6 +312,38 @@ def test_position_escalation_read_from_settings_store(
     assert stored.escalation_hours == 6
 
 
+def test_next_step_clock_starts_when_step_opens(
+    client, hr, buh_owner, requests_store, test_settings_override, settings_store
+):
+    """Срок следующего шага — от момента его поступления на согласование.
+
+    Регрессия (решение человека 2026-10-16): срок ставился всем шагам сразу при
+    выдаче заявки, поэтому при последовательном согласовании второй этап мог
+    истечь, ещё не попав на согласование. Здесь срок второго шага искусственно
+    просрочен (как был бы при часовом TTL и долгом первом этапе) — после отметки
+    первого шага он должен пересчитаться."""
+    settings_store._values["approval_ttl_days"] = json.dumps(1)
+    created = _create(client, hr)
+    assert created.status_code == 201, created.text
+    rid = created.json()["id"]
+    assert client.post(f"/requests/{rid}/submit", headers=hr).status_code == 200
+
+    stored = requests_store.get(rid)
+    stored.steps[1].expires_at = _utcnow() - timedelta(hours=1)
+    requests_store.update(stored)
+
+    approved = client.post(
+        f"/requests/{rid}/steps/1/decision",
+        json={"decision": "approve"},
+        headers=buh_owner,
+    )
+    assert approved.status_code == 200, approved.text
+    second = next(s for s in requests_store.get(rid).steps if s.order == 2)
+    assert second.status == STEP_PENDING
+    assert second.expires_at > _utcnow() + timedelta(hours=23)
+    assert second.expires_at <= _utcnow() + timedelta(days=1, minutes=1)
+
+
 def test_without_blank_and_without_steps_422(
     client, hr, requests_store, test_settings_override, route_override
 ):

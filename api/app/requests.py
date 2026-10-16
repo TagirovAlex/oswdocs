@@ -2849,6 +2849,31 @@ def _reopen_returned_if_current(
     return reopened
 
 
+def _start_fresh_step_clock(
+    request: _Request,
+    route: RouteSettings,
+    before_orders: set[int],
+    now: datetime,
+) -> None:
+    """Срок новому блоку — от момента поступления на согласование (решение
+    человека 2026-10-16).
+
+    Срок шага ставится при выдаче заявки всем шагам сразу, поэтому у шага,
+    который ещё не вступил в работу, к моменту его блока часы могли уже
+    истечь (второй этаг при последовательном согласовании). Здесь шагам,
+    которые в текущий блок только вступили (их нет в before_orders — это
+    ожидающие блока ДО отметки), срок пересчитывается от «сейчас». У каждого
+    шага свой ttl_hours, иначе общий approval_ttl_days (как везде через
+    _step_deadline).
+
+    Шаги блоков ПОЗЖЕ текущего не трогаем: они получат свой срок, когда
+    вступят в свой блок."""
+    for step in _current_pending_steps(request):
+        if step.order in before_orders:
+            continue
+        step.expires_at = _step_deadline(now, step.ttl_hours, route.approval_ttl_days)
+
+
 def _mail_context(
     request: _Request, settings: Settings, comment: str = ""
 ) -> dict[str, object]:
@@ -4301,6 +4326,7 @@ def decide_step(
                     # блока возвращаются в работу (иначе заявка зависла бы без
                     # ожидающих шагов), уведомление уйдёт им как fresh.
                     _reopen_returned_if_current(request, route, now)
+                    _start_fresh_step_clock(request, route, before_orders, now)
         elif body.decision == "reject":
             step.status = STEP_REJECTED
             step.done_by = user.sam
