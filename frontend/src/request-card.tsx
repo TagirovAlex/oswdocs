@@ -5,7 +5,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { ChangeEvent } from "react";
 import { hasBlock, me } from "./auth-client";
-import { formatDate, formatDateTime } from "./date-format";
+import { formatDate, formatDateTime, formatDateTimeHM } from "./date-format";
 import {
   addComment,
   base64ToBlob,
@@ -1664,7 +1664,10 @@ export function RequestCard(props: RequestCardProps) {
                           <td>{stepDutyCell(step)}</td>
                           <td>{stepExecutorsNode(step)}</td>
                           <td>{step.status}</td>
-                          <td>{formatDate(step.expires_at)}</td>
+                          {/* Срок — дата и время до минут: у шага может быть
+                              свой срок в часах, одна дата ничего не говорит
+                              (формат и зона — date-format.ts). */}
+                          <td>{formatDateTimeHM(step.expires_at)}</td>
                           {/* Отметки ответственных (шаг с несколькими
                               ответственными) — под комментарием шага. */}
                           <td>

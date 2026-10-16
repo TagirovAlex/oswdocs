@@ -25,7 +25,7 @@ import type {
 } from "./requests-client";
 import type { Role } from "./api-mock";
 import { hasBlock } from "./auth-client";
-import { formatDate } from "./date-format";
+import { formatDate, formatDateTimeHM } from "./date-format";
 import { useTheme } from "./theme";
 import { AdminSettings } from "./admin-settings";
 import { Directory } from "./directory";
@@ -539,7 +539,9 @@ export function SedLayout(props: SedLayoutProps) {
                       </>
                     )}
                     <td>{row.step}</td>
-                    <td>{formatDate(row.dueDate) || "—"}</td>
+                    {/* Срок — дата и время до минут: срок шага бывает короче
+                        суток (свой ttl_hours), одна дата не говорит ни о чём. */}
+                    <td>{formatDateTimeHM(row.dueDate) || "—"}</td>
                   </tr>
                 );
               })}

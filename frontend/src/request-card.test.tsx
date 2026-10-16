@@ -29,6 +29,7 @@ import {
 import type { AttachmentMeta, RequestOut } from "./requests-client";
 import type { Role } from "./api-mock";
 import { MOCK_ROLE_BLOCKS, MOCK_SED_ADMIN_BLOCKS } from "./api-mock";
+import { setDisplayTimezone } from "./date-format";
 
 vi.mock("./requests-client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./requests-client")>();
@@ -440,6 +441,24 @@ describe("RequestCard", () => {
     expect(cols).toHaveLength(6);
     expect(cols[0].getAttribute("class")).toContain("sed-review__col-kind");
     expect(cols[1].getAttribute("class")).toContain("sed-review__col-duty");
+  });
+
+  // Срок шага — дата И ВРЕМЯ (решение человека 2026-10-16): срок бывает короче
+  // суток (свой ttl_hours), одной даты недостаточно.
+  it("срок шага — дата и время", async () => {
+    setDisplayTimezone("Europe/Moscow");
+    vi.mocked(getRequest).mockResolvedValue({
+      ...requestWith("Громов Игорь Олегович", "На согласовании"),
+      steps: [
+        { order: 1101, owner_group: "SED_STEP_BUH", resolver: "by_group", can_act: false, status: "ожидает", expires_at: "2026-10-05T10:00:00+00:00" },
+      ],
+    });
+
+    renderCard();
+    await waitFor(() => expect(screen.getByLabelText("Шаги заявки")).toBeInTheDocument());
+    const cells = within(screen.getByLabelText("Шаги заявки")).getAllByRole("cell");
+    // expires_at = 2026-10-05T10:00Z → в Europe/Moscow это 05.10.2026, 13:00.
+    expect(cells[cells.length - 2]).toHaveTextContent("05.10.2026, 13:00");
   });
 
   // Должность — читаемое наименование группы из справочника настроек.
