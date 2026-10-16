@@ -117,6 +117,7 @@ INFRA_KEYS: tuple[str, ...] = (
     "hr_dismissals_synced_at",
     "blank_autopick",
     "timezone",
+    "substitute_deputies_limit",
 )
 
 # SETTINGS_KEYS: полный набор (контент + инфра). Поля onec_enterprises_synced_at,
@@ -811,6 +812,30 @@ class SettingsPayload(BaseModel):
             "переменной TZ в .env — значения должны совпадать"
         ),
     )
+    substitute_deputies_limit: int | None = Field(
+        default=None,
+        description=(
+            "Сколько заместителей одновременно может быть у одного сотрудника "
+            "(целое положительное; сид миграции 0025 — 3). Считаются только "
+            "действующие на сегодня записи справочника заместителей"
+        ),
+    )
+
+    @field_validator("substitute_deputies_limit")
+    @classmethod
+    def _positive_deputies_limit(cls, value: int | None) -> int | None:
+        """Лимит заместителей — целое положительное число.
+
+        Ноль или отрицательное значение заблокировали бы любую новую запись
+        («уберите лишнюю запись» при лимите 0 неразрешимо), поэтому такие значения
+        в настройку не пускаем. None — «ключ снят», проверка лимита работает по
+        запасному значению (substitutes._deputies_limit)."""
+        if value is not None and value < 1:
+            raise ValueError(
+                "Лимит заместителей должен быть целым положительным числом "
+                "(минимально 1)"
+            )
+        return value
 
     @field_validator("timezone")
     @classmethod

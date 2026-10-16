@@ -2028,6 +2028,20 @@ def _already_approved(step: _Step, sam: str) -> bool:
     return bool(item) and str(item.get("decision") or "") == "approve"
 
 
+def _has_own_mark(request: _Request, sam: str) -> bool:
+    """Оставлял ли сотрудник свою отметку хотя бы по одному шагу заявки.
+
+    Сравнение логинов без учёта регистра (как в _approved_sams: в approvals
+    лежит sAMAccountName, а написание в реестре и в AD могло различаться).
+    Отметка любая, а не только согласие: вернул или отказал — согласование уже
+    было, сотрудник в нём участвовал."""
+    wanted = str(sam or "").casefold()
+    return any(
+        wanted in {key.casefold() for key in _approvals_by_sam(step)}
+        for step in request.steps
+    )
+
+
 def _closes_on_approve(step: _Step, deputy: _DeputyResolver) -> bool:
     """Закрывает ли новая отметка согласия шаг.
 
@@ -2663,19 +2677,33 @@ def _is_participant(
     user: CurrentUser,
     roster: _RosterResolver | None = None,
     deputy: _DeputyResolver | None = None,
+    include_privileged: bool = True,
 ) -> bool:
-    """Участник заявки: ОК/админ/администратор СЭД, инициатор или владелец шага.
+    """Участник заявки: ОК/админ/администратор СЭД, инициатор, владелец шага
+    или оставивший отметку по любому её шагу.
 
-    Минимальная проверка доступа к карточке (комментарии/история) по образцу
-    _can_view в documents.py, плюс инициатор заявки (создатель видит свою карточку
-    даже без шагов-владельцев). Участник состава этапа (owner_kind = stage_roster)
-    — тоже участник: реестр назначает ему этап, как группе-владельцу. Резолверы
-    не переданы — они строятся здесь же (owner_kind шага восстанавливается из
-    справочника, см. _restore_step_owner_kinds; замещение — по справочнику
-    заместителей, fail-soft)."""
-    if user.role in ("hr", "hr_admin", "admin", "sed_admin"):
+    Правило отметки (_has_own_mark) добавлено решением человека 2026-10-15:
+    карточку должен видеть каждый участвующий в согласовании — иначе у него
+    нет информации о процессе. Оно покрывает случай, когда ответственного
+    шага переназначает сотрудник ОК: согласовавший участвовал, а владеть
+    шагом перестал (инициатор того же правила не отменяет).
+
+    Участник состава этапа (owner_kind = stage_roster) — тоже участник:
+    реестр назначает ему этап, как группе-владельцу. Резолверы не переданы —
+    они строятся здесь же (owner_kind шага восстанавливается из справочника,
+    см. _restore_step_owner_kinds; замещение — по справочнику заместителей,
+    fail-soft).
+
+    include_privileged=False — без ролевого сокращения, только признаки участия
+    (инициатор, отметки, владение шагом). Нужен там, где у функции свой список
+    ролей: бланк заявки отдаётся участникам согласования и ОК/админам, а
+    администратор СЭД в него не входит (решение человека 2026-10-15 — про
+    участников, не про расширение прав администратора)."""
+    if include_privileged and user.role in ("hr", "hr_admin", "admin", "sed_admin"):
         return True
     if request.created_by == user.sam:
+        return True
+    if _has_own_mark(request, user.sam):
         return True
     if roster is None:
         store = _routing_store_or_none()
@@ -3615,12 +3643,12 @@ def list_requests(
     settings: Settings = Depends(get_settings),
     store: RequestsStore = Depends(get_requests_store),
 ) -> list[RequestOut]:
-    """Список: ОК/админы — все, владелец — только свои шаги.
+    """Список: ОК/админы — все, остальным — «свои» (участники согласования).
 
     Право на функцию — блок «Просмотр списка заявок»; уточнение «только свои»
-    остаётся в обрезке ниже (роль/участие). ПДн в списке: ФИО и служба заявки видны
-    всем (решение человека 2026-10-14), табельный номер, предприятие и ключ
-    сотрудника — только привилегированным."""
+    остаётся в обрезке ниже (роль/участие, см. _is_participant). ПДн в списке:
+    ФИО и служба заявки видны всем (решение человека 2026-10-14), табельный
+    номер, предприятие и ключ сотрудника — только привилегированным."""
     settings.ensure_read_only()
     require_block(user, BLOCK_REQUESTS_LIST, "Список заявок недоступен")
     try:
@@ -3670,7 +3698,7 @@ def list_requests(
         ]
     mine = [
         r for r in requests
-        if any(_is_step_viewer(s, user, roster, deputy) for s in r.steps)
+        if _is_participant(r, user, roster, deputy)
     ]
     return [
         _public_view(
@@ -3720,7 +3748,8 @@ def list_folders(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
     # Счетчик «Мои задачи» — то же правило видимости, что у выборки
-    # list_requests.mine (в т.ч. участник состава этапа).
+    # list_requests.mine (_is_participant: инициатор, отметившиеся, владельцы
+    # шагов, в т.ч. участники состава этапа).
     routing_store = _routing_store_or_none()
     roster = _RosterResolver(routing_store)
     stage_kinds = _stage_owner_kinds(routing_store)
@@ -3764,7 +3793,7 @@ def list_folders(
             title="Мои задачи",
             count=sum(
                 1 for r in requests
-                if any(_is_step_viewer(s, user, roster, deputy) for s in r.steps)
+                if _is_participant(r, user, roster, deputy)
             ),
         )
     )
@@ -3781,7 +3810,7 @@ def get_request(
     """Карточка заявки с ролевой обрезкой ПДн.
 
     Право на функцию — блок «Просмотр карточки заявки»; уточнение «только свои»
-    (участники заявки) остаётся в проверке ниже."""
+    (участники заявки, см. _is_participant) остаётся в проверке ниже."""
     settings.ensure_read_only()
     require_block(user, BLOCK_REQUEST_CARD, "Карточка заявки недоступна")
     try:
@@ -3796,10 +3825,7 @@ def get_request(
         # owner_kind шага в БД не хранится — без восстановления из справочника
         # участник состава этапа не считался бы владельцем шага (403).
         _restore_step_owner_kinds(request, _stage_owner_kinds(routing_store))
-        if not any(
-            _is_step_viewer(s, user, _RosterResolver(routing_store), deputy)
-            for s in request.steps
-        ):
+        if not _is_participant(request, user, _RosterResolver(routing_store), deputy):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Нет доступа к заявке")
     return _public_view(request, user, deputy=deputy)
 

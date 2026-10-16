@@ -119,6 +119,12 @@ const ALL_TABS = [
 ] as const;
 type SettingsTab = (typeof ALL_TABS)[number];
 
+// Запасное значение лимита заместителей на сотрудника: смысл настройки задаёт
+// сервер (ключ substitute_deputies_limit в settings БД, решение человека
+// 2026-10-15), а это значение показывается только если ключа в ответе GET нет
+// (старый бэкенд, ключ не засеян) — иначе поле было бы пустым.
+const SUBSTITUTE_DEPUTIES_LIMIT_FALLBACK = 3;
+
 // Какая вкладка за каким блоком (для видимости по правам, AGENTS: настройки —
 // только в settings, хардкод ролей здесь быть не должно).
 const TAB_BLOCK: Record<SettingsTab, string | null> = {
@@ -3127,6 +3133,8 @@ export function AdminSettings(props: AdminSettingsProps) {
   const [ttl, setTtl] = useState<number | null>(null);
   const [retentionDays, setRetentionDays] = useState<number | null>(null);
   const [maxMb, setMaxMb] = useState<number | null>(null);
+  // Лимит заместителей на сотрудника (substitute_deputies_limit) — из settings.
+  const [deputiesLimit, setDeputiesLimit] = useState<number>(SUBSTITUTE_DEPUTIES_LIMIT_FALLBACK);
   const [paperRequired, setPaperRequired] = useState<boolean | null>(null);
   const [smtpHost, setSmtpHost] = useState<string | null>(null);
   const [smtpPort, setSmtpPort] = useState<number | null>(null);
@@ -3178,6 +3186,8 @@ export function AdminSettings(props: AdminSettingsProps) {
           setSessionTtl(full.session_ttl_minutes);
           setRetentionDays(full.scan_retention_days);
           setMaxMb(full.scan_max_mb);
+          // Лимит заместителей — из settings; ключа в ответе нет — запасное значение.
+          setDeputiesLimit(full.substitute_deputies_limit ?? SUBSTITUTE_DEPUTIES_LIMIT_FALLBACK);
           setSmtpHost(full.smtp_host);
           setSmtpPort(full.smtp_port);
           setSmtpFrom(full.smtp_from);
@@ -3254,6 +3264,7 @@ export function AdminSettings(props: AdminSettingsProps) {
           session_ttl_minutes: sessionTtl,
           scan_retention_days: retentionDays,
           scan_max_mb: maxMb,
+          substitute_deputies_limit: deputiesLimit,
           smtp_host: smtpHost,
           smtp_port: smtpPort,
           smtp_from: smtpFrom,
@@ -3451,6 +3462,22 @@ export function AdminSettings(props: AdminSettingsProps) {
               value={maxMb ?? ""}
               onChange={(e) => setMaxMb(Number(e.target.value))}
             />
+          </label>
+          {/* Лимит заместителей на сотрудника (решение человека 2026-10-15) —
+              инфра-ключ: правит администратор, личный раздел «Заместители» его
+              не показывает. */}
+          <label className="sed-field sed-mt-8">
+            Лимит заместителей на сотрудника (substitute_deputies_limit)
+            <input
+              aria-label="Лимит заместителей"
+              type="number"
+              value={deputiesLimit}
+              onChange={(e) => setDeputiesLimit(Number(e.target.value))}
+            />
+            <div className="sed-note">
+              Сколько заместителей может быть у сотрудника одновременно (по умолчанию
+              3). Значение хранится в settings БД и применяется без пересборки.
+            </div>
           </label>
           <label className="sed-field sed-mt-8">
             Хост SMTP-релея (smtp_host)

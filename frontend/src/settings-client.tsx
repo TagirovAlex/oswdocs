@@ -150,6 +150,9 @@ export interface SettingsData {
   hr_admin_groups: string[] | null;
   // Сколько сотрудников на страницу справочника (directory_page_size).
   directory_page_size?: number | null;
+  // Сколько заместителей может быть у сотрудника одновременно
+  // (substitute_deputies_limit) — инфра-ключ, правит администратор.
+  substitute_deputies_limit?: number;
 }
 
 // Контент-настройки (GET/PUT /api/settings/content): контент-ключи для

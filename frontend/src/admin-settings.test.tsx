@@ -134,6 +134,9 @@ const settings: SettingsData = {
   admin_groups: ["TEST_ADMINS"],
   hr_groups: ["TEST_OK"],
   hr_admin_groups: ["TEST_RUK_OK"],
+  // Лимит заместителей на сотрудника (инфра-ключ GET /settings): значение из
+  // ответа намеренно не 3, чтобы тест отличал его от запасного.
+  substitute_deputies_limit: 5,
 };
 
 // Контентная часть (как отдаёт GET /api/settings/content для руководителя ОК).
@@ -648,6 +651,7 @@ describe("AdminSettings", () => {
     // Инфра-вкладки и инфра-поля недоступны руководителю ОК.
     expect(screen.queryByRole("button", { name: "Инфра" })).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Длительность сессии")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Лимит заместителей")).not.toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("TTL отметок"), { target: { value: "7" } });
     fireEvent.click(screen.getByText("Сохранить"));
@@ -696,6 +700,39 @@ describe("AdminSettings", () => {
         }),
       ),
     );
+  });
+
+  // Лимит заместителей на сотрудника (substitute_deputies_limit): инфра-поле
+  // вкладки «Инфра» — грузится из GET /settings и уходит в общий PUT /settings.
+  it("админ правит лимит заместителей и сохраняет его в PUT", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+    vi.mocked(saveSettings).mockImplementation(async (data: SettingsData) => data);
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Инфра" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Инфра" }));
+    await waitFor(() => expect(screen.getByLabelText("Лимит заместителей")).toBeInTheDocument());
+    // Значение пришло из настроек, а не из запасного (в фикстуре 5, запасной — 3).
+    expect(screen.getByLabelText("Лимит заместителей")).toHaveValue(5);
+
+    fireEvent.change(screen.getByLabelText("Лимит заместителей"), { target: { value: "2" } });
+    fireEvent.click(screen.getByText("Сохранить"));
+
+    await waitFor(() =>
+      expect(saveSettings).toHaveBeenCalledWith(expect.objectContaining({ substitute_deputies_limit: 2 })),
+    );
+  });
+
+  // Ключа в ответе GET /settings нет — показывается запасное значение, чтобы
+  // поле не было пустым (у старого бэкенда/незасеянного ключа).
+  it("подставляет запасной лимит заместителей, если ключа нет в настройках", async () => {
+    vi.mocked(getSettings).mockResolvedValue({ ...settings, substitute_deputies_limit: undefined });
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Инфра" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Инфра" }));
+
+    await waitFor(() => expect(screen.getByLabelText("Лимит заместителей")).toHaveValue(3));
   });
 
   // Админ: на вкладке «Инфра» видит 1С-базы, добавляет базу и сохраняет (PUT с onec_bases).

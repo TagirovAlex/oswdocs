@@ -30,6 +30,15 @@
 # пустые логины, срок, заканчивающийся до начала) — 422; неизвестный id —
 # 404; падение БД — 503 (как в соседних модулях).
 #
+# Ограничение числа заместителей (решение человека 2026-10-15): сколько
+# заместителей одновременно может быть у одного сотрудника — инфраструктурная
+# настройка substitute_deputies_limit (её правит админ, сид значения — миграция
+# 0025). Проверяют все четыре ручки записи — и админские, и личные: справочник
+# один. Превышение — 422 с понятным текстом (в нём имя настройки, чтобы сотрудник
+# или админ понимал, куда смотреть). Считаются только записи, действующие СЕГОДНЯ
+# (по часовой зоне системы, как в requests.py): истёкшие и ещё не начатые место не
+# занимают, иначе старые записи заблокировали бы новые навсегда.
+#
 # Сверка заместителя со справочником (личные ручки /my, ревью 2026-10-15): в
 # личном контуре логин заместителя сверяется с employees — он обязан быть
 # сотрудником со связанной учёткой, иначе резолвер замещения его не найдёт
@@ -43,6 +52,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime
 from typing import Any
 
@@ -59,6 +69,12 @@ from .employee_sync import (
 )
 from .employees import DIRECTORY_PAGE_SIZE
 from .permissions import BLOCK_SETTINGS_SUBSTITUTES, require_block
+from .settings_routes import (
+    DbSettingsStore,
+    SettingsUnavailable,
+    get_settings_store,
+    read_setting_value,
+)
 from .substitute_store import (
     Substitute,
     SubstituteNotFound,
@@ -67,8 +83,13 @@ from .substitute_store import (
     SubstitutesUnavailable,
     get_substitute_store,
 )
+from .timezone import current_timezone
 
 router = APIRouter(tags=["заместители"])
+
+# Предупреждения в журнал: битая настройка молча сузила бы лимит до запасного
+# значения, и администратор об этом не узнал бы.
+_LOGGER = logging.getLogger(__name__)
 
 # Тексты ошибок данных записи и «записи нет» — общие для админского и личного
 # контура: клиент получает один и тот же текст в обоих случаях.
@@ -89,6 +110,113 @@ def _check_period(valid_from: date, valid_to: date | None) -> None:
     if valid_to is not None and valid_to < valid_from:
         raise ValueError(
             "Окончание срока (%s) раньше начала (%s)" % (valid_to, valid_from)
+        )
+
+
+# Лимит заместителей у одного сотрудника — инфраструктурная настройка
+# substitute_deputies_limit: единственный источник значения, её правит админ
+# (ключ в INFRA_KEYS, значение засевает миграция 0025). Константа ниже — не
+# источник, а запасной путь на случай, когда ключ недоступен или бит: проверка
+# ограничения не должна ронять сохранение записи.
+_DEPUTIES_LIMIT_KEY = "substitute_deputies_limit"
+_DEPUTIES_LIMIT_FALLBACK = 3
+_ERR_DEPUTIES_LIMIT = (
+    "Лимит заместителей — %d (настройка substitute_deputies_limit); "
+    "уберите лишнюю запись"
+)
+
+
+def _deputies_limit(settings_store: DbSettingsStore | None) -> int:
+    """Сколько заместителей одновременно разрешено одному сотруднику.
+
+    Настоящее значение живёт в БД (настройка substitute_deputies_limit, сид —
+    миграция 0025), поэтому читаем только его. Ключа нет, значение пустое, битое или
+    неположительное — и ошибка хранилища настроек SettingsUnavailable: берём
+    запасной дефолт (то же 3, что сеет миграция). Так ограничение продолжает
+    работать, даже когда настройка недоступна: молча пропустить проверку значило
+    бы разрешить сколько угодно заместителей."""
+    if settings_store is None:
+        return _DEPUTIES_LIMIT_FALLBACK
+    try:
+        raw = read_setting_value(settings_store, _DEPUTIES_LIMIT_KEY)
+    except SettingsUnavailable:
+        _LOGGER.warning(
+            "Настройка %s недоступна — лимит заместителей %d (запасной)",
+            _DEPUTIES_LIMIT_KEY,
+            _DEPUTIES_LIMIT_FALLBACK,
+        )
+        return _DEPUTIES_LIMIT_FALLBACK
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        _LOGGER.warning(
+            "Настройка %s не число (%r) — лимит заместителей %d (запасной)",
+            _DEPUTIES_LIMIT_KEY,
+            raw,
+            _DEPUTIES_LIMIT_FALLBACK,
+        )
+        return _DEPUTIES_LIMIT_FALLBACK
+    if value <= 0:
+        _LOGGER.warning(
+            "Настройка %s не положительна (%d) — лимит заместителей %d (запасной)",
+            _DEPUTIES_LIMIT_KEY,
+            value,
+            _DEPUTIES_LIMIT_FALLBACK,
+        )
+        return _DEPUTIES_LIMIT_FALLBACK
+    return value
+
+
+def _acts_on(valid_from: date, valid_to: date | None, day: date) -> bool:
+    """Действует ли запись на дату: срок начался и ещё не кончился (valid_to =
+    None — бессрочно). Правило то же, что у выборки list_active в хранилище."""
+    return valid_from <= day and (valid_to is None or valid_to >= day)
+
+
+def _check_deputies_limit(
+    store: SubstituteStore,
+    settings_store: DbSettingsStore | None,
+    principal_sam: str,
+    valid_from: date,
+    valid_to: date | None,
+    exclude_id: int | None = None,
+) -> None:
+    """Лимит заместителей сотрудника: превышение — 422 (запись не сохраняется).
+
+    Считаются только записи, действующие сегодня по часовой зоне системы (как
+    считается замещение в requests.py): законченные и ещё не начатые место не
+    занимают, иначе истёкшие записи заблокировали бы новые навсегда. Сама новая
+    запись занимает место, только если действует сегодня.
+
+    exclude_id — правка записи: правимая запись в счёт не входит, иначе её нельзя
+    было бы ни продлить, ни сменить срок. Хранилище недоступно — 503, как и на
+    остальных ручках справочника.
+
+    Проверка одна на все четыре ручки записи (две админские, две личные): в личном
+    контуре principal_sam — логин сессии, в админском — сотрудник из тела."""
+    today = datetime.now(current_timezone()).date()
+    try:
+        active = store.list_active(today)
+    except SubstitutesUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    taken = sum(
+        1
+        for record in active
+        if (exclude_id is None or record.id != exclude_id)
+        # Принадлежность записи сотруднику — то же сравнение логинов без учёта
+        # регистра, что у гейта личного контура (_is_my_record); в админской
+        # ручке это проверка принадлежности записи целевому сотруднику.
+        and _is_my_record(record, principal_sam)
+    )
+    if _acts_on(valid_from, valid_to, today):
+        taken += 1
+    limit = _deputies_limit(settings_store)
+    if taken > limit:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=_ERR_DEPUTIES_LIMIT % limit,
         )
 
 
@@ -226,15 +354,24 @@ def create_substitute(
     payload: SubstituteIn,
     user: CurrentUser = Depends(get_current_user),
     store: SubstituteStore = Depends(get_substitute_store),
+    settings_store: DbSettingsStore = Depends(get_settings_store),
     settings: Settings = Depends(get_settings),
 ) -> SubstituteOut:
     """Создать запись справочника (блок settings_substitutes, иначе 403).
 
-    422 — ошибки данных записи (логины, один и тот же сотрудник, срок);
-    409 — такая пара уже есть (в справочнике одна запись на пару); 503 —
-    хранилище недоступно. Аудит — substitutes.create (без логинов и ФИО)."""
+    422 — ошибки данных записи (логины, один и тот же сотрудник, срок), превышен
+    лимит заместителей у сотрудника (_check_deputies_limit); 409 — такая пара уже
+    есть (в справочнике одна запись на пару); 503 — хранилище недоступно. Аудит —
+    substitutes.create (без логинов и ФИО)."""
     settings.ensure_read_only()
     _require_substitutes(user)
+    _check_deputies_limit(
+        store,
+        settings_store,
+        payload.principal_sam,
+        payload.valid_from,
+        payload.valid_to,
+    )
     try:
         record = store.create(
             principal_sam=payload.principal_sam,
@@ -263,14 +400,36 @@ def update_substitute(
     payload: SubstituteIn,
     user: CurrentUser = Depends(get_current_user),
     store: SubstituteStore = Depends(get_substitute_store),
+    settings_store: DbSettingsStore = Depends(get_settings_store),
     settings: Settings = Depends(get_settings),
 ) -> SubstituteOut:
     """Изменить запись справочника целиком (блок settings_substitutes, иначе 403).
 
-    422 — ошибки данных записи; 409 — пара занята другой записью; 404 — записи
-    с таким id нет; 503 — хранилище недоступно. Аудит — substitutes.update."""
+    422 — ошибки данных записи и превышение лимита заместителей у сотрудника
+    (правимая запись в счёт не входит); 409 — пара занята другой записью; 404 —
+    записи с таким id нет; 503 — хранилище недоступно. Аудит — substitutes.update."""
     settings.ensure_read_only()
     _require_substitutes(user)
+    # Порядок как в личной ручке: сначала существование записи (404), потом лимит
+    # (422) — иначе на несуществующий id при исчерпанном лимите ушёл бы 422.
+    try:
+        store.by_id(sub_id)
+    except SubstituteNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=_ERR_NOT_FOUND
+        ) from exc
+    except SubstitutesUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    _check_deputies_limit(
+        store,
+        settings_store,
+        payload.principal_sam,
+        payload.valid_from,
+        payload.valid_to,
+        exclude_id=sub_id,
+    )
     try:
         record = store.update(
             sub_id,
@@ -576,6 +735,7 @@ def create_my_substitute(
     payload: MySubstituteIn,
     user: CurrentUser = Depends(get_current_user),
     store: SubstituteStore = Depends(get_substitute_store),
+    settings_store: DbSettingsStore = Depends(get_settings_store),
     settings: Settings = Depends(get_settings),
     emp_store: EmployeeSyncStore = Depends(get_employee_sync_store),
 ) -> SubstituteOut:
@@ -583,13 +743,17 @@ def create_my_substitute(
 
     principal_sam — всегда логин сессии, из тела он не принимается (422).
     422 — заместитель = сам пользователь, заместитель не найден в справочнике
-    сотрудников со связанной учёткой (_require_known_deputy) или прочие ошибки
-    данных записи; 409 — такая пара уже есть; 503 — хранилище недоступно.
-    Аудит — substitutes.create (без логинов и ФИО)."""
+    сотрудников со связанной учёткой (_require_known_deputy), превышен лимит
+    заместителей (_check_deputies_limit, проверка последняя — после ошибок данных)
+    или прочие ошибки данных записи; 409 — такая пара уже есть; 503 — хранилище
+    недоступно. Аудит — substitutes.create (без логинов и ФИО)."""
     settings.ensure_read_only()
     sam = _my_sam(user)
     _reject_self_deputy(payload.deputy_sam, sam)
     _require_known_deputy(emp_store, payload.deputy_sam)
+    _check_deputies_limit(
+        store, settings_store, sam, payload.valid_from, payload.valid_to
+    )
     try:
         record = store.create(
             principal_sam=sam,
@@ -620,6 +784,7 @@ def update_my_substitute(
     payload: MySubstituteIn,
     user: CurrentUser = Depends(get_current_user),
     store: SubstituteStore = Depends(get_substitute_store),
+    settings_store: DbSettingsStore = Depends(get_settings_store),
     settings: Settings = Depends(get_settings),
     emp_store: EmployeeSyncStore = Depends(get_employee_sync_store),
 ) -> SubstituteOut:
@@ -629,8 +794,9 @@ def update_my_substitute(
     видно, что запись существует); 422 — ошибки данных записи, в том числе
     заместитель вне справочника сотрудников со связанной учёткой (сверка идёт
     ПОСЛЕ гейта принадлежности, чтобы чужая запись не превращалась в 422 с
-    подсказкой по справочнику); 409 — пара занята другой записью; 503 —
-    хранилище недоступно. expect_principal в store.update закрывает гонку:
+    подсказкой по справочнику) и превышение лимита заместителей (правимая запись
+    в счёт не входит); 409 — пара занята другой записью; 503 — хранилище
+    недоступно. expect_principal в store.update закрывает гонку:
     принадлежность записи проверяется ещё раз в самом UPDATE. Аудит —
     substitutes.update."""
     settings.ensure_read_only()
@@ -638,6 +804,9 @@ def update_my_substitute(
     _reject_self_deputy(payload.deputy_sam, sam)
     _own_record(store, sub_id, sam)  # гейт принадлежности (404) — до изменения
     _require_known_deputy(emp_store, payload.deputy_sam)
+    _check_deputies_limit(
+        store, settings_store, sam, payload.valid_from, payload.valid_to, exclude_id=sub_id
+    )
     try:
         record = store.update(
             sub_id,

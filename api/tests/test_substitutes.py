@@ -14,13 +14,16 @@
 # нет, гейт один — принадлежность записи (principal_sam == логин сессии), а
 # чужая запись отвечает 404 наравне с отсутствующей, чтобы по коду ответа не
 # было видно, что она существует.
+#
+# Третья часть — лимит числа заместителей (настройка substitute_deputies_limit,
+# сид миграции 0025): третьего заместителя завести можно, четвёртого — нет.
 
 from __future__ import annotations
 
 import base64
 import os
 import sys
-from datetime import date
+from datetime import date, datetime, timedelta
 
 import pytest
 
@@ -34,12 +37,17 @@ from app.employee_sync import (  # noqa: E402
     get_employee_sync_store,
 )
 from app.main import app  # noqa: E402
+from app.settings_routes import (  # noqa: E402
+    SettingsUnavailable,
+    get_settings_store,
+)
 from app.substitute_store import (  # noqa: E402
     InMemorySubstituteStore,
     SubstituteNotFound,
     SubstitutesUnavailable,
     get_substitute_store,
 )
+from app.timezone import current_timezone  # noqa: E402
 
 TEST_ALLOWED = "SED_HR,SED_ADMINS"
 TEST_ADMINS = "SED_ADMINS"
@@ -59,6 +67,14 @@ ADMIN_FIO = "Петров Сергей Андреевич"
 OWNER_SAM = "step.sidorov"
 HR_SAM = "ok.ivnova"
 SECOND_DEPUTY = "zameshchitel.vtoroj"
+# Ещё четыре вымышленных заместителя — для проверки лимита нужно больше записей,
+# чем дефолт 3 (все они в справочнике сотрудников фикстуры directory).
+THIRD_DEPUTY = "zameshchitel.tretij"
+FOURTH_DEPUTY = "zameshchitel.chetvertyj"
+FIFTH_DEPUTY = "zameshchitel.pytyj"
+SIXTH_DEPUTY = "zameshchitel.shestoy"
+# Ключ настройки с лимитом заместителей (инфра-ключ, сид миграции 0025).
+LIMIT_KEY = "substitute_deputies_limit"
 
 
 def _b64(value: str) -> str:
@@ -126,6 +142,11 @@ def directory():
                 # Владелец шага из conftest — тоже сотрудник: его логином
                 # проверяется обратная пара (кто-то назначил заместителем меня).
                 ("В-0003", OWNER_SAM, "Сидоров Вымышленный Владелевич"),
+                # Четыре заместителя сверх первых двух — под лимит заместителей.
+                ("В-0004", THIRD_DEPUTY, "Третий Вымышленный Заместителевич"),
+                ("В-0005", FOURTH_DEPUTY, "Четвёртый Вымышленный Заместителевич"),
+                ("В-0006", FIFTH_DEPUTY, "Пятый Вымышленный Заместителевич"),
+                ("В-0007", SIXTH_DEPUTY, "Шестой Вымышленный Заместителевич"),
             )
         ]
     )
@@ -906,3 +927,314 @@ def test_store_list_by_principal_reads_only_own(substitutes):
         OWNER_SAM
     )
     assert substitutes.list_by_principal(HR_SAM) == []
+
+
+# ---------------------------------------------------------------------------
+# Лимит числа заместителей: настройка substitute_deputies_limit (миграция 0025)
+# ---------------------------------------------------------------------------
+
+
+class SeedSettingsStore:
+    """Хранилище настроек с заданными значениями (сид-формат строками)."""
+
+    def __init__(self, values=None, broken=False):
+        self.values = dict(values or {})
+        self.broken = broken
+
+    def _check(self):
+        if self.broken:
+            raise SettingsUnavailable("Хранилище настроек недоступно (тест)")
+
+    def get(self, key):
+        self._check()
+        return self.values.get(key)
+
+    def set(self, key, value):
+        self._check()
+        self.values[key] = value
+
+    def get_many(self, keys):
+        self._check()
+        return {key: self.values.get(key) for key in keys}
+
+    def set_many(self, values):
+        self._check()
+        self.values.update(values)
+
+
+@pytest.fixture
+def deputies_limit():
+    """Хранилище настроек, значение лимита задаёт сам тест (пусто — «ключа нет»)."""
+    store = SeedSettingsStore()
+    app.dependency_overrides[get_settings_store] = lambda: store
+    yield store
+    app.dependency_overrides.pop(get_settings_store, None)
+
+
+def _today() -> date:
+    """Сегодня по часовой зоне системы — так же, как считает лимит."""
+    return datetime.now(current_timezone()).date()
+
+
+def _active_period() -> dict:
+    """Срок записи, действующей сегодня (бессрочно с сегодняшнего числа)."""
+    return {"valid_from": _today().isoformat(), "valid_to": None}
+
+
+def _active_body(deputy_sam: str) -> dict:
+    """Тело личной записи, действующей сегодня (заместитель + открытый срок)."""
+    return _my_body(deputy_sam=deputy_sam, **_active_period())
+
+
+def _admin_active_body(deputy_sam: str, principal_sam: str = PRINCIPAL) -> dict:
+    """Тело админской записи, действующей сегодня."""
+    return _body(principal_sam=principal_sam, deputy_sam=deputy_sam, **_active_period())
+
+
+def test_limit_default_three_without_key(client, owner_headers, substitutes, directory):
+    """Без ключа в настройках (офлайн-хранилище пусто) — дефолт 3: третьего
+    заместителя завести можно, четвёртый — 422 с понятным текстом.
+
+    Текст ответа содержит само значение лимита и имя настройки: сотрудник должен
+    понять, что лимит настраивается, а не зашит."""
+    for deputy in (THIRD_DEPUTY, FOURTH_DEPUTY, FIFTH_DEPUTY):
+        _my_create(client, owner_headers, deputy_sam=deputy, **_active_period())
+    fourth = client.post(
+        "/substitutes/my", json=_active_body(SIXTH_DEPUTY), headers=owner_headers
+    )
+    assert fourth.status_code == 422, fourth.text
+    assert "Лимит заместителей — 3" in fourth.json()["detail"]
+    assert LIMIT_KEY in fourth.json()["detail"]
+    assert len(substitutes.list_all()) == 3
+
+
+def test_limit_taken_from_setting(client, owner_headers, substitutes, directory, deputies_limit):
+    """Лимит — значение НАСТРОЙКИ, а не константа: при 1 второй заместитель 422."""
+    deputies_limit.values[LIMIT_KEY] = "1"
+    _my_create(client, owner_headers, **_active_period())
+    second = client.post(
+        "/substitutes/my", json=_active_body(SECOND_DEPUTY), headers=owner_headers
+    )
+    assert second.status_code == 422, second.text
+    assert "Лимит заместителей — 1" in second.json()["detail"]
+    assert LIMIT_KEY in second.json()["detail"]
+    assert len(substitutes.list_all()) == 1
+
+
+def test_limit_raised_by_setting_allows_fourth(
+    client, owner_headers, substitutes, directory, deputies_limit
+):
+    """Подняли настройку до 4 — четвёртый заместитель заводится (значение из БД)."""
+    deputies_limit.values[LIMIT_KEY] = "4"
+    for deputy in (THIRD_DEPUTY, FOURTH_DEPUTY, FIFTH_DEPUTY, SIXTH_DEPUTY):
+        _my_create(client, owner_headers, deputy_sam=deputy, **_active_period())
+    assert len(substitutes.list_all()) == 4
+
+
+def test_limit_fallback_when_settings_store_down(
+    client, owner_headers, substitutes, directory, deputies_limit
+):
+    """Хранилище настроек недоступно — запасной дефолт: третий создаётся, четвёртый 422.
+
+    Проверка ограничения не должна ронять сохранение записи."""
+    deputies_limit.broken = True
+    for deputy in (THIRD_DEPUTY, FOURTH_DEPUTY, FIFTH_DEPUTY):
+        _my_create(client, owner_headers, deputy_sam=deputy, **_active_period())
+    fourth = client.post(
+        "/substitutes/my", json=_active_body(SIXTH_DEPUTY), headers=owner_headers
+    )
+    assert fourth.status_code == 422, fourth.text
+    assert "Лимит заместителей — 3" in fourth.json()["detail"]
+
+
+def test_limit_fallback_on_dirty_setting(
+    client, owner_headers, substitutes, directory, deputies_limit
+):
+    """Битое или неположительное значение настройки — запасной дефолт 3.
+
+    Через API такое значение в БД не попадёт (валидатор настроек отвергает 0 и
+    мусор), но при ручной правке БД ограничение продолжает работать: третий
+    создаётся, четвёртый 422."""
+    for value in ("не число", "0", "-1"):
+        deputies_limit.values[LIMIT_KEY] = value
+        for deputy in (THIRD_DEPUTY, FOURTH_DEPUTY, FIFTH_DEPUTY):
+            response = client.post(
+                "/substitutes/my",
+                json=_active_body(deputy),
+                headers=owner_headers,
+            )
+            assert response.status_code == 201, (value, response.text)
+        fourth = client.post(
+            "/substitutes/my", json=_active_body(SIXTH_DEPUTY), headers=owner_headers
+        )
+        assert fourth.status_code == 422, (value, fourth.text)
+        assert "Лимит заместителей — 3" in fourth.json()["detail"]
+        for deputy in (THIRD_DEPUTY, FOURTH_DEPUTY, FIFTH_DEPUTY):
+            stored = next(
+                item
+                for item in substitutes.list_all()
+                if item.deputy_sam == deputy
+            )
+            client.delete(f"/substitutes/my/{stored.id}", headers=owner_headers)
+
+
+def test_limit_counts_record_ending_today(client, owner_headers, substitutes, directory):
+    """Запись, заканчивающаяся СЕГОДНЯ, место в лимите занимает.
+
+    Граница интервала: `valid_to` — последний день действия, а не день после
+    него. Ошибка на символе тут сделала бы «вечные» записи (valid_to = сегодня),
+    которые никогда не освобождали бы место."""
+    today = _today()
+    for deputy in (THIRD_DEPUTY, FOURTH_DEPUTY):
+        response = client.post(
+            "/substitutes/my",
+            json=_my_body(
+                deputy_sam=deputy,
+                valid_from=today.isoformat(),
+                valid_to=today.isoformat(),
+            ),
+            headers=owner_headers,
+        )
+        assert response.status_code == 201, response.text
+    started_today = client.post(
+        "/substitutes/my",
+        json=_my_body(deputy_sam=FIFTH_DEPUTY, valid_from=today.isoformat()),
+        headers=owner_headers,
+    )
+    assert started_today.status_code == 201, started_today.text
+    fourth = client.post(
+        "/substitutes/my", json=_active_body(SIXTH_DEPUTY), headers=owner_headers
+    )
+    assert fourth.status_code == 422, fourth.text
+
+
+def test_limit_counts_only_records_active_today(client, owner_headers, substitutes, directory):
+    """Законченная и ещё не начатая записи место не занимают: при трёх действующих
+    они заводятся, а четвёртая действующая — уже 422.
+
+    Иначе истёкшие записи (их нельзя удалить — они нужны для истории) заблокировали
+    бы новые навсегда."""
+    today = _today()
+    for deputy in (THIRD_DEPUTY, FOURTH_DEPUTY, FIFTH_DEPUTY):
+        _my_create(client, owner_headers, deputy_sam=deputy, **_active_period())
+    past = client.post(
+        "/substitutes/my",
+        json=_my_body(
+            deputy_sam=DEPUTY,
+            valid_from=(today - timedelta(days=30)).isoformat(),
+            valid_to=(today - timedelta(days=1)).isoformat(),
+        ),
+        headers=owner_headers,
+    )
+    assert past.status_code == 201, past.text
+    future = client.post(
+        "/substitutes/my",
+        json=_my_body(
+            deputy_sam=SECOND_DEPUTY,
+            valid_from=(today + timedelta(days=30)).isoformat(),
+            valid_to=None,
+        ),
+        headers=owner_headers,
+    )
+    assert future.status_code == 201, future.text
+    fourth_active = client.post(
+        "/substitutes/my", json=_active_body(SIXTH_DEPUTY), headers=owner_headers
+    )
+    assert fourth_active.status_code == 422, fourth_active.text
+    assert len(substitutes.list_all()) == 5
+
+
+def test_limit_not_applied_to_other_employee(
+    client, owner_headers, hr_headers, substitutes, directory
+):
+    """Лимит свой у каждого сотрудника: чужой счётчик не мешает (справочник общий)."""
+    for deputy in (THIRD_DEPUTY, FOURTH_DEPUTY, FIFTH_DEPUTY):
+        _my_create(client, owner_headers, deputy_sam=deputy, **_active_period())
+    blocked = client.post(
+        "/substitutes/my", json=_active_body(SIXTH_DEPUTY), headers=owner_headers
+    )
+    assert blocked.status_code == 422, blocked.text
+    # У сотрудника ОК свой счётчик: его первая запись проходит.
+    first = client.post(
+        "/substitutes/my", json=_active_body(FOURTH_DEPUTY), headers=hr_headers
+    )
+    assert first.status_code == 201, first.text
+    assert first.json()["principal_sam"] == HR_SAM
+
+
+def test_update_does_not_count_edited_record(client, owner_headers, substitutes, directory):
+    """Правка записи не вылетает за лимит: правимая запись в счёт не входит.
+
+    Иначе при лимите 3 сотрудник не смог бы ни продлить срок, ни сменить
+    заместителя — а запись всё равно одна и та же."""
+    ids = [
+        _my_create(client, owner_headers, deputy_sam=deputy, **_active_period())["id"]
+        for deputy in (THIRD_DEPUTY, FOURTH_DEPUTY, FIFTH_DEPUTY)
+    ]
+    edited = client.put(
+        f"/substitutes/my/{ids[-1]}",
+        json=_active_body(SIXTH_DEPUTY),
+        headers=owner_headers,
+    )
+    assert edited.status_code == 200, edited.text
+    assert edited.json()["deputy_sam"] == SIXTH_DEPUTY
+    assert len(substitutes.list_all()) == 3
+    # Лимит при этом не сдвинулся: лишняя запись по-прежнему не заводится.
+    blocked = client.post(
+        "/substitutes/my", json=_active_body(DEPUTY), headers=owner_headers
+    )
+    assert blocked.status_code == 422, blocked.text
+
+
+def test_limit_checked_before_write(client, owner_headers, substitutes, directory):
+    """Превышение лимита — 422 до похода в хранилище: запись не появляется,
+    аудита substitutes.create не пишется."""
+    for deputy in (THIRD_DEPUTY, FOURTH_DEPUTY, FIFTH_DEPUTY):
+        _my_create(client, owner_headers, deputy_sam=deputy, **_active_period())
+    creates_before = len([e for e in audit_log.all() if e.action == "substitutes.create"])
+    response = client.post(
+        "/substitutes/my", json=_active_body(SIXTH_DEPUTY), headers=owner_headers
+    )
+    assert response.status_code == 422, response.text
+    assert SIXTH_DEPUTY not in [record.deputy_sam for record in substitutes.list_all()]
+    assert len([e for e in audit_log.all() if e.action == "substitutes.create"]) == (
+        creates_before
+    )
+
+
+def test_admin_routes_respect_the_same_limit(client, admin_headers, substitutes):
+    """Справочник один: админские ручки /settings/substitutes ограничение соблюдают
+    те же, а правимая запись в счёт не входит (её можно поменять при полном лимите)."""
+    ids = [
+        _seed(client, admin_headers, deputy_sam=deputy, **_active_period())
+        for deputy in (THIRD_DEPUTY, FOURTH_DEPUTY, FIFTH_DEPUTY)
+    ]
+    blocked = _create(
+        client, admin_headers, deputy_sam=SIXTH_DEPUTY, **_active_period()
+    )
+    assert blocked.status_code == 422, blocked.text
+    assert "Лимит заместителей — 3" in blocked.json()["detail"]
+    assert LIMIT_KEY in blocked.json()["detail"]
+    edited = client.put(
+        f"/settings/substitutes/{ids[-1]}",
+        json=_admin_active_body(SIXTH_DEPUTY),
+        headers=admin_headers,
+    )
+    assert edited.status_code == 200, edited.text
+    assert edited.json()["deputy_sam"] == SIXTH_DEPUTY
+    assert len(substitutes.list_all()) == 3
+
+
+def test_admin_update_checks_limit_of_target_employee(client, admin_headers, substitutes):
+    """Перенос записи на сотрудника, у которого лимит исчерпан, — 422 и запись
+    остаётся у прежнего сотрудника."""
+    for deputy in (THIRD_DEPUTY, FOURTH_DEPUTY, FIFTH_DEPUTY):
+        _seed(client, admin_headers, deputy_sam=deputy, **_active_period())
+    moving = _seed(client, admin_headers, principal_sam=HR_SAM, **_active_period())
+    response = client.put(
+        f"/settings/substitutes/{moving}",
+        json=_admin_active_body(SIXTH_DEPUTY, principal_sam=PRINCIPAL),
+        headers=admin_headers,
+    )
+    assert response.status_code == 422, response.text
+    assert substitutes.by_id(moving).principal_sam == HR_SAM

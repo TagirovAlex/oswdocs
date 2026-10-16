@@ -13,7 +13,8 @@
 //
 // Покрытие (README п.1 «Поиск/доступ»): видимость вкладок (в т.ч. личной вкладки
 // «Заместители» у всех ролей), создание заявки, настройки (admin-only), правда и
-// доступность личного справочника заместителей, карточка заявки владельцу без ПДн,
+// доступность личного справочника заместителей, ручки подбора заместителя и
+// справочника сотрудников по блокам прав, карточка заявки владельцу без ПДн,
 // кроме ФИО и службы заявки (решение человека 2026-10-14 — без них согласующий
 // не видит, о ком заявка).
 import { test, expect, Page } from "@playwright/test";
@@ -207,6 +208,18 @@ test.describe("Матрица ролей README п.1", () => {
 
     // Настройки: вкладки нет в UI, GET /api/settings → 403 (только админам).
     expect(await apiStatus(page, "/api/settings")).toBe(403);
+
+    // Личный контур заместителей открыт ЛЮБОМУ вошедшему (решение человека
+    // 2026-10-15): /substitutes/my и подбор /substitutes/candidates — 200 без
+    // блоков прав, а админский справочник /settings/substitutes — 403 (блок
+    // settings_substitutes есть только у admin/sed_admin).
+    expect(await apiStatus(page, "/api/substitutes/my")).toBe(200);
+    expect(await apiStatus(page, "/api/substitutes/candidates?q=ив")).toBe(200);
+    expect(await apiStatus(page, "/api/settings/substitutes")).toBe(403);
+    // Справочник сотрудников и поиск в живом AD — по блоку employee_directory,
+    // который у сотрудника ОК ЕСТЬ (вкладка «Справочник» в списке выше), поэтому
+    // поиск открыт. 403 на /api/ad/search проверяется у роли без блока (owner).
+    expect(await apiStatus(page, "/api/ad/search?q=ив")).toBe(200);
   });
 
   test("owner: только Заявки/Заместители, карточка без ПДн (кроме ФИО и службы), настройки — 403", async ({ page }) => {
@@ -226,7 +239,8 @@ test.describe("Матрица ролей README п.1", () => {
     expect(await apiStatus(page, "/api/substitutes/my")).toBe(200);
     expect(await apiStatus(page, "/api/settings/substitutes")).toBe(403);
     // Подбор заместителя открыт всем вошедшим (локальный справочник сотрудников),
-    // а поиск в живом AD остался за блоком employee_directory.
+    // а поиск в живом AD остался за блоком employee_directory. ФИО сотрудников
+    // видны именно в подборе заместителя (решение человека 2026-10-15).
     expect(await apiStatus(page, "/api/substitutes/candidates?q=ив")).toBe(200);
     expect(await apiStatus(page, "/api/ad/search?q=ив")).toBe(403);
 

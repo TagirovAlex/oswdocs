@@ -5,7 +5,7 @@
 ## Обзор
 - `api/` — FastAPI (Python 3.12), `app/` — код, `tests/` — pytest, `requirements.txt`.
 - `frontend/` — React SPA (Vite): `src/` — код, `public/` — статика, `dist/` — сборка.
-- `db/alembic/versions/` — миграции БД (0001..0023).
+- `db/alembic/versions/` — миграции БД (0001..0025).
 - `proxy/` — nginx. `deploy/` — компоуз/деплой. `samples/` — DESIGN.md + макет.
 - `script_local/`, `script_remote/` — инструментарий разработчика: доступ к стенду, выкладка
   и диагностика (gitignored; состав и назначение каждого скрипта — в `README.md` внутри папок).
@@ -51,6 +51,19 @@
   `_ad_candidates`, `_missing_ad_card_detail`). Замещение ответственных — `_DeputyResolver`
   в `_owns_step`/`_can_act`/`_is_step_viewer`/`_is_participant` (подробно — в
   `substitutes.py` ниже): действует на каждом шаге, включая групповой.
+  **Видимость карточки — правило участника** `_is_participant` (решение человека
+  2026-10-15): привилегированные роли (`hr`/`hr_admin`/`admin`/`sed_admin`), инициатор
+  (`request.created_by`), оставивший отметку по ЛЮБОМУ шагу (`_has_own_mark` — логин в
+  `approvals` любого шага, сравнение без учёта регистра, отметка любая: вернул,
+  отказал) и владелец шага (`_is_step_viewer`: группа-владелец, снимок `assignees`,
+  персональный исполнитель, участник состава этапа, действующий заместитель).
+  Прежнее правило было «только владелец шага» — из-за него карточку не видели
+  инициатор без согласования и сотрудник ОК, чей шаг потом переназначили. Правило
+  применено в трёх местах и всюду одинаково: ветка «мои» `GET /requests`, счётчик
+  папки «Мои задачи» в `GET /folders` и гейт карточки `GET /requests/{id}`.
+  Параметр `include_privileged=False` — без ролевого сокращения, только признаки
+  участия; его зовёт `documents._can_view` (у бланка свой список ролей, администратор
+  СЭД в него не входит).
 - `requests_store.py` — хранилище заявок (InMemory/Db), в т.ч. employees/документы-хелперы.
 - `timezone.py` — часовой пояс системы: зона из `settings.timezone` (иначе `TZ`), соединениям
   Postgres ставится на каждой выдаче из пула (`set_config`, обработчик SQLAlchemy `checkout`),
@@ -107,8 +120,12 @@
   `GET/PUT /settings/routing/blanks/{id}/steps` и шаги справочника
   `GET/POST/PUT/DELETE /settings/routing/step-catalog` (блок `settings_blanks`; `/settings` и виды
   документов — `settings_infra`, `/settings/content` — `settings_content`, `/enterprises` и
-  `/step-groups` — `request_create`); ключи `blank_autopick` и `timezone`
-  в `INFRA_KEYS` (часовой пояс показа дат правится на вкладке «Инфра»). Вкладка
+  `/step-groups` — `request_create`); ключи `blank_autopick`, `timezone` и
+  `substitute_deputies_limit` (лимит заместителей на сотрудника, целое положительное,
+  дефолт 3, сид — миграция 0025; валидатор `_positive_deputies_limit` в `SettingsPayload`
+  не пускает 0 и отрицательные — при лимите 0 «уберите лишнюю запись» неразрешимо)
+  в `INFRA_KEYS` (часовой пояс показа дат и лимит заместителей правятся на вкладке
+  «Инфра»). Вкладка
   «Доступ и роли»: `GET /settings/permissions` (блоки, шаблоны, состав и
   группы одним ответом), `PUT /settings/permissions/templates/{code}` (состав шаблона целиком,
   аудит `permissions.update`, 409 при снятии у себя блока `settings_infra`),
@@ -123,6 +140,17 @@
   ответственных шага из зеркала `users` по логинам (`assignees`); групповой шаг (снимок
   ответственных пуст) печатается по `owner_group`; `_fill_hr_placeholders` — `{date}`/
   `{dismissal_date}`/`{manager}` из локальных зеркал (кадровые данные по ключу заявки, AD users).
+  **Гейт доступа `_can_view`** (его зовут `GET /documents/{id}` и
+  `GET /documents/{id}/pdf`): список ролей прежний — `hr`/`hr_admin`/`admin` — ПЛЮС
+  участники согласования, т.е. `_is_participant(..., include_privileged=False)`:
+  инициатор, оставивший отметку по любому шагу и владелец шага (в т.ч. заместитель)
+  видят бланк наравне с владельцем шага (решение человека 2026-10-15). Администратор
+  СЭД — привилегированный в карточке, но в бланк НЕ входит: расширялось участие, не
+  роли. Сама печать (`POST /requests/{id}/print`) — за блоком `print_blank`.
+  **Вложения смотрят иначе и не менялись** (`attachments._can_access`, решение человека
+  2026-10-15 «вложения по рекомендации»): ОК/руководители ОК/админ, владелец шага
+  и его заместитель — общий `_is_step_viewer` там намеренно не используется, он шире,
+  а гейт держит ещё и загрузку скана.
 - `docs.py` — сборка бланка из данных: `build_blank_document` (python-docx) единой вёрсткой
   (шапка, шаги блоками строк с режимом, подвал; `build_bypass_context` — снимок бланка, шаги с
   `assignees`/`assignee_names`/`approval_mode` и `stage_lines`), плейсхолдеры печати
@@ -148,16 +176,29 @@
   `/api/ad/search` под блоком `employee_directory` остался как был). Хранилище `DbSubstituteStore`/
   `InMemorySubstituteStore` + `SubstitutesUnavailable`;
   действующие записи на дату — `list_active(on)` (`valid_from <= on AND (valid_to IS NULL
-  OR valid_to >= on)`). Замещение применяется в `requests.py`: `_DeputyResolver` (кэш на
+  OR valid_to >= on)`).
+  **Лимит заместителей** (решение человека 2026-10-15): `_check_deputies_limit` —
+  одна проверка на все четыре ручки записи (`POST/PUT /settings/substitutes` и
+  `POST/PUT /substitutes/my`), 422 с текстом, в котором названа настройка
+  `substitute_deputies_limit`. Считаются только записи, действующие **сегодня** по
+  часовой зоне системы (`_acts_on`, как замещение в `requests.py`): законченные и ещё
+  не начавшиеся место не занимают, новая занимает, только если действует сегодня, а при
+  правке записи она в счёт не входит (`exclude_id`); хранилище недоступно — 503.
+  Лимит берётся из БД (`_deputies_limit`: только `read_setting_value`, дефолт 3 —
+  запасной путь при недоступном/битом значении или недоступном хранилище настроек,
+  fail-soft: проверка не должна ронять сохранение записи); ключ в `INFRA_KEYS`,
+  сид — миграция 0025. Замещение применяется в `requests.py`: `_DeputyResolver` (кэш на
   вызов ответа) в `_owns_step`/`_can_act`/`_is_step_viewer`/`_is_participant` и в письме
   «назначена» (`_deputy_assigned_mails`, флаг `notify`, дедупликация по адресу). Замещение
   действует на каждом шаге, включая ГРУППОВОЙ (оба режима шага): `_step_deputy_owned` →
   `_DeputyResolver.covers_member_of`/`_group_sams` по составу группы-владельца из кэша
   `ad_group_members` (один `load` на группу за вызов ответа; кэш недоступен или
   не синхронизирован — пусто, fail-soft), в письме — `notify_deputies_of_group`.
-  Бланк и вложения доступны заместителю так же, как замещаемому: `documents._can_view`
-  и `attachments._can_access` зовут тот же `requests._is_step_viewer` с резолвером; сама
-  печать (`POST /requests/{id}/print`) остаётся за блоком `print_blank`. Отметка
+  Бланк заместителю доступен так же, как замещаемому — `documents._can_view` зовёт
+  `requests._is_participant(..., include_privileged=False)`, то есть признаки участия
+  (в т.ч. замещение); **вложения** — прежнее узкое правило, `attachments._can_access`
+  зовёт `_step_deputy_owned` (решение человека 2026-10-15 «вложения по рекомендации»);
+  сама печать (`POST /requests/{id}/print`) остаётся за блоком `print_blank`. Отметка
   заместителя пишется от его логина, отдельного признака «за кого» нет.
 - `audit.py` — журнал аудита (память + INSERT в БД).
 - `mailer.py` — письма (шаблоны, SMTP/файловая очередь); адресаты шага — все ответственные из
@@ -212,6 +253,11 @@
   режим шага (`parallel`/`sequential`), флаги `optional`/`require_comment`; «Взять из справочника»
   копирует шаг из `step_catalog` в состав бланка. Вкладка «Шаги» (только admin) — редактор
   справочника шагов (`step_catalog`): код/название/текст/исполнитель/режим/флаги/активность.
+  Вкладка «Инфра» (блок `settings_infra`) — поле **«Лимит заместителей на сотрудника
+  (`substitute_deputies_limit`)»**: число из `GET /settings`, уходит в `PUT /settings`
+  тем же ключом; если ключа в ответе нет (старый бэкенд/не засеян) — показывается
+  запасное `SUBSTITUTE_DEPUTIES_LIMIT_FALLBACK = 3`, чтобы поле не было пустым. Правит
+  администратор; личный раздел «Заместители» (`substitutes.tsx`) этого поля не показывает.
   Вкладка «Заместители» (блок `settings_substitutes`, админский контур справочника) —
   `SubstitutesEditor`: весь справочник
   «сотрудник → заместитель» (сотрудники и заместители выбираются поиском в AD),
@@ -314,10 +360,22 @@
    («Настройки: заместители», sort_order 140) с выдачей шаблонам `sed_admin` и `admin`.
    Новых таблиц под групповой шаг нет: состав группы-владельца берётся из кэша
    `ad_group_members` (`_DeputyResolver.covers_member_of`/`_group_sams`, fail-soft);
-   доступ заместителя к бланку и вложениям — через `documents._can_view`/
-   `attachments._can_access` (общий `_is_step_viewer`), печать — за блоком `print_blank`.
-   Вниз: строки блока из perm_template_blocks/perm_blocks и DROP TABLE substitutes.
-  Планируется (волна F3): админка прав — вкладка «Доступ и роли» на блоках и шаблонах
+    доступ заместителя к бланку — через `documents._can_view`
+    (с 2026-10-15 — признаки участия `_is_participant(include_privileged=False)`),
+    к вложениям — `attachments._can_access` (прежнее узкое правило + `_step_deputy_owned`),
+    печать — за блоком `print_blank`.
+    Вниз: строки блока из perm_template_blocks/perm_blocks и DROP TABLE substitutes.
+    0024 индексы нечеткого поиска по справочнику сотрудников под подбор заместителя
+    (`employees_fio_trgm`/`employees_ad_sam_trgm` — GIN по `pg_trgm` под `ILIKE '%…%'`
+    по `fio` и `ad_sam`; ручка открыта любому вошедшему, без индекса таблица на 23+
+    тысячи строк читалась целиком на каждый запрос; `CREATE EXTENSION` не повторяется —
+    его создаёт 0001),
+    0025 лимит заместителей у сотрудника (настройка `settings.substitute_deputies_limit`,
+    сид `3` идемпотентно по образцу 0022 `timezone`: заведённое админом значение не
+    перетирается; вниз — удаление ключа, тогда проверка работает по запасному дефолту 3
+    в `substitutes._deputies_limit`). Схему не меняет, существующие записи не трогает:
+    у кого заместителей больше лимита, они остаются.
+   Планируется (волна F3): админка прав — вкладка «Доступ и роли» на блоках и шаблонах
    (бэкенд прав — `permissions.py` + `/settings/permissions`, волна F2, сделано).
 
 ## Сценарии ключевых функций

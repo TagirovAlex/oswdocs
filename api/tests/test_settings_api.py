@@ -111,6 +111,9 @@ CONTRACT_VALUES = {
     "hr_dismissals_synced_at": None,
     "blank_autopick": None,
     "timezone": None,
+    # Ключа лимита заместителей в офлайн-моке нет (миграция 0025 сеет его в БД) —
+    # контракт GET/PUT на него такой же, как у прочих ключей: None без ключа.
+    "substitute_deputies_limit": None,
 }
 
 # Контент-часть контракта: только ключи CONTENT_KEYS (для GET/PUT /settings/content).
@@ -172,6 +175,7 @@ UPDATED_VALUES = {
     "hr_dismissals_synced_at": None,
     "blank_autopick": None,
     "timezone": None,
+    "substitute_deputies_limit": 3,
 }
 
 
@@ -980,3 +984,42 @@ def test_timezone_blank_clears_key(client, admin_headers, mock_store):
     assert json.loads(mock_store.get("timezone") or "null") is None, (
         "пустая зона должна снимать ключ"
     )
+
+
+def test_settings_put_persists_substitute_deputies_limit(client, admin_headers, mock_store):
+    """Лимит заместителей — инфра-настройка админа: пишется, читается и виден в
+    GET /settings (сид значения — миграция 0025)."""
+    response = client.put(
+        "/settings", json={"substitute_deputies_limit": 5}, headers=admin_headers
+    )
+    assert response.status_code == 200, response.text
+    assert mock_store.get("substitute_deputies_limit") == "5"
+    assert response.json()["substitute_deputies_limit"] == 5
+    assert client.get("/settings", headers=admin_headers).json()[
+        "substitute_deputies_limit"
+    ] == 5
+
+
+def test_settings_reject_non_positive_deputies_limit(client, admin_headers, mock_store):
+    """Ноль или отрицательное значение — 422: такой лимит заблокировал бы любую
+    запись заместителя, а мусор в настройки не попадает."""
+    for bad in (0, -1, "много"):
+        response = client.put(
+            "/settings", json={"substitute_deputies_limit": bad}, headers=admin_headers
+        )
+        assert response.status_code == 422, (bad, response.text)
+    assert "substitute_deputies_limit" not in mock_store._data
+
+
+def test_deputies_limit_is_infra_key_not_content(client, hr_admin_headers, mock_store):
+    """Ключ инфраструктурный (правит админ): на контент-эндпоинте его нет."""
+    assert "substitute_deputies_limit" in SETTINGS_KEYS
+    assert "substitute_deputies_limit" not in CONTENT_KEYS
+    body = client.get("/settings/content", headers=hr_admin_headers).json()
+    assert "substitute_deputies_limit" not in body
+    client.put(
+        "/settings/content",
+        json={"substitute_deputies_limit": 9, "approval_ttl_days": 4},
+        headers=hr_admin_headers,
+    )
+    assert "substitute_deputies_limit" not in mock_store._data

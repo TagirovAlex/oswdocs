@@ -4,8 +4,9 @@
 # + qrcode). Оформление бланка собирается из данных заявки и снимка бланка
 # (docs.build_blank_document, единая вёрстка без макета); файлы-шаблоны .docx и
 # ключ настроек doc_templates удалены — печати нечего читать.
-# Печать — только ОК/админы; чтение мета/PDF — ОК/админы и владелец своего шага.
-# ПДн владельцу не светят: отдаются только пути/версии/QR, PDF не парсится.
+# Печать — только ОК/админы; чтение мета/PDF — ОК/админы и участники
+# согласования (в т.ч. инициатор, см. _can_view).
+# ПДн участнику не светят: отдаются только пути/версии/QR, PDF не парсится.
 
 from __future__ import annotations
 
@@ -31,13 +32,10 @@ from .docs import (
     generate_bypass,
 )
 from .requests import (
-    _deputy_resolver_or_none,
     _get_request_or_404,
-    _is_step_viewer,
-    _restore_step_owner_kinds,
+    _is_participant,
     _RosterResolver,
     _routing_store_or_none,
-    _stage_owner_kinds,
 )
 from .permissions import BLOCK_PRINT_BLANK, require_block
 from .requests_store import RequestsStore, RequestsUnavailable, get_requests_store
@@ -294,27 +292,29 @@ def _doc_type_name(store: object, code: object) -> str:
 def _can_view(
     request: object, user: CurrentUser, roster: _RosterResolver | None = None
 ) -> bool:
-    """Доступ к документам: ОК/руководители ОК/админы или владелец одного из шагов заявки.
+    """Доступ к документам: ОК/руководители ОК/админы или участник заявки.
 
-    Правило шага то же, что у карточки заявки (requests._is_step_viewer):
-    группа-владелец, персональный исполнитель, участник состава этапа
-    (owner_kind = stage_roster) И заместитель ответственного (решение человека
-    2026-10-14: бланк заместителю доступен так же, как замещаемому). Резолверы не
-    переданы — строятся здесь же, вместе с восстановлением owner_kind шага из
-    справочника (в request_steps такой колонки нет, см.
-    requests._restore_step_owner_kinds).
+    Правило то же, что у карточки заявки (requests._is_participant): группа-
+    владелец шага, персональный исполнитель, участник состава этапа
+    (owner_kind = stage_roster), заместитель ответственного (решение человека
+    2026-10-14: бланк заместителю доступен так же, как замещаемому), а также
+    инициатор и отработавшие согласование — видят бланк наравне с владельцем
+    шага (решение человека 2026-10-15: карточку должен видеть каждый
+    участвующий в согласовании). Резолверы не переданы — строятся здесь же,
+    вместе с восстановлением owner_kind шага из справочника (в request_steps
+    такой колонки нет, см. requests._restore_step_owner_kinds).
+
+    Список ролей остаётся прежним: ОК/руководители ОК/админ. Администратор
+    СЭД в бланк НЕ входит — он видит карточку (там он привилегированный), но
+    доступ к бланку/вложениям по решению человека расширялся только участникам
+    согласования, а не ролям (include_privileged=False).
 
     Сама ПЕЧАТЬ остаётся за блоком прав «Печать бланка» (requests.print →
     require_block): замещение даёт видимость и право отметки, а не блок функций —
     его выдаёт администратор."""
     if user.role in ("hr", "hr_admin", "admin"):
         return True
-    if roster is None:
-        routing_store = _routing_store_or_none()
-        _restore_step_owner_kinds(request, _stage_owner_kinds(routing_store))
-        roster = _RosterResolver(routing_store)
-    deputy = _deputy_resolver_or_none()
-    return any(_is_step_viewer(step, user, roster, deputy) for step in request.steps)
+    return _is_participant(request, user, roster, include_privileged=False)
 
 
 def _enterprise_name(settings_store: DbSettingsStore, code: object) -> str:

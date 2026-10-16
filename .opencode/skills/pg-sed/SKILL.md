@@ -27,7 +27,19 @@ Postgres 17 (`postgres:17-trixie`), миграции — Alembic (вверх/в�
   часового пояса показа дат (`settings.timezone`, сид `Europe/Moscow`), 0023 справочник
   заместителей (`substitutes`: principal_sam/deputy_sam/valid_from/valid_to NULL на
   бессрочное/notify/note/created_by, UNIQUE(principal_sam, deputy_sam)) и 14-й блок прав
-  `settings_substitutes` с выдачей `sed_admin`/`admin`.
+  `settings_substitutes` с выдачей `sed_admin`/`admin`, 0024 индексы нечеткого поиска по
+  справочнику сотрудников под подбор заместителя (`employees_fio_trgm`/
+  `employees_ad_sam_trgm` — GIN по `pg_trgm` под `ILIKE '%…%'` по `fio` и `ad_sam`;
+  ручка открыта любому вошедшему, без индекса 23+ тысяч строк читались целиком на
+  каждый запрос; `CREATE EXTENSION` не повторяется — его создаёт 0001), 0025 настройка
+  ограничения числа заместителей (`settings.substitute_deputies_limit`, сид `3`).
+- **Сид ключа настроек делается идемпотентно** (`ON CONFLICT (key) DO NOTHING`) по
+  образцу 0022 `timezone`: значение, заведённое админом руками, миграция не
+  перетирает. 0025 вниз удаляет ключ — тогда проверка лимита работает по запасному
+  дефолту 3 в `substitutes._deputies_limit` (тот же режим, что до миграции). Схему
+  0025 не меняет и существующие записи `substitutes` не трогает: у кого заместителей
+  больше нового лимита, записи остаются, лимит снижает админ настройкой или разбирает
+  записи сам.
 - Откат миграции 0016 ничего не восстанавливает (значения и нерабочие), 0014 при downgrade не
   возвращает прежнее содержимое бланков — состав собирает человек заново; откат 0017 возвращает
   `stage_id` NOT NULL и потому удаляет все текущие шаги бланка (у них `NULL stage_id`) —
@@ -44,7 +56,10 @@ Postgres 17 (`postgres:17-trixie`), миграции — Alembic (вверх/в�
 - Поиск людей — индексы `pg_trgm` на ФИО/`sam`, чувствительность к `ё` учесть в нормализации на стороне API.
 - Файлы (сканы, DOCX/PDF) в БД не хранить — только мета + путь в volume.
 - Сиды `settings` по умолчанию: группы, `sed_ou`, `approval_ttl_days`, `position_escalation`,
-  `blank_autopick='off'`, `timezone='Europe/Moscow'` (легаси `position_to_category`/`templates`/`doc_templates`/`position_sets`
+  `blank_autopick='off'`, `timezone='Europe/Moscow'`, `substitute_deputies_limit='3'`
+  (лимит заместителей на сотрудника, 0025; правится админом, вкладка «Инфра», ключ в
+  `INFRA_KEYS` — контент-настройками он не правится и в `/settings/content` не отдаётся;
+  легаси `position_to_category`/`templates`/`doc_templates`/`position_sets`
   из `settings` удалены миграциями 0014/0016 — не возвращать).
 - `timezone` — часовая зона СИСТЕМЫ (одна на всё, `api/app/timezone.py`): её отдаёт
   `/auth/me` (обеим карточкам; хранимое остаётся в UTC), она уходит в соединения
