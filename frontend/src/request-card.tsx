@@ -65,10 +65,15 @@ interface RequestCardProps {
 // их не отличить от группового шага, поэтому смотрим owner_name. У by_user
 // бэкенд кладёт логин в owner_group — без ФИО показываем нейтральный текст.
 // Логика совпадает с stepOwnerLabel в requests-client.
-function stepOwnerCell(step: RequestStep): string {
+//
+// Название группы берём из справочника (groupNames, GET /api/step-groups): код
+// группы в UI не показываем, если название известно (решение человека
+// 2026-10-16). Без справочника (владельцу шага он закрыт блоком) остаётся код —
+// но тогда название присылает бэкенд в owner_name.
+function stepOwnerCell(step: RequestStep, groupNames: Record<string, string> = {}): string {
   if (step.owner_name) return step.owner_name;
   if (step.resolver === "by_user") return "Персональный исполнитель";
-  return step.owner_group || "—";
+  return groupNames[step.owner_group ?? ""] ?? step.owner_group ?? "—";
 }
 
 // Дата записи истории и дата создания заявки в шапке: локализованная и в зоне
@@ -258,6 +263,10 @@ function routeDraftFromSteps(steps: RequestStep[], knownGroups: string[]): Route
   const blocks: RouteBlockDraft[] = [];
   const byKey = new Map<number, RouteBlockDraft>();
   for (const step of steps) {
+    // Подпись шага для показа: название из owner_name (ФИО либо название группы
+    // — его резолвит бэкенд), без него код группы/логин (решение человека
+    // 2026-10-16: машинные коды в UI не показываем).
+    const ownerLabel = step.owner_name || step.owner_group || `шаг ${step.order}`;
     // В правку входят ожидающие и отказавшие: судьбу отказавшего решает ОК
     // («вернуть в маршрут» либо «убрать»). Согласованные и просроченные — нет.
     const refused = step.status === STEP_REFUSED || step.status === STEP_RETURNED;
@@ -275,12 +284,12 @@ function routeDraftFromSteps(steps: RequestStep[], knownGroups: string[]): Route
       block.steps.push({
         key: nextRouteKey(),
         kind: "refused",
-        value: step.owner_name || step.owner_group || `шаг ${step.order}`,
+        value: ownerLabel,
         order: step.order,
         refusedStatus: step.status,
         resolver: step.resolver || "by_group",
         requireComment: step.require_comment === true,
-        label: step.owner_name || step.owner_group || `шаг ${step.order}`,
+        label: ownerLabel,
       });
       continue;
     }
@@ -305,10 +314,10 @@ function routeDraftFromSteps(steps: RequestStep[], knownGroups: string[]): Route
       requireComment: step.require_comment === true,
       label:
         assignees.length === 0 && kind === "fixed"
-          ? `${step.owner_group} (группы нет в справочнике)`
+          ? `${ownerLabel} (группы нет в справочнике)`
           : assignees.length > 0
             ? assignees.join(", ")
-            : step.owner_group,
+            : ownerLabel,
     });
   }
   return blocks;
@@ -763,7 +772,7 @@ export function RequestCard(props: RequestCardProps) {
   // Исполнитель шага в таблице: при employee_key от бэкенда — ссылка на карточку
   // сотрудника (окно-попа), иначе прежний текст stepOwnerCell.
   function stepOwnerNode(step: RequestStep) {
-    const label = stepOwnerCell(step);
+    const label = stepOwnerCell(step, groupNames);
     if (!step.employee_key) return label;
     const url = employeeUrl(step.employee_key);
     return (
@@ -2225,7 +2234,7 @@ export function RequestCard(props: RequestCardProps) {
                   <option value="">— выберите шаг —</option>
                   {card.steps.map((s) => (
                     <option key={s.order} value={String(s.order)}>
-                      {stepLabel(s.order)} · {stepOwnerCell(s)}
+                      {stepLabel(s.order)} · {stepOwnerCell(s, groupNames)}
                     </option>
                   ))}
                 </select>

@@ -257,6 +257,61 @@ def _create(client, headers, **kw) -> dict:
     return response
 
 
+def test_ttl_days_taken_from_settings_store(
+    client, hr, requests_store, test_settings_override, settings_store
+):
+    """Срок шага берётся из настройки approval_ttl_days, а не из константы кода.
+
+    Регрессия (жалоба человека 2026-10-16): get_route_settings возвращал
+    заглушечный RouteSettings(), поэтому в заявку всегда уходило 3 дня — сколько
+    бы админ ни поставил в настройках. Оверрайда настроек маршрута здесь нет
+    намеренно: проверяется боевое чтение из таблицы settings."""
+    settings_store._values["approval_ttl_days"] = json.dumps(1)
+    created = _create(client, hr)
+    assert created.status_code == 201, created.text
+    expires = datetime.fromisoformat(created.json()["steps"][0]["expires_at"])
+    assert expires > _utcnow() + timedelta(hours=23)
+    assert expires <= _utcnow() + timedelta(days=1, minutes=1)
+
+
+def test_ttl_days_broken_value_falls_back_to_default(
+    client, hr, requests_store, test_settings_override, settings_store
+):
+    """Битое значение настройки — дефолт 3 дня, а не 500 и не срок «сейчас»."""
+    settings_store._values["approval_ttl_days"] = json.dumps("abc")
+    created = _create(client, hr)
+    assert created.status_code == 201, created.text
+    expires = datetime.fromisoformat(created.json()["steps"][0]["expires_at"])
+    assert expires > _utcnow() + timedelta(days=2)
+    assert expires <= _utcnow() + timedelta(days=3, minutes=1)
+
+
+def test_ttl_days_store_down_falls_back_to_default(
+    client, hr, requests_store, test_settings_override, settings_store
+):
+    """Недоступное хранилище настроек — тоже дефолт, а не 500 на создании заявки."""
+    settings_store.broken = True
+    created = _create(client, hr)
+    assert created.status_code == 201, created.text
+    expires = datetime.fromisoformat(created.json()["steps"][0]["expires_at"])
+    assert expires > _utcnow() + timedelta(days=2)
+
+
+def test_position_escalation_read_from_settings_store(
+    client, hr, requests_store, test_settings_override, settings_store
+):
+    """Эскалация по должности читается из настроек и пишется в заявку.
+
+    Раньше RouteSettings возвращался заглушкой, поэтому escalation_hours был
+    всегда пуст, и worker искал часы сам. Теперь берётся тем же чтением, что и
+    срок шага (сид настройки — пустой объект, поведение «из коробки» прежнее)."""
+    settings_store._values["position_escalation"] = json.dumps({FAKE_POSITION_LINE: 6})
+    created = _create(client, hr)
+    assert created.status_code == 201, created.text
+    stored = requests_store.get(created.json()["id"])
+    assert stored.escalation_hours == 6
+
+
 def test_without_blank_and_without_steps_422(
     client, hr, requests_store, test_settings_override, route_override
 ):

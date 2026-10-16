@@ -230,6 +230,9 @@ export interface RoutePreviewStage {
   // Этап необязательный: optional=false — снять его нельзя.
   optional: boolean;
   blocked_reason: string | null;
+  // Свой срок шага в часах (миграция 0026); null — общий срок
+  // approval_ttl_days из настроек.
+  ttl_hours?: number | null;
 }
 
 // Тело POST /api/requests/route/preview (RoutePreviewIn).
@@ -831,6 +834,9 @@ export interface BlankStepRow {
   approval_mode?: StepApprovalMode | null;
   optional: boolean;
   require_comment: boolean;
+  // Свой срок шага в часах (миграция 0026); null — общий срок approval_ttl_days
+  // из настроек. UI даёт и часы, и дни (дни пересчитываются в часы).
+  ttl_hours?: number | null;
 }
 
 // Шаг в теле PUT /api/settings/routing/blanks/{id}/steps (BlankStepIn).
@@ -844,6 +850,7 @@ export interface BlankStepInput {
   approval_mode?: StepApprovalMode | null;
   optional: boolean;
   require_comment: boolean;
+  ttl_hours?: number | null;
 }
 
 // GET /api/settings/routing/blanks: справочник бланков (только админ, иначе 403).

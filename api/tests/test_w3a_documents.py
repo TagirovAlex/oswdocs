@@ -649,7 +649,8 @@ class FakeAdReader:
 
 
 def _make_request(request_id="REQ-0001", *, expires_in, status=IN_APPROVAL,
-                 escalation_hours=None, assignee=None, owner_group="SED_STEP_BUH"):
+                 escalation_hours=None, assignee=None, owner_group="SED_STEP_BUH",
+                 ttl_hours=None):
     return _Request(
         id=request_id, status=status, route_origin="custom",
         enterprise=FAKE_ENTERPRISE, fio="Вымышленный Сотрудник Полный",
@@ -657,7 +658,8 @@ def _make_request(request_id="REQ-0001", *, expires_in, status=IN_APPROVAL,
         escalation_hours=escalation_hours, created_by="ok.vymyshlennaya",
         steps=[
             _Step(order=1, owner_group=owner_group, assignee=assignee,
-                  status=STEP_PENDING, expires_at=_utcnow() + expires_in)
+                  status=STEP_PENDING, expires_at=_utcnow() + expires_in,
+                  ttl_hours=ttl_hours)
         ],
     )
 
@@ -709,6 +711,34 @@ def test_worker_reminder_queued_once(tmp_path):
     again = run_once(store, queue, mailer, templates, {}, 7, ad, BASE_URL, now=now)
     assert again.reminders == 0
     assert again.sent == 0
+
+
+def test_worker_reminder_window_follows_step_ttl(tmp_path):
+    """Своё окно напоминания считается от своего срока шага (ttl_hours).
+
+    Общий TTL в 7 дней дал бы окно 3,5 суток: шаг с сроком 8 часов получил бы
+    напоминание сразу после выдачи, то есть за полтора суток до своего срока.
+    Со своим сроком окно — половина срока шага (4 часа)."""
+    store = get_memory_requests_store()
+    store.create(
+        _make_request(
+            expires_in=timedelta(hours=5),
+            assignee="step.buhgalter",
+            ttl_hours=8,
+        )
+    )
+    queue = FileMailQueue(tmp_path / "q.json")
+    mailer = MockMailer()
+    ad = FakeAdReader(
+        {"step.buhgalter": FakeUser("step.buhgalter", mail="buh@example.com")}
+    )
+    templates = [
+        {"code": "reminder", "subject": "Напоминание {{ request_id }}",
+         "body_html": "<html>{{ url }}</html>"}
+    ]
+    result = run_once(store, queue, mailer, templates, {}, 7, ad, BASE_URL, now=_utcnow())
+    # Осталось 5 часов из 8: до окна (4 часа) ещё час — напоминания нет.
+    assert result.reminders == 0
 
 
 def test_worker_escalation_to_manager(tmp_path):

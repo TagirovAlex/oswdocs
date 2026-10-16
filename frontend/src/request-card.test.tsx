@@ -451,7 +451,12 @@ describe("RequestCard", () => {
 
     renderCard();
     await waitFor(() => expect(screen.getByLabelText("Шаги заявки")).toBeInTheDocument());
-    expect(screen.getByText("Бухгалтерия")).toBeInTheDocument();
+    // Название группы — в колонке «Должность» (и в «Сотруднике», когда состав
+    // группы не загрузился), кода группы в таблице нет (решение человека
+    // 2026-10-16: машинные коды группы в UI не показываем).
+    const steps = within(screen.getByLabelText("Шаги заявки"));
+    expect(steps.getAllByText("Бухгалтерия").length).toBeGreaterThan(0);
+    expect(steps.queryByText("SED_STEP_BUH")).not.toBeInTheDocument();
   });
 
   // Сотрудник — состав группы из AD, даже когда наименование группы известно

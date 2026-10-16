@@ -3,9 +3,9 @@
 # Postgres (DbRequestsStore) на стенде; логика эндпоинтов не зависит от
 # реализации (интерфейс RequestsStore в requests_store.py).
 # Прикладные настройки (position_escalation, approval_ttl_days,
-# require_comment) — из таблицы settings на стенде (волна A1);
-# здесь — injectable-заглушка get_route_settings (дефолты нейтральные,
-# реальные значения — только через settings/тестовые оверрайды).
+# require_comment) — из таблицы settings (волна A1); читает их
+# get_route_settings на каждый вызов (ключа нет — дефолты RouteSettings),
+# тесты подменяют зависимость через оверрайд.
 # Статусы README п.1: Черновик → На согласовании → На доработке →
 # Согласовано → К исполнению → Завершено / Отклонено / Отозвано.
 
@@ -77,6 +77,7 @@ from .routing import (
 from .routing_store import DbRoutingStore, RoutingUnavailable, get_routing_store
 from .settings_routes import (
     DbSettingsStore,
+    SettingsUnavailable,
     _groups_with_names,
     get_settings_store,
     read_setting_value,
@@ -130,13 +131,59 @@ class RouteSettings(BaseModel):
     )
 
 
-# Глобал offline-заглушки (стенд подменит чтением settings из БД).
+# Глобал offline-заглушки (стенд читает настройки из БД — см. get_route_settings).
 _ROUTE_SETTINGS = RouteSettings()
 
 
-def get_route_settings() -> RouteSettings:
-    """Настройки маршрута (зависимость для оверрайда в тестах/на стенде)."""
-    return _ROUTE_SETTINGS
+def get_route_settings(
+    store: DbSettingsStore = Depends(get_settings_store),
+) -> RouteSettings:
+    """Настройки маршрута из таблицы settings: срок отметок шага
+    (approval_ttl_days, дней) и эскалация по должностям (position_escalation).
+
+    Читаются на КАЖДЫЙ вызов, поэтому правка настроек видна следующей же
+    заявкой: раньше здесь возвращался константный заглушечный RouteSettings,
+    и срок шага всегда оставался 3 дня, сколько бы админ ни ставил в настройках
+    (жалоба человека 2026-10-16).
+
+    Ключа в БД нет, значение битое (не целое/не положительное) или хранилище
+    недоступно — дефолты RouteSettings: срок 3 дня. Молчаливая подмена срока
+    опаснее явной ошибки, поэтому сбой хранилища пишем в лог (вместе с причиной)."""
+    try:
+        raw_ttl = read_setting_value(store, "approval_ttl_days")
+        raw_escalation = read_setting_value(store, "position_escalation")
+    except SettingsUnavailable as exc:
+        _LOGGER.warning(
+            "настройки маршрута недоступны (%s) — срок шага %s дн.",
+            exc,
+            _ROUTE_SETTINGS.approval_ttl_days,
+        )
+        return _ROUTE_SETTINGS
+    try:
+        ttl_days = int(raw_ttl) if raw_ttl is not None else _ROUTE_SETTINGS.approval_ttl_days
+    except (TypeError, ValueError):
+        ttl_days = _ROUTE_SETTINGS.approval_ttl_days
+    if ttl_days < 1:
+        ttl_days = _ROUTE_SETTINGS.approval_ttl_days
+    return RouteSettings(
+        approval_ttl_days=ttl_days,
+        position_escalation=_int_map(raw_escalation),
+    )
+
+
+def _int_map(raw: object) -> dict[str, int]:
+    """Карта «должность → часы» из значения настройки; битое значение — пусто."""
+    if not isinstance(raw, dict):
+        return {}
+    result: dict[str, int] = {}
+    for key, value in raw.items():
+        try:
+            hours = int(value)
+        except (TypeError, ValueError):
+            continue
+        if hours > 0:
+            result[str(key)] = hours
+    return result
 
 
 class StepSpec(BaseModel):
@@ -520,6 +567,11 @@ class _Step(BaseModel):
     # уже выданную заявку не меняет. Дефолт TRUE — как у колонки в миграции 0015:
     # шаг выдан до неё не блокируется и снять его можно.
     optional: bool = True
+    # Снимок собственного срока шага в ЧАСАХ (миграция 0026: шаг бланка может
+    # задать свой срок вместо общего approval_ttl_days). None — общий срок из
+    # настроек. Хранится в часах, потому что UI даёт и часы, и дни (дни
+    # пересчитываются в часы на границе) — одна единица не разъезжается.
+    ttl_hours: int | None = None
 
 
 class _Request(BaseModel):
@@ -663,6 +715,30 @@ def _blank_assignees(value: object) -> list[str]:
         if login and login not in assignees:
             assignees.append(login)
     return assignees
+
+
+def _ttl_hours_or_none(value: object) -> int | None:
+    """Свой срок шага из строки справочника в часах; ноль, отрицательное и мусор —
+    None (тогда срок общий, approval_ttl_days).
+
+    Дубль `_positive_int_or_none` в routing_store — по слоям: там нормализуют
+    значение БД при записи в справочник, здесь — снимок шага при выдаче заявки
+    (как и список строк/логинов у каждого слоя свой)."""
+    try:
+        hours = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return hours if hours > 0 else None
+
+
+def _step_deadline(now: datetime, ttl_hours: int | None, ttl_days: int) -> datetime:
+    """Срок шага: свой (ttl_hours, миграция 0026) либо общий approval_ttl_days.
+
+    Единая точка расчёта: ею пользуются и выдача заявки, и переоткрытие/повтор
+    шага — иначе свой срок шага пришлось бы повторять по коду в шести местах."""
+    if ttl_hours and ttl_hours > 0:
+        return now + timedelta(hours=ttl_hours)
+    return now + timedelta(days=ttl_days)
 
 
 def _needs_manager(row: dict) -> bool:
@@ -1235,13 +1311,18 @@ def _step_from_stage(
         assignees = [str(sam).strip() for sam in (roster_sams or []) if str(sam).strip()]
     else:
         assignees = [assignee] if assignee else []
+    # Свой срок этапа: миграция 0026 дала его шагу БЛАНКА, строки этапов
+    # справочника (pick_profile) такого поля не несут — там всегда None и срок
+    # общий. Читаем тот же ключ на случай, если срок этапа заведут (миграция
+    # 0013-0026 — свой срок есть только у blank_steps).
+    ttl_hours = _ttl_hours_or_none(stage_row.get("ttl_hours"))
     return _Step(
         order=order,
         owner_group=str(stage_row.get("owner_group") or assignee or stage_code),
         resolver=resolver,
         assignee=assignee or (assignees[0] if assignees else None),
         require_comment=require_comment,
-        expires_at=now + timedelta(days=ttl_days),
+        expires_at=_step_deadline(now, ttl_hours, ttl_days),
         owner_kind=owner_kind,
         stage_id=_int_or_none(stage_row.get("stage_id", stage_row.get("id"))),
         stage_code=stage_code or None,
@@ -1255,6 +1336,7 @@ def _step_from_stage(
         assignees=assignees,
         approval_mode=_approval_mode(stage_row.get("approval_mode")),
         optional=optional,
+        ttl_hours=ttl_hours,
     )
 
 
@@ -1285,10 +1367,12 @@ def _step_from_blank_step(
     owner_group шага обязателен (_Step): у персонального шага это первый
     ответственный (как в _build_steps), у группового — группа AD, у
     manager_ad — руководитель. Режим шага — из строки бланка, иначе sequential
-    («все ответственные»)."""
+    («все ответственные»). ttl_hours строки (миграция 0026) — свой срок шага в
+    часах; None — общий approval_ttl_days."""
     kind = _executor_kind(blank_step.get("executor_kind"))
     assignees = _blank_assignees(blank_step.get("assignees"))
     owner_group = str(blank_step.get("owner_group") or "").strip()
+    ttl_hours = _ttl_hours_or_none(blank_step.get("ttl_hours"))
     assignee: str | None = None
     resolver = "by_group"
     if kind == "people":
@@ -1315,7 +1399,7 @@ def _step_from_blank_step(
         resolver=resolver,
         assignee=assignee or (assignees[0] if assignees else None),
         require_comment=bool(blank_step.get("require_comment")),
-        expires_at=now + timedelta(days=ttl_days),
+        expires_at=_step_deadline(now, ttl_hours, ttl_days),
         owner_kind=kind,
         stage_title=title or None,
         stage_lines=[
@@ -1328,6 +1412,10 @@ def _step_from_blank_step(
         # Снимок «шаг можно снять» (миграция 0015): правка справочника уже
         # выданную заявку не меняет.
         optional=bool(blank_step.get("optional")),
+        # Снимок своего срока шага (миграция 0026): переоткрытие и повтор
+        # считают новый срок по нему, а не по справочнику и не по общей
+        # настройке.
+        ttl_hours=ttl_hours,
     )
 
 
@@ -2757,7 +2845,7 @@ def _reopen_returned_if_current(
         step.comment = None
         # Отметки прошлого круга к новому не относятся: шаг ждёт всех заново.
         _clear_approvals(step)
-        step.expires_at = now + timedelta(days=route.approval_ttl_days)
+        step.expires_at = _step_deadline(now, step.ttl_hours, route.approval_ttl_days)
     return reopened
 
 
@@ -3046,6 +3134,13 @@ class RoutePreviewStageOut(BaseModel):
     )
     optional: bool = False
     blocked_reason: str | None = None
+    ttl_hours: int | None = Field(
+        default=None,
+        description=(
+            "Свой срок шага в часах (миграция 0026); None — общий срок "
+            "approval_ttl_days из настроек"
+        ),
+    )
 
 
 class RoutePreviewLinkOut(BaseModel):
@@ -3218,6 +3313,7 @@ def _preview_stages(
                 owner_name=owner_name,
                 optional=optional,
                 blocked_reason=blocked_reason,
+                ttl_hours=_ttl_hours_or_none(stage_row.get("ttl_hours")),
             )
         )
     return stages
@@ -3957,7 +4053,7 @@ def submit_request(
                 step.status = STEP_PENDING
                 step.done_by = None
                 step.done_at = None
-                step.expires_at = now + timedelta(days=route.approval_ttl_days)
+                step.expires_at = _step_deadline(now, step.ttl_hours, route.approval_ttl_days)
                 if expired:
                     # Отметки истёкшего круга к новому сроку не относятся (как в
                     # reissue): оставленная approve закрыла бы шаг по старой
@@ -3971,7 +4067,7 @@ def submit_request(
             # просроченным — can_act у всех был бы false до срабатывания воркера.
             for step in request.steps:
                 if step.status == STEP_PENDING:
-                    step.expires_at = now + timedelta(days=route.approval_ttl_days)
+                    step.expires_at = _step_deadline(now, step.ttl_hours, route.approval_ttl_days)
         request.status = IN_APPROVAL
         store.update(request)
     except RequestsUnavailable as exc:
@@ -4234,8 +4330,9 @@ def decide_step(
                 details={"order": order, "comment": step.comment or ""},
             )
             # Возврат — на предыдущий блок: его шаги снова в работе с новым TTL
-            # (route.approval_ttl_days), заявка остаётся на согласовании. Нет
-            # предыдущего блока — заявка на доработку, уведомляется автор.
+            # (_step_deadline: свой срок шага, иначе route.approval_ttl_days),
+            # заявка остаётся на согласовании. Нет предыдущего блока — заявка на
+            # доработку, уведомляется автор.
             reopened = _previous_block_steps(request, order)
             if reopened:
                 for reopened_step in reopened:
@@ -4244,7 +4341,9 @@ def decide_step(
                     reopened_step.done_at = None
                     reopened_step.comment = None
                     _clear_approvals(reopened_step)
-                    reopened_step.expires_at = now + timedelta(days=route.approval_ttl_days)
+                    reopened_step.expires_at = _step_deadline(
+                now, reopened_step.ttl_hours, route.approval_ttl_days
+            )
                 request.status = IN_APPROVAL
             else:
                 request.status = REWORK
@@ -4333,7 +4432,7 @@ def reissue_step(
         step.comment = None
         # Повторный круг: отметки прежнего срока к нему не относятся.
         _clear_approvals(step)
-        step.expires_at = _utcnow() + timedelta(days=route.approval_ttl_days)
+        step.expires_at = _step_deadline(_utcnow(), step.ttl_hours, route.approval_ttl_days)
         request.status = IN_APPROVAL
         store.update(request)
     except RequestsUnavailable as exc:
@@ -4417,7 +4516,7 @@ def replace_steps(
                 # Отметки прежнего круга к новому сроку не относятся (как при
                 # повторной подаче): иначе согласовавший получил бы 409.
                 _clear_approvals(step)
-                step.expires_at = now + timedelta(days=route.approval_ttl_days)
+                step.expires_at = _step_deadline(now, step.ttl_hours, route.approval_ttl_days)
             kept = [s for s in request.steps if s.status != STEP_PENDING]
             pending_before = [s for s in request.steps if s.status == STEP_PENDING]
         if body.blocks is not None:
@@ -4700,7 +4799,7 @@ def rollback_request(
             s.done_by = None
             s.done_at = None
             s.comment = None
-            s.expires_at = now + timedelta(days=route.approval_ttl_days)
+            s.expires_at = _step_deadline(now, s.ttl_hours, route.approval_ttl_days)
         request.status = IN_APPROVAL
         store.update(request)
     except RequestsUnavailable as exc:

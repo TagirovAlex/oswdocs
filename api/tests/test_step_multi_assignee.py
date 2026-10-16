@@ -1290,6 +1290,28 @@ def test_db_store_writes_and_reads_step_optional():
     assert step.optional is True
 
 
+def test_db_store_writes_and_reads_step_ttl_hours():
+    """Снимок своего срока шага пишется в INSERT и читается обратно (миграция 0026)."""
+    session = FakeSession([FakeRow({"id": 7})])
+    request = _snapshot_request()
+    request.steps[0].ttl_hours = 8
+    _db_store(session).create(request)
+    params = [p for sql, p in session.calls if "INSERT INTO request_steps" in sql][0]
+    assert params["ttl_hours"] == 8
+    # Колонка шага без своего срока уходит NULL, а не нулём.
+    session = FakeSession([FakeRow({"id": 7})])
+    request = _snapshot_request()
+    _db_store(session).create(request)
+    params = [p for sql, p in session.calls if "INSERT INTO request_steps" in sql][0]
+    assert params["ttl_hours"] is None
+
+    session = FakeSession([dict(REQUEST_ROW), [dict(STEP_ROW, ttl_hours=8)]])
+    assert _db_store(session).get("REQ-0001").steps[0].ttl_hours == 8
+    # Строка без колонки (заявка выдана до миграции) — срок общий.
+    legacy = dict(STEP_ROW)
+    assert _db_store(FakeSession([dict(REQUEST_ROW), [legacy]])).get("REQ-0001").steps[0].ttl_hours is None
+
+
 def test_db_store_survives_jsonb_garbage_in_snapshot():
     """Мусор в jsonb не роняет выдачу: снимок пустой, права прежние (assignee)."""
     broken = dict(STEP_ROW, assignees="{битый", approvals="не список")

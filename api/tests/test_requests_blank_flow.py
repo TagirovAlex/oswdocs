@@ -12,6 +12,7 @@ import base64
 import json
 import os
 import sys
+from datetime import timedelta
 
 import pytest
 
@@ -26,7 +27,9 @@ from app.employee_sync import (  # noqa: E402
 from app.employees import get_ad_reader  # noqa: E402
 from app.main import app  # noqa: E402
 from app.requests import (  # noqa: E402
+    STEP_EXPIRED,
     RouteSettings,
+    _utcnow,
     get_memory_requests_store,
     get_route_settings,
 )
@@ -1203,3 +1206,67 @@ def test_dismissed_stages_still_work_for_profile_steps(
     created = _create(client, hr, dismissed_stages=["buh"])
     assert created.status_code == 201, created.text
     assert [step["stage_code"] for step in created.json()["steps"]] == ["boss"]
+
+
+# --- Свой срок шага (ttl_hours, миграция 0026) ---
+
+
+def _blank_step_ttl(routing_store, blank_id: int, orders: list[int], hours: int) -> None:
+    """Свой срок шага бланка в часах (тестовая правка справочника)."""
+    for step in routing_store.blank_steps:
+        if step["blank_id"] == blank_id and step["step_order"] in orders:
+            step["ttl_hours"] = hours
+
+
+def test_blank_step_own_ttl_hours_wins_over_setting(
+    client, hr, settings_override, settings_store, requests_store, routing_store, ad_reader
+):
+    """Свой срок шага в часах применяется вместо общего approval_ttl_days."""
+    settings_store.values["approval_ttl_days"] = json.dumps(5)
+    _blank_step_ttl(routing_store, BLANK_ID, [2], 8)
+    preview = client.post(
+        "/requests/route/preview", json=_preview_body(blank_id=BLANK_ID), headers=hr
+    )
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["stages"][1]["ttl_hours"] == 8
+    assert preview.json()["stages"][0]["ttl_hours"] is None
+
+    created = _create(client, hr, blank_id=BLANK_ID)
+    assert created.status_code == 201, created.text
+    stored = requests_store.get(created.json()["id"])
+    assert [step.ttl_hours for step in stored.steps] == [None, 8, None]
+    # Свой срок шага — 8 часов, у соседнего — общий (5 дней из настроек).
+    group_step = stored.steps[1]
+    assert group_step.expires_at <= _utcnow() + timedelta(hours=8, minutes=1)
+    assert group_step.expires_at > _utcnow() + timedelta(hours=7)
+    assert stored.steps[0].expires_at > _utcnow() + timedelta(days=4)
+
+
+def test_blank_step_ttl_survives_catalog_change_and_reissue(
+    client, hr, settings_override, settings_store, requests_store, routing_store, ad_reader
+):
+    """Повтор просроченного шага считает срок по снимку шага, а не по справочнику.
+
+    Свой срок берётся из request_steps.ttl_hours на момент выдачи заявки: правка
+    справочника уже выданный срок не меняет (как optional/stage_lines)."""
+    settings_store.values["approval_ttl_days"] = json.dumps(5)
+    _blank_step_ttl(routing_store, BLANK_ID, [2], 8)
+    created = _create(client, hr, blank_id=BLANK_ID)
+    assert created.status_code == 201, created.text
+    request_id = created.json()["id"]
+    stored = requests_store.get(request_id)
+    group_order = next(s.order for s in stored.steps if s.ttl_hours == 8)
+    # Справочник после выдачи меняем — снимок шага должен устоять.
+    _blank_step_ttl(routing_store, BLANK_ID, [2], 24)
+    # Шаг просрочили: повтор без нового срока был бы 409.
+    target = next(s for s in stored.steps if s.order == group_order)
+    target.status = STEP_EXPIRED
+    target.expires_at = _utcnow() - timedelta(hours=1)
+    requests_store.update(stored)
+
+    reissued = client.post(f"/requests/{request_id}/steps/{group_order}/reissue", headers=hr)
+    assert reissued.status_code == 200, reissued.text
+    step = next(s for s in requests_store.get(request_id).steps if s.order == group_order)
+    assert step.ttl_hours == 8
+    assert step.expires_at <= _utcnow() + timedelta(hours=8, minutes=1)
+    assert step.expires_at > _utcnow() + timedelta(hours=7)

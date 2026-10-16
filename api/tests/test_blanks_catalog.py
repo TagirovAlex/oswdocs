@@ -313,6 +313,34 @@ def test_set_blank_steps_replaces_composition_and_bumps_version():
     assert session.commits == 1
 
 
+def test_blank_steps_keep_own_ttl_hours():
+    """Свой срок шага в часах доезжает до БД и читается обратно (миграция 0026).
+
+    Пустое/битое значение — None («срок общий, approval_ttl_days»): ноль или
+    отрицательное молча не должны становиться сроком шага."""
+    session = FakeSession([[dict(BLANK_STEP_ROW, ttl_hours=8)]])
+    assert _store(session).list_blank_steps(BLANK_ID)[0]["ttl_hours"] == 8
+    assert _store(FakeSession([[BLANK_STEP_ROW]])).list_blank_steps(BLANK_ID)[0]["ttl_hours"] is None
+    assert _store(FakeSession([[dict(BLANK_STEP_ROW, ttl_hours=0)]])).list_blank_steps(
+        BLANK_ID
+    )[0]["ttl_hours"] is None
+
+    session = FakeSession([])
+    _store(session).set_blank_steps(
+        BLANK_ID,
+        [
+            {"step_order": 1, "title": "Бухгалтерия", "executor_kind": "ad_group",
+             "owner_group": STEP_GROUP, "ttl_hours": 8},
+            {"step_order": 2, "title": "Отдел кадров", "executor_kind": "people",
+             "assignees": [PERSON_1], "ttl_hours": 0},
+        ],
+        "adm.petrov",
+    )
+    inserts = _params_with(session, "INSERT INTO blank_steps")
+    assert [item["ttl_hours"] for item in inserts] == [8, None]
+    assert "ttl_hours" in _sqls(session)[1]
+
+
 def test_set_blank_steps_skips_broken_items_and_bumps_version():
     """Битые элементы пропускаются; пустой состав — замена на пустой + версия."""
     session = FakeSession([])
@@ -684,6 +712,41 @@ def test_replace_blank_steps_ad_group_without_group_422(
     assert response.status_code == 422, response.text
     assert "owner_group" in response.text
     assert "set_blank_steps" not in blanks_store.calls
+
+
+def test_replace_blank_steps_bad_ttl_hours_422(
+    client, admin_headers, settings_override, blanks_store, groups_store
+):
+    """Срок шага меньше часа — 422 на границе, состав не меняется.
+
+    Ноль и отрицательное отвергаются: срок «сейчас» шаг бы не закрыл, а тихо
+    заменить его общим сроком — значило бы выдать админу не то, что он ввёл."""
+    for bad in (0, -8):
+        response = client.put(
+            f"/settings/routing/blanks/{BLANK_ID}/steps",
+            json={"steps": [{"step_order": 1, "title": "Бухгалтерия",
+                             "executor_kind": "ad_group", "owner_group": STEP_GROUP,
+                             "ttl_hours": bad}]},
+            headers=admin_headers,
+        )
+        assert response.status_code == 422, response.text
+        assert "ttl_hours" in response.text
+    assert "set_blank_steps" not in blanks_store.calls
+
+
+def test_replace_blank_steps_ttl_hours_saved(
+    client, admin_headers, settings_override, blanks_store, groups_store
+):
+    """Свой срок шага в часах доходит до хранилища; без него — null."""
+    response = client.put(
+        f"/settings/routing/blanks/{BLANK_ID}/steps",
+        json={"steps": [{"step_order": 1, "title": "Бухгалтерия",
+                         "executor_kind": "ad_group", "owner_group": STEP_GROUP,
+                         "ttl_hours": 8}]},
+        headers=admin_headers,
+    )
+    assert response.status_code == 200, response.text
+    assert blanks_store.steps[0]["ttl_hours"] == 8
 
 
 def test_replace_blank_steps_empty_title_422(

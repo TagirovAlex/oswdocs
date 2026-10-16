@@ -40,6 +40,7 @@ import type {
   StepGroup,
 } from "./requests-client";
 import type { Role } from "./api-mock";
+import { richTextToPlain } from "./rich-text";
 import { employeeUrl, openPopup } from "./windows";
 
 interface CreateFormProps {
@@ -239,6 +240,34 @@ function DownIcon() {
 // 2026-10-12). Кода в справочнике нет (группа удалена) — показываем код.
 function groupTitle(groups: StepGroup[], id: string): string {
   return groups.find((g) => g.id === id)?.name || id;
+}
+
+// Текст шага (stage_lines) для показа в предпросмотре маршрута: строки приходят
+// разметкой редактора (TipTap), теги в таблице этапов смотрелись бы как мусор —
+// поэтому печатаем текст без тегов, как это уже делает предпросмотр бланка
+// (blank-preview.tsx). Пустые строки (только разметка) в список не идут.
+function stepTextLines(lines: string[]): string[] {
+  return lines.map(richTextToPlain).filter((line) => line !== "");
+}
+
+// Срок шага в предпросмотре: свой (ttl_hours) либо общий из настроек —
+// общий в предпросмотре не приходит, поэтому показываем только свой (у
+// остальных срок подставляется настройка, её видно в настройках).
+function stepTtlText(hours: number | null | undefined): string | null {
+  if (hours == null || hours < 1) return null;
+  const plural = (n: number, one: string, few: string, many: string): string => {
+    const mod100 = n % 100;
+    const mod10 = n % 10;
+    if (mod100 >= 11 && mod100 <= 14) return many;
+    if (mod10 === 1) return one;
+    if (mod10 >= 2 && mod10 <= 4) return few;
+    return many;
+  };
+  if (hours % 24 === 0) {
+    const days = hours / 24;
+    return `срок ${days} ${plural(days, "день", "дня", "дней")}`;
+  }
+  return `срок ${hours} ${plural(hours, "час", "часа", "часов")}`;
 }
 
 // Форма создания: единый экран, блоки по зависимостям.
@@ -1879,6 +1908,10 @@ function addGroupToBlock(blockId: string, group: string): void {
                         code === ""
                           ? order === null || !dismissedStepOrders.includes(order)
                           : !dismissedStages.includes(code);
+                      // Текст шага разметкой — в таблице этапов показываем
+                      // текстом (теги смущали бы, решение человека 2026-10-16).
+                      const stepText = stepTextLines(stage.stage_lines);
+                      const ttlText = stepTtlText(stage.ttl_hours);
                       return (
                         <tr
                           key={
@@ -1917,8 +1950,17 @@ function addGroupToBlock(blockId: string, group: string): void {
                             {code === "" && blankLocked && (
                               <span className="sed-sub"> (шаг бланка — снять вручную нельзя)</span>
                             )}
-                            {stage.stage_lines.length > 0 && (
-                              <div className="sed-sub">{stage.stage_lines.join(" · ")}</div>
+                            {/* Текст шага — разметка редактора, в списке этапов
+                                она показывается текстом: теги как есть смущали бы
+                                (решение человека 2026-10-16). Печать санирует
+                                разметку своими правилами сама. */}
+                            {stepText.length > 0 && (
+                              <div className="sed-sub">{stepText.join(" · ")}</div>
+                            )}
+                            {/* Свой срок шага (миграция 0026) — виден до создания
+                                заявки: у быстрых шагов он короче общего. */}
+                            {ttlText !== null && (
+                              <div className="sed-note">{ttlText}</div>
                             )}
                             {/* Причина блокировки этапа (важно для ОК: этап
                                 нельзя закрыть — например, не найден руководитель). */}

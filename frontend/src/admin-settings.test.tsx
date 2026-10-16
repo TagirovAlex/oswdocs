@@ -5,7 +5,7 @@
 // справочник бланков с визуальным редактором текста этапа, успех/ошибка/403.
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { AdminSettings } from "./admin-settings";
+import { AdminSettings, stepTtlHours, stepTtlValue } from "./admin-settings";
 import { setDisplayTimezone } from "./date-format";
 import { ApiHttpError } from "./auth-client";
 import type { BlankStepRow, StepCatalogRow } from "./requests-client";
@@ -1355,6 +1355,7 @@ describe("AdminSettings", () => {
           approval_mode: "sequential",
           optional: true,
           require_comment: true,
+          ttl_hours: null,
         },
         // Новый шаг бланка — свой текст и своя группа AD.
         {
@@ -1367,10 +1368,89 @@ describe("AdminSettings", () => {
           approval_mode: "sequential",
           optional: false,
           require_comment: false,
+          ttl_hours: null,
         },
       ]),
     );
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Состав бланка сохранён"));
+  });
+
+  // Свой срок шага (миграция 0026): хранится в часах, UI даёт и часы, и дни.
+  // Пустое поле — общий срок approval_ttl_days из настроек (ttl_hours: null).
+  it("срок шага: дни пересчитываются в часы, пустое поле — общий срок", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+    // У второго шага справочника свой срок 8 часов (миграция 0026).
+    vi.mocked(getBlankSteps).mockResolvedValue([
+      blankSteps[0],
+      { ...blankSteps[1], ttl_hours: 8 },
+    ]);
+    vi.mocked(setBlankSteps).mockResolvedValue({ blank_id: 10, count: 2 });
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Бланки" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Бланки" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Править бланк uvol_base" }));
+
+    // У второго шага в справочнике ttl_hours = 8 — показываем в часах.
+    const ttl2 = await screen.findByLabelText("Срок шага 2");
+    expect(ttl2).toHaveValue(8);
+    expect(screen.getByLabelText("Единица срока шага 2")).toHaveValue("hours");
+    // У первого шага своего срока нет — поле пустое (не ноль).
+    expect(screen.getByLabelText("Срок шага 1")).toHaveValue(null);
+
+    // Переключаем единицу на дни: 8 часов — это те же 8 часов, поле покажет 0,
+    // поэтому задаём срок заново в днях.
+    fireEvent.change(screen.getByLabelText("Единица срока шага 1"), { target: { value: "days" } });
+    fireEvent.change(screen.getByLabelText("Срок шага 1"), { target: { value: "2" } });
+    // Второй шаг: пустое поле снимает свой срок.
+    fireEvent.change(screen.getByLabelText("Срок шага 2"), { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить состав" }));
+
+    await waitFor(() => expect(setBlankSteps).toHaveBeenCalled());
+    const [, sent] = vi.mocked(setBlankSteps).mock.calls[0];
+    expect(sent.map((step) => step.ttl_hours)).toEqual([48, null]);
+  });
+
+  // Регресс: переключатель единиц меняет ТОЛЬКО единицу показа. Срок не должен
+  // ни умножаться, ни делиться на 24 (иначе 8 часов тихо стали бы 8 сутками).
+  it("срок шага: переключение единиц не меняет сам срок", async () => {
+    vi.mocked(getSettings).mockResolvedValue(settings);
+    vi.mocked(getBlankSteps).mockResolvedValue([
+      { ...blankSteps[0], ttl_hours: 8 },
+      { ...blankSteps[1], ttl_hours: 48 },
+    ]);
+    vi.mocked(setBlankSteps).mockResolvedValue({ blank_id: 10, count: 2 });
+
+    render(<AdminSettings role="admin" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Бланки" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Бланки" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Править бланк uvol_base" }));
+
+    // 8 часов → «дней»: показывается дробь (0), сам срок остаётся 8 часов.
+    fireEvent.change(await screen.findByLabelText("Единица срока шага 1"), {
+      target: { value: "days" },
+    });
+    // 48 часов → «часов»: показывается 48, срок остаётся 48 часов.
+    fireEvent.change(screen.getByLabelText("Единица срока шага 2"), {
+      target: { value: "hours" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить состав" }));
+
+    await waitFor(() => expect(setBlankSteps).toHaveBeenCalled());
+    const [, sent] = vi.mocked(setBlankSteps).mock.calls[0];
+    expect(sent.map((step) => step.ttl_hours)).toEqual([8, 48]);
+  });
+
+  // Свой срок шага бланка: пересчёт часов/дней — единственная арифметика UI,
+  // проверяем её напрямую (пустое поле — «общий срок», 0 и отрицательные — нет).
+  it("пересчёт срока: часы/дни и пустое значение", () => {
+    expect(stepTtlValue(8, "hours")).toBe("8");
+    expect(stepTtlValue(48, "days")).toBe("2");
+    expect(stepTtlValue(null, "hours")).toBe("");
+    expect(stepTtlHours(2, "days")).toBe(48);
+    expect(stepTtlHours(8, "hours")).toBe(8);
+    expect(stepTtlHours(0, "days")).toBeNull();
+    expect(stepTtlHours(-1, "hours")).toBeNull();
   });
 
   // Некорректный шаг (people без согласующих) сервер бы отверг 422 — форма

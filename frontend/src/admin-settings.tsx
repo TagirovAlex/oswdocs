@@ -187,6 +187,34 @@ function EnterprisesEditor(props: { value: SettingsEnterprise[]; onChange: (v: S
   );
 }
 
+// ---------------------------------------------------------------------------
+// Срок шага бланка (миграция 0026). Хранится в часах (blank_steps.ttl_hours),
+// UI даёт и часы, и дни: единица — переключатель, значение пересчитывается, а
+// пустое поле означает общий срок approval_ttl_days из настроек.
+// ---------------------------------------------------------------------------
+
+type TtlUnit = "hours" | "days";
+
+// Единица показа по сохранённому сроку: кратное суток — дни, иначе часы.
+// Явно выбранная пользователем единица хранится в ttlUnits и важнее этого
+// правила, иначе переключатель прыгал бы под курсором при наборе 24.
+function stepTtlDefaultUnit(hours: number | null | undefined): TtlUnit {
+  return hours != null && hours >= 24 && hours % 24 === 0 ? "days" : "hours";
+}
+
+// Значение поля в выбранной единице.
+export function stepTtlValue(hours: number | null | undefined, unit: TtlUnit): string {
+  if (hours == null || hours < 1) return "";
+  return String(unit === "days" ? Math.round(hours / 24) : hours);
+}
+
+// Введённое значение → часы хранения; пусто/ноль/минус — «срок не задан».
+export function stepTtlHours(value: number, unit: TtlUnit): number | null {
+  const hours = unit === "days" ? value * 24 : value;
+  if (!Number.isFinite(hours) || hours < 1) return null;
+  return Math.round(hours);
+}
+
 // Нормализация справочника групп из GET: строки старого формата читаются
 // как id=name (как на бэкенде _groups_with_names); пустые id отбрасываются.
 export function toStepGroupRefs(raw: (string | StepGroupRef)[]): StepGroupRef[] {
@@ -1199,6 +1227,10 @@ function BlanksEditor() {
   const [busy, setBusy] = useState<boolean>(false);
   const [form, setForm] = useState<BlankForm>(EMPTY_BLANK_FORM);
   const [steps, setSteps] = useState<BlankStepRow[]>([]);
+  // Единица показа срока шага, выбранная пользователем (индекс строки состава);
+  // без неё показываем дни для сроков, кратных суткам. В составе это только вид
+  // поля: в БД срок всегда в часах (blank_steps.ttl_hours).
+  const [ttlUnits, setTtlUnits] = useState<Record<number, TtlUnit>>({});
   // Запрос подсказки согласующих (GET /api/ad/search) и найденные кандидаты:
   // логины хранятся как есть, ФИО показываем, если AD его отдал.
   const [adQuery, setAdQuery] = useState<string>("");
@@ -1211,6 +1243,15 @@ function BlanksEditor() {
   const [footerTarget, setFooterTarget] = useState<number>(0);
   // Показывать ли макет печати бланка (предпросмотр «как в печати»).
   const [previewOpen, setPreviewOpen] = useState<boolean>(false);
+
+  // Единица срока шага: выбранная пользователем, иначе — по самому сроку.
+  function ttlUnit(index: number, hours: number | null | undefined): TtlUnit {
+    return ttlUnits[index] ?? stepTtlDefaultUnit(hours);
+  }
+
+  // Подсказка пустого поля срока: общий срок из настроек (его админ видит на
+  // вкладке «Контент»). Значения здесь нет — это текст, не значение.
+  const ttlFallbackText = "общий срок из настроек";
 
   // Список бланков после любой правки (step_count/version из ответа сервера).
   function loadBlanks(): void {
@@ -1245,6 +1286,9 @@ function BlanksEditor() {
     getBlankSteps(blankId)
       .then((items) => {
         setSteps(items);
+        // Единица показа срока привязана к позиции в составе: с другим составом
+        // она была бы от другого шага.
+        setTtlUnits({});
         setAdQuery("");
         setAdHits([]);
         setAdError("");
@@ -1511,6 +1555,8 @@ function BlanksEditor() {
           approval_mode: s.approval_mode ?? null,
           optional: s.optional,
           require_comment: s.require_comment,
+          // Свой срок шага в часах; null — общий approval_ttl_days.
+          ttl_hours: s.ttl_hours ?? null,
         })),
       );
       setSaved("Состав бланка сохранён");
@@ -1938,6 +1984,46 @@ function BlanksEditor() {
               )}
 
               <div className="sed-editor-row">
+                {/* Свой срок шага (миграция 0026): пусто — общий срок
+                    approval_ttl_days из настроек. Хранится в часах, поэтому дни
+                    в UI — пересчёт (единица выбирается переключателем). */}
+                <label className="sed-field">
+                  Срок шага
+                  <input
+                    type="number"
+                    min={1}
+                    aria-label={`Срок шага ${i + 1}`}
+                    placeholder={`общий (${ttlFallbackText})`}
+                    value={stepTtlValue(step.ttl_hours, ttlUnit(i, step.ttl_hours))}
+                    onChange={(e) =>
+                      patchStep(i, {
+                        ttl_hours: stepTtlHours(Number(e.target.value), ttlUnit(i, step.ttl_hours)),
+                      })
+                    }
+                  />
+                </label>
+                <label className="sed-field">
+                  Единица срока
+                  <select
+                    aria-label={`Единица срока шага ${i + 1}`}
+                    value={ttlUnit(i, step.ttl_hours)}
+                    onChange={(e) => {
+                      const unit: TtlUnit = e.target.value === "days" ? "days" : "hours";
+                      setTtlUnits((prev) => ({ ...prev, [i]: unit }));
+                      // Срок не меняется — меняется только единица показа. Поэтому
+                      // пересчитываем ПРЕЖНЮЮ единицу (поля показываются в ней), а
+                      // не новую: иначе 8 часов превратились бы в 8 суток.
+                      const oldUnit: TtlUnit = unit === "days" ? "hours" : "days";
+                      const shown = stepTtlValue(step.ttl_hours, oldUnit);
+                      patchStep(i, {
+                        ttl_hours: shown === "" ? null : stepTtlHours(Number(shown), oldUnit),
+                      });
+                    }}
+                  >
+                    <option value="hours">часов</option>
+                    <option value="days">дней</option>
+                  </select>
+                </label>
                 <label className="sed-field">
                   <input
                     type="checkbox"

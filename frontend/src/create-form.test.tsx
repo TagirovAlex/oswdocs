@@ -945,6 +945,45 @@ describe("CreateForm", () => {
     expect(body.added_stages).toEqual([]);
   });
 
+  // Текст шага в предпросмотре приходит разметкой редактора (TipTap): в таблице
+  // этапов он показывается текстом без тегов (жалоба человека 2026-10-16), а свой
+  // срок шага (ttl_hours, миграция 0026) виден до создания заявки.
+  it("предпросмотр: текст шага без тегов и свой срок шага", async () => {
+    vi.mocked(searchEmployees).mockRejectedValue(new ApiHttpError(503, "Клиент 1С не настроен"));
+    vi.mocked(previewRoute).mockResolvedValue({
+      ...routePreview,
+      stages: [
+        {
+          ...routePreview.stages[0],
+          stage_lines: ["<p>Ознакомить <b>с приказом</b></p>", "<p>Получить подпись</p>"],
+          ttl_hours: 8,
+        },
+        { ...routePreview.stages[1], ttl_hours: null },
+      ],
+    });
+    vi.mocked(createRequest).mockResolvedValue({
+      id: "REQ-0100",
+      status: "Черновик",
+      route_origin: "template",
+      department: "Цех № 1",
+      position: "Слесарь",
+      created_by: "petrov.pp",
+      steps: [],
+    });
+
+    render(<CreateForm role="hr" />);
+    await fillEmployeeManually("auto");
+
+    // Текст шага — текстом, тегов в таблице нет.
+    await waitFor(() =>
+      expect(screen.getByText("Ознакомить с приказом · Получить подпись")).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(/<b>с приказом<\/b>/)).toBeNull();
+    // Свой срок шага виден, у шага без своего срока — нет.
+    expect(screen.getByText("срок 8 часов")).toBeInTheDocument();
+    expect(screen.queryByText("срок 3 дня")).toBeNull();
+  });
+
   // Руководитель не найден в AD: блок показывает причину и предлагает подобрать
   // замену вручную; выбранный логин уходит и в предпросмотр, и в создание.
   it("при отсутствии руководителя в AD предлагает подобрать замену вручную", async () => {

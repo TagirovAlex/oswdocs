@@ -84,6 +84,13 @@ def _int_or_none(value: object) -> int | None:
         return None
 
 
+def _positive_int_or_none(value: object) -> int | None:
+    """Положительное целое из значения БД/payload; ноль, отрицательное и мусор —
+    None («срок не задан» — берётся общий approval_ttl_days)."""
+    number = _int_or_none(value)
+    return number if number is not None and number > 0 else None
+
+
 def _approval_mode_or_default(value: object) -> str:
     """Режим шага бланка: parallel — любой из ответственных, иначе sequential
     («все ответственные»). Неизвестное значение и None — sequential: режим по
@@ -308,7 +315,8 @@ class DbRoutingStore:
     _LIST_BLANK_STEPS = text(
         """
         SELECT blank_id, step_order, title, stage_lines, executor_kind,
-               assignees, owner_group, optional, require_comment, approval_mode
+               assignees, owner_group, optional, require_comment, approval_mode,
+               ttl_hours
         FROM blank_steps
         WHERE blank_id = :blank_id
         ORDER BY step_order
@@ -323,10 +331,10 @@ class DbRoutingStore:
         """
         INSERT INTO blank_steps (blank_id, step_order, title, stage_lines,
                                  executor_kind, assignees, owner_group, optional,
-                                 require_comment, approval_mode, updated_at)
+                                 require_comment, approval_mode, ttl_hours, updated_at)
         VALUES (:blank_id, :step_order, :title, CAST(:stage_lines AS jsonb),
                 :executor_kind, CAST(:assignees AS jsonb), :owner_group, :optional,
-                :require_comment, :approval_mode, now())
+                :require_comment, :approval_mode, :ttl_hours, now())
         """
     )
     # Версия бланка растёт при замене состава шагов: blank_version из снимка
@@ -828,7 +836,7 @@ class DbRoutingStore:
     def list_blank_steps(self, blank_id: int) -> list[dict]:
         """Собственные шаги бланка по step_order (без join с этапом): выдаче
         заявке нужен текст шага и вид исполнителя, stage_lines и assignees всегда
-        списками."""
+        списками, ttl_hours — срок шага в часах (None — общий approval_ttl_days)."""
         with self._session() as session:
             rows = session.execute(
                 self._LIST_BLANK_STEPS, {"blank_id": blank_id}
@@ -837,6 +845,7 @@ class DbRoutingStore:
         for item in items:
             item["stage_lines"] = _stage_lines(item.get("stage_lines"))
             item["assignees"] = _logins(item.get("assignees"))
+            item["ttl_hours"] = _positive_int_or_none(item.get("ttl_hours"))
         return items
 
     def set_blank_steps(self, blank_id: int, items: list[dict], actor: str) -> None:
@@ -845,8 +854,9 @@ class DbRoutingStore:
         (аудит blank.steps.update).
 
         items — список {step_order, title, stage_lines, executor_kind, assignees,
-        owner_group, optional, require_comment, approval_mode}; approval_mode =
-        None — «все ответственные» (sequential, как до разделения режимов).
+        owner_group, optional, require_comment, approval_mode, ttl_hours};
+        approval_mode = None — «все ответственные» (sequential, как до разделения
+        режимов), ttl_hours = None — общий срок approval_ttl_days.
         Шаг самостоятельный: этап не проверяется (его у шага нет), а состав
         согласующих и группа AD проверяет схема запроса на границе — здесь 422
         не бывает. Битые элементы (без порядка или названия) пропускаются.
@@ -878,6 +888,9 @@ class DbRoutingStore:
                     "optional": bool(item.get("optional")),
                     "require_comment": bool(item.get("require_comment")),
                     "approval_mode": _approval_mode_or_default(item.get("approval_mode")),
+                    # Срок шага в часах (миграция 0026); None — общий
+                    # approval_ttl_days, как до появления своего срока.
+                    "ttl_hours": _positive_int_or_none(item.get("ttl_hours")),
                 }
             )
         actor = str(actor or "")

@@ -49,9 +49,17 @@ class WorkerResult:
     dead: int = 0  # писем, исчерпавших ретраи
 
 
-def _reminder_before(approval_ttl_days: int) -> timedelta:
-    """Окно напоминания: TTL/2 (напоминание за половину срока до дедлайна)."""
-    return timedelta(hours=max(1, int(approval_ttl_days or 3) * 12))
+def _reminder_before(approval_ttl_days: int, ttl_hours: int | None = None) -> timedelta:
+    """Окно напоминания: половина срока шага (напоминание за TTL/2 до дедлайна).
+
+    ttl_hours — свой срок шага (миграция 0026, снимок в request_steps): у шага
+    со своим коротким сроком общее окно в днях било бы мимо дедлайна (шаг с
+    сроком 8 часов получил бы напоминание за 1,5 суток до срока, то есть сразу).
+    Нет своего срока — окно от общего approval_ttl_days."""
+    hours = int(ttl_hours or 0)
+    if hours <= 0:
+        hours = int(approval_ttl_days or 3) * 24
+    return timedelta(hours=max(1, hours // 2))
 
 
 def _escalation_recipient(ad_reader: object | None, request: object) -> str | None:
@@ -98,7 +106,6 @@ def run_once(
     """
     now = now or datetime.now(timezone.utc)
     result = WorkerResult()
-    reminder_before = _reminder_before(approval_ttl_days)
 
     for request in store.list_all():
         if request.status != IN_APPROVAL:
@@ -123,7 +130,9 @@ def run_once(
                     )
                 break  # заявка ушла на доработку: остальные шаги не трогаем
             if (
-                now >= step.expires_at - reminder_before
+                now >= step.expires_at - _reminder_before(
+                    approval_ttl_days, getattr(step, "ttl_hours", None)
+                )
                 and not mail_queue.has(request.id, EVENT_REMINDER)
             ):
                 # Напоминание адресатам шага: персональному — один, групповому —

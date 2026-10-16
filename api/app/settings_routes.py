@@ -1622,6 +1622,15 @@ class BlankStepIn(BaseModel):
     require_comment: bool = Field(
         default=False, description="Комментарий обязателен даже при согласии"
     )
+    ttl_hours: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Свой срок шага в часах (дни UI пересчитывает в часы). None — общий "
+            "срок approval_ttl_days из настроек. Верхней границы нет: предельный "
+            "срок, если он понадобится, задаётся настройкой"
+        ),
+    )
 
     @model_validator(mode="after")
     def _check_step(self) -> "BlankStepIn":
@@ -2165,6 +2174,7 @@ def replace_blank_steps(
             "optional": step.optional,
             "require_comment": step.require_comment,
             "approval_mode": step.approval_mode,
+            "ttl_hours": step.ttl_hours,
         }
         for step in payload.steps
     ]

@@ -472,7 +472,7 @@ class DbRequestsStore:
         "request_id, step_order, owner_group, done_by, status, resolver, "
         "assignee, require_comment, done_at, expires_at, comment, "
         "stage_id, stage_code, stage_title, stage_lines, profile_step_id, "
-        "assignees, approval_mode, approvals, optional"
+        "assignees, approval_mode, approvals, optional, ttl_hours"
     )
     _SELECT_STEPS_BY_REQUEST = text(
         f"""
@@ -495,7 +495,7 @@ class DbRequestsStore:
           request_id, step_order, owner_group, done_by, status, resolver,
           assignee, require_comment, done_at, expires_at, comment,
           stage_id, stage_code, stage_title, stage_lines, profile_step_id,
-          assignees, approval_mode, approvals, optional
+          assignees, approval_mode, approvals, optional, ttl_hours
         )
         VALUES (
           :request_id, :step_order, :owner_group, :done_by, :status, :resolver,
@@ -503,7 +503,7 @@ class DbRequestsStore:
           :stage_id, :stage_code, :stage_title, CAST(:stage_lines AS jsonb),
           :profile_step_id,
           CAST(:assignees AS jsonb), :approval_mode, CAST(:approvals AS jsonb),
-          :optional
+          :optional, :ttl_hours
         )
         """
     )
@@ -589,6 +589,10 @@ class DbRequestsStore:
             # Миграция 0015: снимок «шаг можно снять» (optional шага бланка или
             # этапа профиля) — правка справочника заявку не меняет.
             "optional": bool(step.optional),
+            # Миграция 0026: снимок собственного срока шага в часах (None —
+            # общий approval_ttl_days). Переоткрытие/повтор считает новый срок
+            # по нему, а не по справочнику.
+            "ttl_hours": step.ttl_hours,
         }
 
     @staticmethod
@@ -677,6 +681,9 @@ class DbRequestsStore:
                     # optional — снимок признака «шаг можно снять» (миграция
                     # 0015); getattr для совместимости с тестовыми строками.
                     optional=bool(getattr(step_row, "optional", True)),
+                    # ttl_hours — снимок своего срока шага (миграция 0026);
+                    # getattr — у строк, выданных до неё, столбца нет.
+                    ttl_hours=getattr(step_row, "ttl_hours", None),
                 )
                 for step_row in step_rows
             ],
