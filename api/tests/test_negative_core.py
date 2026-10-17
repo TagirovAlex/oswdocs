@@ -1,6 +1,7 @@
 # Негативные тесты C1-ядро (волна C, скилл qa-sed): 403, чужие ресурсы,
-# дубли ФИО без автосклейки, просрочка TTL (410 + повтор), полнота audit_log,
-# запрет записи в 1С/AD. Только моки, живых LDAP/HTTP нет; все ПДн вымышлены.
+# дубли ФИО без автосклейки, истёкший срок шага (отметка разрешена, повтор — нет),
+# полнота audit_log, запрет записи в 1С/AD. Только моки, живых LDAP/HTTP нет;
+# все ПДн вымышлены.
 # Прогон локально: pytest api/tests/test_negative_core.py -q (venv script_local/.venv).
 # Прогон на стенде (ВМ): пометка «на ВМ» — живой bind/OData, сессии (TTL в env),
 # TLS/HSTS, compose up (см. deploy/ЧЕК-ЛИСТ_ИТ.md).
@@ -33,6 +34,7 @@ from app.link_store import get_links_store  # noqa: E402
 from app.main import app  # noqa: E402
 from app.onec_client import HttpResult, OneCBaseConfig, OneCClient  # noqa: E402
 from app.requests import (  # noqa: E402
+    STEP_EXPIRED,
     _utcnow,
     get_memory_requests_store,
     get_route_settings,
@@ -455,19 +457,37 @@ def test_duplicate_link_still_manual_review(client, admin_headers, neg_mocks):
     assert body["snapshot_1c"]["fio"] == FIO_DUBL
 
 
-# --- Просрочка TTL: 410 + повтор ---
+# --- Просрочка TTL: отметка разрешена, повтор — только для старых данных ---
 
-def test_ttl_expired_410_and_reissue(client, hr_headers, owner_headers, neg_mocks, route_single):
-    """Решение после TTL — 410 и «На доработке»; повтор возвращает в работу."""
+def test_ttl_overdue_decision_allowed(client, hr_headers, owner_headers, neg_mocks, route_single):
+    """Решение после TTL принимается, заявка остаётся «На согласовании».
+
+    Решение человека 2026-10-17: просрочка не уводит заявку в «На доработке»
+    и не блокирует отметку — задержка видна в карточке и письме worker-а."""
     rid = _create_request(client, hr_headers)["id"]
     assert client.post(f"/requests/{rid}/submit", headers=hr_headers).status_code == 200
     get_memory_requests_store().get(rid).steps[0].expires_at = _utcnow() - timedelta(days=1)
     late = client.post(
         f"/requests/{rid}/steps/1/decision", json={"decision": "approve"}, headers=owner_headers,
     )
-    assert late.status_code == 410
-    assert get_memory_requests_store().get(rid).status == "На доработке"
-    assert any(e.action == "step.expired" for e in audit_log.all())
+    assert late.status_code == 200, late.text
+    # Маршрут одношаговый: единственный шаг согласован, доработки не было.
+    assert get_memory_requests_store().get(rid).status == "Согласовано"
+    assert not any(e.action == "step.expired" for e in audit_log.all())
+
+
+def test_reissue_only_for_expired_step_and_ok_only(
+    client, hr_headers, owner_headers, neg_mocks, route_single
+):
+    """Повтор (reissue) — для шага в статусе «просрочен» и только для ОК.
+
+    Статус «просрочен» в базе остался от прежнего worker-а (до 2026-10-17 он
+    переводил заявку в доработку и просрачивал шаг); повтор по нему работает."""
+    rid = _create_request(client, hr_headers)["id"]
+    assert client.post(f"/requests/{rid}/submit", headers=hr_headers).status_code == 200
+    # Повтор шага в обычном статусе — 409.
+    assert client.post(f"/requests/{rid}/steps/1/reissue", headers=hr_headers).status_code == 409
+    get_memory_requests_store().get(rid).steps[0].status = STEP_EXPIRED
     # Повтор чужой группе запрещен, владельцу запрещен — только ОК.
     stranger = _headers_for("step.chuzhoi", [OTHER_GROUP])
     assert client.post(f"/requests/{rid}/steps/1/reissue", headers=stranger).status_code in (401, 403)
@@ -475,6 +495,7 @@ def test_ttl_expired_410_and_reissue(client, hr_headers, owner_headers, neg_mock
     assert again.status_code == 200
     assert again.json()["status"] == "На согласовании"
     assert again.json()["steps"][0]["status"] == "ожидает"
+    assert again.json()["steps"][0]["expires_at"] > _utcnow().isoformat()
     # Повтор не просроченного шага — 409.
     assert client.post(f"/requests/{rid}/steps/1/reissue", headers=hr_headers).status_code == 409
     # После повтора отметка проходит.
@@ -559,10 +580,9 @@ def test_audit_branch_actions(client, hr_headers, owner_headers, neg_mocks, rout
         headers=hr_headers,
     )
     client.post(f"/requests/{rid}/submit", headers=hr_headers)
-    get_memory_requests_store().get(rid).steps[0].expires_at = _utcnow() - timedelta(days=1)
-    assert client.post(
-        f"/requests/{rid}/steps/1/decision", json={"decision": "approve"}, headers=owner_headers,
-    ).status_code == 410
+    # Статус «просрочен» в базе остался от прежнего worker-а (до 2026-10-17 он
+    # переводил заявку в доработку); повтор по такому шагу работает и пишет аудит.
+    get_memory_requests_store().get(rid).steps[0].status = STEP_EXPIRED
     client.post(f"/requests/{rid}/steps/1/reissue", headers=hr_headers)
     client.post(
         f"/requests/{rid}/steps/1/decision",
@@ -571,8 +591,8 @@ def test_audit_branch_actions(client, hr_headers, owner_headers, neg_mocks, rout
     )
     client.post(f"/requests/{rid}/withdraw", headers=hr_headers)
     actions = {e.action for e in audit_log.all()}
-    for expected in ("steps.patch", "request.submit", "step.expired",
-                     "step.reissue", "step.return", "request.withdraw"):
+    for expected in ("steps.patch", "request.submit", "step.reissue",
+                     "step.return", "request.withdraw"):
         assert expected in actions, (expected, sorted(actions))
 
 

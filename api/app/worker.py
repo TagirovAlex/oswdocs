@@ -1,12 +1,14 @@
 # Worker СЭД (W3a): однократный проход регламентных задач по заявкам.
 # Запуск: `python -m app.worker` (команда compose у worker; управляет
 # systemd-таймер/cron — проходы независимы, состояние — в БД/очереди).
-# Задачи: просроченные шаги (expires_at < now) -> шаг «просрочен», заявка
-# «На доработке», письмо «возврат» автору; напоминания за TTL/2 до дедлайна;
-# эскалация по position_escalation (письмо руководителю). Письма собираются
-# из mail_templates (settings) и ставятся в очередь (DbMailQueue на стенде),
-# затем разбираются отправителем (SmtpMailer). Только чтение/обновление заявок
-# через RequestsStore: никакой записи в 1С/AD.
+# Задачи: просроченные шаги (expires_at < now) -> письмо «просрочка»
+# ответственным за шаг и их руководителю, статус заявки НЕ меняется
+# (решение человека 2026-10-17: просрочка не уводит заявку в «На доработке»,
+# шаг остаётся «ожидает» и отметку по нему можно поставить); напоминания за
+# TTL/2 до дедлайна; эскалация по position_escalation (письмо руководителю).
+# Письма собираются из mail_templates (settings) и ставятся в очередь (DbMailQueue
+# на стенде), затем разбираются отправителем (SmtpMailer). Только чтение/обновление
+# заявок через RequestsStore: никакой записи в 1С/AD.
 # Хардкода шаблонов/TTL нет: значения — из settings (mail_templates,
 # position_escalation, approval_ttl_days) и env (SMTP_*, APP_BASE_URL).
 
@@ -15,33 +17,33 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
+from .audit import AuditEvent, audit_log
 from .docs import request_url
 from .mailer import (
     EVENT_ESCALATION,
+    EVENT_OVERDUE,
     EVENT_REMINDER,
-    EVENT_RETURNED,
     MailQueue,
     Mailer,
     MockWorker,
     enqueue_event,
+    mail_templates_map,
     manager_mail,
-    recipient_mail,
     step_owner_mails,
 )
 from .requests import (
     IN_APPROVAL,
-    REWORK,
-    STEP_EXPIRED,
     STEP_PENDING,
     _current_pending_steps,
 )
+from .timezone import current_timezone
 
 
 @dataclass
 class WorkerResult:
     """Итог одного прохода worker-а."""
 
-    expired: int = 0  # просроченных шагов -> «На доработке» + письмо «возврат»
+    expired: int = 0  # просроченных шагов, поставлено писем «просрочка»
     reminders: int = 0  # поставлено напоминаний
     escalations: int = 0  # поставлено эскалаций
     sent: int = 0  # отправлено писем из очереди
@@ -75,6 +77,81 @@ def _escalation_recipient(ad_reader: object | None, request: object) -> str | No
     return manager_mail(ad_reader, request.created_by)
 
 
+def _overdue_recipients(
+    ad_reader: object | None, request: object, step: object
+) -> list[str]:
+    """Адресаты письма о просрочке: ответственные за просроченный шаг и их
+    руководитель (решение человека 2026-10-17).
+
+    Ответственные — те же, что у «назначена» (кому по шагу ещё предстоит
+    отметиться; у группового шага — состав группы). Руководитель — менеджер
+    ПЕРВОГО ответственного шага (у шага с несколькими ответственными это
+    снимок `assignees`): в параллельном блоке просроченным может быть не первый
+    шаг, и руководитель чужого шага в письме о просрочке был бы ошибкой.
+    Персонального владельца нет (групповой шаг) — менеджер автора заявки. Без
+    дублей: один и тот же человек и ответственный, и руководитель письма
+    получает одно. AD недоступен — пустой список, письмо не ставится."""
+    mails = step_owner_mails(step, ad_reader)
+    assignee = getattr(step, "assignee", None)
+    manager = (
+        manager_mail(ad_reader, assignee) if assignee
+        else manager_mail(ad_reader, request.created_by)
+    )
+    if manager and manager not in mails:
+        mails.append(manager)
+    return mails
+
+
+def _overdue_detail(step: object) -> str:
+    """Метка письма о просрочке: номер шага и его срок.
+
+    Срок в метке обязателен: после повтора шага (reissue) или возврата шаг
+    получает новое `expires_at`, и просрочка этого нового круга — новое
+    событие, о котором адресаты должны узнать. Без срока дедупликация молчала
+    бы на втором круге (строка в `mail_queue` не удаляется никогда)."""
+    expires_at = getattr(step, "expires_at", None)
+    return "step:%d@%s" % (
+        getattr(step, "order", 0),
+        expires_at.isoformat() if expires_at is not None else "-",
+    )
+
+
+def _log_overdue_skip(request_id: str, step: object, reason: str) -> None:
+    """След в аудите: письмо о просрочке поставить нечем (нет шаблона, нет
+    адресатов или не собралось). Без ПДн.
+
+    Ключ — метка письма (номер шага и срок) и причина, поэтому новый круг по
+    шагу с новым сроком даст свою строку, а не проглотится старой.
+
+    Пишется ОДИН раз на ключ: `audit_log` — append-only (триггер запрещает
+    UPDATE/DELETE), а worker ходит раз в минуту, так что повтор на каждом
+    проходе забил бы журнал тысячами строк на каждый просроченный шаг. Дедуп по
+    памяти процесса (`audit_log.all()`): рестарт worker-а даст максимум одну
+    повторную строку — это приемлемо, письма всё равно дедуплицируются по БД."""
+    detail = "event=%s %s reason=%s" % (EVENT_OVERDUE, _overdue_detail(step), reason)
+    if any(
+        e.action == "notify.skip" and e.entity_id == request_id and e.detail == detail
+        for e in audit_log.all()
+    ):
+        return
+    audit_log.append(
+        AuditEvent(
+            actor="system",
+            action="notify.skip",
+            entity="request",
+            entity_id=request_id,
+            detail=detail,
+        )
+    )
+
+
+def _stamp(moment: datetime) -> str:
+    """Момент в зоне компании (settings.timezone) в формате карточки/бланка."""
+    if moment.tzinfo is None:
+        return moment.strftime("%d.%m.%Y %H:%M")
+    return moment.astimezone(current_timezone()).strftime("%d.%m.%Y %H:%M")
+
+
 def _mail_context(request: object, base_url: str) -> dict:
     """Контекст письма (без ПДн; ссылка на заявку — из APP_BASE_URL).
 
@@ -86,6 +163,22 @@ def _mail_context(request: object, base_url: str) -> dict:
         "url": request_url(base_url, request.id),
         "comment": "",
     }
+
+
+def _overdue_context(request: object, base_url: str, step: object, now: datetime) -> dict:
+    """Контекст письма о просрочке: общий плюс срок этапа и величина задержки.
+
+    {{ due_at }} — плановый срок шага, {{ overdue_hours }} — на сколько часов он
+    уже истёк (округление вверх, чтобы минимальная задержка была не «0»).
+    Часы, а не дни: срок шага бывает короче суток (ttl_hours, миграция 0026)."""
+    context = _mail_context(request, base_url)
+    expires_at = getattr(step, "expires_at", None)
+    if expires_at is None:
+        return context
+    context["due_at"] = _stamp(expires_at)
+    seconds = max(0.0, (now - expires_at).total_seconds())
+    context["overdue_hours"] = int(seconds // 3600) + (1 if seconds % 3600 else 0)
+    return context
 
 
 def run_once(
@@ -101,6 +194,9 @@ def run_once(
 ) -> WorkerResult:
     """Один проход: просрочки, напоминания, эскалация + разбор очереди писем.
 
+    Просрочка уведомляет, но ничего не меняет: ни статус шага, ни статус
+    заявки, ни сроки (решение человека 2026-10-17).
+
     store — RequestsStore (на стенде DbRequestsStore, в тестах InMemory).
     now — инжектируемые часы для детерминированных тестов (UTC).
     """
@@ -114,21 +210,54 @@ def run_once(
         # (в параллельном блоке — все его шаги, а не только первый).
         for step in _current_pending_steps(request):
             if step.expires_at < now:
-                step.status = STEP_EXPIRED
-                request.status = REWORK
-                store.update(request)
-                result.expired += 1
-                to = recipient_mail(ad_reader, request.created_by)
-                if to:
-                    enqueue_event(
+                # Просрочка (решение человека 2026-10-17): статус заявки и шага
+                # НЕ меняем — шаг ждёт отметки дальше, заявка остаётся «На
+                # согласовании». Сообщаем адресатам шага и их руководителю.
+                # Метка дедупликации — номер шага И его срок: пока срок тот же,
+                # письмо одно (worker ходит раз в минуту), а после повтора шага
+                # или возврата новый круг со своим сроком — новое письмо.
+                detail = _overdue_detail(step)
+                if EVENT_OVERDUE not in mail_templates_map(mail_templates):
+                    # Шаблона нет — не ходим ни в очередь, ни в AD: след в аудите
+                    # обязателен (иначе письмо о просрочке пропало бы тихо), но
+                    # писать его будем не каждый проход.
+                    _log_overdue_skip(request.id, step, "no_template")
+                    continue
+                if mail_queue.has(request.id, EVENT_OVERDUE, detail):
+                    continue
+                recipients = [to for to in _overdue_recipients(ad_reader, request, step) if to]
+                if not recipients:
+                    _log_overdue_skip(request.id, step, "no_recipients")
+                    continue
+                context = _overdue_context(request, base_url, step, now)
+                notified = 0
+                for to in recipients:
+                    if enqueue_event(
                         mail_queue,
                         to,
                         request.id,
-                        EVENT_RETURNED,
+                        EVENT_OVERDUE,
                         mail_templates,
-                        _mail_context(request, base_url),
+                        context,
+                        detail=detail,
+                    ):
+                        notified += 1
+                if notified:
+                    result.expired += 1
+                    audit_log.append(
+                        AuditEvent(
+                            actor="system",
+                            action="step.overdue",
+                            entity="request",
+                            entity_id=request.id,
+                            detail="order=%d" % step.order,
+                        )
                     )
-                break  # заявка ушла на доработку: остальные шаги не трогаем
+                else:
+                    # Адресаты есть, но письмо не собралось (enqueue_event вернул
+                    # None) — причина другая, в аудите пишем её честно.
+                    _log_overdue_skip(request.id, step, "build_failed")
+                continue
             if (
                 now >= step.expires_at - _reminder_before(
                     approval_ttl_days, getattr(step, "ttl_hours", None)
@@ -147,8 +276,6 @@ def run_once(
                         _mail_context(request, base_url),
                     ):
                         result.reminders += 1
-        if request.status != IN_APPROVAL:
-            continue
         # Эскалация по должности увольняемого (position_escalation, часы).
         hours = request.escalation_hours or position_escalation.get(request.position)
         if not hours:

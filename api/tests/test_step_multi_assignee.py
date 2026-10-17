@@ -46,6 +46,7 @@ from app.requests import (  # noqa: E402
     IN_APPROVAL,
     REWORK,
     STEP_APPROVED,
+    STEP_EXPIRED,
     STEP_PENDING,
     STEP_REJECTED,
     RouteSettings,
@@ -729,16 +730,17 @@ def test_return_by_one_responsible_reopens_previous_block(
 def test_reissue_clears_previous_marks(
     client, requests_store, routing_store, settings_override, route_override, ad_reader
 ):
-    """Повтор просроченного шага (reissue) начинает новый круг: отметки сброшены."""
+    """Повтор шага в статусе «просрочен» начинает новый круг: отметки сброшены.
+
+    Состояние «просрочен» — из данных прежнего worker-а (до 2026-10-17 он
+    просрачивал шаг и переводил заявку в доработку)."""
     rid = _ready_request(client, BLANK_SEQ_ID, _hr())
     first, second = ROSTER[0][0], ROSTER[1][0]
     assert _decide(client, rid, 1, _member(first)).status_code == 200
-    # Срок шага истёк — следующая отметка вернёт 410 и переведёт заявку в доработку.
+    # Шаг в статусе «просрочен» (как оставлял прежний worker) — повтор обязателен.
     expired_request = requests_store.get(rid)
-    expired_request.steps[0].expires_at = _utcnow() - timedelta(seconds=1)
+    expired_request.steps[0].status = STEP_EXPIRED
     requests_store.update(expired_request)
-    late = _decide(client, rid, 1, _member(second))
-    assert late.status_code == 410
     expired = client.post(f"/requests/{rid}/steps/1/reissue", headers=_hr())
     assert expired.status_code == 200, expired.text
     body = expired.json()
@@ -746,6 +748,27 @@ def test_reissue_clears_previous_marks(
     assert body["steps"][0]["status"] == STEP_PENDING
     assert body["steps"][0]["approvals"] == []
     assert body["steps"][0]["approved_count"] == 0
+    # После повтора отметку второго ответственного принимают.
+    assert _decide(client, rid, 1, _member(second)).status_code == 200
+
+
+def test_overdue_step_still_accepts_second_mark(
+    client, requests_store, routing_store, settings_override, route_override, ad_reader
+):
+    """Истёкший срок шага отметкам не мешает (решение человека 2026-10-17).
+
+    Частично согласованный шаг остаётся «ожидает», заявка — на согласовании, и
+    второй ответственный спокойно ставит свою отметку без reissue."""
+    rid = _ready_request(client, BLANK_SEQ_ID, _hr())
+    first, second = ROSTER[0][0], ROSTER[1][0]
+    assert _decide(client, rid, 1, _member(first)).status_code == 200
+    overdue = requests_store.get(rid)
+    overdue.steps[0].expires_at = _utcnow() - timedelta(seconds=1)
+    requests_store.update(overdue)
+    late = _decide(client, rid, 1, _member(second))
+    assert late.status_code == 200, late.text
+    assert requests_store.get(rid).status == IN_APPROVAL
+    assert requests_store.get(rid).steps[0].status == STEP_PENDING
 
 
 # ---------------------------------------------------------------------------

@@ -114,6 +114,7 @@ const HISTORY_ACTIONS: Record<string, string> = {
   "step.return": "Возврат",
   "step.reissue": "Повтор шага",
   "step.expired": "Истёк срок по шагу",
+  "step.overdue": "Просрочка этапа (уведомлено)",
   "document.print": "Печать бланка",
   "document.download": "Скачивание бланка",
   "attachment.upload": "Загрузка вложения",
@@ -239,6 +240,58 @@ const STEP_RETURNED = "возвращен";
 // «Отклонено» в системе не используется (отказ переводит её в «На доработке»).
 function REWORKED_STEPS(steps: RequestStep[]): RequestStep[] {
   return steps.filter((s) => s.status === STEP_REFUSED || s.status === STEP_RETURNED);
+}
+
+// Просрочка этапа (решение человека 2026-10-17): срок шага прошёл, а шаг либо
+// ещё ждёт отметки, либо закрыт ПОСЛЕ срока. Просрочка больше не переводит
+// заявку в «На доработке» и не закрывает шаг, поэтому в карточке видна только
+// здесь — срок в таблице «Рассмотрение» выделяется цветом темы (--sed-danger).
+// Отдельной отметки в данных шага нет: состояние вычисляется по датам.
+//
+// current — шаг в текущем блоке маршрута (currentStepOrders). Срок при выдаче
+// ставится ВСЕМ шагам сразу, а обновляется только при входе шага в свой блок,
+// поэтому «холостой» срок шага, ждущего очереди, может оказаться в прошлом.
+// Такой шаг не просрочен: отметку по нему поставить нельзя и бегунок его тоже
+// не считает просроченным — иначе карточка вводила бы в заблуждение.
+function isStepOverdue(step: RequestStep, current: boolean, now: number): boolean {
+  if (!step.expires_at) return false;
+  const due = new Date(step.expires_at).getTime();
+  if (Number.isNaN(due)) return false;
+  const doneAt = step.done_at ? new Date(step.done_at).getTime() : NaN;
+  if (!Number.isNaN(doneAt)) return due < doneAt;
+  return current && due < now;
+}
+
+// Шаги текущего блока маршрута — те же, что считает backend в
+// _current_pending_steps: первый блок с ожидающими шагами, в параллельном —
+// все его ожидающие, в последовательном — только первый по номеру. Нужен для
+// подсветки просрочки, поэтому повторяет правило, а не придумывает своё.
+// card.status — «На согласовании»: бегунок смотрит только такие заявки.
+function currentStepOrders(card: RequestOut): Set<number> {
+  const orders = new Set<number>();
+  if (card.status !== "На согласовании") return orders;
+  const pending = card.steps
+    .filter((step) => step.status === STEP_PENDING)
+    .sort((a, b) => a.order - b.order);
+  if (!pending.length) return orders;
+  const firstBlock = blockInfo(pending[0].order);
+  const inBlock = pending.filter((step) => blockInfo(step.order).blockNo === firstBlock.blockNo);
+  // Параллельный блок — все его ожидающие, последовательный — только первый.
+  (firstBlock.parallel ? inBlock : inBlock.slice(0, 1)).forEach((step) => orders.add(step.order));
+  return orders;
+}
+
+// Блок маршрута шага: номер для группировки и признак параллельности.
+// Кодирование — как в backend (_order_for/_block_info): order < 1000 — общий
+// последовательный блок, дальше номер блока идёт тысячами, а сотня внутри блока
+// помечает параллельный. Признак берётся ИЗ САМОГО order: в номере блока для
+// показа младшие разряды уже отброшены, и сотня параллельности там терялась бы.
+function blockInfo(order: number): { blockNo: number; parallel: boolean } {
+  const coded = order >= 1000;
+  return {
+    blockNo: coded ? Math.floor(order / 1000) + 1 : 1,
+    parallel: coded && Math.floor((order % 1000) / 100) === 1,
+  };
 }
 
 // Порядковый номер ключа черновика (React-ключи строк маршрута).
@@ -1618,10 +1671,10 @@ export function RequestCard(props: RequestCardProps) {
             {(() => {
               // Блоки в порядке шагов: номер и режим из кода order.
               const blocks: { blockNo: number; parallel: boolean; steps: RequestStep[] }[] = [];
+              // Момент отрисовки для сравнения со сроком шага (просрочка).
+              const now = Date.now();
               card.steps.forEach((step) => {
-                const coded = step.order >= 1000;
-                const blockNo = coded ? Math.floor(step.order / 1000) + 1 : 1;
-                const parallel = coded && Math.floor((step.order % 1000) / 100) === 1;
+                const { blockNo, parallel } = blockInfo(step.order);
                 const last = blocks[blocks.length - 1];
                 if (last && last.blockNo === blockNo) {
                   last.steps.push(step);
@@ -1629,6 +1682,10 @@ export function RequestCard(props: RequestCardProps) {
                   blocks.push({ blockNo, parallel, steps: [step] });
                 }
               });
+              // Шаги текущего блока — для подсветки просрочки (правило backend,
+              // _current_pending_steps). Срок ждущего очереди шага «холостой»:
+              // истёкшим он не считается и бегунком не просрачивается.
+              const currentOrders = currentStepOrders(card);
               return (
                 <table className="sed-table sed-table--review" aria-label="Шаги заявки">
                   {/* Ширины — через colgroup (классы колонок), а не nth-child:
@@ -1654,28 +1711,45 @@ export function RequestCard(props: RequestCardProps) {
                   </thead>
                   <tbody>
                     {blocks.map((block) =>
-                      block.steps.map((step, si) => (
-                        <tr key={step.order}>
-                          {si === 0 && (
-                            <td rowSpan={block.steps.length} className="sed-review__kind">
-                              {block.parallel ? "Параллельно" : "Последовательно"}
+                      block.steps.map((step, si) => {
+                        // Срок один на отрисовку: пересчитывать по каждой
+                        // ячейке незачем, а Date.now() внутри map давал бы
+                        // разные значения в одной таблице.
+                        const overdue = isStepOverdue(
+                          step,
+                          currentOrders.has(step.order),
+                          now,
+                        );
+                        return (
+                          <tr key={step.order}>
+                            {si === 0 && (
+                              <td rowSpan={block.steps.length} className="sed-review__kind">
+                                {block.parallel ? "Параллельно" : "Последовательно"}
+                              </td>
+                            )}
+                            <td>{stepDutyCell(step)}</td>
+                            <td>{stepExecutorsNode(step)}</td>
+                            <td>{step.status}</td>
+                            {/* Срок — дата и время до минут: у шага может быть
+                                свой срок в часах, одна дата ничего не говорит
+                                (формат и зона — date-format.ts). Истёкший срок
+                                выделяется цветом темы: задержка на этапе видна
+                                в карточке, статус заявки при этом прежний. */}
+                            <td
+                              className={overdue ? "sed-review__deadline--overdue" : undefined}
+                              title={overdue ? "Просрочен" : undefined}
+                            >
+                              {formatDateTimeHM(step.expires_at)}
                             </td>
-                          )}
-                          <td>{stepDutyCell(step)}</td>
-                          <td>{stepExecutorsNode(step)}</td>
-                          <td>{step.status}</td>
-                          {/* Срок — дата и время до минут: у шага может быть
-                              свой срок в часах, одна дата ничего не говорит
-                              (формат и зона — date-format.ts). */}
-                          <td>{formatDateTimeHM(step.expires_at)}</td>
-                          {/* Отметки ответственных (шаг с несколькими
-                              ответственными) — под комментарием шага. */}
-                          <td>
-                            {step.comment ?? "—"}
-                            {stepApprovalsNode(step)}
-                          </td>
-                        </tr>
-                      )),
+                            {/* Отметки ответственных (шаг с несколькими
+                                ответственными) — под комментарием шага. */}
+                            <td>
+                              {step.comment ?? "—"}
+                              {stepApprovalsNode(step)}
+                            </td>
+                          </tr>
+                        );
+                      }),
                     )}
                   </tbody>
                 </table>

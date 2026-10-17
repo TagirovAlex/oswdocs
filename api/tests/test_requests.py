@@ -37,6 +37,7 @@ from app.requests import (  # noqa: E402
     IN_APPROVAL,
     REWORK,
     STEP_APPROVED,
+    STEP_EXPIRED,
     STEP_PENDING,
     STEP_REJECTED,
     _employee_keys,
@@ -739,10 +740,13 @@ def test_foreign_step_403(client, hr, other_owner, test_settings_override, route
     assert response.status_code == 403
 
 
-def test_expired_reissue(
+def test_overdue_step_decision_allowed(
     client, hr, buh_owner, requests_store, test_settings_override, route_override
 ):
-    """Просрочка TTL → 410 и На доработке, повтор (reissue) возвращает в работу."""
+    """Отметка после истёкшего срока проходит, заявка остаётся в работе.
+
+    Решение человека 2026-10-17: просрочка не уводит заявку в «На доработке»
+    и не блокирует отметку — согласующий отмечается, задержка видна в карточке."""
     rid = _create(client, hr).json()["id"]
     assert client.post(f"/requests/{rid}/submit", headers=hr).status_code == 200
     # Искусственно состариваем шаг мимо TTL (хранилище in-memory — стенд хранит в БД).
@@ -752,19 +756,9 @@ def test_expired_reissue(
         json={"decision": "approve"},
         headers=buh_owner,
     )
-    assert late.status_code == 410
-    assert requests_store.get(rid).status == "На доработке"
-    again = client.post(f"/requests/{rid}/steps/1/reissue", headers=hr)
-    assert again.status_code == 200
-    assert again.json()["status"] == "На согласовании"
-    assert again.json()["steps"][0]["status"] == "ожидает"
-    # После повтора согласие без комментария (флаг не требует) — успешно.
-    done = client.post(
-        f"/requests/{rid}/steps/1/decision",
-        json={"decision": "approve"},
-        headers=buh_owner,
-    )
-    assert done.status_code == 200
+    assert late.status_code == 200, late.text
+    # Маршрут многошаговый: заявка осталась на согласовании, доработки не было.
+    assert late.json()["status"] == IN_APPROVAL
 
 
 def test_manual_and_patch_only_allowed_group(
@@ -900,14 +894,16 @@ def test_can_act_false_outside_approval_status(
     assert all(s["can_act"] is False for s in body["steps"])
 
 
-def test_can_act_false_on_expired_step(
+def test_can_act_true_on_overdue_step(
     client, hr, buh_owner, requests_store, test_settings_override, route_override, settings_store
 ):
-    """Просроченный шаг (expires_at в прошлом): can_act=False (иначе кнопка, а API даст 410)."""
+    """Шаг с истёкшим сроком остаётся действующим: can_act=True (решение человека
+    2026-10-17 — просрочка не закрывает шаг и не уводит заявку в доработку)."""
     rid = _create_and_submit(client, hr)
     requests_store.get(rid).steps[0].expires_at = _utcnow() - timedelta(days=1)
     body = client.get(f"/requests/{rid}", headers=buh_owner).json()
-    assert _step_of(body, 1)["can_act"] is False
+    assert body["status"] == "На согласовании"
+    assert _step_of(body, 1)["can_act"] is True
 
 
 def test_can_act_false_for_admin_not_owner(
@@ -2044,15 +2040,16 @@ def test_reissue_notifies_step_owner(
     client, hr, buh_owner, requests_store, mail_queue, mail_settings_store,
     mail_ad_reader, test_settings_override, route_override
 ):
-    """Повтор просроченного шага (reissue) — письмо «назначена» его владельцу."""
+    """Повтор шага в статусе «просрочен» (reissue) — письмо «назначена» его владельцу.
+
+    Статус «просрочен» больше не ставит worker (просрочка не уводит заявку в
+    доработку), но в базе остаются шаги, помеченные им до 2026-10-17: повтор
+    по ним работает и письмо шлёт."""
     rid = _create(
         client, hr, blocks=[{"mode": "sequential", "steps": [{"owner_group": GROUP_BUH}]}]
     ).json()["id"]
     assert client.post(f"/requests/{rid}/submit", headers=hr).status_code == 200
-    requests_store.get(rid).steps[0].expires_at = _utcnow() - timedelta(days=1)
-    assert client.post(
-        f"/requests/{rid}/steps/1/decision", json={"decision": "approve"}, headers=buh_owner
-    ).status_code == 410
+    requests_store.get(rid).steps[0].status = STEP_EXPIRED
     assert client.post(f"/requests/{rid}/steps/1/reissue", headers=hr).status_code == 200
     assert _sent(mail_queue) == [
         (_mail_of(BUH_SAM), EVENT_ASSIGNED),
@@ -2291,20 +2288,15 @@ def test_submit_after_rework_reopens_expired_step(
     client, hr, buh_owner, requests_store, mail_queue, mail_settings_store,
     mail_ad_reader, test_settings_override, route_override
 ):
-    """Просроченный шаг после доработки снова ожидает, а не остаётся «просрочен».
+    """Шаг в статусе «просрочен» после доработки снова ожидает, а не остаётся «просрочен».
 
-    Иначе заявка ушла бы в «На согласовании» вообще без доступного шага
-    (can_act у просроченного шага всегда false) и висела до ручного reissue."""
+    Иначе заявка ушла бы в «На согласовании» вообще без доступного шага и висела
+    до ручного reissue. Состояние «просрочен» + «На доработке» — из данных,
+    созданных старым поведением worker-а (до 2026-10-17 просрочка переводила
+    заявку в доработку); новый worker такого перехода не делает."""
     rid = _create_and_submit(client, hr)
-    requests_store.get(rid).steps[0].expires_at = _utcnow() - timedelta(days=1)
-    expired = client.post(
-        f"/requests/{rid}/steps/1/decision",
-        json={"decision": "approve"},
-        headers=buh_owner,
-    )
-    assert expired.status_code == 410
-    # Истечение срока кладёт заявку на доработку (тело 410 — это detail, не карточка).
-    assert requests_store.get(rid).status == "На доработке"
+    requests_store.get(rid).steps[0].status = STEP_EXPIRED
+    requests_store.get(rid).status = REWORK
 
     submitted = client.post(f"/requests/{rid}/submit", headers=hr)
     assert submitted.status_code == 200, submitted.text
@@ -2363,22 +2355,19 @@ def test_submit_after_rework_resets_expired_step_approvals(
 
     Частично согласованный шаг просрочился: после подачи он снова ожидает, но
     согласия прежнего круга не осталось — иначе прежний согласовавший получил бы
-    409 «Вы уже согласовали этот шаг», а шаг закрылся бы по старой отметке."""
+    409 «Вы уже согласовали этот шаг», а шаг закрылся бы по старой отметке.
+    Состояние «просрочен» + «На доработке» — из данных старого worker-а
+    (до 2026-10-17 просрочка переводила заявку в доработку)."""
     rid = _create_and_submit(
         client, hr, blocks=[{"mode": "sequential", "steps": [{"sam": BUH_SAM}]}]
     )
-    requests_store.get(rid).steps[0].expires_at = _utcnow() - timedelta(days=1)
-    assert client.post(
-        f"/requests/{rid}/steps/1/decision",
-        json={"decision": "approve"},
-        headers=buh_owner,
-    ).status_code == 410
-    assert requests_store.get(rid).status == "На доработке"
+    expired_step = requests_store.get(rid).steps[0]
+    expired_step.status = STEP_EXPIRED
+    requests_store.get(rid).status = REWORK
     # Отметка прежнего круга кладётся прямо в хранилище: собирать такой шаг через
     # API нельзя (параллельный блок закрывает шаг первым же согласованием, а
     # последовательный имеет одного ответственного), а проверяем тут именно
     # переоткрытие шага по `submit`.
-    expired_step = requests_store.get(rid).steps[0]
     expired_step.approvals = [
         {
             "sam": BUH_SAM,

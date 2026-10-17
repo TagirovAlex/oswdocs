@@ -551,6 +551,14 @@ a {
   width: 104px;
 }
 
+/* Истёкший срок этапа (просрочка, решение человека 2026-10-17): задержка
+   видна в карточке цветом. --sed-danger разный в светлой и тёмной темах
+   (#b3261e / #f2a5a0) — поэтому отдельный «тёмный красный» не нужен. */
+.sed-review__deadline--overdue {
+  color: var(--sed-danger);
+  font-weight: 600;
+}
+
 .sed-table--review td {
   overflow-wrap: anywhere;
   min-width: 0;

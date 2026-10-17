@@ -784,6 +784,10 @@ const MAIL_PLACEHOLDERS: readonly { token: string; hint: string }[] = [
   { token: "{{ fio }}", hint: "ФИО сотрудника" },
   { token: "{{ url }}", hint: "ссылка на заявку" },
   { token: "{{ comment }}", hint: "комментарий последнего отказа/возврата" },
+  // due_at/overdue_hours — только в письме «просрочка» (overdue), в остальных
+  // письмах подставляются пустой строкой.
+  { token: "{{ due_at }}", hint: "срок этапа (письмо «просрочка»)" },
+  { token: "{{ overdue_hours }}", hint: "задержка в часах (письмо «просрочка»)" },
   { token: "{{ event }}", hint: "код события (служебное)" },
 ];
 

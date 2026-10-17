@@ -43,8 +43,6 @@ from app.mailer import (  # noqa: E402
 )
 from app.requests import (  # noqa: E402
     IN_APPROVAL,
-    REWORK,
-    STEP_EXPIRED,
     STEP_PENDING,
     _Request,
     _Step,
@@ -664,29 +662,245 @@ def _make_request(request_id="REQ-0001", *, expires_in, status=IN_APPROVAL,
     )
 
 
-def test_worker_overdue_to_rework_with_return_letter(tmp_path):
+def _overdue_request(request_id="REQ-0001", *, assignee="step.buhgalter", hours=3):
+    """Заявка с одним просроченным шагом и моментом `now` для run_once.
+
+    Срок ставится ОТ ЭТОГО ЖЕ now: если оставить срок на `_utcnow()` внутри
+    `_make_request`, он окажется на микросекунды раньше переданного в run_once
+    `now` — округление задержки вверх дало бы лишний час (тест был бы зелёным
+    на Windows только из-за квантования часов)."""
+    now = _utcnow()
+    request = _make_request(request_id, expires_in=timedelta(hours=-hours),
+                            assignee=assignee)
+    request.steps[0].expires_at = now - timedelta(hours=hours)
+    return request, now
+
+
+def _overdue_templates():
+    return [{"code": "overdue", "subject": "Просрочка {{ request_id }}",
+             "body_html": "<html>{{ url }}</html>"}]
+
+
+def test_worker_overdue_keeps_approval_and_notifies_step_owners(tmp_path):
+    """Просрочка этапа не меняет статусы (решение человека 2026-10-17): заявка
+    остаётся «На согласовании», шаг — «ожидает» и отметку по нему можно поставить.
+    Письмо «просрочка» уходит ответственному за шаг и его руководителю."""
     store = get_memory_requests_store()
-    store.create(_make_request(expires_in=timedelta(hours=-1)))
+    request, now = _overdue_request()
+    store.create(request)
     queue = FileMailQueue(tmp_path / "q.json")
     mailer = MockMailer()
     ad = FakeAdReader(
-        {"ok.vymyshlennaya": FakeUser("ok.vymyshlennaya", mail="ok@example.com")}
+        {
+            "step.buhgalter": FakeUser(
+                "step.buhgalter", mail="buh@example.com", manager_dn="cn=buh.manager"
+            ),
+        },
+        by_dn={"cn=buh.manager": FakeUser("buh.manager", mail="manager@example.com")},
     )
     templates = [
-        {"code": "returned", "subject": "Возврат {{ request_id }}",
-         "body_html": "<html>{{ url }}</html>"}
+        {"code": "overdue", "subject": "Просрочка {{ request_id }}",
+         "body_html": "<html>{{ url }} срок {{ due_at }}, задержка "
+                      "{{ overdue_hours }} ч.</html>"}
     ]
     result = run_once(
         store, queue, mailer, templates, {}, 7, ad, BASE_URL,
-        now=_utcnow(),
+        now=now,
     )
     stored = store.get("REQ-0001")
-    assert stored.status == REWORK
-    assert stored.steps[0].status == STEP_EXPIRED
+    assert stored.status == IN_APPROVAL
+    assert stored.steps[0].status == STEP_PENDING
+    assert stored.steps[0].expires_at < now
     assert result.expired == 1
-    assert result.sent == 1
-    assert mailer.sent and mailer.sent[0]["to"] == "ok@example.com"
-    assert "REQ-0001" in mailer.sent[0]["subject"]
+    assert result.sent == 2
+    assert {m["to"] for m in mailer.sent} == {"buh@example.com", "manager@example.com"}
+    assert all("REQ-0001" in m["subject"] for m in mailer.sent)
+    # В письме есть срок этапа и величина задержки (в часах, округление вверх).
+    assert all("задержка 3 ч." in m["html"] for m in mailer.sent)
+    assert any(e.action == "step.overdue" and e.entity_id == "REQ-0001"
+               for e in audit_log.all())
+
+
+def test_worker_overdue_letter_sent_once_per_step(tmp_path):
+    """Повторный проход по просроченному шагу письма не дублирует: дедуп по
+    номеру шага и сроку (worker ходит раз в минуту, срок шага не продлевается)."""
+    store = get_memory_requests_store()
+    request, now = _overdue_request()
+    store.create(request)
+    queue = FileMailQueue(tmp_path / "q.json")
+    mailer = MockMailer()
+    ad = FakeAdReader({"step.buhgalter": FakeUser("step.buhgalter", mail="buh@example.com")})
+    first = run_once(store, queue, mailer, _overdue_templates(), {}, 7, ad, BASE_URL, now=now)
+    assert first.expired == 1
+    mailer.sent.clear()
+    again = run_once(store, queue, mailer, _overdue_templates(), {}, 7, ad, BASE_URL, now=now)
+    assert again.expired == 0
+    assert again.sent == 0
+    assert mailer.sent == []
+
+
+def test_worker_overdue_after_reissue_notified_again(tmp_path):
+    """Новый круг по тому же шагу (повтор/reissue дал новый срок) — новое письмо.
+
+    Метка дедупликации включает срок: строка в mail_queue не удаляется никогда,
+    и без срока второй круг просрочки остался бы без письма."""
+    store = get_memory_requests_store()
+    request, now = _overdue_request()
+    store.create(request)
+    queue = FileMailQueue(tmp_path / "q.json")
+    mailer = MockMailer()
+    ad = FakeAdReader({"step.buhgalter": FakeUser("step.buhgalter", mail="buh@example.com")})
+    run_once(store, queue, mailer, _overdue_templates(), {}, 7, ad, BASE_URL, now=now)
+    assert len(mailer.sent) == 1
+    # Повтор шага: новый срок, шаг снова просрочен (прошёл час «мгновенно»).
+    request = store.get("REQ-0001")
+    request.steps[0].expires_at = now - timedelta(hours=1)
+    store.update(request)
+    mailer.sent.clear()
+    again = run_once(store, queue, mailer, _overdue_templates(), {}, 7, ad, BASE_URL,
+                     now=now + timedelta(hours=2))
+    assert again.expired == 1
+    assert [m["to"] for m in mailer.sent] == ["buh@example.com"]
+
+
+def test_worker_overdue_skips_reminder_and_audits_once_without_template(tmp_path):
+    """Просроченный шаг не получает напоминание, а отсутствие письма видно в
+    аудите — ровно один раз, иначе worker (раз в минуту) забил бы append-only
+    журнал тысячами строк на каждый просроченный шаг."""
+    store = get_memory_requests_store()
+    request, now = _overdue_request()
+    store.create(request)
+    queue = FileMailQueue(tmp_path / "q.json")
+    mailer = MockMailer()
+    ad = FakeAdReader({"step.buhgalter": FakeUser("step.buhgalter", mail="buh@example.com")})
+    reminder_only = [{"code": "reminder", "subject": "Напоминание",
+                      "body_html": "<html></html>"}]
+    for _ in range(3):
+        result = run_once(store, queue, mailer, reminder_only, {}, 7, ad, BASE_URL, now=now)
+        assert result.expired == 0
+        assert result.reminders == 0
+    assert mailer.sent == []
+    skip = [e for e in audit_log.all() if e.action == "notify.skip"]
+    assert len(skip) == 1
+    assert "reason=no_template" in skip[0].detail
+    assert not any(e.action == "step.overdue" for e in audit_log.all())
+
+
+def test_worker_overdue_no_recipients_audited_once(tmp_path):
+    """Шаблон есть, но адресатов нет (AD недоступен) — тоже след в аудите, один раз.
+
+    Отличается от build_failed: адресат не найден, письмо нечего слать."""
+    store = get_memory_requests_store()
+    request, now = _overdue_request()
+    store.create(request)
+    queue = FileMailQueue(tmp_path / "q.json")
+    mailer = MockMailer()
+    for _ in range(3):
+        result = run_once(store, queue, mailer, _overdue_templates(), {}, 7, None,
+                          BASE_URL, now=now)
+        assert result.expired == 0
+    assert mailer.sent == []
+    skip = [e for e in audit_log.all() if e.action == "notify.skip"]
+    assert len(skip) == 1
+    assert "reason=no_recipients" in skip[0].detail
+
+
+def test_worker_overdue_one_letter_when_manager_is_assignee(tmp_path):
+    """Руководитель шага и сам ответственный — один человек: письмо одно."""
+    store = get_memory_requests_store()
+    request, now = _overdue_request()
+    store.create(request)
+    queue = FileMailQueue(tmp_path / "q.json")
+    mailer = MockMailer()
+    ad = FakeAdReader(
+        {
+            "step.buhgalter": FakeUser(
+                "step.buhgalter", mail="buh@example.com", manager_dn="cn=self.manager"
+            ),
+        },
+        by_dn={"cn=self.manager": FakeUser("step.buhgalter", mail="buh@example.com")},
+    )
+    result = run_once(store, queue, mailer, _overdue_templates(), {}, 7, ad, BASE_URL,
+                      now=now)
+    assert result.expired == 1
+    assert [m["to"] for m in mailer.sent] == ["buh@example.com"]
+
+
+def test_worker_overdue_notified_per_step_of_parallel_block(tmp_path):
+    """Параллельный блок: просрочены оба шага — письмо по каждому (дедуп по
+    номеру шага, иначе молчал бы второй)."""
+    store = get_memory_requests_store()
+    now = _utcnow()
+    store.create(
+        _Request(
+            id="REQ-0001", status=IN_APPROVAL, route_origin="custom",
+            enterprise=FAKE_ENTERPRISE, fio="Вымышленный Сотрудник Полный",
+            tab_num="В-0001", department=FAKE_SERVICE, position=FAKE_POSITION,
+            created_by="ok.vymyshlennaya",
+            steps=[
+                _Step(order=1101, owner_group="", assignee="step.buhgalter",
+                      status=STEP_PENDING, expires_at=now - timedelta(hours=1)),
+                _Step(order=1102, owner_group="", assignee="step.kassir",
+                      status=STEP_PENDING, expires_at=now - timedelta(hours=1)),
+            ],
+        )
+    )
+    queue = FileMailQueue(tmp_path / "q.json")
+    mailer = MockMailer()
+    ad = FakeAdReader(
+        {
+            "step.buhgalter": FakeUser("step.buhgalter", mail="buh@example.com"),
+            "step.kassir": FakeUser("step.kassir", mail="kassir@example.com"),
+        }
+    )
+    templates = [
+        {"code": "overdue", "subject": "Просрочка {{ request_id }}",
+         "body_html": "<html>{{ url }}</html>"}
+    ]
+    result = run_once(store, queue, mailer, templates, {}, 7, ad, BASE_URL, now=now)
+    assert result.expired == 2
+    assert {m["to"] for m in mailer.sent} == {"buh@example.com", "kassir@example.com"}
+    # Метка дедупликации — номер шага и его срок.
+    for order in (1101, 1102):
+        expires_at = store.get("REQ-0001").steps[
+            0 if order == 1101 else 1
+        ].expires_at.isoformat()
+        assert queue.has("REQ-0001", "overdue", "step:%d@%s" % (order, expires_at))
+
+
+def test_worker_overdue_manager_of_the_overdue_step(tmp_path):
+    """Руководитель в письме — менеджер ответственного ИМЕННО просроченного шага.
+
+    Параллельный блок: просрочен второй шаг, а у первого другой владелец —
+    письмо о шаге 1102 не должно уходить руководителю шага 1101."""
+    store = get_memory_requests_store()
+    now = _utcnow()
+    store.create(
+        _Request(
+            id="REQ-0001", status=IN_APPROVAL, route_origin="custom",
+            enterprise=FAKE_ENTERPRISE, fio="Вымышленный Сотрудник Полный",
+            tab_num="В-0001", department=FAKE_SERVICE, position=FAKE_POSITION,
+            created_by="ok.vymyshlennaya",
+            steps=[
+                _Step(order=1101, owner_group="", assignee="step.buhgalter",
+                      status=STEP_PENDING, expires_at=now + timedelta(hours=5)),
+                _Step(order=1102, owner_group="", assignee="step.kassir",
+                      status=STEP_PENDING, expires_at=now - timedelta(hours=1)),
+            ],
+        )
+    )
+    queue = FileMailQueue(tmp_path / "q.json")
+    mailer = MockMailer()
+    ad = FakeAdReader(
+        {
+            "step.buhgalter": FakeUser("step.buhgalter", mail="buh@example.com"),
+            "step.kassir": FakeUser("step.kassir", mail="kassir@example.com",
+                                    manager_dn="cn=kassir.manager"),
+        },
+        by_dn={"cn=kassir.manager": FakeUser("kassir.manager", mail="boss@example.com")},
+    )
+    run_once(store, queue, mailer, _overdue_templates(), {}, 7, ad, BASE_URL, now=now)
+    assert {m["to"] for m in mailer.sent} == {"kassir@example.com", "boss@example.com"}
 
 
 def test_worker_reminder_queued_once(tmp_path):

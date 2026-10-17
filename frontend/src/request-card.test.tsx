@@ -461,6 +461,190 @@ describe("RequestCard", () => {
     expect(cells[cells.length - 2]).toHaveTextContent("05.10.2026, 13:00");
   });
 
+  // Истёкший срок этапа (решение человека 2026-10-17): заявка остаётся
+  // «На согласовании», поэтому задержка видна только подсветкой срока.
+  // Цвет берётся из --sed-danger (в CSS своё правило на светлую/тёмную тему).
+  it("просроченный срок этапа выделяется цветом темы", async () => {
+    setDisplayTimezone("Europe/Moscow");
+    vi.mocked(getRequest).mockResolvedValue({
+      ...requestWith("Громов Игорь Олегович", "На согласовании"),
+      steps: [
+        {
+          order: 1101,
+          owner_group: "SED_STEP_BUH",
+          resolver: "by_group",
+          status: "ожидает",
+          // Срок в прошлом (тесты идут после этой даты).
+          expires_at: "2026-10-05T10:00:00+00:00",
+        },
+      ],
+    });
+
+    renderCard();
+    await waitFor(() => expect(screen.getByLabelText("Шаги заявки")).toBeInTheDocument());
+    const cells = within(screen.getByLabelText("Шаги заявки")).getAllByRole("cell");
+    const deadline = cells[cells.length - 2];
+    expect(deadline.className).toContain("sed-review__deadline--overdue");
+    expect(deadline.getAttribute("title")).toBe("Просрочен");
+  });
+
+  // Закрытый в срок шаг подсветкой не идёт: задержки не было.
+  it("срок будущего этапа не выделяется", async () => {
+    setDisplayTimezone("Europe/Moscow");
+    const future = new Date(Date.now() + 3 * 24 * 3600 * 1000).toISOString();
+    vi.mocked(getRequest).mockResolvedValue({
+      ...requestWith("Громов Игорь Олегович", "На согласовании"),
+      steps: [
+        {
+          order: 1101,
+          owner_group: "SED_STEP_BUH",
+          resolver: "by_group",
+          status: "ожидает",
+          expires_at: future,
+        },
+      ],
+    });
+
+    renderCard();
+    await waitFor(() => expect(screen.getByLabelText("Шаги заявки")).toBeInTheDocument());
+    const cells = within(screen.getByLabelText("Шаги заявки")).getAllByRole("cell");
+    expect(cells[cells.length - 2].className).not.toContain("sed-review__deadline--overdue");
+  });
+
+  // «Холостой» срок шага следующего блока в прошлом — не просрочка: отметку по
+  // такому шагу поставить нельзя (не текущий блок) и бегунок его не считает
+  // просроченным. Иначе карточка вводила бы в заблуждение (срок при выдаче
+  // ставится всем шагам сразу, обновляется только при входе в свой блок).
+  it("истёкший срок шага следующего блока не выделяется", async () => {
+    setDisplayTimezone("Europe/Moscow");
+    vi.mocked(getRequest).mockResolvedValue({
+      ...requestWith("Громов Игорь Олегович", "На согласовании"),
+      steps: [
+        {
+          order: 1,
+          owner_group: "SED_STEP_BUH",
+          resolver: "by_group",
+          status: "ожидает",
+          expires_at: new Date(Date.now() + 3600 * 1000).toISOString(),
+        },
+        {
+          order: 1101,
+          owner_group: "SED_STEP_HR",
+          resolver: "by_group",
+          status: "ожидает",
+          expires_at: "2026-10-05T10:00:00+00:00",
+        },
+      ],
+    });
+
+    renderCard();
+    await waitFor(() => expect(screen.getByLabelText("Шаги заявки")).toBeInTheDocument());
+    const cells = within(screen.getByLabelText("Шаги заявки")).getAllByRole("cell");
+    const cellsOfSecondStep = cells.filter((cell) =>
+      cell.textContent?.includes("05.10.2026"),
+    );
+    expect(cellsOfSecondStep).toHaveLength(1);
+    expect(cellsOfSecondStep[0].className).not.toContain(
+      "sed-review__deadline--overdue",
+    );
+  });
+
+  // Последовательный блок: текущим считается только первый ожидающий шаг
+  // (так же, как backend в _current_pending_steps), поэтому истёкший «холостой»
+  // срок второго шага того же блока подсветкой не идёт.
+  it("в последовательном блоке просрочен только текущий шаг", async () => {
+    setDisplayTimezone("Europe/Moscow");
+    const past = "2026-10-05T10:00:00+00:00";
+    vi.mocked(getRequest).mockResolvedValue({
+      ...requestWith("Громов Игорь Олегович", "На согласовании"),
+      steps: [
+        {
+          order: 1,
+          owner_group: "SED_STEP_BUH",
+          resolver: "by_group",
+          status: "ожидает",
+          expires_at: past,
+        },
+        {
+          order: 2,
+          owner_group: "SED_STEP_HR",
+          resolver: "by_group",
+          status: "ожидает",
+          expires_at: past,
+        },
+      ],
+    });
+
+    renderCard();
+    await waitFor(() => expect(screen.getByLabelText("Шаги заявки")).toBeInTheDocument());
+    const cells = within(screen.getByLabelText("Шаги заявки"))
+      .getAllByRole("cell")
+      .filter((cell) => cell.textContent?.includes("05.10.2026"));
+    expect(cells).toHaveLength(2);
+    // Подсвечен ровно один срок: второй шаг блока ещё не на согласовании.
+    expect(
+      cells.filter((cell) => cell.className.includes("sed-review__deadline--overdue")),
+    ).toHaveLength(1);
+  });
+
+  // Параллельный блок (номера 1101/1102 — сотня в коде order): текущими считаются
+  // ВСЕ его ожидающие шаги, так же как backend в _current_pending_steps, поэтому
+  // просрочены оба срока (бегунок шлёт письма по каждому).
+  it("в параллельном блоке просрочены оба шага", async () => {
+    setDisplayTimezone("Europe/Moscow");
+    const past = "2026-10-05T10:00:00+00:00";
+    vi.mocked(getRequest).mockResolvedValue({
+      ...requestWith("Громов Игорь Олегович", "На согласовании"),
+      steps: [
+        {
+          order: 1101,
+          owner_group: "SED_STEP_BUH",
+          resolver: "by_group",
+          status: "ожидает",
+          expires_at: past,
+        },
+        {
+          order: 1102,
+          owner_group: "SED_STEP_HR",
+          resolver: "by_group",
+          status: "ожидает",
+          expires_at: past,
+        },
+      ],
+    });
+
+    renderCard();
+    await waitFor(() => expect(screen.getByLabelText("Шаги заявки")).toBeInTheDocument());
+    const overdue = within(screen.getByLabelText("Шаги заявки"))
+      .getAllByRole("cell")
+      .filter((cell) => cell.className.includes("sed-review__deadline--overdue"));
+    expect(overdue).toHaveLength(2);
+  });
+
+  // Заявка не «На согласовании»: бегунок её не смотрит, просрочки по ней нет.
+  it("вне статуса «На согласовании» срок не выделяется", async () => {
+    setDisplayTimezone("Europe/Moscow");
+    vi.mocked(getRequest).mockResolvedValue({
+      ...requestWith("Громов Игорь Олегович", "На доработке"),
+      steps: [
+        {
+          order: 1101,
+          owner_group: "SED_STEP_BUH",
+          resolver: "by_group",
+          status: "ожидает",
+          expires_at: "2026-10-05T10:00:00+00:00",
+        },
+      ],
+    });
+
+    renderCard();
+    await waitFor(() => expect(screen.getByLabelText("Шаги заявки")).toBeInTheDocument());
+    const cells = within(screen.getByLabelText("Шаги заявки")).getAllByRole("cell");
+    expect(cells[cells.length - 2].className).not.toContain(
+      "sed-review__deadline--overdue",
+    );
+  });
+
   // Должность — читаемое наименование группы из справочника настроек.
   it("должность — наименование группы из справочника", async () => {
     vi.mocked(getStepGroups).mockResolvedValue([

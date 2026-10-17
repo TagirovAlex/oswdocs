@@ -2230,24 +2230,23 @@ def _can_act(
     step: _Step,
     user: CurrentUser,
     pending_orders: set[int],
-    now: datetime,
     roster: _RosterResolver | None = None,
     deputy: _DeputyResolver | None = None,
 ) -> bool:
     """Может ли пользователь поставить отметку по шагу прямо сейчас.
 
     Условия те же, что проверяет decide_step: заявка «На согласовании», шаг
-    ожидает, шаг в текущем блоке маршрута (_current_pending_steps), TTL не истек,
+    ожидает, шаг в текущем блоке маршрута (_current_pending_steps),
     пользователь — владелец шага (_owns_step) и ещё не оставлял свою отметку
-    согласия (повтор API отклонил бы 409). Послаблений по роли нет: админ/
-    ОК не «могут всё» — иначе фронт покажет кнопку, которую API отклонит
-    (403/409/410). Считается для всех ролей, у не-владельца просто False.
+    согласия (повтор API отклонил бы 409). Истёкший срок шага не мешает:
+    просрочка больше не блокирует отметку (решение человека 2026-10-17).
+    Послаблений по роли нет: админ/ОК не «могут всё» — иначе фронт покажет
+    кнопку, которую API отклонит (403/409). Считается для всех ролей, у
+    не-владельца просто False.
     """
     if request.status != IN_APPROVAL or step.status != STEP_PENDING:
         return False
     if step.order not in pending_orders:
-        return False
-    if step.expires_at <= now:
         return False
     if not _owns_step(step, user, roster, deputy):
         return False
@@ -2551,7 +2550,6 @@ def _public_view(
     )
     groups = group_names if group_names is not None else _step_group_names_map()
     doc_names = doc_type_names if doc_type_names is not None else _doc_type_names_map()
-    now = _utcnow()
     pending_orders = {s.order for s in _current_pending_steps(request)}
     # Справочники маршрута: состояние маршрута — не ПДн, поэтому резолвим для всех.
     route_store = routing_store if routing_store is not None else _routing_store_or_none()
@@ -2591,7 +2589,7 @@ def _public_view(
                 done_by=s.done_by if privileged else None,
                 done_at=s.done_at.isoformat() if s.done_at else None,
                 comment=s.comment,
-                can_act=_can_act(request, s, user, pending_orders, now, roster, deputy_resolver),
+                can_act=_can_act(request, s, user, pending_orders, roster, deputy_resolver),
                 stage_title=s.stage_title,
                 stage_code=s.stage_code,
                 assignees=(
@@ -4282,15 +4280,10 @@ def decide_step(
         if body.decision == "approve" and _already_approved(step, user.sam):
             raise HTTPException(status_code=409, detail="Вы уже согласовали этот шаг")
         now = _utcnow()
-        # Просрочка TTL — шаг в просроченные, заявка на доработку, решение отклоняется.
-        if now > step.expires_at:
-            step.status = STEP_EXPIRED
-            request.status = REWORK
-            store.update(request)
-            _audit(user.sam, "step.expired", request.id, f"order={order}")
-            raise HTTPException(
-                status_code=410, detail="Срок шага истек: нужен повтор (reissue)"
-            )
+        # Истёкший срок шага отметке НЕ мешает (решение человека 2026-10-17):
+        # просрочка не уводит заявку в «На доработке» и не закрывает шаг —
+        # согласующий отмечается, задержка видна в карточке (красный срок) и
+        # письме worker-а «просрочка».
         # Ожидающие шаги блока ДО отметки — по ним позже считаются новые (переход этапа).
         before_orders = {s.order for s in _current_pending_steps(request)}
         if order not in before_orders:

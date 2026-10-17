@@ -3,15 +3,18 @@
 # STARTTLS, параметры SMTP_* из env), в офлайн-тестах — MockMailer.
 # Очередь: DbMailQueue (Postgres, таблица mail_queue из 0001) на стенде,
 # FileMailQueue (JSON) — offline (переживает рестарт worker-мока).
-# События v1: назначена/напоминание/эскалация/закрыта/возврат (имена событий —
-# константы; тексты шаблонов — только из mail_templates/settings, не из кода).
+# События v1: назначена/напоминание/эскалация/просрочка/закрыта/возврат (имена
+# событий — константы; тексты шаблонов — только из mail_templates/settings).
 # Получатель — mail из AD владельца шага/автора заявки (AdReader, только чтение);
 # у шага с несколькими ответственными письмо уходит каждому, кому по шагу ещё
-# предстоит отметиться (снимок assignees/approvals, миграция 0013); нет
-# ридера/почты — письмо тихо пропускается (офлайн).
+# предстоит отметиться (снимок assignees/approvals, миграция 0013); письмо о
+# просрочке (`overdue`) уходит ещё и руководителю первого ответственного шага
+# (см. worker._overdue_recipients). Нет ридера/почты — письмо тихо пропускается
+# (офлайн).
 # ПДн в письма не включаются сверх перечисленных в TEMPLATES.md §6: получатель —
 # участник процесса, шаблону отдаются {{ request_id }}, {{ fio }}, {{ url }},
-# {{ event }}, {{ comment }} (см. _mail_context в requests.py), ничего больше.
+# {{ event }}, {{ comment }} и {{ due_at }}/{{ overdue_hours }} у письма о
+# просрочке этапа (см. _overdue_context в worker.py), ничего больше.
 
 from __future__ import annotations
 
@@ -33,6 +36,7 @@ from sqlalchemy.orm import sessionmaker
 EVENT_ASSIGNED = "assigned"  # назначена
 EVENT_REMINDER = "reminder"  # напоминание
 EVENT_ESCALATION = "escalation"  # эскалация
+EVENT_OVERDUE = "overdue"  # просрочка этапа (срок согласовывания истёк)
 EVENT_CLOSED = "closed"  # закрыта
 EVENT_RETURNED = "returned"  # возврат
 EVENT_REGLAMENT = "reglament"  # уведомление регламентной операции (тема/текст — из settings)
@@ -41,6 +45,7 @@ KNOWN_EVENTS = frozenset({
     EVENT_ASSIGNED,
     EVENT_REMINDER,
     EVENT_ESCALATION,
+    EVENT_OVERDUE,
     EVENT_CLOSED,
     EVENT_RETURNED,
     EVENT_REGLAMENT,
@@ -121,6 +126,10 @@ class MailMessage:
     html: str
     request_id: str = ""  # заявка-повод (для связки с QR/документом)
     event: str = EVENT_ASSIGNED  # событие v1
+    # Метка события внутри заявки («step:1101@2026-10-05T10:00:00+00:00»):
+    # по ней письма одного шага дедуплицируются (просрочка приходит по каждому
+    # кругу согласования, у событий без метки остаётся дедуп по заявке).
+    detail: str = ""
     attempts: int = 0  # число неудачных попыток
     max_attempts: int = 3  # лимит ретраев (из настроек на стенде)
 
@@ -148,6 +157,7 @@ def build_mail(
     event: str,
     templates: Dict[str, object],
     context: Dict[str, object],
+    detail: str = "",
 ) -> MailMessage:
     """Собрать письмо из mail_templates (текст шаблона — только из настроек).
 
@@ -186,6 +196,7 @@ def build_mail(
         html=html,
         request_id=request_id,
         event=event,
+        detail=detail,
     )
 
 
@@ -321,11 +332,13 @@ def enqueue_event(
     templates: object,
     context: Dict[str, object],
     message_id: str | None = None,
+    detail: str = "",
 ) -> MailMessage | None:
     """Собрать письмо по mail_templates и положить в очередь.
 
     Нет получателя или нет шаблона события — None (письмо тихо пропускается:
-    офлайн без AD/настройки). Возвращает MailMessage либо None.
+    офлайн без AD/настройки). detail — метка события внутри заявки для
+    дедупликации (номер шага у просрочки). Возвращает MailMessage либо None.
     """
     if not to:
         return None
@@ -334,7 +347,7 @@ def enqueue_event(
         return None
     mid = message_id or new_message_id()
     try:
-        message = build_mail(mid, to, request_id, event, tmpl, context)
+        message = build_mail(mid, to, request_id, event, tmpl, context, detail=detail)
     except ValueError:
         return None
     queue.enqueue(message)
@@ -415,10 +428,15 @@ class FileMailQueue:
         """Число писем, исчерпавших ретраи."""
         return sum(1 for item in self._items if item.get("status") == "dead")
 
-    def has(self, request_id: str, event: str) -> bool:
-        """Есть ли письмо-событие по заявке (дедупликация напоминаний)."""
+    def has(self, request_id: str, event: str, detail: str | None = None) -> bool:
+        """Есть ли письмо-событие по заявке (дедупликация напоминаний).
+
+        detail задан — ищем письмо с этой меткой (просрочка по номеру шага),
+        не задан — по событию в целом (как раньше)."""
         return any(
-            item.get("request_id") == request_id and item.get("event") == event
+            item.get("request_id") == request_id
+            and item.get("event") == event
+            and (detail is None or str(item.get("detail") or "") == detail)
             for item in self._items
         )
 
@@ -484,8 +502,8 @@ class MailQueue(Protocol):
         """Число писем, исчерпавших ретраи."""
         ...
 
-    def has(self, request_id: str, event: str) -> bool:
-        """Есть ли письмо-событие по заявке (дедупликация напоминаний)."""
+    def has(self, request_id: str, event: str, detail: str | None = None) -> bool:
+        """Есть ли письмо-событие по заявке (дедупликация); detail — метка."""
         ...
 
 
@@ -579,6 +597,7 @@ class DbMailQueue:
         """
         SELECT 1 FROM mail_queue
         WHERE template_code = :event AND payload->>'request_id' = :request_id
+          AND (CAST(:detail AS text) IS NULL OR payload->>'detail' = :detail)
         LIMIT 1
         """
     )
@@ -596,6 +615,7 @@ class DbMailQueue:
                 "message_id": message.id,
                 "request_id": message.request_id,
                 "event": message.event,
+                "detail": message.detail,
                 "subject": message.subject,
                 "html": message.html,
                 "attempts": message.attempts,
@@ -637,6 +657,7 @@ class DbMailQueue:
             html=payload.get("html", ""),
             request_id=payload.get("request_id", ""),
             event=payload.get("event", EVENT_ASSIGNED),
+            detail=str(payload.get("detail", "") or ""),
             attempts=int(payload.get("attempts", 0) or 0),
             max_attempts=int(payload.get("max_attempts", 3) or 3),
         )
@@ -673,12 +694,12 @@ class DbMailQueue:
         except SQLAlchemyError as exc:
             raise MailQueueUnavailable(f"Очередь писем недоступна: {exc}") from exc
 
-    def has(self, request_id: str, event: str) -> bool:
+    def has(self, request_id: str, event: str, detail: str | None = None) -> bool:
         try:
             with self._session_factory() as session:
                 row = session.execute(
                     self._HAS_SQL,
-                    {"request_id": request_id, "event": event},
+                    {"request_id": request_id, "event": event, "detail": detail},
                 ).first()
         except SQLAlchemyError as exc:
             raise MailQueueUnavailable(f"Очередь писем недоступна: {exc}") from exc
